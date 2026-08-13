@@ -1,0 +1,51 @@
+what is 
+NLWeb protocol (from agentndx.ai)
+
+---
+
+do we need to add more metadata? [|](https://ai-catalog.outshift.io/)
+[Cisco AI Catalog](https://ai-catalog.outshift.io/)
+[powered by Agent Directory Service](https://ai-catalog.outshift.io/)
+[About](https://ai-catalog.outshift.io/about)
+About
+A short guide to the specifications and directory services this browser is built on. Each section below links to the draft or documentation for that piece of the stack.
+AI Catalog
+AI Catalog is a JSON format specification (`application/ai-catalog+json`) for describing heterogeneous AI artifacts such as MCP servers, A2A agents, skills, datasets, and model cards. Each catalog entry declares its artifact type and references or embeds the native metadata, giving one discovery mechanism across protocols and platforms.
+The spec defines conformance levels from minimal entry lists to trusted catalogs with optional trust manifests for identity, attestations, and signatures. This browser surfaces public records that follow the AI Catalog model and are published through ADS.
+
+* [AI Catalog specification](https://agent-card.github.io/ai-catalog)
+
+Agentic Resource Discovery
+Agentic Resource Discovery (ARD) is a specification for how AI artifacts are cataloged, discovered, and searched within or across registries. It aligns with the AI Catalog data model and promotes search-first discovery: registries maintain a shared index so clients can find capabilities over standard HTTP REST APIs instead of loading every tool description into an LLM context window.
+The DIR gateway exposes ARD over the `GET /v1/agents` endpoint, which this UI uses for browsing and detail views.
+
+* [agenticresourcediscovery.org](https://agenticresourcediscovery.org/)
+
+Agent Directory Service (ADS)
+ADS is a distributed registry that exposes [OASF](https://docs.agntcy.org/oasf/open-agentic-schema-framework/) records as AI Catalog entries and serves them securely over the ARD endpoints so the same inventory is reachable by both ADS and ARD client integration. Operators publish records to ADS and consumers discover through ARD, verify through ADS, and invoke through MCP or A2A — one flow, many protocols.
+
+* [Directory documentation overview](https://dir.agntcy.org/latest/)
+* [Quickstart guide](https://dir.agntcy.org/latest/dir/dir-quickstart/)
+* [GitHub repository](https://github.com/agntcy/dir)
+* [ADS specification (IETF draft)](https://datatracker.ietf.org/doc/draft-mp-agntcy-ads)
+
+Trust badges
+Records that include a signed trust manifest show a Verified badge on catalog cards and in the detail view. Use the Trusted or Verified status filters in the sidebar to limit results to records with trust attestations.
+[← Back to catalog](https://ai-catalog.outshift.io/)
+About — Cisco AI Catalog
+
+---
+
+merged - deploy
+
+---
+
+why do we need flop.network public? not related.  markdown still not picking up - Goal: Delivers clean, formatting-stripped text directly to agents instead of forcing them to scrape dense, complex webpage HTML layouts.
+
+Issue: Site does not support Markdown for Agents
+
+Fix: Implement content negotiation so requests with Accept: text/markdown return a markdown representation while HTML remains the default for browsers.
+
+Skill: https://isitagentready.com/.well-known/agent-skills/markdown-negotiation/SKILL.md
+
+Docs: https://developers.cloudflare.com/fundamentals/reference/markdown-for-agents/. do ai catalog
