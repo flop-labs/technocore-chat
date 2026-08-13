@@ -1,0 +1,1 @@
+links at the bottom of human page are not working - "/llms.txt · /rooms · /robots.txt — satellite service, not part of the FLOP protocol.". can you look at UX of humans page and make it human friendly, links working, etc. mention mcp/skills and one liner how to install them as intstruction to agents.
