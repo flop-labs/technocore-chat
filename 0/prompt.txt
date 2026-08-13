@@ -1,0 +1,69 @@
+<ci-monitor-event>flop-labs/flop-core PR #1280 has 3 new review comments:
+- chatgpt-codex-connector[bot] (commented): 
+### 💡 Codex Review
+
+Here are some automated review suggestions for this pull request.
+
+**Reviewed commit:** `4c41a5795a`
+    
+
+<details> <summary>ℹ️ About Codex in GitHub</summary>
+<br/>
+
+[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you
+- Open a pull request for review
+- Mark a draft as ready
+- Comment "@codex review".
+
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+
+
+
+
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+            
+</details>
+- chatgpt-codex-connector[bot] on infra/vultr/compose.technocore-chat.yml:54 [comment_id=3775742776]: **<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  Raise the Cloudflare cap before the app caps**
+
+For deployments using the checked production runbook, Cloudflare still blocks at 50 requests per 10 seconds per IP (`docs/runbooks/technocore-chat-deploy.md:125-148`). That edge cap is about 300/min and has a much smaller burst allowance, so shared-NAT clients hit Cloudflare's stock 429 before the new 600-read/300-write token buckets and lose the application's actionable retry response. Raise the edge rule and update the runbook together with these values, or keep the app limits below it.
+
+Useful? React with 👍 / 👎.
+- chatgpt-codex-connector[bot] on infra/vultr/deploy-agent-chat.sh:45 [comment_id=3775742784]: **<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Update redeploy examples to the 0.3.0 pin**
+
+When an operator follows the documented redeploy command, both this script's usage example (`deploy-agent-chat.sh:15`) and `docs/runbooks/technocore-chat-deploy.md:216` explicitly pass `--tag 0.2.0`, overriding this new default and rolling the service back to the image that lacks the discovery endpoints this commit requires. Update those exact-tag examples with the pin.
+
+Useful? React with 👍 / 👎.
+
+Please address the feedback and push a fix. Then, for each inline comment you addressed (those with a comment_id), post a one-line reply on the thread via `gh api` saying what you changed (or why you didn't). End each reply with the line "_🤖 Addressed by [Claude Code](https://claude.com/claude-code)_" so reviewers can see it was automated. Then resolve the thread. Skip replies for comments you didn't act on.</ci-monitor-event>
+
+---
+
+technocore pr merged. deploy.  also for flop-core add link to artifact - https://claude.ai/code/artifact/4bba8a57-e3bd-4ddf-8afd-63dc8597b9e6
+
+---
+
+can we specify that no need for auth or that need to get DID or just say hello? # Skill: Implement Auth.md Agent Registration Discovery
+
+## What This Skill Does
+
+Helps a service publish Auth.md support for agent registration. Use this when a scanner reports the `authMd` check is failing or when adding the Auth.md standard to an API or application.
+
+## Requirements
+
+- Serve `/auth.md` from the service root as Markdown with an H1 heading that contains `auth.md` (for example, `# auth.md` or `# Example auth.md`).
+- Prefer publishing OAuth Protected Resource Metadata at `/.well-known/oauth-protected-resource` for the resource server.
+- Include `resource`, `authorization_servers`, `scopes_supported`, and `bearer_methods_supported` with `header` in the PRM document.
+- Publish OAuth Authorization Server metadata at each advertised authorization server's `/.well-known/oauth-authorization-server` URL.
+- Include a valid `issuer` in Authorization Server metadata and ensure it matches the issuer advertised in PRM.
+- Add an `agent_auth` block with `skill`, `register_uri`, and at least one complete registration method when Authorization Server metadata is available.
+- If OAuth metadata is not available, keep `/auth.md` self-contained: identify the agent audience, document registration or provisioning endpoint(s), list supported method(s), and explain credential use.
+
+## Flow Metadata
+
+- ID-JAG: include `identity_types_supported: ["identity_assertion"]`, `identity_assertion.assertion_types_supported` with `urn:ietf:params:oauth:token-type:id-jag`, and credential types. Include `revocation_uri` and the revocation event in `events_supported` when supported; scanners may warn when they are omitted, but they are not required for detection.
+- Verified email: include `identity_assertion.assertion_types_supported` with `verified_email`, credential types, and `claim_uri`.
+- Anonymous: include `identity_types_supported: ["anonymous"]`, `anonymous.credential_types_supported`, and `claim_uri`.
+
+## Notes
+
+Do not probe `POST /agent/auth` during passive scans. Registration can create accounts, send email, or issue credentials. Public discovery documents are the safe source of truth.

@@ -1,0 +1,117 @@
+{
+  "cli_version": "0.10.0",
+  "checkpoint_id": "01KZXQ0G0V21XJ2Y7BCS08B0GR",
+  "session_id": "e0378f7c-f404-40a6-bae8-b0dbaa35aefd",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-13T14:04:28.037015Z",
+  "branch": "feat/auth-md-0.3.2",
+  "checkpoints_count": 4,
+  "files_touched": [
+    "src/manifest.py",
+    "src/app.py",
+    "CHANGELOG.md"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-opus-5",
+  "turn_id": "72413c70f907",
+  "checkpoint_transcript_start": 791,
+  "transcript_lines_at_start": 791,
+  "compact_transcript_start": 186,
+  "token_usage": {
+    "input_tokens": 102,
+    "cache_creation_tokens": 58997,
+    "cache_read_tokens": 16684916,
+    "output_tokens": 36896,
+    "api_call_count": 51
+  },
+  "skill_events_version": 1,
+  "skill_events": [
+    {
+      "id": "claude-skill-toolu_0139Dhav6MmUqzFsFhcF6Gqr",
+      "event_type": "tool_invocation",
+      "skill": {
+        "name": "artifact-design"
+      },
+      "source": {
+        "agent": "claude-code",
+        "signal": "skill_tool_use",
+        "confidence": "explicit"
+      },
+      "turn_id": "72413c70f907",
+      "transcript_anchor": {
+        "unit": "line",
+        "start": 396,
+        "end": 397,
+        "entry_ids": [
+          "e2d9006d-9367-4379-9634-a4d1022db637"
+        ],
+        "tool_use_id": "toolu_0139Dhav6MmUqzFsFhcF6Gqr"
+      },
+      "native": {
+        "tool_name": "Skill",
+        "tool_use_id": "toolu_0139Dhav6MmUqzFsFhcF6Gqr"
+      },
+      "collapse": {
+        "target": "tool_pair",
+        "label": "Skill: artifact-design",
+        "default_collapsed": true
+      }
+    }
+  ],
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-13T14:04:27.936225Z",
+    "agent_lines": 212,
+    "agent_removed": 8,
+    "human_added": 30,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 242,
+    "total_lines_changed": 251,
+    "agent_percentage": 87.64940239043824,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 8456,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0,
+      "user_added_per_file": {
+        ".claude/settings.json": 84,
+        ".claude/worktrees/vulnerability-scan-78205e/.dockerignore": 7,
+        ".claude/worktrees/vulnerability-scan-78205e/.github/dependabot.yml": 24,
+        ".claude/worktrees/vulnerability-scan-78205e/.github/workflows/ci.yml": 67,
+        ".claude/worktrees/vulnerability-scan-78205e/.github/workflows/release.yml": 82,
+        ".claude/worktrees/vulnerability-scan-78205e/.gitignore": 6,
+        ".claude/worktrees/vulnerability-scan-78205e/.python-version": 1,
+        ".claude/worktrees/vulnerability-scan-78205e/CHANGELOG.md": 142,
+        ".claude/worktrees/vulnerability-scan-78205e/LICENSE": 202,
+        ".claude/worktrees/vulnerability-scan-78205e/NOTICE": 6,
+        ".claude/worktrees/vulnerability-scan-78205e/README.md": 330,
+        ".claude/worktrees/vulnerability-scan-78205e/SECURITY.md": 93,
+        ".claude/worktrees/vulnerability-scan-78205e/SKILL.md": 79,
+        ".claude/worktrees/vulnerability-scan-78205e/docker/Dockerfile": 63,
+        ".claude/worktrees/vulnerability-scan-78205e/docs/design.md": 616,
+        ".claude/worktrees/vulnerability-scan-78205e/pyproject.toml": 50,
+        ".claude/worktrees/vulnerability-scan-78205e/src/app.py": 1259,
+        ".claude/worktrees/vulnerability-scan-78205e/src/didkey.py": 103,
+        ".claude/worktrees/vulnerability-scan-78205e/src/humans.html": 476,
+        ".claude/worktrees/vulnerability-scan-78205e/src/patterns.md": 82,
+        ".claude/worktrees/vulnerability-scan-78205e/src/store.py": 1097,
+        ".claude/worktrees/vulnerability-scan-78205e/tests/http_hardening_probe.py": 86,
+        ".claude/worktrees/vulnerability-scan-78205e/tests/test_app.py": 1876,
+        ".claude/worktrees/vulnerability-scan-78205e/uv.lock": 725,
+        ".codex/hooks.json": 52,
+        ".gemini/settings.json": 141,
+        ".opencode/plugins/entire.ts": 272,
+        ".pi/extensions/entire/index.ts": 147,
+        "preflight.sh": 115,
+        "submit.sh": 173
+      }
+    }
+  ]
+}
