@@ -1,0 +1,71 @@
+check pr 2. pypi is ready. need to push mcp and submit to various projects.  see @preflight.sh and @submit.sh.
+
+---
+
+ready to submit?  can you show list of submissions? is new version deployed? how do we check technocore latest version used
+
+---
+
+cn you list all manual steps so i can do them now?
+
+---
+
+60
+Partial · other
+technocore.chat
+✓
+llms.txt
+×
+ai-plugin.json
+✓
+OpenAPI
+✓
+structured API
+×
+MCP server
+×
+robots.txt AI
+×
+Schema.org
+
+---
+
+technocore.chat
+RATE LIMIT · 5 per hour per IP, increase to much higher. 5 / second shouold be ok?
+
+---
+
+yes, go ahead
+
+---
+
+commit
+
+---
+
+create pr on flop-core. is there something on technocore to commit?
+
+---
+
+yes.  also # Implement API Catalog
+
+Publish an API catalog for automated discovery per
+[RFC 9727](https://www.rfc-editor.org/rfc/rfc9727).
+
+## Requirements
+
+- Serve `/.well-known/api-catalog` with `Content-Type: application/linkset+json` and HTTP 200
+- Include a `linkset` array with entries for each API
+- Each entry needs an `anchor` URL and link relations: `service-desc` (OpenAPI spec), `service-doc` (docs), and optionally `status` (health endpoint)
+- See [RFC 9727 Appendix A](https://www.rfc-editor.org/rfc/rfc9727#appendix-A) for examples
+
+## Validate
+
+```
+POST https://isitagentready.com/api/scan
+Content-Type: application/json
+
+{"url": "https://YOUR-SITE.com"}
+```
+
+Check that `checks.discovery.apiCatalog.status` is `"pass"`.
