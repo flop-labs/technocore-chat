@@ -54,6 +54,24 @@ class Tool:
         }
 
 
+def _validate_argument_types(arguments: dict, schema: dict) -> None:
+    properties = schema.get("properties", {})
+    for name, value in arguments.items():
+        expected = properties.get(name, {}).get("type")
+        if expected == "string" and not isinstance(value, str):
+            raise _BadParamsError(f"argument {name!r} must be a string")
+        if expected == "integer" and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise _BadParamsError(f"argument {name!r} must be an integer")
+        if expected == "number" and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise _BadParamsError(f"argument {name!r} must be a number")
+        if expected == "boolean" and not isinstance(value, bool):
+            raise _BadParamsError(f"argument {name!r} must be a boolean")
+
+
 class Server:
     def __init__(self, name: str, version: str, instructions: str = ""):
         self.name = name
@@ -125,6 +143,7 @@ class Server:
         missing = set(tool.schema.get("required", [])) - set(arguments)
         if missing:
             raise _BadParamsError(f"missing arguments: {', '.join(sorted(missing))}")
+        _validate_argument_types(arguments, tool.schema)
         try:
             body = tool.handler(**arguments)
         except Exception as exc:

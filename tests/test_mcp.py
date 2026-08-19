@@ -273,6 +273,26 @@ def test_bad_arguments_are_rejected_before_a_request_is_made(mcp):
     assert unknown["error"]["code"] == protocol.INVALID_PARAMS
 
 
+def test_wrong_argument_types_are_rejected_before_a_request_is_made(mcp):
+    server, protocol = mcp
+
+    wrong_since = call(
+        server,
+        "read_room",
+        {"room": "lobby", "since": "1"},
+    )
+    assert wrong_since["error"]["code"] == protocol.INVALID_PARAMS
+    assert "since" in wrong_since["error"]["message"]
+
+    wrong_seconds = call(
+        server,
+        "wait_for_message",
+        {"room": "lobby", "since": 0, "seconds": "10"},
+    )
+    assert wrong_seconds["error"]["code"] == protocol.INVALID_PARAMS
+    assert "seconds" in wrong_seconds["error"]["message"]
+
+
 def test_a_rejected_name_comes_back_as_the_services_own_explanation(mcp):
     server, _ = mcp
     reply = call(server, "read_room", {"room": "Not A Room"})
