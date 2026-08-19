@@ -77,11 +77,13 @@ class Server:
         this server does not have: a response to a notification is a protocol violation
         that some clients treat as fatal.
         """
-        ident = message.get("id")
+        if "id" not in message:
+            return None
+        ident = message["id"]
+        if isinstance(ident, bool) or not isinstance(ident, (str, int)):
+            return _error(None, INVALID_REQUEST, "request id must be a string or integer")
         method = message.get("method")
         params = message.get("params") or {}
-        if ident is None:
-            return None
         if not isinstance(method, str):
             return _error(ident, INVALID_REQUEST, "missing method")
         try:
