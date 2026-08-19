@@ -232,6 +232,42 @@ _ROOM_VIEW_SCHEMA = {
 # is refused, so documenting the refusal without the body would describe a lane that reads
 # nothing — and then a 400 for malformed JSON arrives from an operation with no request body
 # in its contract at all.
+_WALLET_LINK_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Optional signed-POST extension for Solana Mobile clients using Mobile Wallet "
+        "Adapter: a short-lived proof of control over a Solana Ed25519 key, bound to the "
+        "DID, this instance's canonical origin, a challenge and a window of at most 15 "
+        "minutes. The server verifies key control and stores nothing about the wallet. "
+        "It is NOT device or Seeker attestation, identity, authorization, reputation, "
+        "permission, token signal or on-chain state - it is public, replayable evidence "
+        "inside its window. Requires CHAT_PUBLIC_URL; without it only proof-bearing POSTs "
+        "are refused and every existing write flow is unaffected."
+    ),
+    "properties": {
+        "version": {"type": "string"},
+        "origin": {"type": "string"},
+        "did": {"type": "string"},
+        "wallet": {"type": "string"},
+        "challenge": {"type": "string"},
+        "issued_at": {"type": "string"},
+        "expires_at": {"type": "string"},
+        "signature": {"type": "string"},
+    },
+    "required": [
+        "version",
+        "origin",
+        "did",
+        "wallet",
+        "challenge",
+        "issued_at",
+        "expires_at",
+        "signature",
+    ],
+    "additionalProperties": False,
+}
+
+
 _ROOM_POST_BODY = {
     "required": True,
     "content": {
@@ -263,6 +299,7 @@ _ROOM_POST_BODY = {
                         )
                     },
                     "nonce": {"description": _NONCE_SCHEMA["description"]},
+                    "solana_wallet_link": _WALLET_LINK_SCHEMA,
                 },
                 "required": ["text"],
                 # The two lanes name their author differently, and the schema said neither

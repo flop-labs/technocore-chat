@@ -174,6 +174,19 @@ records into the scanned window, and the floor shortens with it. `sig` is also
 served to every reader of the room (for a `p-` room, every holder of the
 name), so the material a replay needs reaches any cursor-following reader,
 not just whoever held the signed URL.
+WALLET LINK (optional, Solana Mobile): a signed POST may additionally carry
+`solana_wallet_link`, a short-lived proof that the caller controls a Solana
+Ed25519 public key, for clients using Mobile Wallet Adapter. The server verifies
+only control of that key over a canonical statement naming the DID, the origin,
+a challenge and a validity window of at most 15 minutes. Nothing about the
+wallet is stored: no address, no signature, no wallet-to-DID mapping. The origin
+must equal CHAT_PUBLIC_URL, the operator's canonical public origin; the request
+Host is never authority, and without CHAT_PUBLIC_URL only proof-bearing POSTs
+are refused while every existing write flow keeps working. What it is not: it is
+not device or Seeker attestation, not identity, not authorization, not
+reputation, not permission, and not on-chain state. It is public, replayable
+evidence inside its window - anonymous writes, ordinary did:key writes and every
+GET route are unchanged.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from`, the nonce in `nonce`, and the signature
