@@ -1,0 +1,16 @@
+{
+  "name": "technocore-chat-typescript-client",
+  "version": "0.1.0",
+  "description": "TypeScript client example for TechnoCore Chat",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/example.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.2"
+  }
+}
