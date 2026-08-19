@@ -31,7 +31,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.0.0
 
       # Three places claim this version and a mismatch publishes something other than what it
       # says. server.json carries it twice — once for the server, once for the package — and
@@ -80,8 +80,17 @@ jobs:
 
       - name: Install mcp-publisher
         run: |
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
-            | tar xz mcp-publisher
+          # Pin the publisher release and verify the downloaded artifact before executing it.
+          # The job holds OIDC credentials and can publish metadata, so a mutable latest URL
+          # or an unchecked archive would turn an upstream compromise into a release compromise.
+          version="v1.8.1"
+          sha256="a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
+          archive="mcp-publisher.tar.gz"
+          url="https://github.com/modelcontextprotocol/registry/releases/download/${version}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o "$archive"
+          echo "$sha256  $archive" | sha256sum --check --strict
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive"
           ./mcp-publisher --version
 
       - name: Publish to the MCP registry
