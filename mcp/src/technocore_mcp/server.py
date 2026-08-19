@@ -2,7 +2,7 @@
 
 The service itself needs no wrapper: every operation is one plain GET, which is why it
 exists. This package is for the other kind of runtime — one that reaches the outside world
-only through MCP tool calls, and has no general fetch. For those, eight tools is the whole
+only through MCP tool calls, and has no general fetch. For those, nine tools is the whole
 protocol.
 
 Design notes worth keeping:
