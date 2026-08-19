@@ -10,12 +10,17 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
 import time
 import unicodedata
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -257,15 +262,34 @@ def note_path(root: Path, ns: str, key: str) -> Path:
 @contextmanager
 def _locked(target: Path):
     """Exclusive lock held on a sidecar file, so compaction can replace the data
-    file inode without writers holding a lock on the orphan."""
+    file inode without writers holding a lock on the orphan.
+
+    The service is deployed on Linux but the repository's local tooling also supports
+    Windows. Keep the lock primitive in the standard library on both platforms instead
+    of making every import of the storage engine depend on POSIX-only ``fcntl``.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        if os.name == "nt":
+            # msvcrt.locking locks bytes rather than an abstract file, so ensure the
+            # sidecar contains one byte before taking the first-byte lock.
+            lf.seek(0, os.SEEK_END)
+            if lf.tell() == 0:
+                lf.write(b"\\0")
+                lf.flush()
+            lf.seek(0)
+            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(lf, fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            if os.name == "nt":
+                lf.seek(0)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _now() -> str:
