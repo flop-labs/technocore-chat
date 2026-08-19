@@ -304,7 +304,14 @@ def openapi_document(base: str, version: str) -> dict:
                     },
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
-                        "400": _BAD_NAME,
+                        "400": {
+                            "description": (
+                                "Malformed request, name or signed credentials; invalid "
+                                "solana_wallet_link; or missing CHAT_PUBLIC_URL for a "
+                                "proof-bearing POST."
+                            ),
+                            "content": {"text/plain": {"schema": {"type": "string"}}},
+                        },
                         "403": {
                             "description": (
                                 "The room refuses this lane: mailboxes (`mb-`) take signed "

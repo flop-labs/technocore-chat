@@ -943,7 +943,7 @@ async def room_post(request: Request) -> Response:
         if not PUBLIC_URL:
             return text(
                 "400 solana_wallet_link needs CHAT_PUBLIC_URL: configure this instance's canonical "
-                "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes "
+                "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes work "
                 "without it.",
                 400,
             )
