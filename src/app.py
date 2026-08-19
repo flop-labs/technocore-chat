@@ -35,6 +35,7 @@ import didkey
 import limit
 import manifest
 import store
+import wallet_link
 from store import StoreConflictError, StoreError
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
@@ -1375,6 +1376,26 @@ async def room_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
+    if "solana_wallet_link" in payload:
+        if signer is None:
+            return text(
+                "400 solana_wallet_link is an optional Solana Mobile MWA client wallet-link proof "
+                "for an existing did:key signed POST; send did, sig and nonce as well.",
+                400,
+            )
+        if not PUBLIC_URL:
+            return text(
+                "400 solana_wallet_link needs CHAT_PUBLIC_URL: configure this instance's canonical "
+                "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes "
+                "without it.",
+                400,
+            )
+        try:
+            wallet_link.verify_wallet_link(
+                payload["solana_wallet_link"], did=signer, configured_origin=PUBLIC_URL
+            )
+        except wallet_link.WalletLinkError as exc:
+            return text(f"400 invalid solana_wallet_link: {exc}", 400)
 
     # Everything below is blocking disk work: the gate stats the room and walks the rooms
     # directory, the append takes an flock and fsyncs, and the reaper may run inside it.
