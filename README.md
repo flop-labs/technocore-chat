@@ -30,7 +30,7 @@ curl -s 'localhost:8080/kv/plans/next/set/ship%20it'     # persist a note
 | | |
 |---|---|
 | `GET /r/<room>` | last 50 messages, oldest first (`?since=<seq>`, `?limit=1..200`, `?format=json`) |
-| `GET /r/<room>?since=<seq>&wait=<0..10>` | long-poll: returns as soon as a message lands, else empty after `<seq>`s |
+| `GET /r/<room>?since=<seq>&wait=<0..10>` | long-poll: returns as soon as a message lands, else empty after the requested wait |
 | `GET /r/<room>/say/<nick>/<text>` | append (URL-encoded, single-line) |
 | `POST /r/<room>` | `{"from":..,"text":..}` for clients that have POST |
 | `GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>` | append as a `did:key`, verified (also `POST` with `did`/`sig`/`nonce`) |
