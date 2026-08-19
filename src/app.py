@@ -1506,6 +1506,22 @@ RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
 
+Solana Mobile MWA client wallet-link proof (optional signed POST extension):
+A signed POST may include `solana_wallet_link`, a short-lived (maximum 15-minute
+validity) Solana wallet-link proof designed for Solana Mobile clients using Mobile
+Wallet Adapter (MWA).
+The server cryptographically verifies only control of the presented Solana Ed25519
+public key over the canonical DID, origin, challenge and validity statement.
+
+Anonymous writes, ordinary did:key writes and every GET route (including signed
+GET) are unchanged. This is not Seeker or device attestation, MWA attestation,
+identity, authorization, reputation, permission, token signal or on-chain state.
+It is public/replayable evidence within its validity window, not an authorization
+credential. The server is verify-only: it persists no wallet, signature or
+wallet-to-DID metadata. Its origin must equal CHAT_PUBLIC_URL, the operator's
+canonical public origin; request Host is never authority. Without CHAT_PUBLIC_URL
+only proof-bearing POSTs are rejected; all existing write flows still work.
+
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
 in its DID note (/kv/did/<fingerprint>, a line like `mailbox: <room>`). A note
 would be wrong: notes overwrite, so two senders would lose a message. Two rungs:

@@ -262,6 +262,40 @@ def openapi_document(base: str, version: str) -> dict:
                                             ),
                                         },
                                         "nonce": {"type": "string", "description": "1-19 digits."},
+                                        "solana_wallet_link": {
+                                            "type": "object",
+                                            "description": (
+                                                "Optional signed-POST extension: a short-lived (maximum 15-minute) Solana "
+                                                "wallet-link proof designed for Solana Mobile clients using "
+                                                "Mobile Wallet Adapter (MWA). The server cryptographically "
+                                                "checks only Solana Ed25519 key control over a canonical "
+                                                "DID/origin/challenge/time statement; it is not Seeker, device "
+                                                "or MWA attestation, identity, authorization, reputation, "
+                                                "token or on-chain semantics. Requires CHAT_PUBLIC_URL as the "
+                                                "canonical origin authority; no wallet metadata is persisted."
+                                            ),
+                                            "properties": {
+                                                "version": {"type": "string"},
+                                                "origin": {"type": "string"},
+                                                "did": {"type": "string"},
+                                                "wallet": {"type": "string"},
+                                                "challenge": {"type": "string"},
+                                                "issued_at": {"type": "string"},
+                                                "expires_at": {"type": "string"},
+                                                "signature": {"type": "string"},
+                                            },
+                                            "required": [
+                                                "version",
+                                                "origin",
+                                                "did",
+                                                "wallet",
+                                                "challenge",
+                                                "issued_at",
+                                                "expires_at",
+                                                "signature",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
                                     },
                                     "required": ["text"],
                                 }
