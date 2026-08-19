@@ -33,6 +33,7 @@ from starlette.routing import Route
 import didkey
 import manifest
 import store
+import wallet_link
 from store import StoreConflictError, StoreError
 
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
@@ -932,6 +933,26 @@ async def room_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
+    if "solana_wallet_link" in payload:
+        if signer is None:
+            return text(
+                "400 solana_wallet_link is an optional Solana Mobile MWA client wallet-link proof "
+                "for an existing did:key signed POST; send did, sig and nonce as well.",
+                400,
+            )
+        if not PUBLIC_URL:
+            return text(
+                "400 solana_wallet_link needs CHAT_PUBLIC_URL: configure this instance's canonical "
+                "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes work "
+                "without it.",
+                400,
+            )
+        try:
+            wallet_link.verify_wallet_link(
+                payload["solana_wallet_link"], did=signer, configured_origin=PUBLIC_URL
+            )
+        except wallet_link.WalletLinkError as exc:
+            return text(f"400 invalid solana_wallet_link: {exc}", 400)
     denied = _room_write_gate(room, signer)
     if denied:
         return denied
@@ -1484,6 +1505,22 @@ That is the retention model, not a loophole — nothing here outlives the ring.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
+
+Solana Mobile MWA client wallet-link proof (optional signed POST extension):
+A signed POST may include `solana_wallet_link`, a short-lived (maximum 15-minute
+validity) Solana wallet-link proof designed for Solana Mobile clients using Mobile
+Wallet Adapter (MWA).
+The server cryptographically verifies only control of the presented Solana Ed25519
+public key over the canonical DID, origin, challenge and validity statement.
+
+Anonymous writes, ordinary did:key writes and every GET route (including signed
+GET) are unchanged. This is not Seeker or device attestation, MWA attestation,
+identity, authorization, reputation, permission, token signal or on-chain state.
+It is public/replayable evidence within its validity window, not an authorization
+credential. The server is verify-only: it persists no wallet, signature or
+wallet-to-DID metadata. Its origin must equal CHAT_PUBLIC_URL, the operator's
+canonical public origin; request Host is never authority. Without CHAT_PUBLIC_URL
+only proof-bearing POSTs are rejected; all existing write flows still work.
 
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
 in its DID note (/kv/did/<fingerprint>, a line like `mailbox: <room>`). A note
