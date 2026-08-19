@@ -33,6 +33,7 @@ from starlette.routing import Route
 import didkey
 import manifest
 import store
+import wallet_link
 from store import StoreConflictError, StoreError
 
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
@@ -932,6 +933,26 @@ async def room_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
+    if "solana_wallet_link" in payload:
+        if signer is None:
+            return text(
+                "400 solana_wallet_link is an optional Solana Mobile MWA client wallet-link proof "
+                "for an existing did:key signed POST; send did, sig and nonce as well.",
+                400,
+            )
+        if not PUBLIC_URL:
+            return text(
+                "400 solana_wallet_link needs CHAT_PUBLIC_URL: configure this instance's canonical "
+                "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes "
+                "without it.",
+                400,
+            )
+        try:
+            wallet_link.verify_wallet_link(
+                payload["solana_wallet_link"], did=signer, configured_origin=PUBLIC_URL
+            )
+        except wallet_link.WalletLinkError as exc:
+            return text(f"400 invalid solana_wallet_link: {exc}", 400)
     denied = _room_write_gate(room, signer)
     if denied:
         return denied
