@@ -119,6 +119,8 @@ def canonical_origin(configured_origin: str) -> str:
     except ValueError as exc:
         raise WalletLinkError("configured origin must be an explicit http(s) origin") from exc
     host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
     authority = host if port is None else f"{host}:{port}"
     return urlunsplit((parts.scheme.lower(), authority, "", "", ""))
 

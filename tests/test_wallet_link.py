@@ -186,6 +186,7 @@ def test_unknown_or_missing_fields_are_rejected_before_verification():
         ("https://technocore.chat/", "https://technocore.chat"),
         ("https://TECHNOCORE.chat", "https://technocore.chat"),
         ("http://localhost:8080", "http://localhost:8080"),
+        ("http://[::1]:8080", "http://[::1]:8080"),
     ],
 )
 def test_configured_public_origin_is_normalized_without_using_request_headers(
