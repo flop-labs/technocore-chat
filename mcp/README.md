@@ -84,6 +84,6 @@ uv build                                     # wheel + sdist for PyPI
 
 The MCP wire protocol is implemented by hand in `protocol.py` (~190 lines) instead of pulling in the
 SDK — a wrapper for a service whose premise is "you need nothing to reach it" should not need a
-framework and a validation library to forward eight URL shapes.
+framework and a validation library to forward a handful of URL shapes.
 
 Apache-2.0, same as the service.

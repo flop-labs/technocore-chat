@@ -141,8 +141,51 @@ def test_notifications_are_never_answered(mcp):
     """A response to a notification is a protocol violation, including for a method this
     server does not have."""
     server, _ = mcp
+    assert server.handle({"jsonrpc": "2.0", "method": "ping"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/cancelled"}) is None
+
+
+def test_a_notification_is_a_missing_id_key_and_nothing_else(mcp):
+    """The distinction the whole reply/no-reply decision hangs on: no `id` key is a
+    notification and gets silence; `"id": null` is a request with an id JSON-RPC 2.0 does
+    not allow, and gets an error. Reading them as the same thing means either answering a
+    notification or swallowing a request."""
+    server, protocol = mcp
+    assert server.handle({"jsonrpc": "2.0", "method": "tools/list"}) is None
+    null = server.handle({"jsonrpc": "2.0", "id": None, "method": "tools/list"})
+    assert null["error"]["code"] == protocol.INVALID_REQUEST
+
+
+@pytest.mark.parametrize("ident", [None, True, False, 1.5, [], {}])
+def test_invalid_request_ids_are_rejected(mcp, ident):
+    server, protocol = mcp
+    reply = server.handle({"jsonrpc": "2.0", "id": ident, "method": "ping"})
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": protocol.INVALID_REQUEST,
+            "message": "request id must be a string or integer",
+        },
+    }
+
+
+@pytest.mark.parametrize("ident", [0, 1, -1, "abc"])
+def test_valid_request_ids_are_preserved(mcp, ident):
+    server, _ = mcp
+    assert server.handle({"jsonrpc": "2.0", "id": ident, "method": "ping"}) == {
+        "jsonrpc": "2.0",
+        "id": ident,
+        "result": {},
+    }
+
+
+def test_invalid_request_id_takes_precedence_over_unknown_method(mcp):
+    server, protocol = mcp
+    reply = server.handle({"jsonrpc": "2.0", "id": None, "method": "unknown"})
+    assert reply["error"]["code"] == protocol.INVALID_REQUEST
+    assert reply["id"] is None
 
 
 def test_unknown_methods_get_an_error_not_a_crash(mcp):
@@ -155,23 +198,102 @@ def test_unknown_methods_get_an_error_not_a_crash(mcp):
 # ------------------------------------------------------------------ the tools
 
 
+# What a client sees in `tools/list`, spelled out: property types and the required set for
+# every tool. The schemas are generated from the handlers' signatures, so this table is the
+# guard that a refactor of a handler cannot quietly change the contract clients integrated
+# against — an argument that stops being required, or an int that becomes a string, breaks
+# callers that never see this repo.
+ADVERTISED = {
+    "read_room": ({"room": "string", "since": "integer", "limit": "integer"}, ["room"]),
+    "wait_for_message": (
+        {"room": "string", "since": "integer", "seconds": "number"},
+        ["room", "since"],
+    ),
+    "say": ({"room": "string", "text": "string", "nick": "string"}, ["room", "text"]),
+    "list_rooms": ({"limit": "integer"}, []),
+    "discover_rooms": ({"since": "integer"}, []),
+    "read_note": ({"namespace": "string", "key": "string"}, ["namespace", "key"]),
+    "write_note": (
+        {
+            "namespace": "string",
+            "key": "string",
+            "value": "string",
+            "if_matches": "string",
+            "if_absent": "boolean",
+        },
+        ["namespace", "key", "value"],
+    ),
+    "list_notes": ({"namespace": "string"}, ["namespace"]),
+    "read_docs": ({"page": "string"}, []),
+}
+
+
 def test_every_tool_is_listed_with_a_usable_schema(mcp):
     server, _ = mcp
     tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert names == {
-        "read_room",
-        "wait_for_message",
-        "say",
-        "list_rooms",
-        "discover_rooms",
-        "read_note",
-        "write_note",
-        "list_notes",
-        "read_docs",
-    }
+    assert names == set(ADVERTISED)
     for tool in tools:
         assert tool["description"] and tool["inputSchema"]["type"] == "object"
+
+
+def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp):
+    """The schemas moved from hand-written dicts to `inspect.signature`; what they describe
+    did not. `X | None` is an optional parameter of the non-None type, not a union, and a
+    parameter with no default is the only thing that lands in `required`."""
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    for tool in tools:
+        schema = tool["inputSchema"]
+        types, required = ADVERTISED[tool["name"]]
+        assert schema["type"] == "object"
+        assert {n: p["type"] for n, p in schema["properties"].items()} == types
+        # No `required` key at all when nothing is required — an empty list would be a
+        # different document to a client that checks for the key.
+        assert schema.get("required", []) == required
+        assert ("required" in schema) == bool(required)
+    pages = {t["name"]: t["inputSchema"] for t in tools}["read_docs"]["properties"]["page"]
+    assert pages["enum"] == ["manual", "patterns", "skill"]
+
+
+def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
+    """The point of `Annotated` here: the sentence lives next to the parameter, and one
+    room description is shared by the four tools that take a room."""
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    schemas = {t["name"]: t["inputSchema"] for t in tools}
+    for name in ("read_room", "wait_for_message", "say"):
+        assert schemas[name]["properties"]["room"]["description"].startswith("Room name, ^[a-z0-9]")
+    assert "4096" in schemas["say"]["properties"]["text"]["description"]
+    assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
+
+
+def test_a_schema_cannot_drift_from_the_function_it_describes(mcp):
+    """The property set is the parameter list and the required set is "has no default",
+    read off the same object the call goes through. This is what replaced keeping two
+    declarations in step by hand."""
+    import inspect
+
+    server, _ = mcp
+    for tool in server.tools.values():
+        parameters = inspect.signature(tool.handler).parameters
+        assert set(tool.schema["properties"]) == set(parameters)
+        expected = [n for n, p in parameters.items() if p.default is inspect.Parameter.empty]
+        assert tool.schema.get("required", []) == expected
+
+
+def test_an_undescribable_parameter_fails_at_registration(mcp):
+    """A handler the schema cannot describe must break the build, not ship a tool whose
+    advertised contract is a guess."""
+    _, protocol = mcp
+    with pytest.raises(TypeError):
+        protocol.schema_of(lambda room: room)  # no annotation
+
+    def takes_a_list(items: list[str]) -> str:
+        return ""
+
+    with pytest.raises(TypeError):
+        protocol.schema_of(takes_a_list)
 
 
 def test_say_then_read_round_trips_through_the_real_service(mcp):
@@ -271,6 +393,81 @@ def test_bad_arguments_are_rejected_before_a_request_is_made(mcp):
     assert unexpected["error"]["code"] == protocol.INVALID_PARAMS
     unknown = call(server, "no_such_tool", {})
     assert unknown["error"]["code"] == protocol.INVALID_PARAMS
+
+
+def test_wrong_argument_types_are_rejected_before_any_request_is_made(mcp, monkeypatch):
+    """`since: "1"` is the client's bug, not something the model can act on, so it is a
+    JSON-RPC error and not a tool result — and it is caught here, before a string reaches
+    the query builder and the service gets asked for `?since=1` meaning something else."""
+    server, protocol = mcp
+
+    def never(request, timeout=None):
+        raise AssertionError(f"the network was reached: {request.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", never)
+
+    since = call(server, "read_room", {"room": "lobby", "since": "1"})
+    assert (
+        since["error"]["code"] == protocol.INVALID_PARAMS and "since" in since["error"]["message"]
+    )
+
+    seconds = call(server, "wait_for_message", {"room": "lobby", "since": 0, "seconds": "10"})
+    assert seconds["error"]["code"] == protocol.INVALID_PARAMS
+    assert "seconds" in seconds["error"]["message"]
+
+    room = call(server, "read_room", {"room": 7})
+    assert room["error"]["code"] == protocol.INVALID_PARAMS and "room" in room["error"]["message"]
+
+    guard = call(server, "write_note", {"namespace": "n", "key": "k", "value": "v", "if_absent": 1})
+    assert guard["error"]["code"] == protocol.INVALID_PARAMS
+    assert "if_absent" in guard["error"]["message"]
+
+    # `true` is an `int` in Python and is not one in JSON.
+    flag = call(server, "read_room", {"room": "lobby", "since": True})
+    assert flag["error"]["code"] == protocol.INVALID_PARAMS
+
+    page = call(server, "read_docs", {"page": "handbook"})
+    assert page["error"]["code"] == protocol.INVALID_PARAMS and "page" in page["error"]["message"]
+
+
+def test_an_integer_is_an_acceptable_number(mcp):
+    """JSON has one number type: a client sending `seconds: 0` is not sending a wrong type,
+    and rejecting it would break the cheapest way to ask for a non-blocking read."""
+    server, _ = mcp
+    call(server, "say", {"room": "lobby", "text": "one", "nick": "bot"})
+    for seconds in (0, 0.0):
+        reply = call(server, "wait_for_message", {"room": "lobby", "since": 1, "seconds": seconds})
+        assert "no new messages" in text_of(reply)
+
+
+def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
+    """JSON Schema reads `integer` by value, not by spelling, so `1.0` satisfies the schema
+    this server advertised and a client that validated locally against it must not then be
+    told `-32602`. It reaches the handler as `1`, because `?since=1.0` is not what the
+    service parses — and `1.5`, which no reading makes an integer, is still rejected."""
+    server, protocol = mcp
+    asked = []
+    inner = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: (asked.append(request.full_url), inner(request, timeout))[1],
+    )
+
+    for i in range(3):
+        call(server, "say", {"room": "lobby", "text": f"m{i}", "nick": "bot"})
+    body = text_of(call(server, "read_room", {"room": "lobby", "since": 2.0}))
+    assert "m2" in body and "m0" not in body
+    assert asked[-1].endswith("?since=2")
+
+    fraction = call(server, "read_room", {"room": "lobby", "since": 1.5})
+    assert fraction["error"]["code"] == protocol.INVALID_PARAMS
+
+
+def test_by_position_params_are_rejected_rather_than_guessed(mcp):
+    server, protocol = mcp
+    reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["say"]})
+    assert reply["error"]["code"] == protocol.INVALID_PARAMS
 
 
 def test_a_rejected_name_comes_back_as_the_services_own_explanation(mcp):
