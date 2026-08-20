@@ -141,8 +141,40 @@ def test_notifications_are_never_answered(mcp):
     """A response to a notification is a protocol violation, including for a method this
     server does not have."""
     server, _ = mcp
+    assert server.handle({"jsonrpc": "2.0", "method": "ping"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/cancelled"}) is None
+
+
+@pytest.mark.parametrize("ident", [None, True, False, 1.5, [], {}])
+def test_invalid_request_ids_are_rejected(mcp, ident):
+    server, protocol = mcp
+    reply = server.handle({"jsonrpc": "2.0", "id": ident, "method": "ping"})
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": protocol.INVALID_REQUEST,
+            "message": "request id must be a string or integer",
+        },
+    }
+
+
+@pytest.mark.parametrize("ident", [0, 1, -1, "abc"])
+def test_valid_request_ids_are_preserved(mcp, ident):
+    server, _ = mcp
+    assert server.handle({"jsonrpc": "2.0", "id": ident, "method": "ping"}) == {
+        "jsonrpc": "2.0",
+        "id": ident,
+        "result": {},
+    }
+
+
+def test_invalid_request_id_takes_precedence_over_unknown_method(mcp):
+    server, protocol = mcp
+    reply = server.handle({"jsonrpc": "2.0", "id": None, "method": "unknown"})
+    assert reply["error"]["code"] == protocol.INVALID_REQUEST
+    assert reply["id"] is None
 
 
 def test_unknown_methods_get_an_error_not_a_crash(mcp):

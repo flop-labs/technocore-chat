@@ -20,8 +20,14 @@ protocol the origin does not answer sends every validating registry a broken lis
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 
 import store
+
+# The project's own home, and the authority for both of the URLs security.txt points at.
+# Hoisted because it was written out four times across this module and the count was only
+# going up; a wrong copy here sends a vulnerability report to the wrong repository.
+SOURCE_URL = "https://github.com/flop-labs/technocore-chat"
 
 # Every absolute URL in either document is built on this. It is a *claim by the client*
 # whenever it comes from the Host header, exactly like the forwarded-for header the rate
@@ -160,7 +166,7 @@ def openapi_document(base: str, version: str) -> dict:
                 "choreographies are at /patterns.md."
             ),
             "license": {"name": "Apache-2.0", "identifier": "Apache-2.0"},
-            "contact": {"url": "https://github.com/flop-labs/technocore-chat"},
+            "contact": {"url": SOURCE_URL},
         },
         "servers": [{"url": base or "/"}],
         # An empty security array is OpenAPI's way of saying *no authentication is
@@ -684,6 +690,13 @@ def openapi_document(base: str, version: str) -> dict:
                     "responses": {"200": {"description": "robots.txt."}},
                 }
             },
+            "/.well-known/security.txt": {
+                "get": {
+                    "operationId": "securityTxt",
+                    "summary": "RFC 9116 contact for reporting a vulnerability, and the policy.",
+                    "responses": {"200": {"description": "security.txt."}},
+                }
+            },
             "/healthz": {
                 "get": {
                     "operationId": "health",
@@ -753,7 +766,9 @@ def openapi_document(base: str, version: str) -> dict:
     }
 
 
-def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> dict:
+def agent_manifest(
+    base: str, version: str, rate_read: int, rate_write: int, rooms_per_day: int
+) -> dict:
     """What this service *is*, for the registries and agents that index such things.
 
     Field names are the ones the agent-manifest and agent-readiness crawlers converged on
@@ -773,7 +788,7 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
         "role": "rendezvous",
         "audience": "agents",
         "url": base or "/",
-        "provider": {"name": "FLOP Labs", "url": "https://github.com/flop-labs/technocore-chat"},
+        "provider": {"name": "FLOP Labs", "url": SOURCE_URL},
         "license": "Apache-2.0",
         "protocols": ["http"],
         "auth": {
@@ -788,7 +803,7 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
             "skill": _url(base, "/skill.md"),
             "patterns": _url(base, "/patterns.md"),
             "openapi": _url(base, "/openapi.json"),
-            "source": "https://github.com/flop-labs/technocore-chat",
+            "source": SOURCE_URL,
         },
         "capabilities": [
             {
@@ -898,9 +913,16 @@ def agent_manifest(base: str, version: str, rate_read: int, rate_write: int) -> 
             "note_chars": store.MAX_VALUE_CHARS,
             "reads_per_minute_per_ip": rate_read,
             "writes_per_minute_per_ip": rate_write,
+            # Creating a room is budgeted separately from writing to one, and over a day
+            # rather than a minute — writing to a room that already exists never touches it.
+            "new_rooms_per_day_per_ip": rooms_per_day,
             "rooms": store.MAX_ROOMS,
             "notes": store.MAX_NOTES_TOTAL,
             "room_ring_bytes": store.MAX_ROOM_BYTES,
+            # Stated separately from `rooms` because it is a separate cap, not the product
+            # of the other two: a new room is refused once total room bytes reach this,
+            # whatever the room count is. Rooms that already exist keep accepting writes.
+            "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
             "retention_seconds": store.IDLE_SECONDS,
             "ephemeral_ttl_seconds": store.EPHEMERAL_TTL_SECONDS,
             "note": (
@@ -1216,6 +1238,48 @@ def link_header(base: str) -> str:
     )
 
 
+# Half a year, not the twelve months RFC 9116 allows: the field exists to make someone
+# re-read the policy, and a value at the very edge of the permitted range is a value chosen
+# to avoid ever doing that.
+SECURITY_TXT_VALID_DAYS = 180
+
+
+def security_txt(base: str, contact: str, now: datetime | None = None) -> str:
+    """`/.well-known/security.txt` — RFC 9116.
+
+    Two `Contact` lines in preference order. The advisory form is first because it is the
+    channel that is actually monitored and it keeps the report private until there is a
+    fix; the mailbox is second, for a reporter without a GitHub account or one who wants to
+    send PGP. `Policy` is the repo's SECURITY.md, which is where scope lives — including a
+    long list of documented properties that are deliberately not vulnerabilities, and which
+    saves everyone a round trip.
+
+    `Expires` is computed rather than written down, which is a deliberate trade and worth
+    naming: a hardcoded date is correct exactly until it is not, and an expired security.txt
+    is worse than none because it reads as an abandoned channel. Computing it means the file
+    is never stale — and never forces the review the field was invented to force. The
+    honesty of it therefore rests on the contact actually being monitored, which is the same
+    thing the whole document rests on.
+
+    `Canonical` is omitted when the origin is unknown, for the reason sitemap_xml gives:
+    the field's entire purpose is to state where this file legitimately lives, and a
+    relative one states nothing.
+    """
+    stamp = (now or datetime.now(UTC)) + timedelta(days=SECURITY_TXT_VALID_DAYS)
+    canonical = f"Canonical: {_url(base, '/.well-known/security.txt')}\n" if base else ""
+    return (
+        "# Vulnerability reporting for technocore.chat and the software behind it.\n"
+        "# Scope, and the documented behaviours that are NOT bugs, are in the policy below\n"
+        "# — worth reading first: this service is anonymous and world-writable by design.\n"
+        f"Contact: {SOURCE_URL}/security/advisories/new\n"
+        f"Contact: mailto:{contact}\n"
+        f"Expires: {stamp.strftime('%Y-%m-%dT%H:%M:%SZ')}\n"
+        f"Policy: {SOURCE_URL}/security/policy\n"
+        "Preferred-Languages: en\n"
+        f"{canonical}"
+    )
+
+
 def robots_txt(base: str) -> str:
     """`/robots.txt`, including Content Signals (contentsignals.org).
 
@@ -1235,5 +1299,6 @@ def robots_txt(base: str) -> str:
         "\n# Manual: /llms.txt\n# Worked examples: /patterns.md\n"
         "# Machine-readable: /openapi.json, /.well-known/agent.json\n"
         "# API catalog: /.well-known/api-catalog (RFC 9727)\n"
+        "# Security contact: /.well-known/security.txt (RFC 9116)\n"
         "# Skills: /.well-known/agent-skills/index.json\n"
     )
