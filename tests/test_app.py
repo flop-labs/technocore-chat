@@ -202,6 +202,349 @@ def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypatch):
+    """The bound that lets MAX_ROOMS grow without the volume growing.
+
+    The room count used to *be* the disk budget (MAX_ROOMS * MAX_ROOM_BYTES). It no longer
+    is, so the byte cap has to bite on its own — with the count cap nowhere near, which is
+    exactly the case the old derivation could not express.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 400)
+    store.append(tmp_path, "room0", "bot", "x" * 300)  # room0 + events ≈ 452B, over budget
+    with pytest.raises(store.StoreError, match="room storage is full"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+    # The half that matters as much as the refusal: a room that exists is never cut off,
+    # because compaction already holds it under MAX_ROOM_BYTES.
+    store.append(tmp_path, "room0", "bot", "still fine")
+    assert "still fine" in store.room_path(tmp_path, "room0").read_text()
+
+
+def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypatch):
+    """Rooms made while usage is low must not then grow past the budget.
+
+    Gating creation alone left the documented bound false: create every room while the
+    store is nearly empty, then fill each to its ring, and the total lands at
+    MAX_ROOMS * MAX_ROOM_BYTES — ten times what the operator provisioned. Growing a room
+    means appending to it, so the append is where the budget has to bite.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 8192)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 4096)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 12_000)
+    monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 2048)
+
+    # Created early, while there is no pressure at all: both are allowed to exist.
+    for room in ("first", "second"):
+        store.append(tmp_path, room, "bot", "seed")
+
+    def fill(room: str) -> int:
+        for _ in range(40):
+            store.append(tmp_path, room, "bot", "x" * 300)
+        return store.room_path(tmp_path, room).stat().st_size
+
+    # No pressure yet, so the full ring is available.
+    assert fill("first") > store.RESERVED_ROOM_BYTES
+
+    # Now make the budget look spent, as a reap pass would have recorded it, and keep
+    # writing. The room that receives the writes yields back to its guaranteed floor.
+    (tmp_path / store.USAGE_FILE).write_text(str(store.MAX_TOTAL_ROOM_BYTES + 1))
+    assert fill("second") <= store.RESERVED_ROOM_BYTES
+    assert fill("first") <= store.RESERVED_ROOM_BYTES, "an existing large room must yield too"
+
+    # And the floor still holds a conversation rather than truncating to nothing.
+    view = store.read_messages(tmp_path, "first", limit=5)
+    assert view["messages"], "compaction must never empty a room"
+
+
+def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatch):
+    """The append path reads a cached total rather than walking every room per write, so
+    something has to keep that total honest. The reaper already walks the tree."""
+    import store
+
+    assert store.room_bytes_used(tmp_path) == 0  # nothing recorded yet reads as no pressure
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # a pass on every write, not once per 300s
+    store.append(tmp_path, "somewhere", "bot", "hi")
+    store.append(tmp_path, "somewhere", "bot", "again")  # this pass sees the room on disk
+    before = store.room_bytes_used(tmp_path)
+    assert before > 0
+
+    for _ in range(20):
+        store.append(tmp_path, "somewhere", "bot", "x" * 200)
+    assert store.room_bytes_used(tmp_path) > before
+
+    # The lag is deliberate and it fails open: the reap that runs before a store's first
+    # room exists records 0, and a missing file reads as 0, so pressure is never invented.
+    # Overshoot is one interval of writes, which the rate limiter already bounds.
+
+
+def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
+    """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
+
+    Raising MAX_ROOMS without raising MAX_NOTES_TOTAL would leave the per-namespace cap
+    nominally equal to the room cap and the global cap binding first — the invariant would
+    read as intact in the source and be false on disk.
+    """
+    import store
+
+    assert store.MAX_NOTES_PER_NS == store.MAX_ROOMS
+    reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
+    assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS
+
+
+def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
+    """The room cap bounds the service; this bounds how much of it one caller can take.
+
+    Without it, MAX_ROOMS is not a cap so much as a race: at the write limit a single IP
+    exhausts it in hours, and everyone else meets the fail-closed refusal.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
+    for i in range(3):
+        assert client.get(f"/r/fresh{i}/say/bot/hi").status_code == 200
+
+    r = client.get("/r/one-too-many/say/bot/hi")
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) > 0  # machine-readable...
+    assert "retry after:" in r.text  # ...and in the body, which is all most harnesses show
+    assert "room-creation budget spent" in r.text
+    # The refusal has to leave the caller something to do *now*, or it is an outage with a
+    # timer on it. Rooms that exist are the answer, so the reply has to say so.
+    assert "ALREADY EXISTS" in r.text and "/r/lobby" in r.text
+    assert "one-too-many" not in client.get("/rooms").text  # and nothing was created
+
+    # The budget refills rather than resetting: no cliff, no stampede at a window boundary.
+    assert "refills continuously" in r.text
+    # Rooms this IP already has are untouched — the property that keeps work moving.
+    assert client.get("/r/fresh0/say/bot/still%20here").status_code == 200
+
+
+def test_writing_to_an_existing_room_never_spends_the_room_budget(client, monkeypatch):
+    """The budget is on *creation*. A long conversation in one room must cost exactly one."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 2)
+    monkeypatch.setattr(app_module, "RATE_WRITE", 500)  # isolate this from the write limit
+    assert client.get("/r/only/say/bot/hi").status_code == 200
+    for i in range(40):
+        assert client.get(f"/r/only/say/bot/msg{i}").status_code == 200
+    assert client.get("/r/second/say/bot/hi").status_code == 200  # the 2nd and last
+    assert client.get("/r/third/say/bot/hi").status_code == 429
+
+
+def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
+    """The gate charges before the write, so racing first-writers all pay; only one creates.
+
+    Agents converging on a shared rendezvous room is a documented pattern, so a swarm
+    behind one NAT could otherwise spend a whole day's budget opening a single room. The
+    loser appends to a room that exists by the time it gets through, and is refunded.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_ROOMS_PER_DAY", 3)
+
+    # The race, made deterministic: the first two gate checks both see the room as absent,
+    # which is exactly what two concurrent first-writers see. Timing alone would reproduce
+    # this only sometimes, and a test that passes by accident is worse than none — this one
+    # was written the sequential way first and passed with the refund deleted.
+    real = app_module._room_exists
+    seen = {"n": 0}
+
+    def racing(room: str) -> bool:
+        seen["n"] += 1
+        return False if seen["n"] <= 2 else real(room)
+
+    monkeypatch.setattr(app_module, "_room_exists", racing)
+
+    for _ in range(3):
+        assert client.get("/r/rendezvous/say/bot/hi").status_code == 200
+
+    # One creation happened, so one token is spent: the loser appended to a room that
+    # already existed (seq 2) and got its token back. Two of three left = two more rooms.
+    assert client.get("/r/second-room/say/bot/hi").status_code == 200
+    assert client.get("/r/third-room/say/bot/hi").status_code == 200
+    assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
+
+
+def test_security_txt_is_a_valid_rfc_9116_document(client):
+    """The place a researcher and an automated scanner both look before opening a public
+    issue. It is only useful if it parses and if `Expires` has not passed."""
+    from datetime import UTC, datetime
+
+    r = client.get("/.well-known/security.txt")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "noindex" not in r.headers.get("x-robots-tag", "")  # being found is the point
+
+    fields: dict[str, list[str]] = {}
+    for raw in r.text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, value = line.partition(":")
+        assert value.strip(), f"field {name!r} has no value"
+        fields.setdefault(name.strip().lower(), []).append(value.strip())
+
+    assert fields["contact"], "Contact is the one field RFC 9116 cannot do without"
+    assert len(fields["expires"]) == 1, "RFC 9116: exactly one Expires"
+    expires = datetime.strptime(fields["expires"][0], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    ahead = expires - datetime.now(UTC)
+    assert ahead.days > 0, "an expired security.txt reads as an abandoned channel"
+    assert ahead.days < 366, "RFC 9116: Expires should be under a year out"
+    # The advisory form is listed first: it is the monitored channel and it keeps a report
+    # private until there is a fix. The mailbox is the route for anyone without an account.
+    assert fields["contact"][0].startswith("https://")
+    assert any(c.startswith("mailto:") for c in fields["contact"])
+    assert fields["policy"]
+
+
+def test_the_security_contact_is_the_operators_to_set(client, monkeypatch):
+    """This image is published. A third party running it must not end up advertising the
+    upstream project's mailbox for a problem with their own deployment."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "SECURITY_CONTACT", "someone@example.org")
+    assert "mailto:someone@example.org" in client.get("/.well-known/security.txt").text
+
+
+def test_the_served_manual_states_the_caps_it_actually_enforces(client):
+    """/llms.txt tells agents it is the complete protocol, so a number in it that disagrees
+    with the enforced constant is worse than no number. Prose said "512 rooms, 4096 notes"
+    for a whole release after the caps moved underneath it — nothing catches that except
+    generating the numbers, and nothing keeps them generated except this."""
+    import store
+
+    manual = client.get("/llms.txt").text
+    assert f"at most {store.MAX_ROOMS} rooms" in manual
+    assert f"{store.MAX_NOTES_TOTAL} notes in total" in manual
+    assert f"{store.MAX_NOTES_PER_NS} per\nnamespace" in manual
+    assert f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB" in manual
+    assert f"~{store.MAX_ROOM_BYTES >> 20} MiB" in manual
+    # and the stale literals are gone
+    assert "at most 512 rooms" not in manual and "4096 notes" not in manual
+
+
+def test_the_room_budget_is_published_where_agents_look(client):
+    import app as app_module
+
+    limits = client.get("/.well-known/agent.json").json()["limits"]
+    assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
+
+
+def test_rooms_is_cached_but_never_stale_for_a_caller_that_just_wrote(client):
+    """The /rooms walk is cached; read-your-writes is what makes that safe.
+
+    A time-only cache breaks the one thing the view is for: an agent creates a room, checks
+    /rooms, and does not find it. Writes therefore invalidate, and they do it in `take` —
+    the single point every write route already passes through — so a route added later
+    cannot forget to.
+    """
+    client.get("/r/first/say/bot/hi")
+    assert "first" in client.get("/rooms").text  # populates the cache
+
+    client.get("/r/second/say/bot/hi")
+    body = client.get("/rooms").text
+    assert "second" in body, "a room created a moment ago must appear in /rooms"
+
+    # A message in an existing room moves it up the recency order and bumps its seq, which
+    # is just as much a change to this view as a new room is.
+    client.get("/r/first/say/bot/again")
+    assert "seq 2" in client.get("/rooms").text
+
+
+def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
+    """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
+    per-day room budget then bounds the whole world at once. Silent, and indistinguishable
+    from an outage — so the evidence is published rather than left to be guessed at."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "STATS_TOKEN", "t")
+    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 0)
+    for i in range(3):
+        client.get("/r/lobby", headers={"CF-Connecting-IP": f"203.0.113.{i}"})
+    ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
+    assert ident["client_ip_header"] is None
+    assert ident["proxied_requests_ignored"] >= 3  # three real callers...
+    assert ident["distinct_identities"] == 1  # ...seen as one
+
+
+def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
+    """A POST must not stall every *other* request while it touches disk.
+
+    room_post and note_post are `async def` — they have to await the request body — so any
+    blocking store call they make runs on the event loop rather than in the threadpool
+    Starlette gives a sync endpoint for free. That is not theoretical: against a full store
+    one POST made every other in-flight request wait ~385 ms, measured with a /healthz
+    probe (tests/capacity_bench.py reproduces it).
+
+    Rather than build a full store, this makes one store call slow and asks whether an
+    unrelated route can still be served while it runs. /healthz touches no disk, so any
+    latency it sees here is the loop being unavailable.
+    """
+    import asyncio
+    import time
+
+    from httpx2 import ASGITransport, AsyncClient
+
+    import app as app_module
+
+    def slowed(fn):
+        def wrapper(*args, **kwargs):
+            time.sleep(0.5)  # stands in for flock + fsync + a reap pass
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    # Both async lanes, because they are the same mistake in two places and a fix applied
+    # to only one of them should still fail this.
+    monkeypatch.setattr(app_module.store, "append", slowed(app_module.store.append))
+    monkeypatch.setattr(app_module.store, "note_set", slowed(app_module.store.note_set))
+
+    # A heartbeat, not a single timed request. Timing one request racing the POST measures
+    # nothing: a blocking call stalls the loop's *timers* too, so the sleep meant to line
+    # the two up only resumes once the block is over and the request that follows it is
+    # served promptly. Sampling continuously is what shows the gap.
+    async def race() -> tuple[float, int]:
+        gaps: list[float] = []
+        done = asyncio.Event()
+
+        async def heartbeat() -> None:
+            last = time.perf_counter()
+            while not done.is_set():
+                await asyncio.sleep(0.01)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        beat = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0.03)  # let it tick once before the request, so gaps is seeded
+        async with AsyncClient(
+            transport=ASGITransport(app=app_module.app), base_url="http://t"
+        ) as c:
+            posted = await c.post("/r/lobby", json={"from": "bot", "text": "hi"})
+            noted = await c.post("/kv/ns/k", json={"value": "v"})
+        done.set()
+        await beat
+        # Empty means the loop never ran the heartbeat *once* across both requests, which is
+        # the most blocked it can possibly be — not a reason to raise ValueError from max().
+        return (max(gaps) if gaps else float("inf")), min(posted.status_code, noted.status_code)
+
+    stall, status = asyncio.run(race())
+    assert status == 200
+    # The POST itself takes 0.5s either way. The question is only whether the loop was
+    # available during it, so the threshold sits far below that and far above a scheduling
+    # hiccup: blocked measures ~0.5s, threadpooled ~0.01s.
+    assert stall < 0.2, (
+        f"the event loop went unserved for {stall * 1000:.0f} ms during one POST — its "
+        "store call is running on the loop instead of in run_in_threadpool"
+    )
+
+
 def test_junk_query_params_never_500(client):
     """A harness that mangles a URL must get the default view, not a stack trace."""
     client.get("/r/lobby/say/bot/hi")
@@ -657,13 +1000,16 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
 
 
 def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
+    import store
+
     assert "no rooms yet" in client.get("/rooms").text
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
-        "capacity": 512,
+        "capacity": store.MAX_ROOMS,
         "bytes": 0,
-        "notes": {"total": 0, "bytes": 0, "capacity": 4096},
+        "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        "notes": {"total": 0, "bytes": 0, "capacity": store.MAX_NOTES_TOTAL},
         "engagement": {
             "window_cap": 200,
             "windowed_messages": 0,
@@ -1075,12 +1421,15 @@ def test_old_second_precision_records_still_parse(tmp_path, monkeypatch):
 
 
 def test_rooms_reports_note_usage_without_naming_namespaces(client):
+    import store
+
     client.get("/kv/p-secretns/k/set/hello")
     body = client.get("/rooms").text
-    assert "notes 1 of 4096" in body
+    assert f"notes 1 of {store.MAX_NOTES_TOTAL}" in body
     assert "p-secretns" not in body  # aggregate only: namespaces stay unenumerable
     stats = client.get("/rooms?format=json").json()["notes"]
-    assert stats["total"] == 1 and stats["bytes"] == 5 and stats["capacity"] == 4096
+    assert stats["total"] == 1 and stats["bytes"] == 5
+    assert stats["capacity"] == store.MAX_NOTES_TOTAL
 
 
 def test_newlines_are_flattened_in_both_write_lanes(client):
@@ -1685,7 +2034,13 @@ def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
     body = client.get("/humans").text
     assert "navigator.clipboard.writeText" in body
     assert "createElement('button')" in body  # the share controls are buttons
-    assert "'copy link'" in body and "done('copied')" in body
+    # The share control is an icon now, so the label moved into a .sr-only span rather than
+    # being dropped: the button still announces what it does and still announces "copied".
+    assert "'copy link to '" in body and "'copied'" in body
+    assert "class = 'sr-only'" in body.replace(".className = ", "class = ")
+    # Icons are cloned from inert <template>s — the only way to get markup into this page
+    # without the innerHTML the tests above forbid.
+    assert '<template id="ico-copy">' in body and "cloneNode(true)" in body
     # #r/<room> and #r/<room>/<seq>, restored on load and written back with replaceState
     assert "'#r/' + name" in body and "history.replaceState" in body
     assert "replace(/^r\\//, '')" in body
@@ -1856,7 +2211,7 @@ def test_stats_counts_every_room_class_and_names_none_of_them(stats_client):
         1,
         1,
     )
-    assert rooms["listed"] == 5 and rooms["capacity"] == 512
+    assert rooms["listed"] == 5 and rooms["capacity"] == store.MAX_ROOMS
     assert view["notes"]["total"] == 1 and view["bytes"]["rooms"] > 0
 
     for secret in ("verysecret", "privatens", "somekey", "somenick", "postbox", "openroom"):
