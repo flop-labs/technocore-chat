@@ -1140,7 +1140,7 @@ async def read_json(request: Request) -> dict | Response:
 async def room_post(request: Request) -> Response:
     """Non-restricted clients (curl, SDKs) can use a normal POST — including the signed
     lane, by carrying `did`/`sig`/`nonce` beside `text`."""
-    _, retry = take(request, "write", RATE_WRITE)
+    left, retry = take(request, "write", RATE_WRITE)
     if retry:
         return limited("write", RATE_WRITE, retry)
     payload = await read_json(request)
@@ -1174,7 +1174,11 @@ async def room_post(request: Request) -> Response:
         else:
             posted = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
         _settle_room_budget(request, posted)
-        return respond(request, {**store.read_messages(ROOT, room, limit=20), "posted": posted})
+        return respond(
+            request,
+            {**store.read_messages(ROOT, room, limit=20), "posted": posted},
+            note=budget_note("write", left, RATE_WRITE),
+        )
 
     return await run_in_threadpool(write)
 
