@@ -1,65 +1,86 @@
 # Contributing
 
-This file collects what is otherwise scattered across the README, the CHANGELOG's opening
-note, and the PR template — where to start, what CI actually runs, and what "public API"
-means here. Nothing below is a new rule; it is the existing ones in one place.
+Thanks for helping improve technocore-chat. Bug fixes, tests, documentation, and focused
+enhancements are welcome.
 
-## Setup
+Do not report exploitable vulnerabilities in a public issue or pull request. Follow
+[`SECURITY.md`](SECURITY.md) to send a private report.
+
+## Development setup
+
+The project uses Python 3.12 and [`uv`](https://docs.astral.sh/uv/) for the environment and locked
+dependencies:
 
 ```bash
-uv sync --frozen              # provisions the pinned Python (3.12) and the locked deps
-uv run python -m pytest tests -q
-uv run ruff check . && uv run ruff format --check . && uv run ty check
+uv sync --frozen
 ```
 
-`cryptography` is required, not optional — it backs the signed (`did:key`) lane, so `uv sync`
-needs to succeed before the tests will.
-
-Run the service locally against the same commands the README uses:
+Run the service locally with a disposable data directory:
 
 ```bash
 CHAT_ROOT=./data uv run uvicorn --app-dir src app:app --port 8080
 ```
 
-## What CI runs
+Then check the health endpoint at <http://localhost:8080/healthz> or read the local manual at
+<http://localhost:8080/llms.txt>.
 
-`.github/workflows/ci.yml` runs the three commands above, plus a `docker build` and a smoke
-test of the built image, on pushes to `main`, non-draft pull requests targeting `main`, and
-manual dispatches. There are no path filters: a world-writable service should never merge a
-change that ran none of this. The image build is the only check that exercises
-`docker/Dockerfile`.
+## Making a change
 
-## Before opening a PR
+- Keep each pull request focused on one problem. Bug fixes and small documentation improvements
+  can go directly to a pull request; discuss substantial API or design changes in an issue first.
+- Match the existing style and reuse established helpers and patterns where practical.
+- Add tests for behavior that changes. A bug fix should include a regression test that fails
+  without the fix and passes with it. Prefer assertions on externally observable behavior over
+  private implementation details.
+- Preserve the service's bounded-resource and world-writable assumptions. For any new route,
+  parameter, or persistent state, consider what an unauthenticated abusive caller can do with it.
+- Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
 
-The PR template asks for four things — this is what each one means in practice:
+## Tests and checks
 
-- **Tests, lint, and type check pass locally.** Running them before pushing is faster than
-  waiting for CI to say the same thing.
-- **Docs that would now be wrong are updated.** The manual is built in `src/app.py` from the
-  constants the service enforces, while `/skill.md` serves the repository's `SKILL.md`
-  byte-for-byte. `src/manifest.py` generates the OpenAPI and agent metadata documents.
-  `README.md`, `src/patterns.md`, and `mcp/README.md` are separate, hand-maintained
-  documents and need their own pass.
-- **New surface on a world-writable service says what an abusive caller can do with it.**
-  Every route here is reachable by anyone, unauthenticated. "Nothing new" is a fine answer
-  when it's true, but the PR should say so explicitly rather than leave the question
-  unanswered.
-- **Versions move together.** Since 0.6.0, the service, the MCP wrapper, and the published
-  skill share one version number from `pyproject.toml`; CI asserts the other declarations
-  equal it. A version bump belongs in its own PR, described in the CHANGELOG under
-  `[Unreleased]`, not folded into an unrelated change.
+Run the same checks used by CI:
 
-## What counts as a public-API change
+```bash
+uv run python -m pytest tests -q
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
+```
 
-From the CHANGELOG: **public API** means the HTTP surface — paths, response shapes, and the
-documented caps. A change that breaks a client written against `/llms.txt` is a MAJOR
-version change even if no Python signature moved; adding a route or a response field is
-MINOR. The `text/plain` line format is part of the contract, not an implementation detail —
-agents parse it, so reordering or reshaping a line is a breaking change even when every
-field is still present.
+CI also builds the MCP distribution and the Docker image, then smoke-tests the image. If your
+change affects packaging or the container, run the relevant build locally as well:
 
-## Reporting a vulnerability
+```bash
+uv build --project mcp
+docker build -f docker/Dockerfile -t technocore-chat:local .
+```
 
-This is a contributing guide, not a security policy — see [`SECURITY.md`](SECURITY.md) for
-how to report a vulnerability privately. Do not open a public issue or PR for anything
-exploitable.
+## Documentation and compatibility
+
+Update every document that would become inaccurate:
+
+- The service manual at `/` and `/llms.txt` is assembled in `src/app.py`.
+- `/skill.md` serves the repository's `SKILL.md` byte-for-byte.
+- `src/manifest.py` generates `/openapi.json` and `/.well-known/agent.json` from enforced
+  constants.
+- `README.md`, `src/patterns.md`, and `mcp/README.md` are maintained separately.
+
+The public API is the HTTP surface: paths, response shapes, documented caps, and the parseable
+`text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
+fields remain. Record notable user-visible changes under `[Unreleased]` in `CHANGELOG.md`.
+
+The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
+version changes to a dedicated release change unless a maintainer asks otherwise.
+
+## Pull requests
+
+In the pull request description:
+
+- Explain what changes for a caller and why the change is needed.
+- Link related issues and note dependencies on other open pull requests.
+- Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
+- Call out documentation updates and compatibility implications.
+- Describe the abuse impact of new public surface, or state explicitly that there is none.
+
+Keep the branch current with `main` and address review feedback with additional commits or a clean
+rebase, as appropriate. All required CI checks must pass before merge.
