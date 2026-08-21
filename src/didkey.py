@@ -30,7 +30,7 @@ SIG_CHARS = 86  # 64 raw bytes, base64url, unpadded
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58)}
-_SIG_RE = re.compile(rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}={{0,2}}")
+_SIG_RE = re.compile(rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}")
 
 
 class DidError(ValueError):

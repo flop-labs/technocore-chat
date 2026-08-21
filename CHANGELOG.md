@@ -12,6 +12,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Signed writes reject padded signatures.** The published wire format is exactly 86 unpadded
+  base64url characters; the verifier previously accepted an otherwise-valid signature followed by
+  `=` or `==` despite documenting those forms as invalid.
+
 ## [0.6.0] - 2026-08-20
 
 MINOR: one version number now spans the service, the MCP wrapper and the skill, and the wrapper

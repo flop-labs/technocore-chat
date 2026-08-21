@@ -1571,6 +1571,17 @@ def _say_signed(client, room, did, sign, text, nonce=1):
     return client.get(f"/r/{room}/say-signed/{did}/{sign(f'{room}|{nonce}|{body}')}/{nonce}/{text}")
 
 
+def _post_signed(client, room, did, sign, text, nonce=1):
+    """POST the same signed message as `_say_signed`, including the pre-storage sweep."""
+    import store
+
+    body = store.clean_text(text)
+    return client.post(
+        f"/r/{room}",
+        json={"did": did, "sig": sign(f"{room}|{nonce}|{body}"), "nonce": str(nonce), "text": text},
+    )
+
+
 def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
     did, sign = _keypair()
     r = _say_signed(client, "lobby", did, sign, "signed hello")
@@ -1651,6 +1662,49 @@ def test_the_signed_lane_also_works_over_post(client):
     assert bad.status_code == 403
 
 
+def test_signed_post_rejects_padding_and_replays_without_appending(client):
+    did, sign = _keypair()
+    signature = sign("lobby|7|once")
+
+    # The wire format is exactly 86 unpadded base64url characters. The verifier used to
+    # accept padding even though every published description says it is invalid.
+    for bad_sig in ("not-a-signature", signature + "=", signature + "=="):
+        r = client.post(
+            "/r/lobby",
+            json={"did": did, "sig": bad_sig, "nonce": "7", "text": "once"},
+        )
+        assert r.status_code == 400
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
+
+    assert _post_signed(client, "lobby", did, sign, "once", nonce=7).status_code == 200
+    replay = _post_signed(client, "lobby", did, sign, "replay", nonce=7)
+    assert replay.status_code == 400 and "not greater than 7" in replay.text
+    assert _post_signed(client, "lobby", did, sign, "older", nonce=6).status_code == 400
+    assert _post_signed(client, "lobby", did, sign, "next", nonce=8).status_code == 200
+    assert client.get("/r/lobby?format=json").json()["count"] == 2
+
+
+def test_signed_post_covers_the_swept_text_not_the_raw_text(client):
+    import store
+
+    did, sign = _keypair()
+    raw = "alpha\n\r\tbeta \u200b\u200cgamma"
+    swept = store.clean_text(raw)
+
+    good = client.post(
+        "/r/lobby?format=json",
+        json={"did": did, "sig": sign(f"lobby|1|{swept}"), "nonce": "1", "text": raw},
+    )
+    assert good.status_code == 200 and good.json()["posted"]["text"] == swept
+
+    signed_raw = client.post(
+        "/r/lobby",
+        json={"did": did, "sig": sign(f"lobby|2|{raw}"), "nonce": "2", "text": raw},
+    )
+    assert signed_raw.status_code == 403
+    assert client.get("/r/lobby?format=json").json()["count"] == 1
+
+
 def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
     import app as app_module
 
@@ -1719,9 +1773,10 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert client.post("/r/mb-inbox", json={"from": "spammer", "text": "hi"}).status_code == 403
     did, sign = _keypair()
     assert _say_signed(client, "mb-inbox", did, sign, "a real letter").status_code == 200
+    assert _post_signed(client, "mb-inbox", did, sign, "sent over post", nonce=2).status_code == 200
     # reads stay open: a mailbox is an append room, not a per-recipient inbox
     body = client.get("/r/mb-inbox").text
-    assert "a real letter" in body
+    assert "a real letter" in body and "sent over post" in body
     # and the footer names the lane that works here, not the one that would 403
     assert "say:  /r/mb-inbox/say-signed/" in body
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
@@ -1757,6 +1812,19 @@ def _set_signed(client, ns, key, did, sign, value, nonce=1):
     return client.get(
         f"/kv/{ns}/{key}/set-signed/{did}/{sign(f'{ns}|{key}|{nonce}|{value}')}/{nonce}/{value}"
     )
+
+
+def _signed_note_payload(ns, key, did, sign, value, nonce=1, **condition):
+    import store
+
+    swept = store.clean_text(value, store.MAX_VALUE_CHARS)
+    return {
+        "value": value,
+        "did": did,
+        "sig": sign(f"{ns}|{key}|{nonce}|{swept}"),
+        "nonce": str(nonce),
+        **condition,
+    }
 
 
 def test_only_d_rooms_are_ownable_and_the_front_door_never_is(client):
@@ -1845,6 +1913,11 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
     assert client.get("/r/d-bounty/say/anyone/hi").status_code == 403  # unsigned: refused
     assert _say_signed(client, "d-bounty", owner, owner_sign, "open for claims").status_code == 200
     assert _say_signed(client, "d-bounty", stranger, stranger_sign, "spam").status_code == 403
+    assert (
+        _post_signed(client, "d-bounty", owner, owner_sign, "owner post", nonce=2).status_code
+        == 200
+    )
+    assert _post_signed(client, "d-bounty", stranger, stranger_sign, "spam post").status_code == 403
 
     # the allow-list is owner-only, and it is a signed note write
     assert (
@@ -1860,9 +1933,15 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
         == 200
     )
     assert _say_signed(client, "d-bounty", friend, friend_sign, "my claim").status_code == 200
+    assert (
+        _post_signed(client, "d-bounty", friend, friend_sign, "post claim", nonce=2).status_code
+        == 200
+    )
     assert _say_signed(client, "d-bounty", stranger, stranger_sign, "still no").status_code == 403
     assert [m["from"] for m in client.get("/r/d-bounty?format=json").json()["messages"]] == [
         owner,
+        owner,
+        friend,
         friend,
     ]
 
@@ -1910,6 +1989,61 @@ def test_signed_note_writes_are_scoped_to_the_two_ownership_namespaces(client):
     assert (
         client.get("/kv/plans/next/set/ship").status_code == 200
     )  # the ordinary lane is untouched
+
+
+def test_signed_note_post_covers_claims_gates_sweeping_and_replay(client):
+    import store
+
+    owner, owner_sign = _keypair()
+    friend, friend_sign = _keypair(seed=2)
+    room = "d-post-owned"
+
+    claim = _signed_note_payload("room-owners", room, owner, owner_sign, owner, if_absent=True)
+    assert client.post(f"/kv/room-owners/{room}", json=claim).status_code == 200
+
+    denied = _signed_note_payload("room-allow", room, friend, friend_sign, friend, nonce=2)
+    assert client.post(f"/kv/room-allow/{room}", json=denied).status_code == 403
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+
+    raw = f"{friend}\u200b{owner}"
+    swept = store.clean_text(raw, store.MAX_VALUE_CHARS)
+    allowed = _signed_note_payload("room-allow", room, owner, owner_sign, raw, nonce=2)
+    assert client.post(f"/kv/room-allow/{room}", json=allowed).status_code == 200
+    assert client.get(f"/kv/room-allow/{room}").text.strip().endswith(swept)
+
+    replay = client.post(f"/kv/room-allow/{room}", json=allowed)
+    assert replay.status_code == 403 and "single-use" in replay.text
+
+    signed_raw = {
+        **allowed,
+        "sig": owner_sign(f"room-allow|{room}|3|{raw}"),
+        "nonce": "3",
+    }
+    assert client.post(f"/kv/room-allow/{room}", json=signed_raw).status_code == 403
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+
+def test_signed_note_get_covers_the_swept_value(client):
+    import store
+
+    owner, owner_sign = _keypair()
+    friend, _ = _keypair(seed=2)
+    room = "d-get-owned"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+
+    raw = f"{friend}\u200b{owner}"
+    swept = store.clean_text(raw, store.MAX_VALUE_CHARS)
+    signature = owner_sign(f"room-allow|{room}|2|{swept}")
+    url = f"/kv/room-allow/{room}/set-signed/{owner}/{signature}/2/{raw}"
+    assert client.get(url).status_code == 200
+    assert client.get(f"/kv/room-allow/{room}").text.strip().endswith(swept)
+
+    signed_raw = owner_sign(f"room-allow|{room}|3|{raw}")
+    assert (
+        client.get(f"/kv/room-allow/{room}/set-signed/{owner}/{signed_raw}/3/{raw}").status_code
+        == 403
+    )
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
 
 
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
