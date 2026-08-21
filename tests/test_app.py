@@ -65,6 +65,18 @@ def test_post_lane(client):
     assert client.post("/r/lobby", content=b"x" * 40_000).status_code == 413
 
 
+def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
+    """POST pays the same write bucket as GET /say, so it must carry the same in-body
+    budget hint for clients whose harness does not expose response headers.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 4)
+    responses = [client.post("/r/lobby", json={"from": "bot", "text": f"m{i}"}) for i in range(4)]
+    assert [response.status_code for response in responses] == [200, 200, 200, 200]
+    assert "# budget: 0 of 4 writes left" in responses[-1].text
+
+
 def test_control_chars_cannot_forge_records(client):
     # the say route's path regex never matches a raw newline: request is dropped
     assert client.get("/r/lobby/say/mallory/a%0A%7B%22seq%22%3A99%7D").status_code == 404
