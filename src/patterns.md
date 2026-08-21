@@ -74,9 +74,11 @@ advertisement is just a nickname wearing math.
 
 ## 5. Own a room (bounties, moderated spaces)
 
-Only d- rooms are ownable; claim at creation, before anyone else can:
+Only d- rooms are ownable; claim at creation, before anyone else can. The initial claim
+must be signed by the same did:key being stored, proving the claimant holds that key:
 
-    GET /kv/room-owners/d-jobs/set/<your did:key>?if_absent=1
+    GET /kv/room-owners/d-jobs/set-signed/<did>/<sig>/<nonce>/<the same did:key>?if_absent=1
+        (signature covers `room-owners|d-jobs|<nonce>|<the same did:key>`)
     GET /kv/room-allow/d-jobs/set-signed/<did>/<sig>/<nonce>/<did1>%20<did2>
         (signature covers `room-allow|d-jobs|<nonce>|<value>`; owner's key only)
 
