@@ -60,9 +60,11 @@ def test_notes_roundtrip(client):
 
 
 def test_post_lane(client):
+    import app as app_module
+
     r = client.post("/r/lobby", json={"from": "carol", "text": "via post"})
     assert r.status_code == 200 and "via post" in r.text
-    assert client.post("/r/lobby", content=b"x" * 40_000).status_code == 413
+    assert client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1)).status_code == 413
 
 
 def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
@@ -1452,7 +1454,9 @@ def test_listings_never_echo_a_name_the_validator_would_reject(tmp_path):
 def test_oversize_body_is_refused_before_it_is_buffered(client):
     """`await request.body()` buffers everything first, so the size check has to come
     from Content-Length (and a streaming cap for chunked uploads)."""
-    r = client.post("/r/lobby", content=b"x" * 100_000)
+    import app as app_module
+
+    r = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
     assert r.status_code == 413 and "too large" in r.text
     assert "no rooms yet" in client.get("/rooms").text  # nothing was written
 
@@ -1506,13 +1510,15 @@ def test_header_block_is_capped_far_below_the_edge_ceiling(client):
 
 
 def test_a_full_length_message_is_postable_in_every_encoding(client):
-    """The documented cap is 2000 *characters*. json.dumps defaults to ensure_ascii=True,
-    so 2000 emoji become ~24 KB of \\uXXXX — the old 8 KiB body cap rejected legal
-    messages, silently shrinking the documented limit for non-Latin scripts."""
+    """The documented cap is in *characters*. json.dumps defaults to ensure_ascii=True,
+    so astral characters cost 12 body bytes each as surrogate-pair escapes. The byte cap
+    must not silently shrink the character limit for clients using that default."""
     import json
 
+    import store
+
     for label, ch in (("ascii", "a"), ("cjk", "日"), ("emoji", "\U0001f600")):
-        text_value = ch * 2000
+        text_value = ch * store.MAX_TEXT_CHARS
         escaped = json.dumps({"from": "agent", "text": text_value}, ensure_ascii=True)
         r = client.post(
             f"/r/enc-{label}",
@@ -1521,7 +1527,7 @@ def test_a_full_length_message_is_postable_in_every_encoding(client):
         )
         assert r.status_code == 200, (label, len(escaped), r.text[:200])
         stored = client.get(f"/r/enc-{label}?format=json").json()["messages"][0]["text"]
-        assert len(stored) == 2000 and stored == text_value
+        assert len(stored) == store.MAX_TEXT_CHARS and stored == text_value
 
 
 def test_body_cap_still_refuses_oversize_uploads(client):
@@ -1530,24 +1536,57 @@ def test_body_cap_still_refuses_oversize_uploads(client):
     over = b"x" * (app_module.MAX_BODY + 1000)
     assert client.post("/r/lobby", content=over).status_code == 413
     # declared-but-not-sent is refused on Content-Length alone, before buffering
-    assert client.post("/r/lobby", content=b"x" * 100, headers={"content-length": "99999999"})
+    assert (
+        client.post(
+            "/r/lobby", content=b"x" * 100, headers={"content-length": "99999999"}
+        ).status_code
+        == 413
+    )
 
 
 def test_notes_have_a_post_lane_so_their_documented_cap_is_reachable(client):
     """8192 characters URL-encode past the request line (and past Cloudflare's 16 KiB URL
-    ceiling), so without POST the note limit was unreachable."""
+    ceiling), so POST must accept the full character limit in every JSON encoding."""
+    import json
+
     import store
 
-    value = "z" * store.MAX_VALUE_CHARS  # not "v": the banner contains one
-    r = client.post("/kv/plans/big", json={"value": value})
-    assert r.status_code == 200
-    assert client.get("/kv/plans/big").text.count("z") == store.MAX_VALUE_CHARS
+    for label, ch in (("ascii", "z"), ("emoji", "\U0001f600")):
+        value = ch * store.MAX_VALUE_CHARS
+        escaped = json.dumps({"value": value}, ensure_ascii=True)
+        r = client.post(
+            f"/kv/plans/big-{label}",
+            content=escaped.encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert r.status_code == 200, (label, len(escaped), r.text[:200])
+        assert client.get(f"/kv/plans/big-{label}").text.count(ch) == store.MAX_VALUE_CHARS
     assert (
         client.post(
             "/kv/plans/toobig", json={"value": "z" * (store.MAX_VALUE_CHARS + 1)}
         ).status_code
         == 400
     )
+
+
+def test_full_length_conditional_note_is_postable_with_escaped_json(client):
+    """A valid CAS body carries two full notes: the replacement and the value last read."""
+    import json
+
+    import store
+
+    previous = "\U0001f600" * store.MAX_VALUE_CHARS
+    replacement = "\U0001f680" * store.MAX_VALUE_CHARS
+    assert client.post("/kv/plans/cas-max", json={"value": previous}).status_code == 200
+
+    escaped = json.dumps({"value": replacement, "if": previous}, ensure_ascii=True)
+    r = client.post(
+        "/kv/plans/cas-max",
+        content=escaped.encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200, (len(escaped), r.text[:200])
+    assert client.get("/kv/plans/cas-max").text.count("\U0001f680") == store.MAX_VALUE_CHARS
 
 
 # ------------------------------------------------------- conditional notes (CAS)
@@ -1774,6 +1813,32 @@ def _post_signed(client, room, did, sign, text, nonce=1):
         f"/r/{room}",
         json={"did": did, "sig": sign(f"{room}|{nonce}|{body}"), "nonce": str(nonce), "text": text},
     )
+
+
+def test_full_length_signed_message_is_postable_with_escaped_json(client):
+    import json
+
+    import store
+
+    room = "signed-max"
+    nonce = 9_223_372_036_854_775_807
+    text_value = "\U0001f600" * store.MAX_TEXT_CHARS
+    did, sign = _keypair()
+    payload = {
+        "did": did,
+        "sig": sign(f"{room}|{nonce}|{text_value}"),
+        "nonce": str(nonce),
+        "text": text_value,
+    }
+    escaped = json.dumps(payload, ensure_ascii=True)
+    r = client.post(
+        f"/r/{room}",
+        content=escaped.encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 200, (len(escaped), r.text[:200])
+    stored = client.get(f"/r/{room}?format=json").json()["messages"][0]
+    assert stored["from"] == did and stored["nonce"] == nonce and stored["text"] == text_value
 
 
 def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
@@ -2969,6 +3034,7 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
 def test_openapi_limits_are_the_limits_the_server_enforces(client):
     """A published limit that disagrees with the enforced one is worse than none: a
     machine reader believes it. Generated from the constants, and this holds that line."""
+    import app as app_module
     import store
 
     doc = client.get("/openapi.json").json()
@@ -2979,6 +3045,9 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     assert next(p for p in value if p["name"] == "value")["schema"]["maxLength"] == (
         store.MAX_VALUE_CHARS
     )
+    body_limit = f"{app_module.MAX_BODY // 1024} KiB"
+    assert body_limit in doc["paths"]["/r/{room}"]["post"]["responses"]["413"]["description"]
+    assert body_limit in doc["paths"]["/kv/{ns}/{key}"]["post"]["responses"]["413"]["description"]
     room = next(p for p in say["parameters"] if p["name"] == "room")
     assert room["schema"]["pattern"] == store.NAME_RE.pattern
     # …and the version comes from the file that declares it, not a second copy.

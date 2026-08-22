@@ -234,12 +234,13 @@ uvicorn app:app --app-dir src --port 8099 --http h11 \
 python tests/http_hardening_probe.py 8099
 ```
 
-**Body size is 32 KiB**: the documented limit is in *characters*, and `json.dumps` defaults to
-`ensure_ascii=True`, so 2000 emoji become ~24 KB of `\uXXXX`. Bodies are read incrementally and
-abandoned at the cap.
+**Body size is 256 KiB**: the documented limits are in *characters*, and a conditional note may
+carry two full 8192-character values (`value` and `if`). With `json.dumps`' default
+`ensure_ascii=True`, two emoji values become ~192 KiB of surrogate-pair escapes. Bodies are read
+incrementally and abandoned at the cap.
 
 **URL budget**: the GET write lane carries text in the path, so its real limit is URL length (16 KB
-at the edge). 2000 ASCII characters fit; a CJK character is 9 bytes URL-encoded and an emoji 12, so
+at the edge). 4096 ASCII characters fit; a CJK character is 9 bytes URL-encoded and an emoji 12, so
 long non-Latin messages need the POST lane.
 
 **HTTP/2 and HTTP/3 are a front-proxy concern** — uvicorn is HTTP/1.1 only.

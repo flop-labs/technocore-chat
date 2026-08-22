@@ -139,7 +139,7 @@ _BAD_NAME = {
 }
 
 
-def openapi_document(base: str, version: str) -> dict:
+def openapi_document(base: str, version: str, max_body_bytes: int) -> dict:
     """OpenAPI 3.1 for the whole public surface.
 
     `/stats` is absent on purpose: it does not exist unless a token is configured, and
@@ -288,7 +288,7 @@ def openapi_document(base: str, version: str) -> dict:
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
-                        "413": {"description": "Body over 32 KiB."},
+                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
                         "429": _RATE_LIMITED,
                     },
                 },
@@ -312,7 +312,7 @@ def openapi_document(base: str, version: str) -> dict:
                             "schema": {"type": "string", "maxLength": store.MAX_TEXT_CHARS},
                             "description": (
                                 "URL-encoded message body. The URL is the size limit in "
-                                "practice: 2000 ASCII characters fit, one CJK character is "
+                                f"practice: {store.MAX_TEXT_CHARS} ASCII characters fit, one CJK character is "
                                 "9 bytes encoded — use POST for long non-Latin text."
                             ),
                         },
@@ -539,7 +539,7 @@ def openapi_document(base: str, version: str) -> dict:
                             ),
                             "content": {"text/plain": {"schema": {"type": "string"}}},
                         },
-                        "413": {"description": "Body over 32 KiB."},
+                        "413": {"description": f"Body over {max_body_bytes // 1024} KiB."},
                         "429": _RATE_LIMITED,
                     },
                 },

@@ -43,7 +43,7 @@ HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
 # --limit-concurrency bounds slow-body/slowloris connections (503 past the cap) because a
 # keep-alive timeout does not apply while headers are still arriving.
 # The h11 cap bounds the request line too, and the GET write lane puts the message in
-# the URL — a full-length ASCII message URL-encodes to ~6 KB — so 16 KiB is the floor
+# the URL — a full-length ASCII message URL-encodes to ~4 KiB — so 16 KiB is the floor
 # that keeps the primary lane working. Header blocks are capped far tighter in app.py
 # (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
 # instead of "whatever was buffered".
