@@ -1,6 +1,5 @@
 """Regression checks for owned-room instructions in the served manual."""
 
-import os
 import sys
 from pathlib import Path
 
