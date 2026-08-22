@@ -2156,7 +2156,7 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
         assert op["summary"] and "200" in op["responses"]
 
 
-def test_openapi_limits_are_the_limits_the_server_enforces(client):
+def test_openapi_limits_are_the_limits_theserver_enforces(client):
     """A published limit that disagrees with the enforced one is worse than none: a
     machine reader believes it. Generated from the constants, and this holds that line."""
     import store
