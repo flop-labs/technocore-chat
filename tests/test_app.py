@@ -24,6 +24,90 @@ def client(tmp_path, monkeypatch):
     return TestClient(app_module.app)
 
 
+# --------------------------------------------------------------------------- shared helpers
+#
+# Four things every lifecycle test needs, written once. The reaper, the ring and the
+# signed lane are all clock- and race-sensitive, and open-coding that at 40-odd call sites
+# buried the one line of each test that was actually the point.
+
+
+def _age(path, seconds):
+    """Move a file `seconds` into the past.
+
+    The reaper stats mtime, so this is how a test says "nobody has touched this for a
+    week" without waiting one. Callers pass the threshold plus a margin —
+    `_age(p, store.IDLE_SECONDS + 60)` — which reads as the rule it is testing.
+    """
+    when = time.time() - seconds
+    os.utime(path, (when, when))
+
+
+def _arm_reaper(root):
+    """Clear the once-per-REAP_EVERY throttle, so the next write runs a pass."""
+    (root / ".reaped").unlink(missing_ok=True)
+
+
+def _reap_now(root):
+    """Run a pass immediately, throttle and all."""
+    import store
+
+    _arm_reaper(root)
+    store._reap(root)
+
+
+def _ok(client, target, post=None):
+    """Send `target` (a path, or an already-made response) and require it to succeed.
+
+    A published limit is honoured only if the server *accepts* the extreme value; a 4xx
+    here means the document is advertising something no caller can use.
+    """
+    if isinstance(target, str):
+        target = client.post(target, json=post) if post is not None else client.get(target)
+    assert target.status_code == 200, f"published limit refused: {target.text[:160]}"
+    return target
+
+
+def _race_before_lock(monkeypatch, store, path, action):
+    """Run `action()` once, in the gap between the store reading a file and locking it.
+
+    Every race worth testing here lives in that gap: the store reads, decides, then takes
+    the lock and writes. A second writer landing in between is what the compare-and-set
+    and the reaper's under-lock recheck exist to survive, and this puts one there without
+    threads. Returns a list that is non-empty once the race has actually happened — assert
+    on it, or a test that stopped reaching the gap will pass while proving nothing.
+    """
+    real_locked = store._locked
+    fired = []
+
+    @contextmanager
+    def hook(target):
+        if target == path and not fired:
+            fired.append(True)
+            action()
+        with real_locked(target):
+            yield
+
+    monkeypatch.setattr(store, "_locked", hook)
+    return fired
+
+
+def _race_under_lock(monkeypatch, store, action):
+    """Run `action(target)` after the store takes a lock, before it acts on the file.
+
+    The other half of the same idea, for the checks the store performs *under* the lock:
+    a writer that lands here has beaten the recheck rather than the read.
+    """
+    real_locked = store._locked
+
+    @contextmanager
+    def hook(target):
+        with real_locked(target):
+            action(target)
+            yield
+
+    monkeypatch.setattr(store, "_locked", hook)
+
+
 def test_say_then_read(client):
     r = client.get("/r/lobby/say/alice/hello%20world")
     # `~alice`, not `alice`: an unsigned nick is self-asserted and the text view says so
@@ -65,6 +149,98 @@ def test_post_lane(client):
     r = client.post("/r/lobby", json={"from": "carol", "text": "via post"})
     assert r.status_code == 200 and "via post" in r.text
     assert client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1)).status_code == 413
+
+
+def test_a_fractional_wait_is_honoured_rather_than_silently_dropped(client, monkeypatch):
+    """`?wait=` is published as `type: number` and the poll interval is half a second, so
+    `wait=0.5` is the shortest wait that can return anything — the constant's own comment
+    calls it the useful floor. It was int-parsed, so every fractional value became no wait
+    at all, and the caller got an immediate empty reply indistinguishable from an idle
+    room. Review catch on #40.
+    """
+    import app as app_module
+
+    assert app_module._seconds("0.5") == 0.5
+    assert app_module._seconds("2.5") == 2.5
+    # Junk, negative and absent all mean "do not wait" rather than raising.
+    for junk in (None, "", "abc", "-1", "nan", "²"):
+        assert app_module._seconds(junk) == 0.0, junk
+    # The ceiling is applied here, so it cannot be enforced in one caller and forgotten in
+    # another. Infinity is just an over-large number.
+    monkeypatch.setattr(app_module, "MAX_WAIT", 1.0)
+    assert app_module._seconds("10") == 1.0
+    assert app_module._seconds("inf") == 1.0
+
+    # End to end: a fractional wait really does hold the connection open and then return.
+    started = time.monotonic()
+    r = client.get("/r/quiet?since=1&wait=0.5")
+    assert r.status_code == 200 and time.monotonic() - started >= 0.4
+
+
+def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
+    """The sharp end of the same bug: below a one-second ceiling every schema-conforming
+    positive wait int-parsed to zero, so the feature the document advertised could not be
+    used at all on that instance."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)
+    published = next(
+        p
+        for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
+        if p["name"] == "wait"
+    )["schema"]
+    assert published["maximum"] == 0.5
+    # The largest value the schema permits is a wait the server actually takes.
+    assert app_module._seconds(str(published["maximum"])) == 0.5
+
+
+def test_posting_to_the_events_room_documents_what_it_really_answers(client):
+    """`/r/events` is the ordinary room POST handler with one room that always says no, so
+    the body is read and parsed *before* the refusal — a malformed or oversized body never
+    reaches the 403. Documenting only the 403 promised a client one outcome and delivered
+    three. Review catch on #40.
+    """
+    import app as app_module
+
+    documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
+    assert set(documented["responses"]) == {"400", "403", "413", "429"}
+    # It parses a body, so it declares one.
+    assert (
+        "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])
+    )
+
+    assert client.post("/r/events", json={"from": "bot", "text": "hi"}).status_code == 403
+    assert client.post("/r/events", content=b"not json").status_code == 400
+    assert client.post("/r/events", json=[1, 2]).status_code == 400
+    oversize = client.post("/r/events", content=b"x" * (app_module.MAX_BODY + 1))
+    assert oversize.status_code == 413
+
+
+def test_the_body_cap_holds_when_nothing_declares_a_length(client):
+    """Two bounds, and only one of them was ever reached. `await request.body()` buffers
+    the whole upload before any size check, so a large POST was an OOM against a 128 MiB
+    container; the Content-Length refusal fixes the honest case and the streaming cap
+    fixes the rest. A chunked request declares no length, so the second bound is the only
+    one that applies there — and every oversize test until now sent a declared length,
+    because the test client computes one for you.
+    """
+    import app as app_module
+
+    def chunked():
+        for _ in range(4):
+            yield b"x" * (app_module.MAX_BODY // 2)
+
+    streamed = client.post("/r/lobby", content=chunked())
+    assert streamed.status_code == 413
+    assert "the stream passed it before it ended" in streamed.text
+
+    declared = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
+    assert declared.status_code == 413
+    assert f"your Content-Length said {app_module.MAX_BODY + 1} bytes" in declared.text
+
+    # Both bodies name the cap, because a caller that just lost an upload needs the number.
+    for response in (streamed, declared):
+        assert f"the cap is {app_module.MAX_BODY} bytes" in response.text
 
 
 def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
@@ -122,6 +298,11 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
     assert r.headers["retry-after"].isdigit()
     # the wait is in the body too: harness webfetch shows page text, not headers
     assert "retry after:" in r.text and "429 rate limited" in r.text
+    # …and it is the right order of magnitude. A bucket refilling at 4/min hands back a
+    # token in ~15s; the arithmetic that produces that is one character from reporting
+    # four minutes, and an agent that believes it sleeps through its own work.
+    assert 1 <= int(r.headers["retry-after"]) <= 60 // 4 + 1
+    assert f"retry after: {r.headers['retry-after']}s" in r.text  # header and body agree
     # the manual stays reachable while throttled, so a limited agent can learn to back off
     assert client.get("/llms.txt").status_code == 200
     assert client.get("/r/lobby").status_code == 200  # reads have their own budget
@@ -181,6 +362,20 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
     # what still works while throttled, and where to read the limits up front
     assert "reads are a separate budget" in r.text
     assert "limits.writes_per_minute_per_ip" in r.text
+    # The poll advice names the ceiling this instance enforces, not a hardcoded 10 — the
+    # same reason the manual states no rate limit it cannot guarantee.
+    assert f"&wait={app_module.MAX_WAIT:g}" in r.text
+
+    # The read bucket is the other half, and it is the one an agent hits first. `other` is
+    # computed from `kind`, so a 429 that names the wrong budget as "still open" sends the
+    # caller straight back into the bucket it just emptied.
+    monkeypatch.setattr(app_module, "RATE_READ", 1)
+    for _ in range(2):
+        read = client.get("/r/lobby")
+    assert read.status_code == 429
+    assert "the read budget for your IP (1/min) is spent" in read.text
+    assert "writes are a separate budget" in read.text
+    assert "limits.reads_per_minute_per_ip" in read.text
 
 
 def test_the_refill_rate_stays_a_number_an_agent_can_pace_against(client):
@@ -317,6 +512,69 @@ def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypat
     # And the floor still holds a conversation rather than truncating to nothing.
     view = store.read_messages(tmp_path, "first", limit=5)
     assert view["messages"], "compaction must never empty a room"
+
+
+def test_the_byte_budget_binds_at_the_cap_and_not_one_byte_past_it(tmp_path, monkeypatch):
+    """Both budget comparisons are `at or over`, and both were only ever driven strictly
+    over. `>=` vs `>` and `<` vs `<=` are invisible until usage lands exactly on the
+    number, which is precisely where an operator who sized the disk expects it to bite."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
+    store.append(tmp_path, "room0", "bot", "hi")
+    used = store._scan(tmp_path / "rooms", ".jsonl", sized=True)[1]
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", used)  # exactly at the budget
+
+    with pytest.raises(store.StoreError, match="room storage is full"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+
+    # The same equality on the growth half: at the budget a room gets its floor, not the
+    # full ring, or "the budget bounds growth" is off by one byte.
+    (tmp_path / store.USAGE_FILE).write_text(str(used))
+    assert store._ring_limit(tmp_path) == store.RESERVED_ROOM_BYTES
+
+
+def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monkeypatch):
+    """These bodies are the service's answer to "now what", and the actionable part is the
+    figures: the cap that was hit, and how full the disk is against how big it was sized.
+    Matching only the opening words leaves every number in them free to be wrong."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "only", "bot", "hi")
+    with pytest.raises(store.StoreError, match=r"room limit reached \(1 is the cap"):
+        store.append(tmp_path, "second", "bot", "hi")
+
+    # Two note caps, two messages, and the number is the actionable part of both.
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "plans", "only", "hi")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap"):
+        store.note_set(tmp_path, "plans", "second", "hi")
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 10_000)
+    monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 1)
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 across all namespaces"):
+        store.note_set(tmp_path, "elsewhere", "second", "hi")
+
+    # "how full, of how much" is the figure an operator sizes a disk against, and the two
+    # shifts that produce it are one character from reporting megabytes as terabytes.
+    monkeypatch.setattr(store, "MAX_ROOMS", 10_000)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 3 << 20)
+    monkeypatch.setattr(store, "_scan", lambda *a, **k: (1, 5 << 20))  # 5 MiB on disk
+    with pytest.raises(store.StoreError, match="5 MiB of a 3 MiB budget"):
+        store.append(tmp_path, "overflow", "bot", "hi")
+
+
+def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
+    """A write cut short leaves the file there and empty. Reading that as *some* pressure
+    would throttle every room to its floor on the strength of a truncated write; the
+    documented default is 0, and it is the same fail-open as a missing file."""
+    import store
+
+    (tmp_path / store.USAGE_FILE).write_text("")
+    assert store.room_bytes_used(tmp_path) == 0
+    (tmp_path / store.USAGE_FILE).write_text("   \n")
+    assert store.room_bytes_used(tmp_path) == 0
 
 
 def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatch):
@@ -710,15 +968,119 @@ def test_orphan_locks_are_swept(tmp_path):
     path = store.room_path(tmp_path, "gone")
     lock = path.with_suffix(".jsonl.lock")
     assert lock.exists()
-    old = time.time() - store.IDLE_SECONDS - 60
     for p in (path, lock):
-        os.utime(p, (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+        _age(p, store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "other", "bot", "hi")  # reaps the data file, keeps its lock
     assert not path.exists()
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "other", "bot", "again")  # next pass sweeps the orphan lock
     assert not lock.exists()
+
+
+def test_the_note_side_of_the_sweep_is_wired_up_too(tmp_path):
+    """Notes are nested one directory deeper than rooms and carry a different suffix, so
+    the sweep walks them with a second, hand-written tuple that nothing exercised — every
+    way of getting that tuple wrong leaves note locks and empty namespaces accumulating
+    forever, silently and unboundedly, on the half of the store nobody was watching."""
+    import store
+
+    store.note_set(tmp_path, "scratch", "gone", "value")
+    note = store.note_path(tmp_path, "scratch", "gone")
+    lock = note.with_suffix(".txt.lock")
+    assert lock.exists(), "premise: note writes leave a sidecar lock"
+
+    for target in (note, lock):
+        _age(target, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)  # takes the data file, keeps the lock a writer might hold
+    assert not note.exists()
+
+    _reap_now(tmp_path)
+    assert not lock.exists(), "an orphaned note lock is swept like a room's"
+    # …and the namespace directory goes with the last note in it, or every namespace ever
+    # written stays on disk as an empty directory.
+    assert not note.parent.exists()
+
+
+def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
+    """The sweep spares a lock whose data file still exists, whatever the lock's own age —
+    a lock is touched only when someone writes, so a busy room with a quiet week looks
+    exactly like an orphan. Unlinking it splits the lock domain: the next writer locks a
+    fresh inode and two writers append at once."""
+    import store
+
+    store.append(tmp_path, "quiet", "bot", "hi")
+    path = store.room_path(tmp_path, "quiet")
+    lock = path.with_suffix(".jsonl.lock")
+
+    _age(lock, store.IDLE_SECONDS + 60)  # the lock is stale; the room it guards is not
+    _reap_now(tmp_path)
+
+    assert path.exists() and lock.exists()
+
+
+def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
+    """The reaper walks every room and note in one pass, and a racing writer or a
+    permission blip on any one of them is ordinary. Skipping that entry costs nothing;
+    stopping the pass leaves everything after it unreaped until the next interval, which
+    on a store under pressure is how a disk fills while the reaper reports success."""
+    import store
+
+    for room in ("first-idle", "second-idle"):
+        store.append(tmp_path, room, "bot", "hi")
+    for room in ("first-idle", "second-idle"):
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
+
+    def explode():
+        raise OSError("racing writer")
+
+    exploded = _race_before_lock(
+        monkeypatch, store, store.room_path(tmp_path, "first-idle"), explode
+    )
+    _reap_now(tmp_path)
+
+    assert exploded, "the failure never happened — this test proved nothing"
+    assert not store.room_path(tmp_path, "second-idle").exists(), "the pass stopped early"
+
+
+def test_reap_counts_every_room_it_takes_not_just_the_last(tmp_path):
+    """The counters are the only monotonic numbers in the store, and a digest reports
+    deltas from them. One reap pass usually takes many rooms; a counter that assigns
+    instead of accumulating reports 1 whatever the wave size, which is exactly the signal
+    a wave is supposed to produce."""
+    import store
+
+    for room in ("ended-one", "ended-two", "ended-three"):
+        store.append(tmp_path, room, "bot", "hi")
+        store.append(tmp_path, room, "other", "yes")  # answered, so the idle rule takes it
+    for room in ("ended-one", "ended-two", "ended-three"):
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
+
+    before = store.counters(tmp_path)["reaped_idle"]
+    _reap_now(tmp_path)
+    assert store.counters(tmp_path)["reaped_idle"] == before + 3
+
+
+def test_an_ephemeral_room_keeps_the_history_that_has_not_expired(tmp_path, monkeypatch):
+    """Compaction retains the newest record of an `e-` room unconditionally, then stops at
+    the first expired one. The guard that makes it unconditional is `and kept`, and
+    dropping it turns every rotation of a *busy* ephemeral room into a truncation to one
+    line — losing history that is still well inside its TTL. Only a room whose records are
+    all fresh at rotation time can tell the two apart."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 2048)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 1024)
+
+    for i in range(40):  # well past the ring, and all of it written just now
+        store.append(tmp_path, "e-busy", "bot", f"message {i} " + "x" * 60)
+
+    view = store.read_messages(tmp_path, "e-busy", limit=50)
+    assert view["count"] > 1, "a rotating ephemeral room must keep unexpired history"
+    assert view["messages"][-1]["seq"] == store.last_seq(tmp_path, "e-busy")
+    # contiguous: compaction drops from the front, it never leaves a hole
+    seqs = [m["seq"] for m in view["messages"]]
+    assert seqs == list(range(seqs[0], seqs[-1] + 1))
 
 
 def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
@@ -727,19 +1089,13 @@ def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
 
     store.append(tmp_path, "live", "bot", "hi")
     path = store.room_path(tmp_path, "live")
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(path, (old, old))
-    real_locked = store._locked
+    _age(path, store.IDLE_SECONDS + 60)
 
-    @contextmanager
-    def refresh_then_lock(target):
-        with real_locked(target):
-            os.utime(target, None)  # a writer got in between the stat and the unlink
-            yield
+    def refresh(target):
+        os.utime(target, None)  # a writer got in between the stat and the unlink
 
-    monkeypatch.setattr(store, "_locked", refresh_then_lock)
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _race_under_lock(monkeypatch, store, refresh)
+    _reap_now(tmp_path)
     assert path.exists()
 
 
@@ -857,9 +1213,8 @@ def test_idle_rooms_are_reaped_so_squatting_expires(tmp_path, monkeypatch):
 
     monkeypatch.setattr(store, "MAX_ROOMS", 2)
     store.append(tmp_path, "squat", "bot", "hi")
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "squat"), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)  # force a reap pass
+    _age(store.room_path(tmp_path, "squat"), store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)  # force a reap pass
     store.append(tmp_path, "fresh", "bot", "hi")
     assert not store.room_path(tmp_path, "squat").exists()
     assert store.room_path(tmp_path, "fresh").exists()
@@ -870,14 +1225,12 @@ def test_stillborn_rooms_go_after_a_day_but_answered_ones_keep_the_week(tmp_path
     week. Both rooms are idle for the same time — only the reply tells them apart."""
     import store
 
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
     store.append(tmp_path, "monologue", "bot", "anyone here?")
     store.append(tmp_path, "answered", "bot", "anyone here?")
     store.append(tmp_path, "answered", "other", "yes")
     for room in ("monologue", "answered"):
-        os.utime(store.room_path(tmp_path, room), (day_old, day_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+        _age(store.room_path(tmp_path, room), store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
     assert not store.room_path(tmp_path, "monologue").exists()
     assert store.room_path(tmp_path, "answered").exists()
 
@@ -888,10 +1241,8 @@ def test_stillborn_room_survives_its_first_day(tmp_path):
     import store
 
     store.append(tmp_path, "waiting", "bot", "anyone here?")
-    hour_old = time.time() - 3600
-    os.utime(store.room_path(tmp_path, "waiting"), (hour_old, hour_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(store.room_path(tmp_path, "waiting"), 3600)
+    _reap_now(tmp_path)
     assert store.room_path(tmp_path, "waiting").exists()
 
 
@@ -902,11 +1253,63 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
 
     store.note_set(tmp_path, store.TOPIC_NS, "somewhere", "what this room is for")
     path = store.note_path(tmp_path, store.TOPIC_NS, "somewhere")
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(path, (day_old, day_old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(path, store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
     assert path.exists()
+
+
+def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
+    """The stillborn count skips what it cannot parse rather than stopping at it: stopping
+    reads a room with one bad line as a room with no messages, and the reaper takes a
+    conversation because of a byte a crash left behind. From the mutation run — turning
+    that `continue` into a `break` passed the whole suite."""
+    import store
+
+    path = store.room_path(tmp_path, "torn")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b'{"seq":1,"ts":"2026-01-01T00:00:00.000000Z","from":"a","tex\n'  # cut mid-record
+        b'{"seq":2,"ts":"2026-01-01T00:00:01.000000Z","from":"a","text":"anyone here?"}\n'
+        b'{"seq":3,"ts":"2026-01-01T00:00:02.000000Z","from":"b","text":"yes"}\n'
+    )
+    _age(path, store.STILLBORN_SECONDS + 60)
+    _reap_now(tmp_path)
+
+    assert path.exists(), "two answered messages and a torn line is not a monologue"
+    # …and the messages either side of the torn line are still readable.
+    assert store.read_messages(tmp_path, "torn")["count"] == 2
+
+
+def test_a_room_that_cannot_be_counted_is_never_stillborn(tmp_path):
+    """Fail open, and only here: a reaper that reads "I could not count this" as "there is
+    nothing here" deletes live data on the first IO error it meets."""
+    import store
+
+    unreadable = tmp_path / "rooms"  # a directory: opening it raises, like a bad file
+    unreadable.mkdir()
+    assert store._stillborn(unreadable) is False
+
+
+def test_a_second_precision_timestamp_still_expires(tmp_path):
+    """Records predating microsecond `ts` carry `...:05Z`, and expiry is the only thing
+    that parses `ts` — so the older form must keep working or an `e-` room silently stops
+    expiring its oldest records. Both forms coexist by design; this keeps the second real."""
+    from datetime import UTC, datetime, timedelta
+
+    import store
+
+    path = store.room_path(tmp_path, "e-legacy")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stale = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    fresh = datetime.now(UTC) - timedelta(seconds=5)
+    path.write_bytes(
+        f'{{"seq":1,"ts":"{stale.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"old"}}\n'
+        f'{{"seq":2,"ts":"{fresh.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"new"}}\n'.encode()
+    )
+    view = store.read_messages(tmp_path, "e-legacy")
+    assert [m["text"] for m in view["messages"]] == ["new"]
+    # seq keeps advancing past what nobody can read any more, or a cursor would be reused.
+    assert store.last_seq(tmp_path, "e-legacy") == 2
 
 
 def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeypatch):
@@ -916,21 +1319,15 @@ def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeyp
 
     store.append(tmp_path, "racing", "bot", "anyone here?")
     path = store.room_path(tmp_path, "racing")
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(path, (day_old, day_old))
-    real_locked = store._locked
+    _age(path, store.STILLBORN_SECONDS + 60)
 
-    @contextmanager
-    def answer_then_lock(target):
-        with real_locked(target):
-            with target.open("ab") as f:  # a reply got in between the count and the unlink
-                f.write(b'{"seq":2,"ts":"2026-01-01T00:00:00Z","from":"other","text":"yes"}\n')
-            os.utime(target, (day_old, day_old))  # still idle: only the count saves it
-            yield
+    def answer(target):
+        with target.open("ab") as f:  # a reply got in between the count and the unlink
+            f.write(b'{"seq":2,"ts":"2026-01-01T00:00:00Z","from":"other","text":"yes"}\n')
+        _age(target, store.STILLBORN_SECONDS + 60)  # still idle: only the count saves it
 
-    monkeypatch.setattr(store, "_locked", answer_then_lock)
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _race_under_lock(monkeypatch, store, answer)
+    _reap_now(tmp_path)
     assert path.exists()
 
 
@@ -1181,8 +1578,7 @@ def test_reaper_spares_active_files_and_throttles_itself(tmp_path, monkeypatch):
     # a reap ran on the first write, so the marker exists and the next pass is throttled
     marker = tmp_path / ".reaped"
     assert marker.exists()
-    stale = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "other"), (stale, stale))
+    _age(store.room_path(tmp_path, "other"), store.IDLE_SECONDS + 60)
     store.append(tmp_path, "active", "bot", "again")
     assert store.room_path(tmp_path, "other").exists()  # throttled: not reaped yet
     marker.unlink()
@@ -1196,8 +1592,7 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     client.get("/r/old/say/bot/first")
     client.get("/r/busy/say/bot/a")
     client.get("/r/busy/say/bot/b")
-    stale = time.time() - 3600
-    os.utime(store.room_path(tmp_path, "old"), (stale, stale))
+    _age(store.room_path(tmp_path, "old"), 3600)
 
     view = client.get("/rooms?format=json").json()
     names = [r["room"] for r in view["rooms"]]
@@ -1966,6 +2361,21 @@ def test_a_failed_announcement_never_fails_the_write(tmp_path, monkeypatch):
 # ------------------------------------------------------------ signed writes (did:key)
 
 
+def _multibase(raw: bytes) -> str:
+    """base58btc, the encoding a `did:key` multibase segment is written in.
+
+    Spelt out rather than imported: `didkey` only ever decodes, and a test that built its
+    keys with the decoder's own inverse could not catch the decoder being wrong.
+    """
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = alphabet[rem] + out
+    return out
+
+
 def _keypair(seed: int = 1):
     """A deterministic Ed25519 key and its did:key, so a failure is reproducible."""
     import base64
@@ -1977,17 +2387,45 @@ def _keypair(seed: int = 1):
     key = Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
     raw = key.public_key().public_bytes_raw()
 
-    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-    n = int.from_bytes(didkey.MULTICODEC_ED25519 + raw, "big")
-    out = ""
-    while n:
-        n, rem = divmod(n, 58)
-        out = alphabet[rem] + out
-
     def sign(message: str) -> str:
         return base64.urlsafe_b64encode(key.sign(message.encode())).decode().rstrip("=")
 
-    return f"{didkey.PREFIX}z{out}", sign
+    return f"{didkey.PREFIX}z{_multibase(didkey.MULTICODEC_ED25519 + raw)}", sign
+
+
+def test_a_did_key_has_exactly_one_spelling(client):
+    """Ownership compares DID *strings*: `_note_write_gate` asks `signer != current`, and
+    `_allowed_keys` matches by string. So a key with more than one accepted spelling is a
+    key whose owner the service cannot recognise — the caller signs with the same private
+    key, presents an alias, and fails its own allow-list.
+
+    Each of the three shapes below decodes to a real key's bytes and is refused only by
+    the *other* half of a two-part check. `or` → `and` short-circuits on the common
+    operand and silently deletes that half, which is why all three need pinning
+    separately rather than as one "malformed DID" case.
+    """
+    import didkey
+
+    did, _ = _keypair()
+    mb = did[len(didkey.PREFIX) :]
+    real = didkey.public_key(did)
+
+    # Right suffix, wrong prefix — same length, so only the `startswith` check refuses it.
+    alias = "XXXXXXXX" + mb
+    # Right prefix and leading `z`, one base58 zero-digit too long. Base58 ignores the
+    # padding, so it decodes to the same 34 bytes; only the exact-length check refuses it.
+    padded = didkey.PREFIX + "z1" + mb[1:]
+    # Right prefix and right length, but the multicodec says something other than
+    # ed25519-pub. Only the codec check refuses it.
+    wrong_codec = didkey.PREFIX + "z" + _multibase(b"\xe7\x01" + real)
+    assert len(wrong_codec) == len(did), "premise: this must pass the length check to matter"
+
+    for spelling in (alias, padded, wrong_codec):
+        with pytest.raises(didkey.DidError):
+            didkey.public_key(spelling)
+        assert not didkey.is_did(spelling)
+
+    assert didkey.public_key(did) == real  # …and the canonical one still works
 
 
 def _say_signed(client, room, did, sign, text, nonce=1):
@@ -2343,21 +2781,19 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
     store.append(tmp_path, "d-live", "bot", "hi")
     for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "7")):
         store.note_set(tmp_path, ns, "d-live", value)
-        old = time.time() - store.IDLE_SECONDS - 60
-        os.utime(store.note_path(tmp_path, ns, "d-live"), (old, old))
+        _age(store.note_path(tmp_path, ns, "d-live"), store.IDLE_SECONDS + 60)
 
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "d-live", "bot", "still talking")  # forces a reap pass
     for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
         assert store.note_get(tmp_path, ns, "d-live") is not None, ns
 
     # once the room itself goes, the guards go with it — bounded exactly as before
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "d-live"), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _age(store.room_path(tmp_path, "d-live"), store.IDLE_SECONDS + 60)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "elsewhere", "bot", "hi")
     assert not store.room_path(tmp_path, "d-live").exists()
-    (tmp_path / ".reaped").unlink(missing_ok=True)
+    _arm_reaper(tmp_path)
     store.append(tmp_path, "elsewhere", "bot", "again")
     for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
@@ -2525,6 +2961,63 @@ def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     # the counter is server-written and world-readable, never client-writable
     assert client.get("/kv/room-nonce/d-bounty").text.strip().endswith("3")
     assert client.get("/kv/room-nonce/d-bounty/set/0").status_code == 403
+
+
+def test_two_signed_writers_cannot_both_spend_one_nonce(client, tmp_path, monkeypatch):
+    """The counter is read before it is claimed, so two writers racing one room both pass
+    the "greater than the last one" check against the same stale value. Only the
+    compare-and-set inside `note_set` separates them — without it both writes land, the
+    counter ends up at whichever finished last, and a nonce that was already spent becomes
+    spendable again. That is the single-use guarantee, and nothing exercised it.
+    """
+    import store
+
+    owner, owner_sign = _keypair()
+    assert _claim(client, "d-race", owner, owner_sign).status_code == 200  # burns nonce 1
+
+    counter = store.note_path(tmp_path, store.NONCE_NS, "d-race")
+    raced = _race_before_lock(
+        monkeypatch,
+        store,
+        counter,
+        lambda: counter.write_text("9", encoding="utf-8"),  # the other writer got there
+    )
+    lost = _set_signed(client, store.ALLOW_NS, "d-race", owner, owner_sign, owner, nonce=5)
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    # The loser must not drag the counter back to its own value: a nonce between 5 and 9
+    # would otherwise be spendable a second time.
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-race") == "9"
+    # …and the write the burnt nonce was carrying does not land either.
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-race") is None
+
+
+def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path, monkeypatch):
+    """The other end of the same guarantee. On a room's first signed write there is no
+    counter to compare against, so the CAS runs as create-if-absent instead — and if that
+    half is missing, two callers racing the first claim both create it and both spend
+    nonce 1. The replace path above cannot catch this one: it only engages once a counter
+    exists.
+    """
+    import store
+
+    owner, owner_sign = _keypair()
+    counter = store.note_path(tmp_path, store.NONCE_NS, "d-first")
+
+    def create():
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        counter.write_text("1", encoding="utf-8")  # the other claim got there first
+
+    raced = _race_before_lock(monkeypatch, store, counter, create)
+    lost = _claim(client, "d-first", owner, owner_sign)
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-first") == "1"
+    # The loser's claim does not land: the room stays unowned rather than owned by whoever
+    # lost the race for its counter.
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-first") is None
 
 
 # ------------------------------------------------------------------ ephemeral rooms
@@ -3015,11 +3508,9 @@ def test_message_counter_survives_the_reaper(tmp_path):
         store.append(tmp_path, "doomed", "bot", f"m{i}")
     assert store.counters(tmp_path)["messages"] == 3
 
-    old = time.time() - store.IDLE_SECONDS - 60
     for room in ("doomed", "events"):
-        os.utime(store.room_path(tmp_path, room), (old, old))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+        _age(store.room_path(tmp_path, room), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
 
     assert not store.room_path(tmp_path, "doomed").exists()
     assert store.counters(tmp_path)["messages"] == 3  # monotonic across the deletion
@@ -3034,12 +3525,9 @@ def test_reap_counters_tell_the_two_rules_apart(tmp_path):
     store.append(tmp_path, "monologue", "bot", "anyone here?")
     store.append(tmp_path, "ended", "bot", "hi")
     store.append(tmp_path, "ended", "other", "bye")
-    stale = time.time() - store.IDLE_SECONDS - 60
-    day_old = time.time() - store.STILLBORN_SECONDS - 60
-    os.utime(store.room_path(tmp_path, "monologue"), (day_old, day_old))
-    os.utime(store.room_path(tmp_path, "ended"), (stale, stale))
-    (tmp_path / ".reaped").unlink(missing_ok=True)
-    store._reap(tmp_path)
+    _age(store.room_path(tmp_path, "monologue"), store.STILLBORN_SECONDS + 60)
+    _age(store.room_path(tmp_path, "ended"), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
 
     counts = store.counters(tmp_path)
     assert (counts["reaped_stillborn"], counts["reaped_idle"]) == (1, 1)
@@ -3198,6 +3686,31 @@ def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(clie
     assert r.status_code == 405
     assert "/kv/<ns>/<key>/set/<value>" in r.text
     assert "append-only" in r.text  # …and why there is nothing to DELETE
+    # The pointer has to be fetchable as printed: routes are case-sensitive, so a body
+    # that shouted /LLMS.TXT would send an agent that copied it to a 404.
+    assert "/llms.txt" in r.text and client.get("/llms.txt").status_code == 200
+
+
+def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
+    """RFC 9110 §15.5.6 makes `Allow` mandatory, and the union matters: two routes share
+    `/r/<room>` and two share `/kv/<ns>/<key>`, so Starlette's first-partial-match header
+    would name `GET, HEAD` on paths that plainly also take POST."""
+    for path in ("/r/lobby", "/kv/plans/next"):
+        r = client.request("PUT", path)
+        assert r.status_code == 405
+        assert r.headers["allow"] == "GET, HEAD, POST", path
+        # Repeated in the body for the same reason Retry-After is: agent harnesses show
+        # the body and drop the headers.
+        assert "this path accepts: GET, HEAD, POST" in r.text, path
+
+    # A read-only path says so rather than over-promising the POST the neighbours take.
+    for path in ("/rooms", "/llms.txt", "/r/lobby/say/bot/hi", "/kv/plans/next/set/x"):
+        r = client.request("PATCH", path)
+        assert r.status_code == 405 and r.headers["allow"] == "GET, HEAD", path
+
+    # OPTIONS is not implemented either, so it must not appear in a list of what is.
+    options = client.request("OPTIONS", "/healthz")
+    assert options.status_code == 405 and "OPTIONS" not in options.headers["allow"]
 
 
 def test_a_missing_note_says_how_to_create_it(client):
@@ -3223,6 +3736,10 @@ def test_a_lost_conditional_write_says_how_to_rebase(client):
     absent = client.get("/kv/plans/absent/set/x?if=something")
     assert absent.status_code == 409
     assert "no note there at all" in absent.text and "if_absent=1" in absent.text
+    # Both branches keep the store's own diagnostic ahead of the generic advice: the
+    # template says what to do, the exception says which condition actually fired.
+    assert absent.text.startswith("409 note plans/absent")
+    assert lost.text.startswith("409 note plans/next changed since you read it")
 
 
 def test_a_rejected_name_names_the_usual_causes(client):
@@ -3325,12 +3842,451 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
         assert set(operations) <= accepted, f"{path} documents a method it does not accept"
 
     # 3. Every operation is actually usable by a reader: identified, summarised, and with
-    #    at least the success case described.
+    #    the outcome a caller will actually get described.
     operations = [op for path in doc["paths"].values() for op in path.values()]
     ids = [op["operationId"] for op in operations]
     assert len(ids) == len(set(ids)), "operationIds must be unique — clients name methods with them"
     for op in operations:
-        assert op["summary"] and "200" in op["responses"]
+        assert op["summary"], op
+        codes = set(op["responses"])
+        # Normally the success case. The exception is a lane that exists only to refuse:
+        # `/r/events` accepts POST because `/r/{room}` does and answers 403 every time, so
+        # a documented 200 would be the lie. It must say so in prose, or "no 2xx" is
+        # indistinguishable from an oversight.
+        if not any(code.startswith("2") for code in codes):
+            assert "403" in codes, f"{op['operationId']} documents no outcome at all"
+            assert "refus" in (op["summary"] + op.get("description", "")).lower(), (
+                f"{op['operationId']} can never succeed and does not say why"
+            )
+
+
+def test_every_documented_response_declares_the_body_it_returns(client):
+    """A response with no `content` tells a generated client there is nothing to show. On a
+    service whose refusals *are* the documentation — the 413 names the cap, the 409 carries
+    the current value, the 429 the retry delay — that hides the correction at exactly the
+    moment a caller needs it. `content_type_conformance` cannot catch it either: it only
+    checks the responses a fuzzer actually provokes, and nothing in a bounded run uploads
+    256 KiB. So the rule is blanket, because every response this service sends has a body.
+    """
+    doc = client.get("/openapi.json").json()
+    bare = [
+        f"{verb.upper()} {path} -> {code}"
+        for path, operations in doc["paths"].items()
+        for verb, op in operations.items()
+        for code, response in op["responses"].items()
+        if "content" not in response
+    ]
+    assert not bare, f"documented with no body: {bare}"
+
+    # And the declared type is the one the server sends, spot-checked across the three
+    # shapes: a refusal, a machine-readable document, and a negotiated one.
+    for path, expected in (
+        ("/kv/plans/next/set/hi", "text/plain"),
+        ("/openapi.json", "application/json"),
+        ("/skill.md", "text/plain"),
+    ):
+        served = client.get(path).headers["content-type"].split(";")[0]
+        assert served == expected, f"{path} sends {served}"
+    # …and the negotiated one really does offer the second type it advertises.
+    markdown = client.get("/skill.md", headers={"Accept": "text/markdown"})
+    assert markdown.headers["content-type"].startswith("text/markdown")
+    assert "text/markdown" in doc["paths"]["/skill.md"]["get"]["responses"]["200"]["content"]
+
+
+def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
+    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
+    but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
+    service answering with undiscoverable documents is worse off than one that refused to
+    boot. Review catch on #40.
+    """
+    import importlib
+    import json as json_module
+
+    import app as app_module
+
+    for bad in ("inf", "-inf", "nan", "NaN"):
+        with pytest.raises(ValueError, match="must be a finite number"):
+            app_module._finite_env("CHAT_MAX_WAIT", bad)
+    # Junk still dies the way every other numeric setting here does.
+    with pytest.raises(ValueError):
+        app_module._finite_env("CHAT_MAX_WAIT", "abc")
+    assert app_module._finite_env("CHAT_MAX_WAIT", "2.5") == 2.5
+
+    # …and the ceiling is actually wired through it. Checking the helper alone would pass
+    # against a MAX_WAIT that still called bare `float()`, which is the mistake this
+    # guards: the process has to refuse to start, not merely own a function that could
+    # have refused.
+    monkeypatch.setenv("CHAT_MAX_WAIT", "inf")
+    for module in ("app", "store"):
+        sys.modules.pop(module, None)
+    with pytest.raises(ValueError, match="must be a finite number"):
+        importlib.import_module("app")
+
+    # Whatever survives that, the documents stay strict JSON — no bare Infinity or NaN.
+    for raw in (client.get("/openapi.json").text, client.get("/.well-known/agent.json").text):
+        assert "Infinity" not in raw and "NaN" not in raw
+        json_module.loads(raw)  # parses under Python's lenient reader too
+
+
+def test_an_integral_ceiling_publishes_as_an_integer(client):
+    """`10.0` and `10` are the same number to a validator and different bytes to a reader,
+    and this was an integer literal until the ceiling became configurable. A fractional
+    ceiling still publishes as a float, because fractional waits are real."""
+    import manifest
+
+    def maximum(doc):
+        return next(
+            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
+        )["schema"]["maximum"]
+
+    served = maximum(client.get("/openapi.json").json())
+    assert served == 10 and isinstance(served, int)
+    assert maximum(manifest.openapi_document("", "0.7.0", 65536, 2.5)) == 2.5
+    assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
+
+
+# Statuses whose provoking case is a fixture rather than a request shape: 429 needs the
+# rate limiter wound down and 413 a quarter-megabyte upload, and both already have tests
+# built around exactly that. Everything else a caller can hit by choosing its own bytes.
+_REFUSALS = frozenset({"400", "403", "404", "409"})
+
+
+def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
+    """Both directions, because each catches what the other cannot.
+
+    An undocumented status is the failure neither a generated client nor a contract fuzzer
+    recovers from: the client treats an unannounced 403 as a transport fault and retries
+    the identical bytes, the fuzzer calls the service broken. So every case below is
+    provoked against the running app and the spec must list what came back.
+
+    The second assertion is the one that would have saved a round of review. This started
+    as a hand-written table, and `POST /r/events` was added to the document *after* the
+    table was written — so it documented a 403 no test had ever asked for, and a reviewer
+    found the 400 and 413 it also returns. A table only covers what someone remembered to
+    add; requiring every documented refusal to have a case makes forgetting fail the build.
+    """
+    did, sign = _keypair()
+    other, other_sign = _keypair(2)
+    client.get("/kv/plans/held/set/first")
+    assert _claim(client, "d-owned", did, sign).status_code == 200
+    signed_note = f"{sign('room-owners|d-owned|4|' + other)}/4/{other}"
+
+    # (openapi path, method, expected status, the request that produces it)
+    cases = [
+        # Reads.
+        ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
+        ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
+        ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
+        ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
+        # A sitemap needs an origin, and a Host that is not one leaves it with nothing to
+        # point at. Spaces cannot appear in a hostname, so this is never a real origin.
+        (
+            "/sitemap.xml",
+            "get",
+            404,
+            lambda: client.get("/sitemap.xml", headers={"host": "not a host"}),
+        ),
+        # The URL write lanes. `%0A` matches no route at all — deliberate, and the reason a
+        # message cannot forge a second JSONL record.
+        ("/r/{room}/say/{nick}/{text}", "get", 400, lambda: client.get("/r/UPPER/say/bot/hi")),
+        ("/r/{room}/say/{nick}/{text}", "get", 403, lambda: client.get("/r/mb-box/say/bot/hi")),
+        ("/r/{room}/say/{nick}/{text}", "get", 404, lambda: client.get("/r/lobby/say/bot/a%0Ab")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 400, lambda: client.get("/kv/UPPER/k/set/v")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 403, lambda: client.get("/kv/room-nonce/x/set/1")),
+        ("/kv/{ns}/{key}/set/{value}", "get", 404, lambda: client.get("/kv/plans/k/set/a%0Ab")),
+        (
+            "/kv/{ns}/{key}/set/{value}",
+            "get",
+            409,
+            lambda: client.get("/kv/plans/held/set/second?if=not-that"),
+        ),
+        # The POST lanes.
+        ("/r/{room}", "post", 400, lambda: client.post("/r/lobby", json={"from": "b", "text": ""})),
+        (
+            "/r/{room}",
+            "post",
+            403,
+            lambda: client.post("/r/mb-box", json={"from": "b", "text": "hi"}),
+        ),
+        ("/r/events", "post", 400, lambda: client.post("/r/events", content=b"not json")),
+        (
+            "/r/events",
+            "post",
+            403,
+            lambda: client.post("/r/events", json={"from": "b", "text": "hi"}),
+        ),
+        ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/UPPER/k", json={"value": "v"})),
+        # `required: ["value"]` never implied a *non-empty* value, and the sweep refuses one.
+        ("/kv/{ns}/{key}", "post", 400, lambda: client.post("/kv/plans/k", json={"value": ""})),
+        (
+            "/kv/{ns}/{key}",
+            "post",
+            403,
+            lambda: client.post("/kv/room-nonce/lobby", json={"value": "9"}),
+        ),
+        (
+            "/kv/{ns}/{key}",
+            "post",
+            409,
+            lambda: client.post("/kv/plans/held", json={"value": "v", "if": "not-that"}),
+        ),
+        # The signed lanes. A signature that does not verify is a refusal, not a malformed
+        # request; a stale nonce is the other way round.
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            400,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/not-a-nonce/hi"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            403,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/1/hi"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            404,
+            lambda: client.get(f"/r/lobby/say-signed/{did}/{'A' * 86}/1/a%0Ab"),
+        ),
+        # …and a room that will not take this key is a refusal too.
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            403,
+            lambda: _say_signed(client, "d-owned", other, other_sign, "hi", nonce=3),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            400,
+            lambda: _set_signed(client, "plans", "k", did, sign, "v", nonce=9),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            403,
+            lambda: client.get(f"/kv/room-owners/d-owned/set-signed/{did}/{'A' * 86}/9/{other}"),
+        ),
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            404,
+            lambda: client.get(f"/kv/room-owners/d-owned/set-signed/{did}/{'A' * 86}/9/a%0Ab"),
+        ),
+        # Notes have no ring, so the signed lane's nonce counter is itself a note claimed
+        # with a compare-and-set: a racing writer loses on the counter, with a 409.
+        (
+            "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+            "get",
+            409,
+            lambda: client.get(
+                f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
+            ),
+        ),
+    ]
+
+    doc = client.get("/openapi.json").json()
+    for path, method, status, send in cases:
+        response = send()
+        assert response.status_code == status, f"{method.upper()} {path}: {response.text[:200]}"
+        documented = doc["paths"][path][method]["responses"]
+        assert str(status) in documented, f"{method.upper()} {path} can {status} undocumented"
+
+    # …and nothing documented is left unprovoked.
+    provoked = {(path, method, str(status)) for path, method, status, _ in cases}
+    unprovoked = sorted(
+        f"{method.upper()} {path} -> {code}"
+        for path, operations in doc["paths"].items()
+        for method, op in operations.items()
+        for code in op["responses"]
+        if code in _REFUSALS and (path, method, code) not in provoked
+    )
+    assert not unprovoked, f"documented but never provoked by a test: {unprovoked}"
+
+
+def _published_bounds(doc):
+    """Every input constraint the document publishes, keyed by the constraint itself.
+
+    Keyed by the bound rather than by the site because the same promise is repeated: the
+    name pattern appears on eleven parameters and means one thing each time. Twelve
+    distinct promises across forty-odd declarations.
+    """
+    keys = ("maximum", "minimum", "maxLength", "minLength", "enum", "pattern")
+    found = set()
+    for operations in doc["paths"].values():
+        for op in operations.values():
+            schemas = [p["schema"] for p in op.get("parameters", [])]
+            body = op.get("requestBody")
+            if body:
+                schemas += list(
+                    body["content"]["application/json"]["schema"]["properties"].values()
+                )
+            for schema in schemas:
+                bound = {k: schema[k] for k in keys if k in schema}
+                if bound:
+                    found.add(json.dumps(bound, sort_keys=True))
+    return found
+
+
+def test_every_published_limit_is_one_the_server_actually_honours(client, monkeypatch):
+    """The read side of the contract, which is where this branch kept going wrong.
+
+    Every fix here traced where a number is *written down* — three publishing sites for the
+    wait ceiling, then two more — and none of them asked who parses it back. That is
+    precisely where the bug was: `?wait=` was published as `type: number` and int-parsed,
+    so every fractional value a conforming client could send was silently discarded. The
+    failure had no contract signature at all — a documented 200 with a schema-valid body,
+    identical to an idle room — so no fuzzer, coverage gate or mutation run could see it.
+
+    So: take each bound at its extreme, send it, and require the server to honour it. And
+    require the table to cover every bound the document publishes, or the next parameter
+    added with a limit nobody honours passes unnoticed the same way.
+    """
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_WAIT", 0.5)  # keep the long-poll case quick
+    doc = client.get("/openapi.json").json()
+    did, sign = _keypair()
+    longest_name = "a" * 48
+
+    def wait_is_honoured():
+        published = next(
+            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
+        )["schema"]["maximum"]
+        started = time.monotonic()
+        client.get(f"/r/idle?since=1&wait={published}")
+        # It has to actually hold the connection, not return an immediate empty reply that
+        # a caller cannot tell from a quiet room.
+        assert time.monotonic() - started >= published * 0.8
+
+    # (the bound as published, a request using it at its extreme)
+    checks = [
+        ('{"pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"}', lambda: _ok(client, f"/r/{longest_name}")),
+        (
+            '{"maxLength": 4096, "minLength": 1}',
+            lambda: _ok(client, "/r/lobby", post={"from": "b", "text": "x" * 4096}),
+        ),
+        (
+            '{"maxLength": 8192, "minLength": 1}',
+            lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
+        ),
+        ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
+        ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
+        ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
+        ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
+        ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
+        ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
+        # The signed lane's three, at the exact shapes it publishes. A room each, because a
+        # nonce is single-use per key per room and the 19-digit one spends the ceiling —
+        # 10**19 - 1 being the largest the published pattern allows, and an int64 fits it.
+        (
+            '{"pattern": "^[0-9]{1,19}$"}',
+            lambda: _ok(
+                client, _say_signed(client, "big-nonce", did, sign, "hi", nonce=10**19 - 1)
+            ),
+        ),
+        (
+            '{"maxLength": 56, "minLength": 56, '
+            '"pattern": "^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"}',
+            lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
+        ),
+        (
+            '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+            lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
+        ),
+    ]
+
+    for _bound, exercise in checks:
+        exercise()
+
+    covered = {bound for bound, _ in checks}
+    published = _published_bounds(doc)
+    assert not published - covered, f"published but never exercised: {sorted(published - covered)}"
+
+
+def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
+    """One definition, three places it is published. The room lane's `did` pattern ended in
+    an unbounded `+`, so `did:key:z6Mk` satisfied it; the note lane's was a bare `string`;
+    the POST body was prose no generator can read. A client is built against whichever copy
+    it found, so the weakest one was the contract.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    doc = client.get("/openapi.json").json()
+
+    def param(path, name):
+        return next(p for p in doc["paths"][path]["get"]["parameters"] if p["name"] == name)[
+            "schema"
+        ]
+
+    say = "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"
+    note = "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}"
+    body = doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+
+    published = [param(say, "did"), param(note, "did"), body["properties"]["did"]]
+    assert len({json.dumps(schema, sort_keys=True) for schema in published}) == 1, (
+        "the two signed lanes and the POST body must publish one `did` shape"
+    )
+    for schema in published:
+        # A real key satisfies it, and the truncated DID the old pattern accepted does not.
+        assert re.fullmatch(schema["pattern"], did)
+        assert not re.fullmatch(schema["pattern"], "did:key:z6Mk")
+        assert schema["minLength"] == schema["maxLength"] == len(did)
+        assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
+
+    for schema in (param(say, "sig"), param(note, "sig"), body["properties"]["sig"]):
+        assert re.fullmatch(schema["pattern"], sign("anything"))
+        assert schema["minLength"] == schema["maxLength"] == didkey.SIG_CHARS
+    for schema in (param(say, "nonce"), param(note, "nonce"), body["properties"]["nonce"]):
+        assert re.fullmatch(schema["pattern"], "1") and not re.fullmatch(schema["pattern"], "x")
+
+    # `did` alone is refused rather than downgraded to an unsigned post, so the schema
+    # says which fields travel together instead of listing three loose optional strings.
+    assert body["dependentRequired"] == {"did": ["sig", "nonce"]}
+    assert client.post("/r/lobby", json={"text": "hi", "did": did}).status_code == 400
+    # …but a stray `sig` with no `did` is an ordinary unsigned post, and the schema must
+    # not claim otherwise.
+    assert client.post("/r/lobby", json={"from": "b", "text": "hi", "sig": "x"}).status_code == 200
+
+
+def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
+    """`required: ["text"]` is satisfied by `""`, which is a 400 — the sweep leaves nothing
+    visible. A generator reading only `required` emits a client whose empty-message call
+    can never succeed."""
+    import store
+
+    doc = client.get("/openapi.json").json()
+    schemas = {
+        "post /r/{room}.text": doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["properties"]["text"],
+        "post /kv.value": doc["paths"]["/kv/{ns}/{key}"]["post"]["requestBody"]["content"][
+            "application/json"
+        ]["schema"]["properties"]["value"],
+        "get say.text": next(
+            p
+            for p in doc["paths"]["/r/{room}/say/{nick}/{text}"]["get"]["parameters"]
+            if p["name"] == "text"
+        )["schema"],
+        "get set.value": next(
+            p
+            for p in doc["paths"]["/kv/{ns}/{key}/set/{value}"]["get"]["parameters"]
+            if p["name"] == "value"
+        )["schema"],
+    }
+    for where, schema in schemas.items():
+        assert schema["minLength"] == 1, where
+    assert schemas["post /r/{room}.text"]["maxLength"] == store.MAX_TEXT_CHARS
+    assert schemas["post /kv.value"]["maxLength"] == store.MAX_VALUE_CHARS
+
+    # And the server agrees, on both lanes.
+    assert client.post("/r/lobby", json={"from": "bot", "text": ""}).status_code == 400
+    assert client.post("/kv/plans/k", json={"value": ""}).status_code == 400
 
 
 def test_openapi_limits_are_the_limits_the_server_enforces(client):

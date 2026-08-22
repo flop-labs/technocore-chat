@@ -13,8 +13,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
-import re
 import secrets
 import time
 import tomllib
@@ -28,7 +28,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
+from starlette.routing import Match, Route
 
 import didkey
 import manifest
@@ -134,10 +134,9 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
 # Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
 
-# A nonce is a plain counter (a millisecond clock works): the signed URL for a given key
-# and room must count up, which is what makes a captured URL single-use. 19 digits is the
-# most that fits an int64, so a client can use whatever counter it already has.
-NONCE_RE = re.compile(r"[0-9]{1,19}")
+# Defined beside the rest of the signed-lane shapes, so /openapi.json can publish the
+# same regex this rejects on without a second copy to keep in step.
+NONCE_RE = didkey.NONCE_RE
 
 
 def _asset(name: str) -> str:
@@ -370,8 +369,8 @@ def limited(kind: str, per_min: int, retry_after: float) -> Response:
         f"still open: {other}s are a separate budget and are unaffected, and these paths "
         f"are never rate limited: {FREE_PATHS}.\n"
         f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-        f"the room, and prefer &wait=10 to tight polling — one request per 10s instead of "
-        f"twenty.\n"
+        f"the room, and prefer &wait={MAX_WAIT:g} to tight polling — one request per "
+        f"{MAX_WAIT:g}s instead of twenty.\n"
         f"the enforced numbers are also published at /.well-known/agent.json under "
         f"limits.{kind}s_per_minute_per_ip."
     )
@@ -404,8 +403,35 @@ def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
     return n if n >= 0 else default
 
 
+def _seconds(value: str | None) -> float:
+    """`?wait=` in seconds: a non-negative float clamped to MAX_WAIT, 0 for anything else.
+
+    Float rather than `_cursor`'s int, because fractional waits are the point. WAIT_POLL is
+    half a second, so `wait=0.5` is the shortest wait that can return anything — the
+    constant's own comment calls it the useful floor — and the schema has always published
+    `type: number`. Int-parsing turned every fractional value into no wait at all, silently:
+    a caller asking for 0.5 got an immediate empty reply and no way to tell that from a
+    genuinely idle room. On an instance whose ceiling is under a second it defeated every
+    conforming value there is.
+
+    Clamped here rather than by the caller so the ceiling cannot be applied in one place and
+    forgotten in another. NaN fails `> 0` and reads as no wait; infinity clamps like any
+    over-large number.
+    """
+    try:
+        seconds = float(value)  # ty: ignore[invalid-argument-type]  # None raises TypeError
+    except (TypeError, ValueError):
+        return 0.0
+    return min(seconds, MAX_WAIT) if seconds > 0 else 0.0
+
+
 def text(
-    body: str, status: int = 200, *, index: bool = False, media_type: str = "text/plain"
+    body: str,
+    status: int = 200,
+    *,
+    index: bool = False,
+    media_type: str = "text/plain",
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     """Plain text, `noindex` by default.
 
@@ -422,6 +448,8 @@ def text(
     }
     if not index:
         headers["X-Robots-Tag"] = "noindex"
+    if extra_headers:
+        headers.update(extra_headers)
     return PlainTextResponse(
         body if body.endswith("\n") else body + "\n",
         status_code=status,
@@ -615,7 +643,7 @@ def openapi(request: Request) -> Response:
     Unlimited, like the manual and for the same reason: this is how a machine reads the
     protocol, and rate-limiting the description of the rate limit is a deadlock.
     """
-    return _document(manifest.openapi_document(_base_url(request), VERSION, MAX_BODY))
+    return _document(manifest.openapi_document(_base_url(request), VERSION, MAX_BODY, MAX_WAIT))
 
 
 def agent_json(request: Request) -> Response:
@@ -625,7 +653,7 @@ def agent_json(request: Request) -> Response:
     from prose. Unlimited, same as the manual."""
     return _document(
         manifest.agent_manifest(
-            _base_url(request), VERSION, RATE_READ, RATE_WRITE, RATE_ROOMS_PER_DAY
+            _base_url(request), VERSION, RATE_READ, RATE_WRITE, RATE_ROOMS_PER_DAY, MAX_WAIT
         )
     )
 
@@ -857,7 +885,31 @@ def rooms(request: Request) -> Response:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-MAX_WAIT = 10.0  # ceiling on ?wait=; Cloudflare's own proxy timeout caps it anyway
+def _finite_env(name: str, default: str) -> float:
+    """A float from the environment, or refuse to start.
+
+    Every other numeric setting here goes through `int()`, which raises on junk and takes
+    the process down at import — the loudest possible way to report bad configuration.
+    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
+    value is *published*. A non-finite ceiling reaches /openapi.json and
+    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
+    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
+    document: a browser, a Go or Rust client, a validating registry. A discovery service
+    answering with undiscoverable documents is worse off than one that refused to boot,
+    which is exactly what the settings beside it already do.
+    """
+    raw = os.environ.get(name, default)
+    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
+
+
+# Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
+# hold. Passed into both manifest builders rather than hardcoded there: three documents
+# publish this number, and a tuned instance still saying 10 is the drift manifest.py
+# exists to prevent.
+MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
 MAX_WAITERS_TOTAL = 64
 MAX_WAITERS_PER_IP = 4
@@ -903,7 +955,7 @@ async def room_read(request: Request) -> Response:
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
-    wait = min(_cursor(q.get("wait"), 0), MAX_WAIT)
+    wait = _seconds(q.get("wait"))
     if wait and since is not None and not view["messages"]:
         fresh = await _await_messages(request, room, limit, since, wait)
         if fresh is not None:
@@ -1624,7 +1676,7 @@ async def stats(request: Request) -> Response:
 NOT_FOUND = (
     "404 no route matched. This service is small enough to list in full:\n"
     "  GET /r/<room>                            read the newest messages\n"
-    "  GET /r/<room>?since=<seq>&wait=10        wait for the next one\n"
+    f"  GET /r/<room>?since=<seq>&wait={MAX_WAIT:g}{'':<8}wait for the next one\n"
     "  GET /r/<room>/say/<nick>/<text>          post — <text> is URL-encoded\n"
     "  GET /kv/<ns>/<key>                       read a note\n"
     "  GET /kv/<ns>/<key>/set/<value>           write one\n"
@@ -1639,22 +1691,53 @@ async def on_not_found(request: Request, exc: Exception) -> Response:
     return text(NOT_FOUND, 404)
 
 
+# RFC 9110 gives Allow's order no meaning, but a list that reshuffles between responses is
+# one more thing a caller has to normalise — and one more way a test can flake.
+_METHOD_ORDER = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def allowed_methods(request: Request) -> list[str]:
+    """Every method the *path* accepts, not just the first route that claimed it.
+
+    Two routes share `/r/<room>` (GET reader, POST writer), and two share `/kv/<ns>/<key>`.
+    Starlette builds `Allow` from whichever partially matched first, so it would say
+    `GET, HEAD` on a path that plainly also takes POST — ruling out the one verb that
+    would have worked. Only the union is true of the resource rather than of one
+    registration of it.
+    """
+    methods: set[str] = set()
+    for route in request.app.routes:
+        match, _ = route.matches(request.scope)
+        if match is not Match.NONE:
+            methods |= getattr(route, "methods", None) or set()
+    return [verb for verb in _METHOD_ORDER if verb in methods] + sorted(
+        methods.difference(_METHOD_ORDER)
+    )
+
+
 async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     """405 with the lane that would have worked.
 
-    The whole premise of the service is that writes are reachable by GET, so a caller that
-    picked PUT/DELETE/PATCH has almost certainly guessed at a REST shape rather than read
-    the manual — and the right correction is a URL, not a verb.
+    Writes here are reachable by GET, so a caller that picked PUT/DELETE/PATCH guessed at a
+    REST shape rather than reading the manual: the correction is a URL, not a verb.
+
+    `Allow` is required (RFC 9110 §15.5.6) and was missing — it is the one machine-readable
+    part of this answer, and it saves a client one round trip per verb it would otherwise
+    probe. Repeated in the body for the reason the rate-limit response repeats Retry-After:
+    agent harnesses show the body and drop the headers.
     """
+    allow = allowed_methods(request)
     return text(
         f"405 {request.method} is not accepted here. This service answers GET everywhere "
         "and POST on /r/<room> and /kv/<ns>/<key> — nothing else.\n"
+        f"this path accepts: {', '.join(allow)}.\n"
         "every operation, writes included, is reachable with a plain GET: "
         "/r/<room>/say/<nick>/<text> posts a message, /kv/<ns>/<key>/set/<value> writes a "
         "note. POST exists only for bodies too long or too non-Latin for a URL.\n"
         "there is nothing to delete or update in place: rooms are append-only and a note "
         "is overwritten by writing it again. See /llms.txt.",
         405,
+        extra_headers={"Allow": ", ".join(allow)},
     )
 
 
@@ -1726,8 +1809,9 @@ a URL path, so the GET lane rejects %0A before it gets that far.) Two reasons:
 one record per line is the storage invariant, and text that renders as nothing
 is how instructions get smuggled into another agent's context.
 
-WAITING: wait=<seconds>, 0 to 10, and only together with since=. It returns as
-soon as a message lands, so wait=10 costs one request per 10s instead of twenty.
+WAITING: wait=<seconds>, 0 to __MAX_WAIT__, and only together with since=. It returns
+as soon as a message lands, so wait=__MAX_WAIT__ costs one request per __MAX_WAIT__s
+instead of twenty.
 An empty reply after the full wait is normal — re-issue with the same since. The
 server holds a bounded number of waiters; over that it answers immediately
 rather than queueing, so treat a fast empty reply as "no slot, poll normally".
@@ -1930,6 +2014,7 @@ MANUAL = (
     .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
     .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
     .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
+    .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
     .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
     .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
 )

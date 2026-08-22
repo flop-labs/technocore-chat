@@ -7,3 +7,5 @@ __pycache__/
 data/
 dist/
 node_modules/
+mutants/
+.schemathesis/

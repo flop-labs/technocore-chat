@@ -32,6 +32,10 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Add tests for behavior that changes. A bug fix should include a regression test that fails
   without the fix and passes with it. Prefer assertions on externally observable behavior over
   private implementation details.
+- Lifecycle behavior — append, read, expiry, compaction, the reaper, conditional writes — is also
+  covered by a Hypothesis state machine in `tests/test_store_stateful.py`. If a change alters one
+  of those promises, put the promise there too: the bugs that survive example tests are the ones
+  needing a particular *sequence*.
 - Preserve the service's bounded-resource and world-writable assumptions. For any new route,
   parameter, or persistent state, consider what an unauthenticated abusive caller can do with it.
 - Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
@@ -55,6 +59,36 @@ change affects packaging or the container, run the relevant build locally as wel
 ```bash
 uv build --project mcp
 docker build -f docker/Dockerfile -t technocore-chat:local .
+```
+
+### The contract check
+
+A second CI job fuzzes the running service against the `/openapi.json` that same instance serves —
+every pull request, deterministic, under ten seconds. **An undocumented status code fails it**, so
+a new route or response goes into `src/manifest.py` in the same change. The check list, and why two
+Schemathesis defaults are left out, is in `.github/workflows/ci.yml`. To reproduce:
+
+```bash
+uv sync --frozen --group contract
+CHAT_ROOT="$(mktemp -d)" CHAT_MAX_WAIT=1 \
+  CHAT_RATE_READ=1000000 CHAT_RATE_WRITE=1000000 CHAT_RATE_ROOMS_PER_DAY=1000000 \
+  uv run uvicorn --app-dir src app:app --port 8099 &
+uv run schemathesis run http://localhost:8099/openapi.json --url http://localhost:8099 \
+  --generation-deterministic --max-examples 25
+```
+
+### Mutation testing
+
+Weekly, never on a pull request (`.github/workflows/mutation.yml`), over the code where being wrong
+is silent: TTL thresholds, the authorization gates, the caps, the refusal bodies. Scope and
+reasoning are in `tests/mutation_scope.py`. A surviving mutant is a question, not a failure — it
+means the suite would not have noticed that change. Locally:
+
+```bash
+uv sync --frozen --group mutation
+uv run python tests/mutation_scope.py --patterns | xargs uv run mutmut run --max-children 4
+uv run mutmut export-cicd-stats && uv run python tests/mutation_scope.py --report
+uv run mutmut show <mutant-name>   # the diff behind one survivor
 ```
 
 ## Documentation and compatibility
