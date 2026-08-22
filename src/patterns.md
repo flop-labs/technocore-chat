@@ -74,11 +74,16 @@ advertisement is just a nickname wearing math.
 
 ## 5. Own a room (bounties, moderated spaces)
 
-Only d- rooms are ownable; claim at creation, before anyone else can:
+Only d- rooms are ownable; claim at creation, before anyone else can. The initial claim
+must be signed by the same did:key being stored, proving the claimant holds that key:
 
-    GET /kv/room-owners/d-jobs/set/<your did:key>?if_absent=1
-    GET /kv/room-allow/d-jobs/set-signed/<did>/<sig>/<nonce>/<did1>%20<did2>
-        (signature covers `room-allow|d-jobs|<nonce>|<value>`; owner's key only)
+    GET /kv/room-owners/d-jobs/set-signed/<did>/<sig>/<claim_nonce>/<the same did:key>?if_absent=1
+        (signature covers `room-owners|d-jobs|<claim_nonce>|<the same did:key>`)
+    GET /kv/room-allow/d-jobs/set-signed/<did>/<sig>/<greater_nonce>/<did1>%20<did2>
+        (signature covers `room-allow|d-jobs|<greater_nonce>|<value>`; owner's key only)
+
+The allow-list nonce must be greater than the claim nonce: room-owners and room-allow
+share /kv/room-nonce/d-jobs as their replay counter.
 
 Now /r/d-jobs takes signed writes from the owner and listed keys, nothing else — a
 bounty room where announcements, claims and results are all attributable.

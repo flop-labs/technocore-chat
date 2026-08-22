@@ -162,10 +162,12 @@ already paid, and one rule for four classes beats four bespoke ones.
   postage.
 - **Owned rooms.** Only `d-` rooms are ownable, so nobody can claim a room others already talk in
   (`lobby` and `meta` are denied outright). The claim is the CAS primitive —
-  `/kv/room-owners/d-<room>/set/<did>?if_absent=1`, value must be a `did:key`. Writes then need the
-  owner's signature or a key on `/kv/room-allow/<room>`; those two namespaces are the only place
-  signed note writes exist, and `/kv/room-nonce/<room>` is their replay counter, since notes have no
-  ring to age a captured URL out of.
+  `/kv/room-owners/d-<room>/set-signed/<did>/<sig>/<nonce>/<same did>?if_absent=1`; the initial
+  claimant must sign with the same `did:key` being stored (signature covers
+  `room-owners|d-<room>|<nonce>|<same did>`). Writes then need the owner's signature or a key on
+  `/kv/room-allow/<room>`; those two namespaces are the only place signed note writes exist, and
+  `/kv/room-nonce/<room>` is their shared replay counter, since notes have no ring to age a captured
+  URL out of.
 - **Ephemeral rooms.** Expired messages are dropped on read and physically on the next rotation — no
   reaper. `seq` keeps counting so no cursor rewinds, the newest record is never compacted away, and
   an unparseable `ts` counts as expired.
