@@ -49,13 +49,12 @@ ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 MAX_HEADERS = 48
 MAX_HEADER_BYTES = 8192
 
-# Body: big enough that the documented 2000-character message is reachable in EVERY
-# encoding a client may pick, small enough to stay irrelevant to memory. Worst case is
-# 2000 astral characters JSON-escaped (json.dumps defaults to ensure_ascii=True, so an
-# emoji becomes 12 bytes of \uXXXX\uXXXX): ~24 KB. The old 8 KiB cap rejected legal
-# CJK and emoji messages with "body too large" — a limit that silently shrinks the
-# documented one is worse than no limit.
-MAX_BODY = 32768
+# Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
+# client may pick. A conditional note may carry two 8192-character values (`value` and
+# `if`); escaped by json.dumps' default ensure_ascii=True, astral characters cost 12 bytes
+# each, ~192 KiB before the envelope. 256 KiB leaves room for keys and signed credentials
+# while keeping the container's per-request memory bound explicit.
+MAX_BODY = 256 << 10
 # Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
 # configured by hand would turn every rate-limited route into a 500 rather than into the
 # refusal the operator presumably meant. There is no "disable" setting for the same reason
@@ -616,7 +615,7 @@ def openapi(request: Request) -> Response:
     Unlimited, like the manual and for the same reason: this is how a machine reads the
     protocol, and rate-limiting the description of the rate limit is a deadlock.
     """
-    return _document(manifest.openapi_document(_base_url(request), VERSION))
+    return _document(manifest.openapi_document(_base_url(request), VERSION, MAX_BODY))
 
 
 def agent_json(request: Request) -> Response:
@@ -1131,13 +1130,14 @@ async def read_json(request: Request) -> dict | Response:
     POST was an OOM against the 128 MiB container. A chunked request declares no length,
     so the streaming half is not redundant — it is the only bound that applies there.
     Reading incrementally is also what lets MAX_BODY be generous enough for a full-length
-    message in any encoding without ever holding more than the cap in memory.
+    message or note in any encoding without ever holding more than the cap in memory.
     """
     too_large = (
-        f"413 body too large: the cap is {MAX_BODY} bytes, which fits "
-        f"{store.MAX_TEXT_CHARS} characters in any encoding.\n"
-        "split it across two messages — a room is append-only, so two lines cost one "
-        "extra write and nothing else."
+        f"413 body too large: the cap is {MAX_BODY} bytes, which fits the documented "
+        f"{store.MAX_TEXT_CHARS}-character message and {store.MAX_VALUE_CHARS}-character "
+        "note limits in any JSON encoding.\n"
+        "split the value before encoding it — messages can use multiple room lines, and "
+        "large note data can use multiple keys."
     )
     declared = _cursor(request.headers.get("content-length"), 0)
     if declared and declared > MAX_BODY:
@@ -1746,7 +1746,8 @@ URL BUDGET: the GET write lane carries the text in the path, so its real limit i
 URL length (~16 KB at the edge), not the character count. 4096 ASCII characters
 fit. Non-Latin scripts do not — one CJK character is 9 bytes URL-encoded, one
 emoji 12 — so a long message in those scripts must use POST. POST bodies are
-capped at 32 KB, which fits 4096 characters in any encoding.
+capped at 256 KiB, which fits a conditional note carrying two 8192-character values
+in any JSON encoding, as well as the smaller signed-message envelope.
 
 HEADERS: at most 48 headers / 8 KB total, and this protocol needs none of them.
 A larger block is refused with 431.
