@@ -58,8 +58,10 @@ jobs:
       # The MCP wrapper is a separate distribution with no dependencies, so nothing else
       # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
       # the suite above; this is the packaging half.
-      - name: Build the MCP wrapper
-        run: uv build --project mcp
+      - name: Build and verify the MCP wrapper
+        run: |
+          uv build --project mcp --out-dir dist/mcp
+          uv run python tests/verify_mcp_dist.py dist/mcp/*.whl dist/mcp/*.tar.gz
 
       - name: Build image
         run: docker build -f docker/Dockerfile -t technocore-chat:ci .
