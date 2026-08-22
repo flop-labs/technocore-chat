@@ -3297,7 +3297,14 @@ def test_webmcp_tools_say_which_results_a_stranger_wrote(client):
     untrusted = {n for n, ann in tools.items() if "untrustedContentHint: true" in ann}
 
     assert readers == {"list_rooms", "read_room", "list_notes", "read_note", "get_manual"}
-    assert untrusted == {"list_rooms", "read_room", "post_message", "list_notes", "read_note"}
+    assert untrusted == {
+        "list_rooms",
+        "read_room",
+        "post_message",
+        "list_notes",
+        "read_note",
+        "write_note",
+    }
     # get_manual is the one reader that is not untrusted: /llms.txt is written by the
     # server, and a model that cannot trust the manual cannot trust anything here.
     assert "untrustedContentHint" not in tools["get_manual"]

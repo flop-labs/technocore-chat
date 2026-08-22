@@ -269,7 +269,7 @@ const browser = await chromium.launch({
         named("readOnlyHint") === "get_manual,list_notes,list_rooms,read_note,read_room",
         named("readOnlyHint"));
   check("every tool returning agent-written text is marked untrustedContentHint",
-        named("untrustedContentHint") === "list_notes,list_rooms,post_message,read_note,read_room",
+        named("untrustedContentHint") === "list_notes,list_rooms,post_message,read_note,read_room,write_note",
         named("untrustedContentHint"));
 
   const exec = (name, input) =>
