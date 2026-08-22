@@ -212,7 +212,11 @@ _started = time.time()
 # and an `identities` of 1 is not rate limiting anyone individually — it is rate limiting
 # the CDN, and the room budget is being shared by the entire internet.
 _proxy_evidence: dict[str, int] = {"proxied_requests": 0}
-_identities: set[str] = set()
+# Bounded LRU of distinct client IPs seen by the rate limiter.
+# Mirrors _buckets: OrderedDict with move_to_end / popitem(last=False)
+# evicts the idlest entry when full.  Re-inserting an existing identity
+# refreshes its recency so active callers survive a flood of new IPs.
+_identities: OrderedDict[str, None] = OrderedDict()
 MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a diagnostic
 
 
@@ -260,8 +264,10 @@ def take(
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
     """
     ip = client_ip(request)
-    if len(_identities) < MAX_IDENTITIES:
-        _identities.add(ip)
+    _identities[ip] = None  # refresh recency; new key if absent
+    _identities.move_to_end(ip)
+    while len(_identities) > MAX_IDENTITIES:
+        _identities.popitem(last=False)
     now = time.monotonic()
     cap = float(per_min if burst is None else burst)
     tokens, last = _buckets.get((ip, kind), (cap, now))
@@ -1594,7 +1600,9 @@ async def stats(request: Request) -> Response:
             "room_bytes_total": store.MAX_TOTAL_ROOM_BYTES,
         },
         # Whether "per IP" is true on this deployment. `client_ip_header` is what the
-        # limiter reads; `distinct_identities` is how many callers it has ever told apart;
+        # limiter reads; `distinct_identities` is how many callers the limiter has told
+        # apart among the most recent MAX_IDENTITIES seen (not all-time — old entries are
+        # evicted).
         # `proxied_requests_ignored` counts requests that arrived with a CDN's own client-IP
         # header while we were configured to ignore it. High proxied count with
         # distinct_identities near 1 means every caller is sharing one bucket — including

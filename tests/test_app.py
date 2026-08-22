@@ -3420,3 +3420,77 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+# ------------------------------------------------------------------ identities LRU
+#
+# _identities is a bounded OrderedDict LRU (mirrors _buckets).  Once full the
+# idlest entry is evicted; re-inserting an existing identity refreshes its
+# recency so active callers survive a flood of new IPs.
+
+
+def test_identities_evicts_oldest_when_full(client, monkeypatch):
+    """Fill past MAX_IDENTITIES and confirm the oldest entry is gone."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_IDENTITIES", 5)
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    # Insert 5 distinct identities
+    for i in range(5):
+        client.get("/r/lobby", headers={"cf-connecting-ip": f"10.0.0.{i}"})
+    assert len(app_module._identities) == 5
+    assert "10.0.0.0" in app_module._identities
+    # Insert a 6th: oldest (10.0.0.0) is evicted
+    client.get("/r/lobby", headers={"cf-connecting-ip": "10.0.0.5"})
+    assert len(app_module._identities) == 5
+    assert "10.0.0.0" not in app_module._identities
+    assert "10.0.0.5" in app_module._identities
+
+
+def test_identities_reseen_identity_survives_eviction(client, monkeypatch):
+    """Re-seeing an existing identity refreshes its recency, so it survives
+    a flood that evicts its neighbours."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_IDENTITIES", 4)
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    # Insert A, B, C, D
+    for nick in ("A", "B", "C", "D"):
+        client.get("/r/lobby", headers={"cf-connecting-ip": f"10.0.0.{nick}"})
+    assert len(app_module._identities) == 4
+    # Re-see B: B moves to the most-recent end
+    client.get("/r/lobby", headers={"cf-connecting-ip": "10.0.0.B"})
+    # Insert E, F: A and C should be evicted, B survives
+    for nick in ("E", "F"):
+        client.get("/r/lobby", headers={"cf-connecting-ip": f"10.0.0.{nick}"})
+    assert len(app_module._identities) == 4
+    assert "10.0.0.B" in app_module._identities, "re-seen identity was evicted"
+    assert "10.0.0.E" in app_module._identities
+    assert "10.0.0.F" in app_module._identities
+
+
+def test_identities_never_exceeds_max(client, monkeypatch):
+    """The LRU never grows past MAX_IDENTITIES, even under sustained flood."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "MAX_IDENTITIES", 8)
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    for i in range(50):
+        client.get("/r/lobby", headers={"cf-connecting-ip": f"10.0.{i // 256}.{i % 256}"})
+    assert len(app_module._identities) <= 8
+
+
+def test_identities_stats_reflects_recent_window(client, monkeypatch):
+    """distinct_identities in /stats reports the bounded window count,
+    not an all-time total."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "STATS_TOKEN", "t")
+    monkeypatch.setattr(app_module, "STATS_CACHE_SECONDS", 0)
+    monkeypatch.setattr(app_module, "MAX_IDENTITIES", 5)
+    monkeypatch.setattr(app_module, "CLIENT_IP_HEADER", "cf-connecting-ip")
+    # Insert 10 distinct IPs; the window holds at most 5
+    for i in range(10):
+        client.get("/r/lobby", headers={"cf-connecting-ip": f"10.0.{i // 256}.{i % 256}"})
+    ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
+    assert ident["distinct_identities"] == 5
