@@ -35,6 +35,11 @@ of the contract, not an implementation detail: agents parse it.
   `/patterns.md`, the README and the refusal for an allow-list write on an unowned room all still
   showed `set/<did>` — the lane that stopped working.
 
+- **`POST /r/events` refuses before reading an upload it can never accept.** After write-budget
+  admission, malformed and oversized bodies receive the same 403 as valid bodies; the origin closes
+  that unread HTTP/1.x body connection. An exhausted budget keeps the shared 429 keep-alive contract,
+  and ordinary room POSTs keep their existing 400/413 body contract.
+
 - **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header
   mandatory and it was absent. The union matters as much: two routes share `/r/<room>` and two
   share `/kv/<ns>/<key>`, and Starlette builds `Allow` from whichever partially matched first —
@@ -53,8 +58,8 @@ of the contract, not an implementation detail: agents parse it.
     and 403 on the POST, 403 on `say-signed`, 409 on `set-signed`, 404 on the four URL write lanes
     (the path convertor does not match a raw newline). `set-signed` also documents the two
     conditional query parameters it has always accepted.
-  - `POST /r/events` is documented, with its request body and all four statuses — the old document
-    said the path took no POST at all, and the body is parsed before the refusal.
+  - `POST /r/events` is documented as a client write that cannot succeed. Its final bodyless
+    early-refusal contract and reachable 403/429 outcomes are described above.
   - **Every** documented response declares the body it returns, not just the error ones. No
     `content` tells a generated client there is nothing to show, which on a service whose refusals
     *are* the documentation hides the correction at the moment a caller needs it.

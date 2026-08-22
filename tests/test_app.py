@@ -194,26 +194,74 @@ def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
     assert app_module._seconds(str(published["maximum"])) == 0.5
 
 
-def test_posting_to_the_events_room_documents_what_it_really_answers(client):
-    """`/r/events` is the ordinary room POST handler with one room that always says no, so
-    the body is read and parsed *before* the refusal — a malformed or oversized body never
-    reaches the 403. Documenting only the 403 promised a client one outcome and delivered
-    three. Review catch on #40.
+def test_posting_to_the_events_room_is_refused_before_reading_a_body(client, monkeypatch):
+    """The URL already names the one room no client may write.
+
+    Reading an attacker-controlled body before that unconditional gate spends the JSON and
+    streaming budget on a request that cannot succeed. Because an unread HTTP body cannot be
+    reused safely, the refusal also closes the connection rather than leaving bytes for the
+    next request on the socket.
     """
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "413", "429"}
-    # It parses a body, so it declares one.
-    assert (
-        "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])
-    )
+    assert set(documented["responses"]) == {"403", "429"}
+    assert "requestBody" not in documented
 
-    assert client.post("/r/events", json={"from": "bot", "text": "hi"}).status_code == 403
-    assert client.post("/r/events", content=b"not json").status_code == 400
-    assert client.post("/r/events", json=[1, 2]).status_code == 400
-    oversize = client.post("/r/events", content=b"x" * (app_module.MAX_BODY + 1))
+    async def body_must_not_be_read(_request):
+        pytest.fail("/r/events read a body before its unconditional 403")
+
+    monkeypatch.setattr(app_module, "read_json", body_must_not_be_read)
+    for body in ({"from": "bot", "text": "hi"}, b"not json", b"x" * (app_module.MAX_BODY + 1)):
+        if isinstance(body, dict):
+            refused = client.post("/r/events", json=body)
+        else:
+            refused = client.post("/r/events", content=body)
+        assert refused.status_code == 403
+        assert refused.headers["connection"] == "close"
+
+    monkeypatch.undo()
+    # Ordinary room POSTs keep the body contract: malformed is 400 and oversized is 413.
+    assert client.post("/r/lobby", content=b"not json").status_code == 400
+    oversize = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
     assert oversize.status_code == 413
+
+
+def test_rate_limited_events_post_keeps_the_shared_429_contract(client, monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
+    app_module._buckets.clear()
+    first = client.post("/r/events", content=b"ignored")
+    limited = client.post("/r/events", content=b"also ignored")
+    assert first.status_code == 403
+    assert limited.status_code == 429
+    assert "connection" not in limited.headers
+
+
+def test_unread_body_helper_does_not_emit_connection_on_http2():
+    from starlette.requests import Request
+
+    import app as app_module
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "2",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/r/events",
+            "raw_path": b"/r/events",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("localhost", 443),
+            "root_path": "",
+        }
+    )
+    response = app_module.text("refused", 403)
+    assert app_module._close_unread_body(request, response) is response
+    assert "connection" not in response.headers
 
 
 def test_the_body_cap_holds_when_nothing_declares_a_length(client):
@@ -4009,11 +4057,12 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     the identical bytes, the fuzzer calls the service broken. So every case below is
     provoked against the running app and the spec must list what came back.
 
-    The second assertion is the one that would have saved a round of review. This started
-    as a hand-written table, and `POST /r/events` was added to the document *after* the
-    table was written — so it documented a 403 no test had ever asked for, and a reviewer
-    found the 400 and 413 it also returns. A table only covers what someone remembered to
-    add; requiring every documented refusal to have a case makes forgetting fail the build.
+    The second assertion is the one that saved a round of review. This started as a
+    hand-written table, and `POST /r/events` was added to the document *after* the table was
+    written. The route now refuses before reading a body, so the table pins its one reachable
+    application refusal — 403 — while the focused events test holds the no-read and
+    connection-close behavior. Requiring every documented refusal to have a case makes
+    forgetting fail the build.
     """
     did, sign = _keypair()
     other, other_sign = _keypair(2)
@@ -4058,7 +4107,6 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             403,
             lambda: client.post("/r/mb-box", json={"from": "b", "text": "hi"}),
         ),
-        ("/r/events", "post", 400, lambda: client.post("/r/events", content=b"not json")),
         (
             "/r/events",
             "post",

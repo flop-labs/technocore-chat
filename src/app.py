@@ -1219,16 +1219,30 @@ async def read_json(request: Request) -> dict | Response:
     return payload
 
 
+def _close_unread_body(request: Request, response: Response) -> Response:
+    """Close an HTTP/1.x origin connection when the app intentionally skips its body.
+
+    `Connection` is forbidden on HTTP/2 and HTTP/3 and is hop-by-hop through a proxy, so
+    this applies only to the h11 origin transport the shipped image uses.
+    """
+    if request.scope.get("http_version") in {"1.0", "1.1"}:
+        response.headers["Connection"] = "close"
+    return response
+
+
 async def room_post(request: Request) -> Response:
     """Non-restricted clients (curl, SDKs) can use a normal POST — including the signed
     lane, by carrying `did`/`sig`/`nonce` beside `text`."""
+    room = request.path_params["room"]
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
         return limited("write", RATE_WRITE, retry)
+    denied = _reject_if_events_room(room)
+    if denied:
+        return _close_unread_body(request, denied)
     payload = await read_json(request)
     if isinstance(payload, Response):
         return payload
-    room = request.path_params["room"]
     credentials = _payload_credentials(payload)
     signer = None
     if credentials:
