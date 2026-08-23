@@ -470,11 +470,48 @@ def test_by_position_params_are_rejected_rather_than_guessed(mcp):
     assert reply["error"]["code"] == protocol.INVALID_PARAMS
 
 
+def test_malformed_tool_calls_name_the_shape_the_client_must_send(mcp):
+    """Hostile JSON-RPC can be structurally valid JSON while omitting the pieces dispatch
+    needs. These are caller errors with a correction, never exceptions or vague 500s.
+    """
+    server, protocol = mcp
+    missing_method = server.handle({"jsonrpc": "2.0", "id": 7})
+    assert missing_method["error"] == {
+        "code": protocol.INVALID_REQUEST,
+        "message": "missing method",
+    }
+
+    for params in ({}, {"name": 7}, {"name": "say", "arguments": []}):
+        reply = server.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": params})
+        assert reply["error"]["code"] == protocol.INVALID_PARAMS
+        assert "string `name`" in reply["error"]["message"]
+        assert "object `arguments`" in reply["error"]["message"]
+
+
 def test_a_rejected_name_comes_back_as_the_services_own_explanation(mcp):
     server, _ = mcp
     reply = call(server, "read_room", {"room": "Not A Room"})
     assert reply["result"]["isError"] is True
     assert "400" in text_of(reply)
+
+
+def test_a_network_failure_becomes_an_actionable_tool_result(mcp, monkeypatch):
+    """A connector outage is something the model can retry or report, not a JSON-RPC fault.
+    Include the configured origin and the cause because either may be the misconfiguration.
+    """
+    from technocore_mcp import server as mcp_server
+
+    server, _ = mcp
+
+    def unreachable(request, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", unreachable)
+    reply = call(server, "read_room", {"room": "lobby"})
+    assert reply["result"]["isError"] is True
+    message = text_of(reply)
+    assert f"cannot reach {mcp_server.BASE_URL}" in message
+    assert "connection refused" in message
 
 
 # ------------------------------------------------------------------ the transport
@@ -522,6 +559,29 @@ def test_a_batch_is_answered_by_one_array(mcp):
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert len(lines) == 1  # the all-notification batch produced no line at all
     assert [reply["id"] for reply in lines[0]] == [1, 2]
+
+
+def test_invalid_top_level_frames_are_refused_without_guessing(mcp):
+    """The transport is exposed to arbitrary JSON values, including batches with primitive
+    members. Each response identifies the violated shape so a client can repair its frame.
+    """
+    server, protocol = mcp
+
+    empty = protocol._response(server, [])
+    assert empty["error"] == {
+        "code": protocol.INVALID_REQUEST,
+        "message": "batch must not be empty",
+    }
+
+    mixed = protocol._response(
+        server,
+        [7, {"jsonrpc": "2.0", "method": "notifications/initialized"}],
+    )
+    assert len(mixed) == 1
+    assert mixed[0]["error"]["message"] == "batch member must be an object"
+
+    primitive = protocol._response(server, "ping")
+    assert primitive["error"]["message"] == "message must be an object"
 
 
 def test_malformed_json_does_not_kill_the_session(mcp):

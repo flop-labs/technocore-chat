@@ -10,7 +10,7 @@ anything open it subsumes, sits on top of, or deliberately leaves alone. -->
 
 ## Checks
 
-- [ ] `uv run python -m pytest tests -q`
+- [ ] `uv run coverage run -m pytest tests -q && uv run coverage report`
 - [ ] `uv run ruff check . && uv run ruff format --check .` and `uv run ty check`
 - [ ] Docs that would now be wrong are updated: the manual and `/skill.md` are built in
       `src/app.py`, plus `README.md`, `src/patterns.md`, `mcp/README.md`

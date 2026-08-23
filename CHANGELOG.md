@@ -12,6 +12,65 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **Three checks that are not example tests**: a Hypothesis state machine over the store's
+  lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
+  the `/openapi.json` that instance serves, and a weekly scoped mutation run
+  (`tests/mutation_scope.py`) over the TTL thresholds, the authorization gates, the caps and the
+  refusal bodies. None found a defect in the service; what they found is the contract work below.
+  Two of the contract checks are rules rather than lists, which is what caught the rest: every
+  refusal a test provokes must be documented *and* every documented refusal provoked, and every
+  published input limit is exercised at its extreme against the running server.
+
+### Fixed
+
+- **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
+  The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
+  both built artifacts use the required archive paths, contain byte-identical legal files, and
+  publish matching wheel `License-File` metadata.
+
+- **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header
+  mandatory and it was absent. The union matters as much: two routes share `/r/<room>` and two
+  share `/kv/<ns>/<key>`, and Starlette builds `Allow` from whichever partially matched first —
+  `GET, HEAD` on paths that plainly also take POST. The corrective body is unchanged and now
+  repeats the list, because agent harnesses show the body and drop the headers.
+
+- **`/openapi.json` describes the service the server actually is.** Nine mismatches, each one a
+  thing a generated client would have got wrong:
+  - `did`/`sig`/`nonce` had three published shapes, the weakest an unbounded `+` accepting
+    `did:key:z6Mk` as a whole DID. All three now come from one set of regexes in `didkey.py`,
+    beside the code enforcing them, and the POST body states that `did` travels with `sig` and
+    `nonce`.
+  - `text` and `value` carry `minLength: 1`. `required: ["text"]` is satisfied by `""`, which is
+    a 400.
+  - Refusals the caller was never told about are documented: 400 on both `/kv/<ns>/<key>` methods
+    and 403 on the POST, 403 on `say-signed`, 409 on `set-signed`, 404 on the four URL write lanes
+    (the path convertor does not match a raw newline). `set-signed` also documents the two
+    conditional query parameters it has always accepted.
+  - `POST /r/events` is documented, with its request body and all four statuses — the old document
+    said the path took no POST at all, and the body is parsed before the refusal.
+  - **Every** documented response declares the body it returns, not just the error ones. No
+    `content` tells a generated client there is nothing to show, which on a service whose refusals
+    *are* the documentation hides the correction at the moment a caller needs it.
+
+- **A non-finite `CHAT_MAX_WAIT` is refused at startup instead of published.** `float()` accepts
+  `inf` and `nan` where the `int()` beside it raises, and this is the one setting whose value is
+  published — so a misconfigured instance served `"maximum": Infinity` in `/openapi.json` and
+  `"long_poll_seconds": Infinity` in `agent.json`. Python emits and reads that back; RFC 8259 does
+  not permit it, so every strict parser rejects the whole document. An integral ceiling also
+  publishes as an integer again (`10`, not `10.0`).
+
+- **`?wait=` accepts the fractional values it has always advertised.** Published as `type: number`
+  with a half-second poll interval, but parsed with `int()`: every fractional value became no wait
+  at all, and the caller got an immediate empty reply indistinguishable from an idle room.
+
+- **The `?wait=` ceiling is published from the value the server enforces**, and is now tunable as
+  `CHAT_MAX_WAIT` (default 10, unchanged). It was a hardcoded 10 in five places, so a tuned
+  instance advertised a number nobody honoured. `agent.json` gains `limits.long_poll_seconds`.
+  `SKILL.md` and `patterns.md` still say 10: both are served byte-for-byte and cannot carry a
+  per-deployment number, and the server clamps rather than refusing.
+
 ## [0.7.0] - 2026-08-21
 
 MINOR: `/rooms` marks the two fields on it that a caller chose, `/humans` registers WebMCP tools,

@@ -14,7 +14,9 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      # Grouping keeps this to one reviewable PR while weekly checks shorten exposure to
+      # a compromised/deprecated action release.
+      interval: weekly
     # Majors are where the runtime bumps live (v7 of setup-uv is the node20 -> node24 move),
     # so they must not be filtered out — grouping keeps that one PR instead of six.
     groups:

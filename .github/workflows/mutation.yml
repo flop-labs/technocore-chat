@@ -1,0 +1,54 @@
+name: Mutation
+
+# Weekly and on demand, never on a pull request. A scoped pass is tens of minutes and
+# produces a reading, not a verdict: a surviving mutant is a question ("would anyone
+# notice if this were wrong, and should they?"). Blocking merges on it would only teach
+# people to narrow the scope file.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 4 * * 0"
+
+concurrency:
+  group: ${{ github.workflow }}
+  # A run 40 minutes in has results worth finishing, and nothing waits on it.
+  cancel-in-progress: false
+
+jobs:
+  mutate:
+    name: "scoped mutants"
+    runs-on: ubuntu-latest
+    # ~970 mutants at roughly a second each, measured. Generous: the alternative to a slow
+    # run is no run.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --group mutation
+
+      # mutmut runs the suite in a copy of the project, so it has to pass there first.
+      # Failing here is a missing entry in `also_copy`, not a mutation finding.
+      - name: Baseline
+        run: uv run python -m pytest tests -q
+
+      # `xargs` rather than a literal list: the scope lives in one file with the reasoning
+      # beside each entry, and a copy here would drift.
+      - name: Run the scoped mutants
+        run: |
+          uv run python tests/mutation_scope.py --patterns \
+            | xargs uv run mutmut run --max-children 4
+
+      # Always: a run that died halfway still knows what it killed. Exits non-zero only
+      # when the harness broke — mutants generated and never judged.
+      - name: Report
+        if: always()
+        run: |
+          uv run mutmut export-cicd-stats
+          uv run python tests/mutation_scope.py --report | tee -a "$GITHUB_STEP_SUMMARY"

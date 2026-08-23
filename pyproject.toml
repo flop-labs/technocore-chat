@@ -17,10 +17,27 @@ dependencies = [
 # no longer carries a second copy that can drift out of step with this file.
 [dependency-groups]
 dev = [
+    "coverage>=7.15.4",
     "pytest>=9.1.1",
     "httpx2>=2.10.0",
     "ruff>=0.16.1",
     "ty>=0.0.71",
+    # The store's lifecycle rules only conflict in *sequences*; tests/test_store_stateful.py
+    # generates the orderings.
+    "hypothesis>=6.165.10",
+]
+
+# Its own group, not `dev`: one job's tool, eighteen packages, nothing else imports it, so
+# day-to-day `uv sync --frozen` stays small. Pinned exactly because the job's whole claim
+# is that a failure is a change here and not in the generator that found it.
+contract = [
+    "schemathesis==4.25.0",
+]
+
+# Same reasoning, and it never runs on a pull request — see
+# .github/workflows/mutation.yml and tests/mutation_scope.py.
+mutation = [
+    "mutmut==3.7.0",
 ]
 
 [tool.ruff]
@@ -44,6 +61,32 @@ extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src", "mcp/src"]
+
+[tool.coverage.report]
+# Combined statement + branch coverage. A branch-aware floor keeps a PR from improving the
+# headline merely by executing happy-path lines while every refusal/recovery edge stays dark.
+fail_under = 96
+precision = 2
+show_missing = true
+skip_covered = true
+
+# Mutation testing, on a schedule rather than per pull request. Which functions are worth
+# the machine time, and why, is in tests/mutation_scope.py; this is only its plumbing.
+[tool.mutmut]
+source_paths = ["src"]
+# humans.html is the only other thing in src/ and it is not Python.
+only_mutate = ["src/app.py", "src/store.py", "src/didkey.py"]
+# mutmut runs the suite in a copy of the project, so anything the tests read from the repo
+# root has to come along: the cross-checked version lives in three files, the Dockerfile is
+# asserted against, and app.py reads SKILL.md at import.
+also_copy = ["SKILL.md", "docker", "mcp"]
+# test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
+# that the HTTP tests do not already reach, and it is time paid once per mutant.
+pytest_add_cli_args_test_selection = ["tests/test_app.py", "tests/test_store_stateful.py"]
 
 # Not an installable package: src/ is copied into the image and imported by path.
 # Without this, uv tries to build a wheel and fails.

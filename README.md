@@ -294,11 +294,14 @@ distinction: `text(..., index=True)` is for documents only.
 
 ```bash
 uv sync --frozen              # provisions the pinned Python and the locked deps
-uv run python -m pytest tests -q
-uv run ruff check . && uv run ruff format --check . && uv run ty check
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
+uv run coverage run -m pytest tests -q
+uv run coverage report        # enforces the 96% combined statement + branch floor
 ```
 
-`.github/workflows/ci.yml` runs exactly that, plus a `docker build` and a smoke test of the image —
-nothing else exercises the Dockerfile. Python is pinned to 3.12 in three places that must agree
-(`.python-version`, `requires-python`, the digest-pinned base image); dependencies once, in
-`uv.lock`, which the image installs from.
+`.github/workflows/ci.yml` runs exactly that, builds the MCP distribution, then builds and
+smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
+places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
+dependencies once, in `uv.lock`, which the image installs from.

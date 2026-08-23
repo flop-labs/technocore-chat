@@ -13,7 +13,8 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer commit makes an older build result obsolete on both PRs and main.
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -24,7 +25,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      # Full commit pins are the only immutable form for third-party actions. Dependabot
+      # updates these SHAs and the release comments together.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Runs PR-controlled code (the service and its tests), so no checkout
           # credentials are persisted where that code could read them.
@@ -32,9 +35,9 @@ jobs:
 
       # Installs the interpreter named in .python-version, so CI, local dev and the
       # image all run the same 3.12.
-      # Pinned to the full version: setup-uv stopped publishing floating major tags
-      # after v7, so `@v10` does not resolve. Dependabot bumps this pin.
-      - uses: astral-sh/setup-uv@v10.0.0
+      # Resolved from the full release version to an immutable commit: setup-uv stopped
+      # publishing floating major tags after v7, and Dependabot bumps this SHA.
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
       - run: uv sync --frozen
@@ -47,14 +50,18 @@ jobs:
       - name: Types
         run: uv run ty check
 
-      - name: Tests
-        run: uv run python -m pytest tests -q
+      - name: Tests + branch coverage
+        run: |
+          uv run coverage run -m pytest tests -q
+          uv run coverage report
 
       # The MCP wrapper is a separate distribution with no dependencies, so nothing else
       # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
       # the suite above; this is the packaging half.
-      - name: Build the MCP wrapper
-        run: uv build --project mcp
+      - name: Build and verify the MCP wrapper
+        run: |
+          uv build --project mcp --out-dir dist/mcp
+          uv run python tests/verify_mcp_dist.py dist/mcp/*.whl dist/mcp/*.tar.gz
 
       - name: Build image
         run: docker build -f docker/Dockerfile -t technocore-chat:ci .
@@ -76,3 +83,70 @@ jobs:
           curl -fsS localhost:8080/openapi.json | grep -q '"openapi"'
           curl -fsS localhost:8080/.well-known/agent.json | grep -q '"content_is_untrusted"'
           docker rm -f technocore-chat-ci
+
+  # Separate because it needs the service running, and because a red contract check should
+  # point at the contract rather than at "the tests". It fetches the instance's own
+  # /openapi.json, so there is no committed copy to drift.
+  contract:
+    name: "openapi contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --group contract
+
+      # Tuned so the fuzzer spends its budget on handlers rather than on the parts that
+      # exist to stop it. CHAT_MAX_WAIT is published as the `wait` maximum, and at the
+      # default 10 a few generated long polls cost more than the whole run; without the
+      # rate bumps the limiter answers most of it with a 429 that conforms and checks
+      # nothing. Everything else is the shipped configuration.
+      - name: Start the service
+        run: |
+          CHAT_ROOT="$(mktemp -d)" \
+          CHAT_MAX_WAIT=1 \
+          CHAT_RATE_READ=1000000 CHAT_RATE_WRITE=1000000 CHAT_RATE_ROOMS_PER_DAY=1000000 \
+            uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
+          for _ in $(seq 30); do
+            curl -fsS localhost:8099/healthz && break
+            sleep 1
+          done
+
+      # Deterministic: --generation-deterministic fixes the generation (superseding
+      # --seed, which the CLI then ignores) and the pinned schemathesis fixes the generator,
+      # so a failure is a change in this service. ~800 requests in under ten seconds.
+      #
+      # Checks are named rather than `all`, because two of the rest assume things this
+      # service breaks on purpose: negative_data_rejection expects schema-invalid input to
+      # be refused, but a mistyped `?wait=` or `?limit=` is ignored (`_cursor` falls back);
+      # positive_data_acceptance expects valid input to succeed, but a valid write to a
+      # mailbox or a reserved namespace is refused. What remains is what must hold — no
+      # 500s, every response matching the status, content type, headers and schema
+      # promised, and the two 405 checks, since Allow is the machine-readable half of a
+      # refused method.
+      #
+      # --warnings lists what to *enable*. Three are left out because they can never clear:
+      # missing_auth (POST /r/events only ever 403s, and there are no credentials to
+      # suggest), validation_mismatch (a generated 86-character string is never a valid
+      # Ed25519 signature), missing_test_data (a generated note name has never been
+      # written, and 404 is the right answer). A warning that is always there is one
+      # nobody reads.
+      - name: Check the running service against its own /openapi.json
+        run: |
+          uv run schemathesis run http://localhost:8099/openapi.json \
+            --url http://localhost:8099 \
+            --checks not_a_server_error,status_code_conformance,content_type_conformance,response_headers_conformance,response_schema_conformance,unsupported_method,allow_header_conformance \
+            --phases examples,coverage,fuzzing \
+            --max-examples 25 \
+            --generation-deterministic \
+            --max-response-time 10 \
+            --warnings missing_deserializer,unused_openapi_auth,unsupported_regex,method_not_allowed,constants_extraction,unmatched_filter \
+            --no-color

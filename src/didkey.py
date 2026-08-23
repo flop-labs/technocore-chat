@@ -30,7 +30,24 @@ SIG_CHARS = 86  # 64 raw bytes, base64url, unpadded
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(_B58)}
-_SIG_RE = re.compile(rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}")
+
+# The three shapes a signed write must have, written once because they are enforced here
+# and *published* in /openapi.json — and a published constraint that disagrees with the
+# enforced one is worse than none, since a machine reader believes it. They were three
+# prose descriptions and two half-copies, and the weakest copy was the real contract.
+# Unanchored: everything here uses `fullmatch`, and manifest.py anchors them for JSON
+# Schema.
+#
+# DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
+# and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
+DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
+SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
+# A nonce is a plain counter (a millisecond clock works): it must count up per key per
+# room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
+NONCE_PATTERN = r"[0-9]{1,19}"
+
+SIG_RE = re.compile(SIG_PATTERN)
+NONCE_RE = re.compile(NONCE_PATTERN)
 
 
 class DidError(ValueError):
@@ -94,7 +111,7 @@ def verify(did: str, signature: str, message: str) -> None:
     trusted afterwards exactly as far as this server is trusted.
     """
     key = Ed25519PublicKey.from_public_bytes(public_key(did))
-    if not _SIG_RE.fullmatch(signature or ""):
+    if not SIG_RE.fullmatch(signature or ""):
         raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
     try:

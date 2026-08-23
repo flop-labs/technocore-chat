@@ -19,6 +19,13 @@ on:
   push:
     tags: ["mcp-v*"]
 
+# Publishing is not cancellable: PyPI versions are immutable, so cancelling after the
+# PyPI step and restarting would strand the registry half. Duplicate runs for the same
+# tag queue behind the active one instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: "PyPI + MCP registry"
@@ -30,11 +37,11 @@ jobs:
       # Both publishes are OIDC: PyPI trusted publishing, and the registry's namespace proof.
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
 
       # Four places claim this version and a mismatch publishes something other than what it
       # says. server.json carries it twice — once for the server, once for the package —
@@ -85,8 +92,15 @@ jobs:
 
       - name: Install mcp-publisher
         run: |
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" \
-            | tar xz mcp-publisher
+          # This job holds an OIDC publishing credential. Pin and verify the executable
+          # instead of running bytes from a mutable `latest` URL.
+          version="v1.8.1"
+          sha256="a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/modelcontextprotocol/registry/releases/download/${version}/${archive}"
+          echo "${sha256}  ${archive}" | sha256sum --check --strict
+          tar xzf "${archive}" mcp-publisher
+          rm "${archive}"
           ./mcp-publisher --version
 
       - name: Publish to the MCP registry
