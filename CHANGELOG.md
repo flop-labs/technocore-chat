@@ -25,6 +25,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
+  The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
+  both built artifacts use the required archive paths, contain byte-identical legal files, and
+  publish matching wheel `License-File` metadata.
+
 - **A 405 carries `Allow`, naming every verb the *path* takes.** RFC 9110 §15.5.6 makes the header
   mandatory and it was absent. The union matters as much: two routes share `/r/<room>` and two
   share `/kv/<ns>/<key>`, and Starlette builds `Allow` from whichever partially matched first —
