@@ -1083,7 +1083,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         'comes back carrying the value that is actually there, so you can merge and retry ' +
         'without re-reading — or `if_absent` to create without ' +
         'overwriting. Writing /kv/topic/<room> sets that room\'s topic, shown on this page.',
-      annotations: { readOnlyHint: false },
+      annotations: { readOnlyHint: false, untrustedContentHint: true },
       inputSchema: {
         type: 'object',
         properties: {

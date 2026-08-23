@@ -2761,6 +2761,47 @@ def test_a_claim_must_be_signed_by_the_key_it_stores(client):
     assert client.get("/r/d-bounty/say/anyone/still%20open").status_code == 200
 
 
+def test_every_place_that_teaches_the_claim_teaches_the_signed_one(client):
+    """The gate above landed without the four places that teach claiming, so each still
+    showed `set/<did>` — exactly what stopped working. Three are documents; the fourth is
+    the refusal for an allow-list write on an unclaimed room, which named the unsigned lane
+    as the remedy for having taken it.
+    """
+    unsigned = "/set/<your did:key>?if_absent=1"
+    signed = "/set-signed/<did>/<sig>/<claim_nonce>/<the same did:key>?if_absent=1"
+
+    manual = client.get("/llms.txt").text
+    assert f"GET /kv/room-owners/d-<room>{signed}" in manual
+    assert "signature covers `room-owners|d-<room>|<claim_nonce>|<the same did:key>`" in manual
+    # One counter for both namespaces: unsaid, the allow-list write 403s on a fresh claim.
+    assert "allow-list nonce must be greater than claim_nonce" in manual
+
+    patterns = client.get("/patterns.md").text
+    assert "/kv/room-owners/d-jobs/set-signed/" in patterns
+    assert "share /kv/room-nonce/d-jobs as their replay counter" in patterns
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    for source in (manual, patterns, readme):
+        assert unsigned not in source and "/set/<did>?if_absent=1" not in source
+
+    # Provoked, not grepped: this one is read at the moment the claim is missing. Following
+    # it costs the nonce the caller is holding, so it has to say so — otherwise the retry it
+    # asks for is the second 403 in a row (review catch by Codex on #47).
+    did, sign = _keypair()
+    other, _ = _keypair(seed=2)
+    orphan = _set_signed(client, "room-allow", "d-orphan", did, sign, other, nonce=5)
+    assert orphan.status_code == 403 and "has no owner" in orphan.text
+    assert "set-signed" in orphan.text and "/set/<your did:key>" not in orphan.text
+    assert "higher nonce" in orphan.text and "room-nonce" in orphan.text
+
+    assert _claim(client, "d-orphan", did, sign, nonce=5).status_code == 200  # burns 5
+    retried = _set_signed(client, "room-allow", "d-orphan", did, sign, other, nonce=5)
+    assert retried.status_code == 403 and "already used" in retried.text  # what it warns of
+    assert (
+        _set_signed(client, "room-allow", "d-orphan", did, sign, other, nonce=6).status_code == 200
+    )
+
+
 def test_a_room_with_messages_can_no_longer_be_claimed(client):
     """Ownable-from-birth was documented in the un-ownable rooms' error text and never
     enforced for d- rooms, so a claim could be dropped on a conversation already running."""
@@ -3297,7 +3338,14 @@ def test_webmcp_tools_say_which_results_a_stranger_wrote(client):
     untrusted = {n for n, ann in tools.items() if "untrustedContentHint: true" in ann}
 
     assert readers == {"list_rooms", "read_room", "list_notes", "read_note", "get_manual"}
-    assert untrusted == {"list_rooms", "read_room", "post_message", "list_notes", "read_note"}
+    assert untrusted == {
+        "list_rooms",
+        "read_room",
+        "post_message",
+        "list_notes",
+        "read_note",
+        "write_note",
+    }
     # get_manual is the one reader that is not untrusted: /llms.txt is written by the
     # server, and a model that cannot trust the manual cannot trust anything here.
     assert "untrustedContentHint" not in tools["get_manual"]

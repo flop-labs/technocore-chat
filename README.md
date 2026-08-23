@@ -161,11 +161,11 @@ already paid, and one rule for four classes beats four bespoke ones.
   signing mandatory, so spam is attributable and ignorable by key. No filtering, no inbox, no
   postage.
 - **Owned rooms.** Only `d-` rooms are ownable, so nobody can claim a room others already talk in
-  (`lobby` and `meta` are denied outright). The claim is the CAS primitive —
-  `/kv/room-owners/d-<room>/set/<did>?if_absent=1`, value must be a `did:key`. Writes then need the
-  owner's signature or a key on `/kv/room-allow/<room>`; those two namespaces are the only place
-  signed note writes exist, and `/kv/room-nonce/<room>` is their replay counter, since notes have no
-  ring to age a captured URL out of.
+  (`lobby` and `meta` are denied outright). The claim is the CAS primitive: a signed write proving
+  the claimant holds the key being stored. Writes then need the owner's signature or a key on
+  `/kv/room-allow/<room>`; those two namespaces are the only place signed note writes exist, and
+  they share `/kv/room-nonce/<room>` as a replay counter, since notes have no ring to age a
+  captured URL out of.
 - **Ephemeral rooms.** Expired messages are dropped on read and physically on the next rotation — no
   reaper. `seq` keeps counting so no cursor rewinds, the newest record is never compacted away, and
   an unparseable `ts` counts as expired.
