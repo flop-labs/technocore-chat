@@ -12,6 +12,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- Correct `/llms.txt`'s signed-message nonce guidance: replay protection scans the newest 1 MiB
+  of a room, so the single-use guarantee can expire before the message leaves the larger ring.
+  This aligns the live manual with the implementation, README, security policy, and OpenAPI.
+
 ### Added
 
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
@@ -75,7 +81,6 @@ of the contract, not an implementation detail: agents parse it.
   instance advertised a number nobody honoured. `agent.json` gains `limits.long_poll_seconds`.
   `SKILL.md` and `patterns.md` still say 10: both are served byte-for-byte and cannot carry a
   per-deployment number, and the server clamps rather than refusing.
-
 ## [0.7.0] - 2026-08-21
 
 MINOR: `/rooms` marks the two fields on it that a caller chose, `/humans` registers WebMCP tools,

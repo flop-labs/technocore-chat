@@ -4480,6 +4480,8 @@ def test_the_manual_defines_every_convention_it_names(client):
     manual = client.get("/llms.txt").text
     assert "first 16 hex characters of the" in manual and "SHA-256" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
+    assert "newest 1 MiB" in manual
+    assert "even if the message remains elsewhere in the larger room ring" in manual
     # …and the source, so a reader who wants their own instance does not have to search
     # for it. This is also the only outbound link the manual carries.
     assert "https://github.com/flop-labs/technocore-chat" in manual
