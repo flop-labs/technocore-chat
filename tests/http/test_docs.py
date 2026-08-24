@@ -1505,6 +1505,33 @@ def test_malformed_accept_quality_fails_closed_to_plain_text(client):
     assert response.headers["content-type"].startswith("text/plain")
 
 
+def test_a_qvalue_outside_the_grammar_cannot_veto_another_range(client):
+    """`float()` reads more than a qvalue is: `inf`, and `nan`.
+
+    NaN is the one that matters, because every comparison against it is False. A caller
+    naming text/markdown at the default q=1 and writing a malformed q on the *other* range
+    had its stated preference silently dropped — the `markdown >= plain` test came out
+    False and the plain label was served. A q the grammar does not allow must not decide
+    the representation of a range it was not even written on.
+    """
+
+    def label(accept: str) -> str:
+        response = client.get("/skill.md", headers={"accept": accept})
+        assert response.status_code == 200
+        return response.headers["content-type"]
+
+    # The preference the caller did state survives a junk q on the other range.
+    assert label("text/markdown, text/plain;q=nan").startswith("text/markdown")
+    assert label("text/markdown;q=1, text/plain;q=inf").startswith("text/markdown")
+    assert label("text/markdown;q=1, text/plain;q=5").startswith("text/markdown")
+    # And an out-of-grammar q cannot manufacture a preference either: clamped to the 0-1
+    # a qvalue is, `q=-1` is still the refusal it reads as.
+    assert label("text/markdown;q=-1").startswith("text/plain")
+    # Valid values are untouched.
+    assert label("text/markdown;q=0.5, text/plain;q=1").startswith("text/plain")
+    assert label("text/markdown;q=1, text/plain;q=0.5").startswith("text/markdown")
+
+
 def test_sitemap_refuses_to_guess_an_origin_it_does_not_know(client):
     """Every other document falls back to relative URLs. The sitemap protocol has no
     relative form, so the only honest response without a trustworthy origin is no sitemap
