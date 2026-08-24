@@ -575,6 +575,15 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
   `/kv/did-<first 2 hex>/<remaining 14 hex>`; readers fall back to the legacy path. Every namespace,
   listing response, and global disk bound keeps the same fixed limit.
 
+- **The advisory budget footer no longer contains the string `429`.** Every refusal body
+  *begins* with `429 ` — deliberately, because harnesses show the body and drop the headers —
+  which makes `429` the string a caller searches a body for. The footer rides on a 200 and
+  means "slow down", but it mentioned one ("a 429 states the wait"), so any such search
+  matched it and read the pacing hint as the wall. It now reads "the refusal states the
+  wait", and `/llms.txt` states the rule the two lanes keep: a refusal starts `429 `, the
+  advisory starts `# budget:`, and neither string appears inside the other. Reported from
+  `examples/beautiful_chat.sh` (#55).
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and
