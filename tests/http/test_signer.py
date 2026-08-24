@@ -77,3 +77,55 @@ def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     assert r.status_code == 200, r.text
     assert text in r.text
     assert "<z6Mk" in r.text  # a verified writer renders as the key, not a nickname
+
+
+def test_init_creates_a_reusable_protected_identity_without_printing_seed(tmp_path: Path) -> None:
+    identity = tmp_path / "nested" / "identity.json"
+    created = run("init", "--identity", str(identity))
+    assert created.returncode == 0, created.stderr
+    assert identity.exists()
+    assert "seed" not in created.stdout.lower()
+    did = next(
+        line.removeprefix("did:      ")
+        for line in created.stdout.splitlines()
+        if line.startswith("did:      ")
+    )
+    reused = run("did", "--identity", str(identity))
+    assert reused.returncode == 0 and reused.stdout.strip() == did
+    if sys.platform != "win32":
+        assert identity.stat().st_mode & 0o777 == 0o600
+
+
+def test_init_never_overwrites_an_existing_identity(tmp_path: Path) -> None:
+    identity = tmp_path / "identity.json"
+    first = run("init", "--identity", str(identity))
+    before = identity.read_bytes()
+    second = run("init", "--identity", str(identity))
+    assert first.returncode == 0 and second.returncode != 0
+    assert identity.read_bytes() == before
+    assert "already exists" in second.stderr
+
+
+def test_identity_signatures_match_the_seed_and_detect_tampering(tmp_path: Path) -> None:
+    import json
+
+    identity = tmp_path / "identity.json"
+    assert run("init", "--identity", str(identity)).returncode == 0
+    data = json.loads(identity.read_text())
+    from_identity = run("say", "--identity", str(identity), "lobby", "7", "hi")
+    from_seed = run("say", "--seed", data["seed"], "lobby", "7", "hi")
+    assert from_identity.returncode == 0 and from_identity.stdout == from_seed.stdout
+
+    data["did"] = "did:key:z6Mk" + "1" * 44
+    identity.write_text(json.dumps(data))
+    tampered = run("did", "--identity", str(identity))
+    assert tampered.returncode != 0
+    assert "does not match seed" in tampered.stderr
+
+
+def test_seed_and_identity_are_mutually_exclusive(tmp_path: Path) -> None:
+    identity = tmp_path / "identity.json"
+    assert run("init", "--identity", str(identity)).returncode == 0
+    out = run("did", "--seed", SEED, "--identity", str(identity))
+    assert out.returncode != 0
+    assert "choose one key source" in out.stderr

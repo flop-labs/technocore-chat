@@ -20,19 +20,22 @@ Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. Sign the
 raw text and the server answers 403 — by design, so that a stored record can
 be re-verified later against the bytes on disk.
 
-Key material comes from --seed or $SIGN_SEED:
+Key material comes from --seed / $SIGN_SEED, or --identity / $SIGN_IDENTITY:
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
   * anything else       -> SHA-256 of it (so a passphrase works; weaker than
-                           randomness, fine for a demo, not for a identity you
+                           randomness, fine for a demo, not for an identity you
                            care about)
+  * identity file       -> JSON created by init; its seed is never printed
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
 Usage:
+  uv run scripts/sign.py init --identity ~/.config/technocore/identity.json
   uv run scripts/sign.py keygen
   uv run scripts/sign.py did   [--seed HEX|PASSPHRASE]
   uv run scripts/sign.py say   [--seed ...] <room> <nonce> <text>
   uv run scripts/sign.py set   [--seed ...] <ns> <key> <nonce> <value>
 
+'init' creates a mode-0600 identity and prints only its path and did:key.
 'keygen' prints the seed and the did:key. 'did' prints the did:key. 'say' and
 'set' print two lines — the did:key, then the 86-character base64url
 signature — ready for:
@@ -49,10 +52,12 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import json
 import os
 import re
 import secrets
 import unicodedata
+from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -100,18 +105,80 @@ def multibase(raw: bytes) -> str:
     return out
 
 
-def load_key(seed_arg: str | None) -> tuple[Ed25519PrivateKey, str]:
-    """The Ed25519 key for --seed / $SIGN_SEED, plus a human-readable provenance."""
-    given = seed_arg or os.environ.get("SIGN_SEED")
-    if given is None:
-        raise SystemExit("no key: pass --seed <hex|passphrase> or set $SIGN_SEED")
+def identity_path(identity_arg: str | None) -> Path | None:
+    """Resolve --identity / $SIGN_IDENTITY without reading key material."""
+    given = identity_arg or os.environ.get("SIGN_IDENTITY")
+    return Path(given).expanduser() if given else None
+
+
+def key_from_seed(given: str) -> Ed25519PrivateKey:
+    """Build a key from the documented hex-seed or passphrase forms."""
     if len(given) == 64:
         try:
-            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), given
+            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given))
         except ValueError:
             pass  # 64 chars but not hex — fall through and hash it like any passphrase
     digest = hashlib.sha256(given.encode()).hexdigest()
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({given!r})"
+    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest))
+
+
+def load_identity(path: Path) -> Ed25519PrivateKey:
+    """Load and validate a private identity created by this script."""
+    try:
+        if os.name == "posix" and path.stat().st_mode & 0o077:
+            raise SystemExit(f"identity permissions are too open: chmod 600 {path}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        seed = data["seed"]
+        expected_did = data["did"]
+    except FileNotFoundError:
+        raise SystemExit(f"identity not found: {path}") from None
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise SystemExit(f"invalid identity {path}: {exc}") from None
+    if not isinstance(seed, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", seed):
+        raise SystemExit(f"invalid identity {path}: seed must be 64 hex characters")
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
+    if expected_did != did_of(key):
+        raise SystemExit(f"invalid identity {path}: did does not match seed")
+    return key
+
+
+def create_identity(path: Path) -> str:
+    """Create a new mode-0600 identity without exposing its seed on stdout."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    seed = secrets.token_hex(32)
+    key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
+    did = did_of(key)
+    payload = json.dumps({"version": 1, "seed": seed, "did": did}, indent=2) + "\n"
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise SystemExit(f"identity already exists: {path}") from None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        if os.name == "posix":
+            path.chmod(0o600)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return did
+
+
+def load_key(
+    seed_arg: str | None, identity_arg: str | None = None
+) -> tuple[Ed25519PrivateKey, str]:
+    """Load one Ed25519 key from an explicit seed or protected identity file."""
+    seed = seed_arg or os.environ.get("SIGN_SEED")
+    path = identity_path(identity_arg)
+    if seed is not None and path is not None:
+        raise SystemExit("choose one key source: --seed/$SIGN_SEED or --identity/$SIGN_IDENTITY")
+    if path is not None:
+        return load_identity(path), str(path)
+    if seed is None:
+        raise SystemExit(
+            "no key: pass --seed, set $SIGN_SEED, or pass --identity / set $SIGN_IDENTITY"
+        )
+    return key_from_seed(seed), "explicit seed"
 
 
 def did_of(key: Ed25519PrivateKey) -> str:
@@ -140,8 +207,14 @@ def main() -> None:
         default=argparse.SUPPRESS,
         help="64-hex-char seed, or any string (hashed with SHA-256)",
     )
+    seeded.add_argument(
+        "--identity",
+        default=argparse.SUPPRESS,
+        help="protected identity JSON created by the init command",
+    )
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], parents=[seeded])
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init", parents=[seeded], help="create a protected persistent identity")
     sub.add_parser("keygen", parents=[seeded], help="print a fresh random seed and its did:key")
     sub.add_parser("did", parents=[seeded], help="print the did:key for the seed")
     say = sub.add_parser("say", parents=[seeded], help="sign room|nonce|swept-text")
@@ -155,6 +228,18 @@ def main() -> None:
     note.add_argument("value")
     args = parser.parse_args()
 
+    seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
+    identity = getattr(args, "identity", None)
+    if args.cmd == "init":
+        if seed is not None or os.environ.get("SIGN_SEED") is not None:
+            raise SystemExit("init generates a random seed; do not pass --seed or set $SIGN_SEED")
+        path = identity_path(identity)
+        if path is None:
+            raise SystemExit("init needs --identity <path> or $SIGN_IDENTITY")
+        print(f"identity: {path}")
+        print(f"did:      {create_identity(path)}")
+        return
+
     if args.cmd == "keygen":
         seed = secrets.token_hex(32)
         key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
@@ -162,9 +247,8 @@ def main() -> None:
         print(f"did:  {did_of(key)}")
         return
 
-    seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
     if args.cmd == "did":
-        key, _ = load_key(seed)
+        key, _ = load_key(seed, identity)
         print(did_of(key))
         return
 
@@ -178,7 +262,7 @@ def main() -> None:
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
-    key, _ = load_key(seed)
+    key, _ = load_key(seed, identity)
     print(did_of(key))
     print(signature(key, canonical))
 
