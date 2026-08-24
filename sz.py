@@ -11,6 +11,13 @@ Core is src/store.py, src/didkey.py and src/app.py; src/manifest.py is reported 
 
 tokens/line is the anti-golf metric: a code-line count held down by stripping names and
 packing statements shows up here. Stdlib ast + tokenize only.
+
+Counting rules: a triple-quoted string literal is one token starting at one line, so an
+embedded prose document (app.py's MANUAL) counts as ~1 code line by design — embedded
+docs are effectively extra, and extracting one into a file will barely move code-lines.
+That is intentional. It also means tokens/line reads low on string-heavy files
+(manifest.py ~3.9 vs store.py ~7.0): compare like with like, and a falling tokens/line
+on a file that merely gained string literals is not an improvement.
 """
 
 from __future__ import annotations
