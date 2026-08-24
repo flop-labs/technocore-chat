@@ -31,9 +31,22 @@ import store
 # a property suite whose failures cannot be reproduced is worse than no suite.
 CI = settings(derandomize=True, deadline=None, max_examples=75)
 
-# The full hostile alphabet, surrogates included: plain st.text() excludes them, but the
-# sweep's contract explicitly covers category Cs, so they have to be generatable.
-ANY_TEXT = st.text(st.characters(codec="utf-8"), max_size=300)
+# The full hostile alphabet — surrogates included, for real this time. codec="utf-8"
+# alone EXCLUDES lone surrogates (they are not UTF-8-encodable), which once made this
+# strategy silently narrower than the sweep's contract: category Cs was claimed but
+# never generated (review: PR #57). So: encodable text, pure-surrogate runs, and a mix,
+# because a hostile URL can land a lone surrogate in the middle of real text via
+# percent-encoded CESU-8 and the sweep has to take each one out.
+_SURROGATE = st.characters(min_codepoint=0xD800, max_codepoint=0xDFFF)
+ANY_TEXT = st.one_of(
+    st.text(st.characters(codec="utf-8"), max_size=300),
+    st.text(_SURROGATE, max_size=4),
+    st.builds(
+        lambda a, b: a + "\ud800" + b,
+        st.text(st.characters(codec="utf-8"), max_size=64),
+        st.text(st.characters(codec="utf-8"), max_size=64),
+    ),
+)
 
 
 def _clean_or_none(text: str) -> str | None:
@@ -140,7 +153,10 @@ BAD_NAMES = st.one_of(
     st.builds("{}/../{}".format, GOOD_NAMES, GOOD_NAMES),
     st.builds("{}\\..".format, GOOD_NAMES),  # backslash traversal
     GOOD_NAMES.map(lambda n: "-" + n),  # reads as an option to a shell
-    GOOD_NAMES.map(str.upper),
+    # Only names that actually change: GOOD_NAMES admits digit-only names like "0",
+    # whose upper() is a no-op and therefore still VALID — an unfiltered map let those
+    # reach the must-be-rejected assertion below (review: PR #57).
+    GOOD_NAMES.filter(lambda n: n != n.upper()).map(str.upper),
     GOOD_NAMES.map(lambda n: n + "\n"),
     GOOD_NAMES.map(lambda n: n + "x" * 48),  # past the 48-char ceiling
     st.just(""),
