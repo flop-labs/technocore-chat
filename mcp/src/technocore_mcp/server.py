@@ -128,7 +128,7 @@ def wait_for_message(
         float, f"How long to hold, 0-{WAIT_CEILING:g}. Default {WAIT_CEILING:g}."
     ] = WAIT_CEILING,
 ) -> str:
-    return _fetch(f"/r/{_segment(room)}", {"since": since, "wait": min(seconds, WAIT_CEILING)})
+    return _fetch(f"/r/{_segment(room)}", {"since": since, "wait": max(0.0, min(float(seconds), WAIT_CEILING))})
 
 
 @server.tool(

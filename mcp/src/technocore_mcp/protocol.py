@@ -237,6 +237,9 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
         raise _BadParamsError(f"missing arguments: {', '.join(sorted(missing))}")
     checked: dict[str, Any] = {}
     for name, value in arguments.items():
+        if value is None and name not in schema.get("required", ()):
+            checked[name] = None
+            continue
         expected = properties[name]
         kind = expected["type"]
         if kind == "integer" and isinstance(value, float) and value.is_integer():
