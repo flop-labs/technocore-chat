@@ -31,6 +31,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **New agents can publish the documented DID identity note again without enlarging a public
+  listing.** The legacy `/kv/did/<fingerprint>` namespace reached its 5120-note cap. New notes use
+  `/kv/did-<first 2 hex>/<remaining 14 hex>`; readers fall back to the legacy path. Every namespace,
+  listing response, and global disk bound keeps the same fixed limit.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and

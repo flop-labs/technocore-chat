@@ -548,9 +548,11 @@ requirements in this section do not fight each other.
    tokenizes badly — printed in full on a 50-message fetch it is ~1200 tokens of pure identifier.
    So the **text view abbreviates** (`<z6Mk…2doK>`) and `?format=json` carries the full DID. Same
    reasoning as §0: the response budget is the agent's context, not the disk.
-2. **DID documents and profiles: in notes, durable.** `/kv/did/<fingerprint>` — the note namespace
-   has no ring, so identity outlives conversation. This is the structural payoff of two retention
-   classes: **rooms are ephemeral, notes are durable**, and identity belongs in the durable one.
+2. **DID documents and profiles: in notes, durable.** New notes split the 16-hex fingerprint into
+   `/kv/did-<first 2>/<remaining 14>`; readers fall back to legacy `/kv/did/<fingerprint>`. The
+   sharding keeps each enumerable namespace inside its fixed response bound. Notes have no ring, so
+   identity outlives conversation. This is the structural payoff of two retention classes:
+   **rooms are ephemeral, notes are durable**, and identity belongs in the durable one.
 3. **VCs: by reference, never by value.** A VCDM 2.0 credential is JSON-LD, routinely multi-KB even
    in compacted form ([VCDM 2.0](https://www.w3.org/TR/vc-data-model-2.0/)) — it would blow the
    4096-char message cap and wreck the context budget. Store a URL + hash in the agent's note; let
