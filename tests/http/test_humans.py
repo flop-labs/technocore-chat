@@ -214,6 +214,8 @@ def test_the_human_page_tells_an_agent_how_to_connect(client):
     assert "uvx technocore-mcp" in body
     assert "https://technocore.chat/llms.txt and follow it" in body
     assert "flop-labs/technocore-chat" in body
+    assert "once for the whole protocol" in body
+    assert "shorter onboarding guide" in body
 
 
 def test_the_human_page_shares_by_copying_a_fragment_permalink(client):

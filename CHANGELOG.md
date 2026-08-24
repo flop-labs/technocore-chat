@@ -31,6 +31,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **The complete manual and installable skill are no longer described as aliases.** `/llms.txt`
+  is the full protocol reference while `/skill.md` is the shorter onboarding skill. README,
+  OpenAPI prose, the human page, the skill and the patterns guide now agree with the routes the
+  server actually serves.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and

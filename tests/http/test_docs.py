@@ -110,13 +110,14 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     assert client.get("/r/lobby").headers["x-robots-tag"] == "noindex"
 
 
-def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
+def test_skill_md_matches_the_installable_file_and_is_never_rate_limited(client, monkeypatch):
     import config
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
     # installs and the skill it fetches can never drift.
     skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
     assert client.get("/skill.md").text == skill
+    assert client.get("/skill.md").text != client.get("/llms.txt").text
     assert client.get("/skill.md").headers["content-type"].startswith("text/plain")
     assert "/llms.txt" in client.get("/skill.md").text  # points at the full reference
     with config.override(RATE_READ=1):
