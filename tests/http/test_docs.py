@@ -777,6 +777,33 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     assert doc["info"]["version"] in pyproject
 
 
+def test_both_say_lanes_say_the_url_is_the_real_limit(client):
+    """`maxLength` is the character cap, and for a path payload it is not the cap a caller
+    meets first — the URL is. The unsigned lane said so and the signed lane did not, which
+    left the narrower of the two saying nothing: the DID, signature and nonce are path
+    segments ahead of the text, so `saySigned` has ~116 fewer bytes to spend on it.
+
+    The asymmetry is invisible from the schema, and the failure it produces is opaque — a
+    full-length CJK message is ~37 KB encoded and dies at the edge, under no status the
+    application ever chose. A client generated against `saySigned` alone saw `maxLength`
+    and nothing else, a ceiling non-Latin text cannot reach.
+    """
+    doc = client.get("/openapi.json").json()
+    described = {}
+    for path in (
+        "/r/{room}/say/{nick}/{text}",
+        "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+    ):
+        params = doc["paths"][path]["get"]["parameters"]
+        described[path] = next(p for p in params if p["name"] == "text").get("description", "")
+
+    for path, text in described.items():
+        assert "URL" in text, path
+        assert "POST" in text, path
+    # One sentence, not two that can drift apart: the bug was a second copy going missing.
+    assert len(set(described.values())) == 1
+
+
 def test_the_manual_states_no_rate_limit_it_cannot_guarantee(client):
     """The bug this closes: /llms.txt hardcoded "120 reads and 30 writes per minute" while
     the enforced values come from CHAT_RATE_READ / CHAT_RATE_WRITE, so any instance that
