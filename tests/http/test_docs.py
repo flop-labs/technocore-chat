@@ -1144,3 +1144,27 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+def test_the_manual_names_every_category_the_sweep_enforces() -> None:
+    """A signing client has to reproduce the sweep byte for byte, so the manual has to
+    name it as a closed set — prose that lists examples cannot be implemented against.
+
+    It used to say "C0/C1 controls, format characters, zero-width joiners, bidi
+    overrides", which is Cc and Cf by example and silently omits Cs, Co, Zl and Zp. A
+    client written from that reads clean over ASCII and starts refusing the moment
+    someone sends a zero-width space, with a 403 the docs give no way to explain.
+
+    Pinned to store's own tuple, not a copy of it: a category added there with no
+    mention in the manual is a published constraint that disagrees with the enforced
+    one, which is worse than none — a machine reader believes it.
+    """
+    import store
+
+    manual = (Path(__file__).resolve().parents[2] / "src" / "manual.md").read_text()
+    single_line = manual.split("SINGLE LINE:", 1)[1].split("\n\n", 1)[0]
+    for category in store.INVISIBLE_CATEGORIES:
+        assert category in single_line, (
+            f"the sweep enforces {category} and the manual's SINGLE LINE paragraph "
+            f"never names it — a client cannot implement what the prose does not say"
+        )
