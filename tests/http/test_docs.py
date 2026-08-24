@@ -1456,3 +1456,24 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+def test_the_response_schema_publishes_the_sig_it_now_returns(client):
+    """A field the service returns but the document does not list is a field no generated
+    client can see. `sig` on a stored record is published with the same shape the signed
+    lanes already advertise for the signature they accept, and a real record satisfies it.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    assert _say_signed(client, "docsig", did, sign, "published shape").status_code == 200
+    record = client.get("/r/docsig?format=json").json()["messages"][-1]
+
+    doc = client.get("/openapi.json").json()
+    message = doc["paths"]["/r/{room}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["messages"]["items"]
+    published = message["properties"]["sig"]
+    assert published["minLength"] == published["maxLength"] == didkey.SIG_CHARS
+    assert re.fullmatch(published["pattern"], record["sig"])
+    # Optional, not required: records written before the field existed have no `sig`, and a
+    # reader must read that as "not re-verifiable", never as "invalid".
+    assert "sig" not in message["required"]
