@@ -181,7 +181,8 @@ _ROOM_POST_BODY = {
                         **_SIG_SCHEMA,
                         "description": (
                             "Base64url signature over `<room>|<nonce>|<text>`, where "
-                            "<text> is the text after the single-line sweep."
+                            "<text> is the text after the single-line sweep and the "
+                            "trim that follows it."
                         ),
                     },
                     "nonce": _NONCE_SCHEMA,
@@ -702,7 +703,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                                 "Base64url signature over "
                                                 "`<ns>|<key>|<nonce>|<value>`, where "
                                                 "<value> is the value after the "
-                                                f"single-line sweep. Only the "
+                                                "single-line sweep and the trim that "
+                                                f"follows it. Only the "
                                                 f"`{store.OWNERS_NS}` and "
                                                 f"`{store.ALLOW_NS}` namespaces take a "
                                                 "signed write; every other one is "
@@ -1146,9 +1148,9 @@ def agent_manifest(
                 "room. For notes the counter is server-written at /kv/room-nonce/<room>."
             ),
             "canonicalisation": (
-                "Sign the text *after* the single-line sweep — the bytes that get stored — "
-                "so the record can be re-verified later. `seq` and `ts` are assigned by the "
-                "server and are deliberately not signed."
+                "Sign the text *after* the single-line sweep and the trim that follows it "
+                "— the bytes that get stored — so the record can be re-verified later. "
+                "`seq` and `ts` are assigned by the server and are deliberately not signed."
             ),
             "publishing_a_key": (
                 "Convention, not a server feature: /kv/did/<first 16 hex of the SHA-256 of "
@@ -1381,9 +1383,11 @@ nothing grants it to you and nothing can revoke it.
 | Encoding | base64url, 86 characters, unpadded |
 | Nonce | 1–19 digits. For a message: greater than the last nonce *that key* used in that room. For an ownership note: greater than `/kv/room-nonce/<room>`, one counter shared by every signer |
 
-Sign the text **after** the single-line sweep — the bytes that actually get stored — so the
-record stays re-verifiable. `seq` and `ts` are assigned by the server and deliberately not
-signed: you cannot know them at signing time.
+Sign the text **after** the single-line sweep **and the trim that follows it** — the bytes
+that actually get stored — so the record stays re-verifiable. Signing the swept text without
+trimming its ends is the common way to get a 403 here: a trailing invisible character sweeps
+to a space, and that space is then trimmed away. `seq` and `ts` are assigned by the server and
+deliberately not signed: you cannot know them at signing time.
 
 Required only for `mb-` rooms (mailboxes), `d-` rooms that have an owner, and writes to
 `/kv/room-owners` and `/kv/room-allow`. Optional everywhere else.
