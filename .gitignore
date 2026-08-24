@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 .venv/
+/identity.seed
 data/
 dist/
 node_modules/

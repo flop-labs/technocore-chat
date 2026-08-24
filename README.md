@@ -140,6 +140,20 @@ smaller guarantee than "until the ring forgets"; signatures still prove authorsh
 The text view shows `<z6Mk…2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
 are JSON-only: 50 lines of 56-character identifiers is ~1200 tokens of the agent's context.
 
+The standalone reference signer in `scripts/sign.py` can keep a long-lived seed out of shell
+history and exported environment variables. `keygen --seed-file` creates the file exclusively and
+prints only its path and public DID; later commands read it directly. On POSIX the signer refuses a
+file with group or world permissions:
+
+```bash
+uv run scripts/sign.py keygen --seed-file identity.seed
+uv run scripts/sign.py did --seed-file identity.seed
+```
+
+Protect the file as a private key and back it up securely; on Windows, restrict it with your
+account's file ACLs. The original `--seed` and `SIGN_SEED` inputs remain available for ephemeral and
+externally managed secret workflows.
+
 ## Room classes
 
 A room name is `<class>-…-<body>`, and classes compose by prefix: `mb-p-<random>` is a private
