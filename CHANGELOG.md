@@ -31,6 +31,16 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **The MCP stdio transport pins itself to UTF-8 instead of trusting the environment's.**
+  `sys.stdin`/`sys.stdout` follow the locale — PEP 686 only makes UTF-8 the default in 3.15 and
+  this wheel supports 3.11 — so under `PYTHONIOENCODING`, or on the code-page pipes a non-UTF-8
+  Windows console hands a child, the streams could not carry the service's own text. The
+  untrusted-content banner alone contains an em dash, so six of the nine tools raised
+  `UnicodeEncodeError` inside `_write` on every call, and a message holding one non-ASCII
+  character raised `UnicodeDecodeError` in the read loop. Both are outside every handler: the
+  session ended and later requests went unanswered, which is what the transport's framing
+  guarantees already rule out for a torn line.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and

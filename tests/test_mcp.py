@@ -600,6 +600,105 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def _ascii_stdio(payload: str = "") -> tuple[io.TextIOWrapper, io.TextIOWrapper, io.BytesIO]:
+    """The stdio pair a client on a non-UTF-8 locale hands this process.
+
+    `PYTHONIOENCODING=ascii` produces exactly this, and so does a Windows console whose code
+    page is not UTF-8: the pipes a child gets are decoded and encoded with it. Real
+    TextIOWrappers rather than StringIO, because the encoding is the whole subject and
+    StringIO has none.
+    """
+    written = io.BytesIO()
+    stdin = io.TextIOWrapper(io.BytesIO(payload.encode("utf-8")), encoding="ascii")
+    stdout = io.TextIOWrapper(written, encoding="ascii", write_through=True)
+    return stdin, stdout, written
+
+
+def test_a_room_that_is_not_ascii_does_not_kill_the_session(mcp):
+    """Reading a room with an emoji in it must not take the transport down.
+
+    `_write` serialises with `ensure_ascii=False`, so a message body reaches `stdout.write`
+    as the characters it holds. On a stdout that cannot encode them that raises outside
+    every handler, and the session is gone — the same loss
+    `test_malformed_json_does_not_kill_the_session` rules out for a torn line, reached here
+    through ordinary content that any stranger can put in a public room.
+    """
+    server, _ = mcp
+    assert "1" in text_of(call(server, "say", {"room": "lobby", "text": "café 🐱 猫", "nick": "a"}))
+
+    stdin, stdout, written = _ascii_stdio(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "read_room", "arguments": {"room": "lobby"}},
+            }
+        )
+        + "\n"
+        + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        + "\n"
+    )
+    server.serve(stdin, stdout)
+
+    replies = [json.loads(line) for line in written.getvalue().decode("utf-8").splitlines()]
+    assert [reply["id"] for reply in replies] == [1, 2]  # the ping proves the loop survived
+    assert "café 🐱 猫" in replies[0]["result"]["content"][0]["text"]
+
+
+def test_a_message_that_is_not_ascii_does_not_kill_the_session(mcp):
+    """The read half of the same defect: the emoji is in the request, not the reply.
+
+    A stdin that cannot decode it raises in the `for line in stdin` that drives the loop,
+    before any framing check can answer, so the client loses the session for sending a
+    message the service accepts and stores.
+    """
+    server, _ = mcp
+    stdin, stdout, written = _ascii_stdio(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "say",
+                    "arguments": {"room": "lobby", "text": "café 🐱 猫", "nick": "a"},
+                },
+            }
+        )
+        + "\n"
+        + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        + "\n"
+    )
+    server.serve(stdin, stdout)
+
+    replies = [json.loads(line) for line in written.getvalue().decode("utf-8").splitlines()]
+    assert [reply["id"] for reply in replies] == [1, 2]
+    assert replies[0]["result"]["isError"] is False
+    # stored as sent, not as mojibake: the fix pins the encoding, it does not drop characters
+    assert "café 🐱 猫" in text_of(call(server, "read_room", {"room": "lobby"}, ident=3))
+
+
+def test_pinning_the_encoding_never_raises_on_its_own(mcp):
+    """The repair must not become the failure. reconfigure() refuses to run once a stream has
+    been read from, so a stream already UTF-8 is left untouched rather than re-set, and one
+    that cannot be corrected is left as it was — no worse off than before the attempt."""
+    _, protocol = mcp
+
+    def read_from(encoding: str) -> io.TextIOWrapper:
+        stream = io.TextIOWrapper(io.BytesIO(b"{}\n{}\n"), encoding=encoding)
+        stream.readline()  # a caller that peeked; reconfigure would now raise
+        return stream
+
+    already = read_from("utf-8")
+    protocol._as_utf8(already)  # skipped before reconfigure is reached
+    assert already.encoding == "utf-8"
+
+    uncorrectable = read_from("ascii")
+    protocol._as_utf8(uncorrectable)  # reconfigure raises here and is swallowed
+    assert uncorrectable.encoding == "ascii"
+
+
 # ------------------------------------------------------------------ packaging
 
 

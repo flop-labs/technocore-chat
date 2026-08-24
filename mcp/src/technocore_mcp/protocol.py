@@ -20,6 +20,7 @@ advertises and what `tools/call` enforces cannot disagree with what the handler 
 
 from __future__ import annotations
 
+import codecs
 import inspect
 import json
 import sys
@@ -370,6 +371,8 @@ class Server:
         """
         stdin = stdin or sys.stdin
         stdout = stdout or sys.stdout
+        _as_utf8(stdin)
+        _as_utf8(stdout)
         for line in stdin:
             line = line.strip()
             if not line:
@@ -418,6 +421,38 @@ def _ok(ident: RequestId | None, result: dict[str, Any]) -> Success:
 
 def _error(ident: RequestId | None, code: int, message: str) -> Failure:
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}
+
+
+def _as_utf8(stream: TextIO) -> None:
+    """Pin a stdio stream to UTF-8, when it is a real one that is not already.
+
+    MCP's stdio transport is UTF-8 by definition; `sys.stdin` and `sys.stdout` are whatever
+    the environment made them. PEP 686 only makes UTF-8 the default in 3.15 and this wheel
+    supports 3.11, so a client that exports PYTHONIOENCODING — or hands this process the
+    code-page pipes a non-UTF-8 Windows console gives a child — gets streams that cannot
+    carry the service's own content. A room holding one emoji then raises UnicodeEncodeError
+    inside `_write`, and a message carrying one raises UnicodeDecodeError inside the read
+    loop. Both are outside every handler, so the loop is gone and every later request goes
+    unanswered — the failure `test_malformed_json_does_not_kill_the_session` already rules
+    out for a torn line, arriving instead through ordinary content.
+
+    `errors="replace"` is for the read half: bytes that are not UTF-8 are a client framing
+    bug, and U+FFFD reaching `json.loads` answers it with the PARSE_ERROR that says so
+    rather than taking the session down. Nothing can trigger it on the write half, where
+    every `str` encodes.
+
+    A stream already UTF-8 is left alone. reconfigure() refuses to run once a stream has
+    been read from, and the common case must not be the one that raises.
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    encoding = getattr(stream, "encoding", None)
+    if reconfigure is None or encoding is None:
+        return  # the StringIO the tests inject: no encoding to correct
+    try:
+        if codecs.lookup(encoding).name != "utf-8":
+            reconfigure(encoding="utf-8", errors="replace")
+    except (LookupError, ValueError):
+        pass  # an unknown encoding name, or a stream already read from: no worse off
 
 
 def _write(stdout: TextIO, message: Reply | list[Reply]) -> None:
