@@ -217,8 +217,7 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "
-        f"(refills {refill_rate(per_min)}; the rate-limit response states the wait, "
-        f"and the full limits are "
+        f"(refills {refill_rate(per_min)}; rate-limit responses state the wait; full limits are "
         f"in /.well-known/agent.json)"
     )
 
