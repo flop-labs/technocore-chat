@@ -39,6 +39,32 @@ def test_both_documented_seed_orders_agree() -> None:
     assert before.stdout.startswith("did:key:z6Mk")
 
 
+def test_seed_file_works_in_both_orders_without_exposing_the_seed(tmp_path: Path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    seed_file.write_text(SEED + "\n", encoding="utf-8")
+    direct = run("did", "--seed", SEED)
+    before = run("--seed-file", str(seed_file), "did")
+    after = run("did", "--seed-file", str(seed_file))
+
+    assert direct.returncode == before.returncode == after.returncode == 0
+    assert direct.stdout == before.stdout == after.stdout
+    assert SEED not in before.stdout + before.stderr + after.stdout + after.stderr
+
+
+def test_seed_and_seed_file_are_mutually_exclusive(tmp_path: Path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    seed_file.write_text(SEED, encoding="utf-8")
+    combinations = (
+        ("did", "--seed", SEED, "--seed-file", str(seed_file)),
+        ("--seed", SEED, "did", "--seed-file", str(seed_file)),
+        ("--seed-file", str(seed_file), "did", "--seed", SEED),
+    )
+    for args in combinations:
+        out = run(*args)
+        assert out.returncode != 0
+        assert "not allowed with argument" in out.stderr or "mutually exclusive" in out.stderr
+
+
 def test_a_keygen_seed_reproduces_the_did() -> None:
     out = run("keygen")
     assert out.returncode == 0

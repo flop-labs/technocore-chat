@@ -20,6 +20,9 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
+- `scripts/sign.py --seed-file PATH` reads a hex seed or passphrase from a UTF-8 file so a
+  reusable signing identity does not have to appear in process arguments or shell history.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run

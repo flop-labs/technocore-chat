@@ -20,16 +20,19 @@ Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. Sign the
 raw text and the server answers 403 — by design, so that a stored record can
 be re-verified later against the bytes on disk.
 
-Key material comes from --seed or $SIGN_SEED:
+Key material comes from --seed, --seed-file or $SIGN_SEED:
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
   * anything else       -> SHA-256 of it (so a passphrase works; weaker than
                            randomness, fine for a demo, not for a identity you
                            care about)
+  * --seed-file PATH    -> reads either form from a UTF-8 file, keeping it out
+                           of process arguments and shell history
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
 Usage:
   uv run scripts/sign.py keygen
   uv run scripts/sign.py did   [--seed HEX|PASSPHRASE]
+  uv run scripts/sign.py did   [--seed-file PATH]
   uv run scripts/sign.py say   [--seed ...] <room> <nonce> <text>
   uv run scripts/sign.py set   [--seed ...] <ns> <key> <nonce> <value>
 
@@ -53,6 +56,7 @@ import os
 import re
 import secrets
 import unicodedata
+from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -100,18 +104,31 @@ def multibase(raw: bytes) -> str:
     return out
 
 
-def load_key(seed_arg: str | None) -> tuple[Ed25519PrivateKey, str]:
-    """The Ed25519 key for --seed / $SIGN_SEED, plus a human-readable provenance."""
-    given = seed_arg or os.environ.get("SIGN_SEED")
-    if given is None:
-        raise SystemExit("no key: pass --seed <hex|passphrase> or set $SIGN_SEED")
+def load_key(seed_arg: str | None, seed_file: str | None = None) -> tuple[Ed25519PrivateKey, str]:
+    """The Ed25519 key for --seed / --seed-file / $SIGN_SEED, plus its provenance."""
+    if seed_file is not None:
+        path = Path(seed_file)
+        try:
+            given = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise SystemExit(f"cannot read --seed-file {path}: {exc}") from exc
+        if not given:
+            raise SystemExit(f"--seed-file {path} is empty")
+        provenance = str(path)
+    else:
+        given = seed_arg or os.environ.get("SIGN_SEED")
+        if given is None:
+            raise SystemExit(
+                "no key: pass --seed <hex|passphrase>, --seed-file <path>, or set $SIGN_SEED"
+            )
+        provenance = given
     if len(given) == 64:
         try:
-            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), given
+            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), provenance
         except ValueError:
             pass  # 64 chars but not hex — fall through and hash it like any passphrase
     digest = hashlib.sha256(given.encode()).hexdigest()
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({given!r})"
+    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({provenance!r})"
 
 
 def did_of(key: Ed25519PrivateKey) -> str:
@@ -135,10 +152,16 @@ def main() -> None:
     # copy of the option re-defaults the attribute to None AFTER the top-level parse
     # already stored X, silently discarding it (review: PR #54).
     seeded = argparse.ArgumentParser(add_help=False)
-    seeded.add_argument(
+    key_source = seeded.add_mutually_exclusive_group()
+    key_source.add_argument(
         "--seed",
         default=argparse.SUPPRESS,
         help="64-hex-char seed, or any string (hashed with SHA-256)",
+    )
+    key_source.add_argument(
+        "--seed-file",
+        default=argparse.SUPPRESS,
+        help="read the hex seed or passphrase from a UTF-8 file",
     )
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], parents=[seeded])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -154,6 +177,10 @@ def main() -> None:
     note.add_argument("nonce")
     note.add_argument("value")
     args = parser.parse_args()
+    seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
+    seed_file = getattr(args, "seed_file", None)
+    if seed is not None and seed_file is not None:
+        parser.error("--seed and --seed-file are mutually exclusive")
 
     if args.cmd == "keygen":
         seed = secrets.token_hex(32)
@@ -162,9 +189,8 @@ def main() -> None:
         print(f"did:  {did_of(key)}")
         return
 
-    seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
     if args.cmd == "did":
-        key, _ = load_key(seed)
+        key, _ = load_key(seed, seed_file)
         print(did_of(key))
         return
 
@@ -178,7 +204,7 @@ def main() -> None:
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
-    key, _ = load_key(seed)
+    key, _ = load_key(seed, seed_file)
     print(did_of(key))
     print(signature(key, canonical))
 
