@@ -1149,3 +1149,11 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+def test_public_base_rejects_out_of_range_ports():
+    import manifest
+
+    assert manifest.public_base("https", "example.com:65535") == "https://example.com:65535"
+    assert manifest.public_base("https", "example.com:65536") == ""
+    assert manifest.public_base("https", "example.com:99999") == ""
