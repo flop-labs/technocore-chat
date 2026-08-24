@@ -18,10 +18,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "mcp" / "src"))
 
-before = set(sys.modules)
-
 
 def _pulled_by(module: str) -> list[str]:
+    # Drop any earlier import (tests/test_mcp.py may have run first), so the measurement
+    # is this import's own footprint no matter where in the suite this file lands.
+    for name in [m for m in sys.modules if m.split(".")[0] == "technocore_mcp"]:
+        del sys.modules[name]
+    before = set(sys.modules)
     importlib.import_module(module)
     return sorted(set(sys.modules) - before)
 
@@ -38,11 +41,11 @@ def test_the_wrapper_imports_only_stdlib_and_itself():
 
 
 def test_the_wrapper_pulls_in_no_third_party_transitively():
-    # The first test covers names the import brought in; this one watches the interpreter
-    # state, so a transitive pull is caught even when it hides under an allowed root.
-    import technocore_mcp.protocol  # noqa: F401
-    import technocore_mcp.server  # noqa: F401
+    # The first test covers names the import brought in; this one re-imports via the
+    # server module and watches the interpreter state, so a transitive pull is caught
+    # even when it hides under an allowed root.
+    pulled = _pulled_by("technocore_mcp.server")
 
-    roots = {name.split(".")[0] for name in set(sys.modules) - before}
+    roots = {name.split(".")[0] for name in pulled}
     foreign = sorted(roots - {"technocore_mcp"} - set(sys.stdlib_module_names))
     assert not foreign, f"third-party modules imported: {sorted(foreign)}"
