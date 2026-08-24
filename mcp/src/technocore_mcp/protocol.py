@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import math
 import sys
 import types
 from collections.abc import Callable
@@ -147,8 +148,12 @@ _CHECKS: dict[str, Callable[[Any], bool]] = {
     "boolean": lambda value: isinstance(value, bool),
     "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
     # JSON has one number type, so an integer is a number and `seconds: 0` is valid. A bool
-    # is not a number here for the same reason it is not an id.
-    "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+    # is not a number here for the same reason it is not an id. JSON also has no spelling
+    # for non-finite floats, even though Python's decoder accepts them by default.
+    "number": lambda value: (
+        (isinstance(value, int) and not isinstance(value, bool))
+        or (isinstance(value, float) and math.isfinite(value))
+    ),
 }
 
 
@@ -362,6 +367,11 @@ class Server:
 
     # ------------------------------------------------------------------ transport
 
+    @staticmethod
+    def _reject_json_constant(value: str) -> None:
+        """Keep Python's permissive decoder inside JSON's actual number grammar."""
+        raise json.JSONDecodeError(f"{value} is not permitted in JSON", value, 0)
+
     def serve(self, stdin: TextIO | None = None, stdout: TextIO | None = None) -> None:
         """Newline-delimited JSON-RPC on stdio, the transport every MCP client supports.
 
@@ -375,7 +385,7 @@ class Server:
             if not line:
                 continue
             try:
-                message = json.loads(line)
+                message = json.loads(line, parse_constant=self._reject_json_constant)
             except json.JSONDecodeError as exc:
                 _write(stdout, _error(None, PARSE_ERROR, f"invalid JSON: {exc}"))
                 continue

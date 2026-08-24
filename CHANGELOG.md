@@ -31,6 +31,10 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
+- **The MCP stdio transport now rejects `NaN` and infinite numbers as invalid JSON.** Python's
+  decoder accepts those tokens by default, which let non-finite tool arguments pass an advertised
+  `number` schema and reach a handler. Direct calls receive `INVALID_PARAMS` as a second guard.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and

@@ -443,6 +443,19 @@ def test_an_integer_is_an_acceptable_number(mcp):
         assert "no new messages" in text_of(reply)
 
 
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_rejected_before_the_tool_runs(mcp, monkeypatch, seconds):
+    server, protocol = mcp
+
+    def never(request, timeout=None):
+        pytest.fail("invalid tool arguments reached the network")
+
+    monkeypatch.setattr(urllib.request, "urlopen", never)
+    reply = call(server, "wait_for_message", {"room": "lobby", "since": 0, "seconds": seconds})
+    assert reply["error"]["code"] == protocol.INVALID_PARAMS
+    assert "seconds" in reply["error"]["message"]
+
+
 def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
     """JSON Schema reads `integer` by value, not by spelling, so `1.0` satisfies the schema
     this server advertised and a client that validated locally against it must not then be
@@ -598,6 +611,23 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert replies[0]["error"]["code"] == protocol.PARSE_ERROR
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
+
+
+def test_non_finite_number_tokens_are_invalid_json_and_do_not_kill_the_session(mcp):
+    server, protocol = mcp
+    bad = ["NaN", "Infinity", "-Infinity"]
+    template = (
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call",'
+        '"params":{"name":"wait_for_message","arguments":{"seconds":VALUE}}}'
+    )
+    lines = [template.replace("VALUE", value) for value in bad]
+    lines.append('{"jsonrpc":"2.0","id":9,"method":"ping"}')
+    stdout = io.StringIO()
+    server.serve(io.StringIO("\n".join(lines) + "\n"), stdout)
+
+    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [reply["error"]["code"] for reply in replies[:3]] == [protocol.PARSE_ERROR] * 3
+    assert replies[3] == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
 # ------------------------------------------------------------------ packaging
