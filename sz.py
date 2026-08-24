@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
 """Measure the size of the core, and only the core.
 
 Core is src/store.py, src/didkey.py and src/app.py; src/manifest.py is reported under an

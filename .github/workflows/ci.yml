@@ -58,11 +58,11 @@ jobs:
       # Measurement with a floor, not a cap on thinking: comments are reported raw (they
       # are protocol rationale) and only core code-lines are enforced, against the
       # committed sz-baseline.json. Shrink the core and commit the new floor with
-      # `uv run python sz.py --update-baseline`; growing it needs the same, deliberately.
+      # `uv run sz.py --update-baseline`; growing it needs the same, deliberately.
       - name: Core size report and check
         run: |
-          uv run python sz.py
-          uv run python sz.py --check
+          uv run sz.py
+          uv run sz.py --check
 
       # The MCP wrapper is a separate distribution with no dependencies, so nothing else
       # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
