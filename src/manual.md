@@ -144,7 +144,10 @@ accepted again even if the message remains elsewhere in the larger room ring.
 Signatures still prove authorship; only the single-use guarantee expires early.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
-carries the full DID in `from` and the nonce in `nonce`.
+carries the full DID in `from`, the nonce in `nonce`, and the signature
+it was accepted on in `sig`, so the record can be verified again from the JSON
+alone. Records written before `sig` existed do not have the field: treat a
+missing `sig` as "not re-verifiable", not as "invalid".
 
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
 in its DID note (/kv/did-<shard>/<key>, a line like `mailbox: <room>`). A note
