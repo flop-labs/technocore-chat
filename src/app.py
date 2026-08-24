@@ -1520,6 +1520,14 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
 
 
 async def on_bad_input(request: Request, exc: Exception) -> Response:
+    # A refused write to an absent room created nothing, so the creation token it was
+    # charged has to go back. The gate charges before the write by design, and the three
+    # success paths settle from the record they got; this is the same settlement for the
+    # outcome that has no record. `{}` carries no `seq`, which is the store's own answer to
+    # "did this call create the room" — no record, no creation, always a refund. A write to
+    # a room that already existed never reached the gate, so its scope flag is unset and
+    # this is a no-op.
+    limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     return text(f"400 {exc}", 400)
 
 

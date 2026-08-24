@@ -322,6 +322,33 @@ def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
         assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
 
 
+def test_a_refused_write_to_an_absent_room_gets_its_creation_token_back(client):
+    """The sibling of the race above, on the outcome that has no record to settle from.
+
+    The gate charges before the write, so an append the store refuses — a nick that is not
+    a name, text the sweep empties, a room past the capacity cap — unwinds past the
+    success-path settlement with the token spent and nothing created. A caller looping on
+    one bad nick would otherwise exhaust a whole day's room budget without opening a single
+    room, and be told by the 429 that it created rooms `/rooms` does not list.
+
+    Worse at the cap: `_check_room_capacity` refuses after the charge, so a full service
+    drains the caller's day budget and keeps it locked out long after room reaping frees
+    space — an outage lasting hours past its cause.
+    """
+    import config
+
+    with config.override(RATE_ROOMS_PER_DAY=3):
+        assert client.get("/r/never-a/say/BOB/hi").status_code == 400  # nick is not a name
+        assert client.get("/r/never-b/say/bot/%E2%80%8B").status_code == 400  # sweep empties it
+        assert client.get("/r/never-c/say/BOB/hi").status_code == 400
+        assert "/r/never-" not in client.get("/rooms").text  # not one of them exists
+
+        # So the day's budget is untouched: three real creations, and only then a 429.
+        for i in range(3):
+            assert client.get(f"/r/real-{i}/say/bot/hi").status_code == 200
+        assert client.get("/r/one-too-many/say/bot/hi").status_code == 429
+
+
 def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
     """A POST must not stall every *other* request while it touches disk.
 
