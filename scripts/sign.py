@@ -50,6 +50,7 @@ import argparse
 import base64
 import hashlib
 import os
+import re
 import secrets
 import unicodedata
 
@@ -130,8 +131,15 @@ def signature(key: Ed25519PrivateKey, message: str) -> str:
 def main() -> None:
     # --seed lives on a parent parser so it reads naturally on either side of the
     # subcommand: 'sign.py --seed X say ...' and 'sign.py say --seed X ...' both work.
+    # default=SUPPRESS is what makes that true: without it, each subparser's inherited
+    # copy of the option re-defaults the attribute to None AFTER the top-level parse
+    # already stored X, silently discarding it (review: PR #54).
     seeded = argparse.ArgumentParser(add_help=False)
-    seeded.add_argument("--seed", help="64-hex-char seed, or any string (hashed with SHA-256)")
+    seeded.add_argument(
+        "--seed",
+        default=argparse.SUPPRESS,
+        help="64-hex-char seed, or any string (hashed with SHA-256)",
+    )
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], parents=[seeded])
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("keygen", parents=[seeded], help="print a fresh random seed and its did:key")
@@ -154,19 +162,23 @@ def main() -> None:
         print(f"did:  {did_of(key)}")
         return
 
+    seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
     if args.cmd == "did":
-        key, _ = load_key(args.seed)
+        key, _ = load_key(seed)
         print(did_of(key))
         return
 
     # say/set: build the canonical string over the SWEPT text — what is stored.
-    if not args.nonce.isdigit() or not 1 <= len(args.nonce) <= 19:
-        raise SystemExit(f"nonce must be 1-19 digits, got {args.nonce!r}")
+    # ASCII digits only, exactly the server's NONCE_RE: str.isdigit() alone also
+    # accepts Unicode digits like '١', the script would sign them, and the server
+    # would then refuse a signature we told the caller was good (review: PR #54).
+    if not re.fullmatch(r"[0-9]{1,19}", args.nonce):
+        raise SystemExit(f"nonce must be 1-19 ASCII digits, got {args.nonce!r}")
     if args.cmd == "say":
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
-    key, _ = load_key(args.seed)
+    key, _ = load_key(seed)
     print(did_of(key))
     print(signature(key, canonical))
 

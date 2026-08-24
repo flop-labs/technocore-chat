@@ -37,17 +37,28 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== booting the real service on 127.0.0.1:$PORT (data: $TMP)"
-CHAT_ROOT="$TMP" uv run uvicorn --app-dir src app:app --port "$PORT" --log-level warning >"$LOG" 2>&1 &
+# The rate limits are pinned here rather than inherited: a CHAT_RATE_WRITE in the
+# caller's environment would silently change the demo's arithmetic — a higher
+# value pushes the budget footer out of reach, a lower one 429s mid-demo
+# (review: PR #54). The numbers are the server's defaults, stated.
+CHAT_ROOT="$TMP" CHAT_RATE_WRITE=30 CHAT_RATE_READ=120 \
+  uv run uvicorn --app-dir src app:app --port "$PORT" --log-level warning >"$LOG" 2>&1 &
 SRV_PID=$!
 
 # Wait for /healthz — one of the paths that is never rate limited, so it is the
 # right door to knock on repeatedly. Bounded, and it fails with the server log
 # if boot itself broke.
 BODY="$TMP/body"; CODE=""
-for _ in $(seq 1 100); do
+# A bash-native counter, not seq(1): the script promises bash-3.2/macOS-only
+# assumptions, and seq is an external binary a minimal environment may lack —
+# its absence would make the loop body run zero times and the demo die waiting
+# for a server that was already healthy (review: PR #54).
+tries=0
+while [ "$tries" -lt 100 ]; do
   if CODE=$(curl -sS -o "$BODY" -w '%{http_code}' "http://127.0.0.1:$PORT/healthz" 2>/dev/null) && [ "$CODE" = "200" ]; then
     break
   fi
+  tries=$((tries + 1))
   sleep 0.2
 done
 if [ "${CODE:-}" != "200" ]; then
@@ -172,12 +183,21 @@ ok_lacks "$PROOM" "...but the p- room is not — reachable, never enumerated"
 echo
 echo "== 9. the budget footer: pace before the wall, not at it"
 # Replies append '# budget: N of M ... left this minute' once under a quarter of
-# the bucket remains. The steps above spent write tokens; a short burst of
-# re-writes to the SAME existing room (no room-creation budget involved) brings
-# the demo under that line without ever tripping a 429 — the whole demo stays
-# inside the default 30/min burst bucket.
-for i in 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
-  get "$BASE/r/$ROOM/say/alice/budget%20probe%20$i"
+# the bucket remains. How many probes that takes DEPENDS ON TIMING: tokens refill
+# at 30/min while the demo runs, so a slow machine arrives here with more left
+# than a fast one. A fixed request count (this stage's earlier shape) could finish
+# above the line on a slow run — the probe is reactive instead: keep writing to
+# the SAME existing room (no room-creation budget involved) until the footer
+# shows, bounded well inside the 30-write burst so the wall is never touched
+# (review: PR #54).
+probe=0
+get "$BASE/r/$ROOM/say/alice/budget%20probe"
+while ! grep -qF '# budget:' "$BODY"; do
+  probe=$((probe + 1))
+  if [ "$probe" -gt 24 ]; then
+    echo "   FAIL - the budget footer never appeared"; echo "   HTTP $CODE, body:"; sed 's/^/     | /' "$BODY"; exit 1
+  fi
+  get "$BASE/r/$ROOM/say/alice/budget%20probe%20$probe"
 done
 ok_has "# budget:" "the reply now warns how many writes are left this minute"
 ok_code 200 "...as a plain 200 — the footer is pacing advice, not a rate limit"
