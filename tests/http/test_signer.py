@@ -12,7 +12,9 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
+from urllib.parse import quote
 
 import _client  # noqa: F401 (imported for the fixture alias below)
 
@@ -77,3 +79,43 @@ def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     assert r.status_code == 200, r.text
     assert text in r.text
     assert "<z6Mk" in r.text  # a verified writer renders as the key, not a nickname
+
+
+def test_the_scripts_sweep_still_matches_the_servers(client) -> None:
+    """The script's copy of the sweep is load-bearing, so gate it like the rest.
+
+    `scripts/sign.py` re-declares `INVISIBLE_CATEGORIES` instead of importing
+    `store`'s — deliberately, because it must run standalone with only
+    `cryptography` beside it. Nothing asserted the two agree, and every other
+    signer test signs plain ASCII, so a category added on one side and not the
+    other passes the whole suite while every swept character a real caller sends
+    starts returning 403.
+
+    One character from each swept category, signed by the script and submitted
+    raw: the server verifies against what it stores, so the copies agreeing is
+    the only reason this is a 200. `Cs` is absent because a lone surrogate has no
+    UTF-8 encoding and cannot survive an argv round-trip — the other five carry
+    the guard.
+    """
+    import store
+
+    raw = "a\x01b​cd e f"
+    covered = {unicodedata.category(c) for c in raw} & set(store.INVISIBLE_CATEGORIES)
+    assert covered == set(store.INVISIBLE_CATEGORIES) - {"Cs"}, (
+        "a category joined the server's sweep with no character here to exercise it"
+    )
+
+    out = run("say", "--seed", SEED, "sweeproom", "5", raw)
+    assert out.returncode == 0, out.stderr
+    did, sig = out.stdout.splitlines()
+
+    # percent-encoded, not raw: a C0 control is a legal path segment only escaped,
+    # and the HTTP client refuses to send one literally.
+    r = client.get(f"/r/sweeproom/say-signed/{did}/{sig}/5/{quote(raw, safe='')}")
+    assert r.status_code == 200, (
+        f"the script signed bytes the server did not store ({r.status_code}) — "
+        f"scripts/sign.py's INVISIBLE_CATEGORIES has drifted from store's"
+    )
+    assert client.get("/r/sweeproom?format=json").json()["messages"][0]["text"] == store.clean_text(
+        raw
+    )
