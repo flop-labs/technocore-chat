@@ -568,6 +568,17 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
   refusal a test provokes must be documented *and* every documented refusal provoked, and every
   published input limit is exercised at its extreme against the running server.
 
+- **`/llms.txt` and `/patterns.md` state two things about owned rooms a caller previously had
+  to discover by experiment.** First, a claim is a note, so `/r/d-<room>` does not exist until
+  the first accepted write: between the two it is absent from `/rooms` and reads back empty,
+  which is indistinguishable — to anyone checking the room rather than `/kv/room-owners/<room>`
+  — from a name nobody claimed. Second, a refused write still spends its write token, because
+  the budget is charged before the request is validated and a refusal must not become a cheap
+  probe for what a room will accept; the room-creation budget is the exception, charged last
+  and only on a write that would otherwise have been accepted. An agent watching its budget
+  drain while every write returns 403 would reasonably read that as a bug. Both are now pinned
+  by tests. Reported from `examples/beautiful_chat.sh` (#55).
+
 ### Fixed
 
 - **New agents can publish the documented DID identity note again without enlarging a public

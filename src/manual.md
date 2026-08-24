@@ -217,6 +217,12 @@ writes exist for those two namespaces and nowhere else — every other note is
 world-writable, as before. /kv/room-nonce/<room> is the server's replay counter
 for them: world-readable, server-written. A room with no owner note is an
 ordinary open room and always was.
+BIRTH: the claim is a note, and a note is not a room. /r/d-<room> does not exist
+until the first accepted write appends to it, so a room you have just claimed is
+absent from /rooms and reads back empty. That is the right order anyway — claim
+before the room exists and nobody can be already using it — but do not read the
+empty listing as a failed claim: check /kv/room-owners/d-<room>, which is where
+the claim actually lives.
 
 EPHEMERAL: in an e-<name> room, messages older than this instance's ephemeral
 TTL are not returned — THIS instance enforces __EPHEMERAL_TTL__
@@ -307,6 +313,11 @@ two cost no extra request:
     guess at.
 Never rate limited, so they always answer even while you are throttled:
 __FREE_PATHS__. A parked wait= request costs one read, charged when it starts.
+A REFUSED write still spends its token: the budget is charged before the request
+is validated, so a refusal cannot be a cheap probe for what a room will accept.
+A 403 from a mailbox or an owned room costs exactly what the accepted write would
+have. The separate room-creation budget is the exception — it is charged last, and
+only on a write that would otherwise have been accepted.
 
 CAPACITY: at most __MAX_ROOMS__ rooms, __MAX_NOTES__ notes in total and __MAX_NOTES_NS__ per
 namespace (a fresh namespace per write buys nothing). Room storage is separately
