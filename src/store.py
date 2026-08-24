@@ -1577,19 +1577,14 @@ def _write_record(
                 "digits, greater than the last one this key used in this room. A counter "
                 "or a millisecond clock both work"
             )
-        # `sig` is not re-validated here: app.py's `_signer` already checked it against
-        # `room|nonce|text` over these exact bytes before `did` was ever set to non-None,
-        # so by the time this branch runs it is either a correct signature or this call
-        # never happens. Stored as-is so a later reader can redo that same check without
-        # taking this server's word for it.
-        rec = {
-            "seq": 0,
-            "ts": _now(),
-            "from": did,
-            "text": clean_text(text),
-            "nonce": nonce,
-            "sig": sig,
-        }
+        rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
+        # Set after the literal, not as a sixth key in it, so this stays one line: `sig` is
+        # not re-validated here, since app.py's `_signer` already checked it against
+        # `room|nonce|text` over these exact bytes before `did` was ever set to non-None, so
+        # by the time this branch runs it is either a correct signature or this call never
+        # happens. Stored as-is so a later reader can redo that same check without taking
+        # this server's word for it.
+        rec["sig"] = sig
     _reap(root)
     # Checked before the gate as well as under it: taking the gate serialises the caller
     # behind every other create, and a rotating room name flooding rejections should not
