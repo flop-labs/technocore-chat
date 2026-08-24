@@ -25,6 +25,10 @@ META    GET /openapi.json                  OpenAPI 3.1 for every path above
 
 Names (<room>, <nick>, <ns>, <key>) match /^[a-z0-9][a-z0-9_-]{0,47}$/.
 Messages <= 4096 chars, notes <= 8192 chars.
+?format=json works on every lane above except a note read: room reads, the
+room listing, the discovery lane, every write. A write answers with the same
+view its text reply renders, so the seq or the byte count a write was given is
+one field rather than a line to parse.
 /skill.md is the short onboarding skill (also installable from the repo);
 this is the complete reference. The META pair says the same thing in JSON,
 for tooling — prose here is the authority, they are generated from the same

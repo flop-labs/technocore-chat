@@ -458,6 +458,101 @@ def test_the_spec_and_the_running_app_describe_the_same_service(client):
             )
 
 
+def test_every_lane_that_answers_json_says_so_and_describes_what_it_sends(client):
+    """`?format=json` is honoured wherever a handler calls `respond()`, and it was declared
+    on two operations out of ten.
+
+    Two failures for a machine reader, and the first hid the second. A generated client had
+    no `format` parameter on the say lanes, `/r/events`, `/kv/<ns>` or any write lane, so the
+    only way to reach JSON there was to append a query string the document does not contain.
+    And because schemathesis only generates parameters the document declares, it never sent
+    `?format=json` to a write lane and never saw that three of them answered
+    `application/json` while promising `text/plain` only.
+
+    The parameter half is derived from the app rather than from a table: whichever endpoints
+    reach `respond()` are exactly the ones that honour it, so a lane added later fails this
+    until its operation declares it. The body half needs a real request per lane, so those are
+    named below and checked against the derived set rather than replacing it.
+    """
+    import inspect
+
+    from starlette.routing import Route
+
+    import app as app_module
+
+    doc = client.get("/openapi.json").json()
+    by_id = {
+        op["operationId"]: op for operations in doc["paths"].values() for op in operations.values()
+    }
+    # Which route endpoints negotiate, read off the app. `/r/events` is documented separately
+    # from `/r/{room}` and is served by it, so the match is by route rather than by path
+    # string — the same rule test_the_spec_and_the_running_app_describe_the_same_service uses.
+    negotiating = [
+        route
+        for route in app_module.app.routes
+        if isinstance(route, Route) and "respond(" in inspect.getsource(route.endpoint)
+    ]
+    covered = set()
+    for path, operations in doc["paths"].items():
+        for method, op in operations.items():
+            if not any(
+                _spelled_for_openapi(route.path) == path or route.path_regex.match(path)
+                for route in negotiating
+                if method.upper() in (route.methods or ())
+            ):
+                continue
+            # `POST /r/events` reaches the same handler and answers 403 every time, so it
+            # has no 200 to negotiate. The carve-out is the documented one: an operation
+            # that cannot succeed is already required to say so in prose above.
+            if not any(code.startswith("2") for code in op["responses"]):
+                continue
+            covered.add(op["operationId"])
+            names = [p["name"] for p in op.get("parameters", [])]
+            assert "format" in names, (
+                f"{op['operationId']} reaches respond() and does not declare ?format=json"
+            )
+
+    did, sign = _keypair()
+    # A request that provokes each lane's JSON reply. Hand-written because each one has to be
+    # a request the server accepts, and keyed by operationId so the derived set above stays
+    # the authority: a lane that starts negotiating fails below until it has an entry here.
+    requests = {
+        "readRoom": ("/r/lobby", None),
+        "postMessage": ("/r/lobby", {"from": "a", "text": "x"}),
+        "say": ("/r/lobby/say/a/hi", None),
+        "saySigned": (f"/r/lobby/say-signed/{did}/{sign('lobby|1|signed')}/1/signed", None),
+        "discoverRooms": ("/r/events", None),
+        "listRooms": ("/rooms", None),
+        "listNotes": ("/kv/plans", None),
+        "readNote": ("/kv/plans/seeded", None),
+        "postNote": ("/kv/plans/posted", {"value": "v"}),
+        "writeNote": ("/kv/plans/written/set/v", None),
+        "writeNoteSigned": (
+            f"/kv/room-owners/d-json/set-signed/{did}/{sign(f'room-owners|d-json|1|{did}')}/1/{did}",
+            None,
+        ),
+    }
+    assert covered <= set(requests), f"no request to exercise: {sorted(covered - set(requests))}"
+
+    client.get("/kv/plans/seeded/set/seed")
+    for operation_id in sorted(covered):
+        op = by_id[operation_id]
+        target, body = requests[operation_id]
+        url = f"{target}?format=json"
+        sent = client.post(url, json=body) if body is not None else client.get(url)
+        assert sent.status_code == 200, (operation_id, sent.text[:120])
+        media = sent.headers["content-type"].split(";")[0]
+        declared = op["responses"]["200"]["content"]
+        assert media in declared, f"{operation_id} sends {media}, documents {sorted(declared)}"
+
+        # …and the schema names what the server actually put in the body. `posted` on a
+        # write and the note-write receipt are the fields a caller reaches for, and both
+        # were absent from the contract while being present in every reply.
+        schema = declared[media]["schema"]
+        missing = sorted(set(sent.json()) - set(schema.get("properties", {})))
+        assert not missing, f"{operation_id} sends undocumented fields: {missing}"
+
+
 def test_every_documented_response_declares_the_body_it_returns(client):
     """A response with no `content` tells a generated client there is nothing to show. On a
     service whose refusals *are* the documentation — the 413 names the cap, the 409 carries
