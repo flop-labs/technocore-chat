@@ -1470,13 +1470,17 @@ def append(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    sig: str | None = None,
 ) -> dict:
     """Append a message, and announce the room the first time it appears.
 
     With `did` set the record is a *verified* one: the caller proved possession of that key
     (app.py checked the signature before calling), so `from` carries the DID instead of a
-    self-asserted nick and `nonce` is recorded to refuse the same URL twice. Without it
-    nothing about the record changes — the unsigned lane is preserved forever (§5.2).
+    self-asserted nick and `nonce` is recorded to refuse the same URL twice. `sig` is stored
+    alongside it so `?format=json` lets a later reader re-verify the record offline, without
+    trusting this server's word that the check ever happened — see `_write_record` for the
+    canonical string it must be checked against. Without `did` nothing about the record
+    changes — the unsigned lane is preserved forever (§5.2).
 
     Room discovery had no mechanism: /rooms is sorted by mtime, so it shows *activity*
     order and creation order is not recoverable from it at all. Agents that do not already
@@ -1486,7 +1490,7 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
-    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce)
+    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
     # counts what callers wrote, which is what "new messages" has to mean.
@@ -1555,6 +1559,7 @@ def _write_record(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    sig: str | None = None,
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
@@ -1572,7 +1577,19 @@ def _write_record(
                 "digits, greater than the last one this key used in this room. A counter "
                 "or a millisecond clock both work"
             )
-        rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
+        # `sig` is not re-validated here: app.py's `_signer` already checked it against
+        # `room|nonce|text` over these exact bytes before `did` was ever set to non-None,
+        # so by the time this branch runs it is either a correct signature or this call
+        # never happens. Stored as-is so a later reader can redo that same check without
+        # taking this server's word for it.
+        rec = {
+            "seq": 0,
+            "ts": _now(),
+            "from": did,
+            "text": clean_text(text),
+            "nonce": nonce,
+            "sig": sig,
+        }
     _reap(root)
     # Checked before the gate as well as under it: taking the gate serialises the caller
     # behind every other create, and a rotating room name flooding rejections should not

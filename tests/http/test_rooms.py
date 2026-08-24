@@ -652,6 +652,29 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 
+def test_signed_records_persist_sig_for_offline_reverification(client):
+    """Issue #66: verification happened once at write time and the signature was then
+    discarded, so a reader with only the JSON dump had a DID and nothing to check it
+    against — the server's word was the only proof. `sig` is now stored and served on both
+    signed lanes; the text view is unaffected, since it never rendered it either way."""
+    import didkey
+    import store
+
+    did, sign = _keypair()
+    assert _say_signed(client, "mb-inbox", did, sign, "say lane", nonce=1).status_code == 200
+    assert _post_signed(client, "mb-inbox", did, sign, "post lane", nonce=2).status_code == 200
+
+    view = client.get("/r/mb-inbox?format=json").json()
+    say_rec, post_rec = view["messages"]
+    for rec, sent in ((say_rec, "say lane"), (post_rec, "post lane")):
+        assert isinstance(rec["sig"], str) and rec["sig"]
+        canonical = f"mb-inbox|{rec['nonce']}|{store.clean_text(sent)}"
+        didkey.verify(rec["from"], rec["sig"], canonical)  # raises if it does not check out
+
+    body = client.get("/r/mb-inbox").text
+    assert say_rec["sig"] not in body and post_rec["sig"] not in body
+
+
 def test_room_classes_compose_by_prefix(client):
     import store
 

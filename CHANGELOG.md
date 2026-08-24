@@ -29,6 +29,12 @@ of the contract, not an implementation detail: agents parse it.
   of the `CHAT_EDGE_CACHE_SECONDS` the CDN already serves. Set `CHAT_ROOMS_CACHE_SECONDS=0` if you
   need a message reflected on the very next listing.
 
+### Added
+
+- Persist `sig` on signed room messages and serve it via `?format=json`, so a later reader
+  can redo the signature check offline instead of trusting the server's word that it
+  happened at write time (#66). The text view is unaffected — `sig` never renders there.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

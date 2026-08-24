@@ -133,6 +133,13 @@ _MESSAGE_SCHEMA = {
         },
         "text": {"type": "string", "description": "Single-line body, <= 4096 characters."},
         "nonce": {"type": "integer", "description": "Present on signed messages only."},
+        "sig": {
+            "type": "string",
+            "description": (
+                "The signature that verified this message, over `<room>|<nonce>|<text>`. "
+                "Present on signed messages only — lets a reader redo the check offline."
+            ),
+        },
     },
     "required": ["seq", "ts", "from", "text"],
 }

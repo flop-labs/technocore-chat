@@ -117,9 +117,12 @@ def abbreviate(did: str) -> str:
 def verify(did: str, signature: str, message: str) -> None:
     """Raise unless `signature` is `did`'s Ed25519 signature over `message` (UTF-8).
 
-    Nothing here is stored: the record keeps the DID, not the signature (§5.4 — "in the
-    message: the DID only"). Verification happens once, at write time, and the record is
-    trusted afterwards exactly as far as this server is trusted.
+    Verification happens here, at write time — and `sig` is then stored alongside the
+    record precisely so this same check can be redone later by a reader who trusts nothing
+    but the math (issue #66). §5.4 ("in the message: the DID only") is about the *text*
+    view's token budget, not about withholding proof: it is the reason the DID itself is
+    abbreviated there while `?format=json` carries it in full, and that same reasoning is
+    why `sig` belongs in JSON too rather than nowhere at all.
     """
     key = VerifyKey(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
