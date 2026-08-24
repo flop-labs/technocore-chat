@@ -1,13 +1,7 @@
 """Run: uv run --group dev python -m pytest tests"""
 
-import sys
-from pathlib import Path
-
+import _client
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/, for _client
-
-import _client  # noqa: E402
 
 client = _client.client  # the shared TestClient fixture
 

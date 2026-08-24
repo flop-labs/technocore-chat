@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "src"))
 
 
 def _render() -> str:
@@ -37,7 +35,7 @@ def test_the_store_doc_matches_the_module():
 
 def test_the_store_doc_covers_every_public_function():
     committed = (ROOT / "docs" / "store.md").read_text(encoding="utf-8")
-    import store
+    import store  # resolves via the pythonpath bootstrap in pyproject.toml
 
     for name, fn in vars(store).items():
         if inspect.isfunction(fn) and fn.__module__ == "store" and not name.startswith("_"):

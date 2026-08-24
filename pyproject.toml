@@ -61,6 +61,9 @@ extra-paths = ["./src", "./mcp/src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The single source of path bootstrap for the suite — src for import app/store/didkey,
+# tests for _client — so no test file needs its own sys.path.insert.
+pythonpath = ["src", "tests"]
 
 [tool.coverage.run]
 branch = true

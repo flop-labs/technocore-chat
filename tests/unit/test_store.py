@@ -2,16 +2,11 @@
 
 import json
 import os
-import sys
 import time
 from contextlib import contextmanager
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/, for _client
-
-from _client import (  # noqa: E402
+from _client import (
     _age,
     _at,
     _race_before_lock,

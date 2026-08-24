@@ -1,12 +1,9 @@
 """Run: uv run --group dev python -m pytest tests"""
 
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tests/, for _client
-
-import _client  # noqa: E402
-from _client import (  # noqa: E402
+import _client
+from _client import (
     _age,
     _at,
     _claim,
