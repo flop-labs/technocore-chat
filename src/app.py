@@ -330,6 +330,15 @@ def _accept_ranges(accept: str) -> list[tuple[str, float]]:
     Header order is not preference — q is (RFC 9110 §12.5.1) — so the ranges have to be
     parsed rather than searched for as substrings. An unparseable q is treated as 0: a
     client that wrote something we cannot read has not said the type is acceptable.
+
+    Clamped to the 0-1 a qvalue is (§12.4.2), because `float()` is wider than the grammar:
+    it also reads `inf` and `nan`. NaN is the one that bites — every comparison against it
+    is False, so `text/markdown, text/plain;q=nan` made `markdown >= plain` in
+    _markdown_wanted False and served plain, discarding the preference the caller *did*
+    state on the other range. The clamp lands NaN on 0 (nothing to honour, so not
+    acceptable) and an over-large q on 1 (a caller writing q=2 means "most", and honouring
+    that is kinder than inverting it into a refusal). config._finite_env and _seconds guard
+    the same float() edge for the two knobs that reach them.
     """
     ranges: list[tuple[str, float]] = []
     for part in accept.lower().split(","):
@@ -339,7 +348,7 @@ def _accept_ranges(accept: str) -> list[tuple[str, float]]:
             key, _, value = param.partition("=")
             if key.strip() == "q":
                 try:
-                    q = float(value.strip())
+                    q = min(1.0, max(0.0, float(value.strip())))  # max() lands NaN on 0.0
                 except ValueError:
                     q = 0.0
         if name.strip():
