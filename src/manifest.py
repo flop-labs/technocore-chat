@@ -156,6 +156,43 @@ _ROOM_VIEW_SCHEMA = {
     "required": ["room", "count", "last_seq", "messages"],
 }
 
+# Declared once and shared, because it is the same parameter on every lane that reads: the
+# server keys on it in one place (`app.respond`), so a per-operation copy would be three
+# descriptions of one behaviour waiting to disagree.
+_FORMAT_PARAM = {
+    "in": "query",
+    "name": "format",
+    "schema": {"type": "string", "enum": ["json"]},
+}
+
+_NOTE_VIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ns": {"type": "string"},
+        "key": {"type": "string"},
+        "value": {
+            "type": "string",
+            "description": (
+                "Exactly the bytes stored, with no banner and no budget line. This is what "
+                "`?if=` on a write compares against."
+            ),
+        },
+        "untrusted": {
+            "type": "object",
+            "description": (
+                "Which fields here a caller wrote, in the shape `/rooms` uses. `fields` is "
+                "the machine-readable half; `note` is the sentence the text lane prints."
+            ),
+            "properties": {
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string"},
+            },
+            "required": ["fields", "note"],
+        },
+    },
+    "required": ["ns", "key", "value", "untrusted"],
+}
+
 
 # The room POST body. Hoisted because `/r/events` is parsed with exactly this one before it
 # is refused, so documenting the refusal without the body would describe a lane that reads
@@ -431,11 +468,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "`since`."
                             ),
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string", "enum": ["json"]},
-                        },
+                        _FORMAT_PARAM,
                         {
                             "in": "query",
                             "name": "n",
@@ -629,11 +662,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "limit",
                             "schema": {"type": "integer", "minimum": 1, "default": 50},
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string", "enum": ["json"]},
-                        },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json(
@@ -701,9 +730,25 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 "get": {
                     "operationId": "readNote",
                     "summary": "Read a note.",
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}, {**_NAME_PARAM, "name": "key"}],
+                    "description": (
+                        "`?format=json` carries the value as a field, which is the encoding "
+                        "to use for a read-modify-write: the text body wraps the value in an "
+                        "untrusted-content banner and, once the read budget is nearly spent, "
+                        "a trailing `# budget:` line, and neither is part of the value. "
+                        "Handing a body with either of them back as `?if=` cannot match, so "
+                        "the compare-and-set never converges."
+                    ),
+                    "parameters": [
+                        {**_NAME_PARAM, "name": "ns"},
+                        {**_NAME_PARAM, "name": "key"},
+                        _FORMAT_PARAM,
+                    ],
                     "responses": {
-                        "200": _plain("The note value, after an untrusted-content banner."),
+                        "200": _text_or_json(
+                            "The note value: as the body after an untrusted-content banner, "
+                            "or as `value` under `?format=json`.",
+                            _NOTE_VIEW_SCHEMA,
+                        ),
                         # `ns` and `key` run through the same allowlist every other lane
                         # uses, so an uppercase or spaced name is a 400 and not the 404 a
                         # reader of this contract would have expected. The two are not

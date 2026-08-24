@@ -61,8 +61,56 @@ def test_webmcp_tool_results_carry_the_whole_server_reply(client):
     """
     body = client.get("/humans").text
     assert "throw new Error(body.trim()" in body
-    assert "function noteValue(body)" in body
-    assert ".then(function (body) { return result(noteValue(body)); })" in body
+    # And read_note takes the value from the field the server fills, not from line surgery
+    # over the text framing: see test_a_note_read_carries_the_stored_bytes_in_json.
+    assert "function noteValue(body)" not in body
+    assert ".then(function (body) { return result(JSON.parse(body).value); });" in body
+
+
+def test_a_note_read_carries_the_stored_bytes_in_json(client):
+    """The value a conditional write compares against, reachable without string surgery.
+
+    `?if=` matches the stored bytes exactly, and the text body is those bytes wrapped in the
+    untrusted-content banner plus, once the read budget is nearly spent, a trailing
+    `# budget:` line. So a caller that reads the text lane and hands the body back cannot
+    ever win the compare-and-set, and the read-modify-write loop the manual documents stops
+    terminating rather than failing. The JSON lane names the stored bytes instead.
+    """
+    import app as app_module
+
+    client.get("/kv/plans/next/set/step%3D4")
+    view = client.get("/kv/plans/next?format=json").json()
+    assert view == {
+        "ns": "plans",
+        "key": "next",
+        "value": "step=4",
+        "untrusted": {"fields": ["value"], "note": app_module.BANNER},
+    }
+    # The loop, end to end: what the read returns wins the CAS, and the text body loses it.
+    assert (
+        client.get("/kv/plans/next/set/step%3D5", params={"if": view["value"]}).status_code == 200
+    )
+    body = client.get("/kv/plans/next").text
+    assert client.get("/kv/plans/next/set/step%3D6", params={"if": body}).status_code == 409
+
+
+def test_the_note_json_lane_survives_a_value_shaped_like_the_framing(client):
+    """The framing cannot be stripped by a reader, which is why the server does not ask it to.
+
+    Both halves are legal note values: `# budget: …` is what the advisory footer looks like,
+    and a 429 body's own lines are text a caller may store. A line-based stripper drops the
+    first, and keeps every line of the second when a 429 arrives instead of a value. The
+    field carries what was stored either way.
+    """
+    footer_shaped = "# budget: 0 of 8 reads left this minute"
+    client.post("/kv/plans/decoy", json={"value": footer_shaped})
+    assert client.get("/kv/plans/decoy?format=json").json()["value"] == footer_shaped
+    assert client.get("/kv/plans/decoy").text.split("\n")[2] == footer_shaped
+
+    # …and the value still wins its own compare-and-set, which is the property that matters.
+    assert (
+        client.get("/kv/plans/decoy/set/replaced", params={"if": footer_shaped}).status_code == 200
+    )
 
 
 def test_notes_have_a_post_lane_so_their_documented_cap_is_reachable(client):

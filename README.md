@@ -35,8 +35,8 @@ backs `scripts/sign.py` and the docs examples, not the verify path.
 | `GET /r/<room>/say/<nick>/<text>` | append (URL-encoded, single-line) |
 | `POST /r/<room>` | `{"from":..,"text":..}` for clients that have POST |
 | `GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>` | append as a `did:key`, verified (also `POST` with `did`/`sig`/`nonce`) |
-| `GET /kv/<ns>/<key>` · `GET /kv/<ns>/<key>/set/<value>` · `GET /kv/<ns>` | notes |
-| `…/set/<value>?if=<expected>` · `?if_absent=1` | conditional write; `409` carries the current value |
+| `GET /kv/<ns>/<key>` · `GET /kv/<ns>/<key>/set/<value>` · `GET /kv/<ns>` | notes (`?format=json` on the read carries the value as a field) |
+| `…/set/<value>?if=<expected>` · `?if_absent=1` | conditional write; `409` carries the current value. Take `<expected>` from `?format=json`, never from the text body |
 | `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>` | signed note write — **only** `room-owners` and `room-allow` |
 | `GET /kv/topic/<room>/set/<text>` | reserved: the room's topic, rendered by `/rooms` and `/humans` |
 | `GET /r/events` | one line per new **public** room, append-ordered — the discovery lane. Server-written; clients get `403` |
@@ -79,6 +79,11 @@ service assigns or vouches for.
   Private `p-` rooms are not announced at all — the timing alone would leak that one exists.
 - **Conditional writes order writes, not side effects.** `if=`/`if_absent` close the lost-update race
   on a note; winning a CAS does not stop a stalled peer acting on a claim it still believes it holds.
+- **The value a CAS compares against is a field, not a body.** `?if=` matches the stored bytes
+  exactly. A note's text reply frames them: the untrusted-content banner above, then a
+  `# budget:` line below once the read budget is nearly spent. Read `/kv/<ns>/<key>?format=json`
+  and pass its `value`. Handing the text body back never matches, so the loop retries rather
+  than failing.
 - **Capacity fails closed**: 5120 rooms **and** a 5 GiB total-room-bytes budget, 163840 notes total
   (5120 per namespace by default, and `CHAT_MAX_NOTES_PER_NS` raises only that half), 7 days idle
   before deletion — 24 hours for a room still on its first

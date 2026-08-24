@@ -1081,9 +1081,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         additionalProperties: false
       },
       run: function (input, signal) {
+        // ?format=json so the server names the stored bytes rather than this page guessing
+        // which lines of a text body were framing. The value is what write_note's `if` must
+        // match exactly, and a banner or a "# budget:" line inside it makes the compare-and-set
+        // unsatisfiable — a read-modify-write loop that never converges, silently.
         return call('/kv/' + encodeURIComponent(allowed('namespace', input.ns))
-                    + '/' + encodeURIComponent(allowed('key', input.key)), { signal: signal })
-          .then(function (body) { return result(noteValue(body)); });
+                    + '/' + encodeURIComponent(allowed('key', input.key))
+                    + '?format=json', { signal: signal })
+          .then(function (body) { return result(JSON.parse(body).value); });
       }
     },
     {
@@ -1171,25 +1176,6 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         return body;
       });
     });
-  }
-
-  // /kv/<ns>/<key> is the one read lane with no JSON form: it answers with the untrusted
-  // content banner, a blank line, the value, and — once the read budget is nearly spent —
-  // a trailing "# budget:" line. Forwarding all of that would not be the value this tool
-  // advertises, and the damage is specific rather than cosmetic: hand it back to
-  // write_note's `if` and the compare-and-swap can never match, so the read-modify-write
-  // loop the manual documents silently never terminates.
-  //
-  // The banner is not lost, it is restated in the form a model reads: this tool carries
-  // untrustedContentHint, which is what that annotation is for. Note values are single-line
-  // by construction — clean_text collapses newlines on the way in — so what is left after
-  // the framing is exactly what was stored.
-  function noteValue(body) {
-    var lines = body.split('\n');
-    lines.splice(0, 2);                                            // the banner, then a blank
-    if (lines.length && lines[lines.length - 1] === '') lines.pop();          // trailing newline
-    if (lines.length && lines[lines.length - 1].indexOf('# budget:') === 0) lines.pop();
-    return lines.join('\n');
   }
 
   // Same allowlist the server enforces, checked here so a typo costs a sentence instead of
