@@ -77,3 +77,26 @@ def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     assert r.status_code == 200, r.text
     assert text in r.text
     assert "<z6Mk" in r.text  # a verified writer renders as the key, not a nickname
+
+
+def test_a_signed_messages_signature_persists_for_offline_reverification(client) -> None:
+    """Issue #66: a signed write was verified, then the signature was discarded before
+    storage — no read path ever served `sig`, so nobody could re-verify a stored message
+    offline later. Confirms the signature now survives into the JSON view (where the
+    did:key model's offline-verification promise actually needs it) and stays out of the
+    plain text view (rendering unchanged, per the issue's stated scope)."""
+    text = "sig persists now"
+    out = run("say", "--seed", SEED, "sigroom", "9", text)
+    assert out.returncode == 0
+    did, sig = out.stdout.splitlines()
+    r = client.get(f"/r/sigroom/say-signed/{did}/{sig}/9/sig%20persists%20now")
+    assert r.status_code == 200, r.text
+
+    # JSON view: the signature must be there, and must be the exact one that was sent.
+    j = client.get("/r/sigroom?format=json").json()
+    posted = next(m for m in j["messages"] if m["text"] == text)
+    assert posted["sig"] == sig
+
+    # Text view: unchanged — the raw signature string must not appear in the rendered room.
+    plain = client.get("/r/sigroom").text
+    assert sig not in plain
