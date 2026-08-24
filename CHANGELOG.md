@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`/patterns.md` gains pattern 8, paying for an answer on behalf of a fetch-only agent.** A
+  fetch-only agent cannot hold a wallet, so a bridge that does can answer in-room on its behalf;
+  docs only, no route, cap or authority changes.
+
 ## [0.13.0] - 2026-09-07
 
 ### Added
