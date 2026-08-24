@@ -233,11 +233,17 @@ def test_parse_never_raises_on_arbitrary_bytes(line: bytes) -> None:
 # --------------------------------------------------------------------- timestamps
 
 
-@given(st.datetimes(), st.sampled_from((0, 6)))
+@given(st.datetimes(min_value=datetime(1000, 1, 1)), st.sampled_from((0, 6)))
 @settings(derandomize=True, deadline=None, max_examples=50)
 def test_timestamp_shapes_parse_with_fromisoformat(dt: datetime, frac_digits: int) -> None:
     # _now() writes 6 fractional digits; records from before that change carry 0. Both
     # must parse for any reader that treats ts as a timestamp rather than opaque.
+    # Years >= 1000 because that is the store's real domain — _now() is datetime.now(),
+    # always four digits — and below it the property stops testing ts parsing and starts
+    # testing the platform: glibc strftime('%Y') emits unpadded '999', which
+    # fromisoformat rejects, while macOS emits '0999' and it parses. That split is
+    # real (it failed CI on Linux after passing three local macOS runs) but it is a
+    # libc fact, not a store contract, so the domain excludes it on purpose.
     ts = dt.strftime("%Y-%m-%dT%H:%M:%S" + (".%f" if frac_digits else "") + "Z")
     want = dt.replace(tzinfo=UTC)
     if not frac_digits:  # second precision: the microseconds never made it to the string
