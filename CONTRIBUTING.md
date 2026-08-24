@@ -39,6 +39,12 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Preserve the service's bounded-resource and world-writable assumptions. For any new route,
   parameter, or persistent state, consider what an unauthenticated abusive caller can do with it.
 - Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
+- No code golf. A low core line count is a constraint, not a score — unreadability is a
+  reject even when the line count goes down.
+- Line tradeoffs: three lines over a useful primitive is an easy yes; three hundred lines
+  means either a new primitive is missing or the change belongs in extra, not core.
+- Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
+- Removing dead code from core is a win on its own; open a pull request for it.
 
 ## Tests and checks
 
