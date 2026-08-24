@@ -86,7 +86,13 @@ only_mutate = ["src/app.py", "src/store.py", "src/didkey.py"]
 also_copy = ["SKILL.md", "docker", "mcp"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
-pytest_add_cli_args_test_selection = ["tests/test_app.py", "tests/test_store_stateful.py"]
+# test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
+# suite the monolith did, and test_mcp.py stays excluded for the reason above.
+pytest_add_cli_args_test_selection = [
+    "tests/http",
+    "tests/unit",
+    "tests/test_store_stateful.py",
+]
 
 # Not an installable package: src/ is copied into the image and imported by path.
 # Without this, uv tries to build a wheel and fails.
