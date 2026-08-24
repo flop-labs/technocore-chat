@@ -34,20 +34,26 @@ Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. Sign the
 raw text and the server answers 403 — by design, so that a stored record can
 be re-verified later against the bytes on disk.
 
-Key material comes from --seed or $SIGN_SEED:
+Key material comes from --seed-file, --seed or $SIGN_SEED:
+  * --seed-file PATH   -> one seed/passphrase line read directly from a private
+                          file, without putting it in argv or the environment
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
   * anything else       -> SHA-256 of it (so a passphrase works; weaker than
                            randomness, fine for a demo, not for a identity you
                            care about)
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
+On keygen, --seed-file PATH creates PATH exclusively with a fresh random seed
+and prints only the path and DID. On POSIX, an input seed file must have no
+group or world permissions; `chmod 600 identity.seed` is the normal setting.
+
 Usage:
-  uv run scripts/sign.py keygen
-  uv run scripts/sign.py did      [--seed HEX|PASSPHRASE]
-  uv run scripts/sign.py say      [--seed ...] <room> <nonce> <text>
-  uv run scripts/sign.py set      [--seed ...] <ns> <key> <nonce> <value>
+  uv run scripts/sign.py keygen   [--seed-file PATH]
+  uv run scripts/sign.py did      [--seed-file PATH|--seed HEX|PASSPHRASE]
+  uv run scripts/sign.py say      [--seed-file PATH|--seed ...] <room> <nonce> <text>
+  uv run scripts/sign.py set      [--seed-file PATH|--seed ...] <ns> <key> <nonce> <value>
   uv run scripts/sign.py note     <did:key>
-  uv run scripts/sign.py delegate [--seed ...] <agent-did> <scope> <days> [nonce]
+  uv run scripts/sign.py delegate [--seed-file PATH|--seed ...] <agent-did> <scope> <days> [nonce]
   uv run scripts/sign.py check    <root-did> [file]
 
 'keygen' prints the seed and the did:key. 'did' prints the did:key. 'say' and
@@ -89,6 +95,7 @@ import hashlib
 import os
 import re
 import secrets
+import stat
 import sys
 import time
 import unicodedata
@@ -108,6 +115,7 @@ INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
+MAX_SEED_FILE_CHARS = 4096
 
 # A delegation's scope. Deliberately three shapes and no grammar to speak of: this file
 # issues and checks delegations, it does not enforce them, and a scope language richer than
@@ -164,18 +172,60 @@ def multibase(raw: bytes) -> str:
     return out
 
 
-def load_key(seed_arg: str | None) -> tuple[Ed25519PrivateKey, str]:
-    """The Ed25519 key for --seed / $SIGN_SEED, plus a human-readable provenance."""
-    given = seed_arg or os.environ.get("SIGN_SEED")
+def read_seed_file(path: Path) -> str:
+    """Read one private seed/passphrase line without exporting it to child processes."""
+    try:
+        # Opening a FIFO normally blocks before fstat can reject it. Nonblocking open
+        # leaves regular files unchanged and lets the type check refuse special files.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, encoding="utf-8") as source:
+            mode = os.fstat(source.fileno()).st_mode
+            if not stat.S_ISREG(mode):
+                raise SystemExit(f"seed file is not a regular file: {path}")
+            if os.name != "nt" and stat.S_IMODE(mode) & 0o077:
+                raise SystemExit(f"seed file is readable by others; run: chmod 600 {path}")
+            raw = source.read(MAX_SEED_FILE_CHARS + 1)
+    except (OSError, UnicodeError) as exc:
+        raise SystemExit(f"cannot read seed file {path}: {exc}") from exc
+    if len(raw) > MAX_SEED_FILE_CHARS:
+        raise SystemExit(f"seed file is over {MAX_SEED_FILE_CHARS} characters: {path}")
+    given = raw.removesuffix("\n").removesuffix("\r")
+    if not given or "\n" in given or "\r" in given:
+        raise SystemExit(f"seed file must contain exactly one non-empty line: {path}")
+    return given
+
+
+def write_seed_file(path: Path, seed: str) -> None:
+    """Create a private seed file without following or replacing an existing path."""
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise SystemExit(f"cannot create seed file {path}: {exc}") from exc
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+            destination.write(seed + "\n")
+            destination.flush()
+            os.fsync(destination.fileno())
+    except OSError as exc:
+        raise SystemExit(f"cannot write seed file {path}: {exc}") from exc
+
+
+def load_key(seed_arg: str | None, seed_file: Path | None = None) -> tuple[Ed25519PrivateKey, str]:
+    """The Ed25519 key for --seed-file / --seed / $SIGN_SEED, plus its provenance."""
+    given = read_seed_file(seed_file) if seed_file is not None else seed_arg
+    given = given or os.environ.get("SIGN_SEED")
     if given is None:
-        raise SystemExit("no key: pass --seed <hex|passphrase> or set $SIGN_SEED")
+        raise SystemExit(
+            "no key: pass --seed-file <path>, --seed <hex|passphrase>, or set $SIGN_SEED"
+        )
+    provenance = f"file:{seed_file}" if seed_file is not None else given
     if len(given) == 64:
         try:
-            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), given
+            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), provenance
         except ValueError:
             pass  # 64 chars but not hex — fall through and hash it like any passphrase
     digest = hashlib.sha256(given.encode()).hexdigest()
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({given!r})"
+    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({provenance!r})"
 
 
 def did_of(key: Ed25519PrivateKey) -> str:
@@ -338,10 +388,17 @@ def main() -> None:
     # copy of the option re-defaults the attribute to None AFTER the top-level parse
     # already stored X, silently discarding it (review: PR #54).
     seeded = argparse.ArgumentParser(add_help=False)
-    seeded.add_argument(
+    source = seeded.add_mutually_exclusive_group()
+    source.add_argument(
         "--seed",
         default=argparse.SUPPRESS,
         help="64-hex-char seed, or any string (hashed with SHA-256)",
+    )
+    source.add_argument(
+        "--seed-file",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="private file containing one seed/passphrase line; keygen creates it",
     )
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], parents=[seeded])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -367,11 +424,18 @@ def main() -> None:
     audit.add_argument("root", help="the root did:key the note belongs to")
     audit.add_argument("file", nargs="?", help="note text; reads stdin when absent")
     args = parser.parse_args()
+    if hasattr(args, "seed") and hasattr(args, "seed_file"):
+        parser.error("--seed and --seed-file are mutually exclusive")
 
     if args.cmd == "keygen":
         seed = secrets.token_hex(32)
         key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
-        print(f"seed: {seed}")
+        seed_file = getattr(args, "seed_file", None)
+        if seed_file is None:
+            print(f"seed: {seed}")
+        else:
+            write_seed_file(seed_file, seed)
+            print(f"seed file: {seed_file}")
         print(f"did:  {did_of(key)}")
         return
 
@@ -391,8 +455,9 @@ def main() -> None:
         raise SystemExit(0 if live else 1)
 
     seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
+    seed_file = getattr(args, "seed_file", None)
     if args.cmd == "did":
-        key, _ = load_key(seed)
+        key, _ = load_key(seed, seed_file)
         print(did_of(key))
         return
 
@@ -406,7 +471,7 @@ def main() -> None:
         if not DIGITS_RE.fullmatch(nonce):
             raise SystemExit(f"nonce must be 1-19 ASCII digits, got {nonce!r}")
         expires = str(int(time.time()) + int(args.days) * 86400)
-        key, _ = load_key(seed)
+        key, _ = load_key(seed, seed_file)
         root = did_of(key)
         if root == args.agent:
             raise SystemExit("a key cannot delegate to itself — it already acts for itself")
@@ -426,7 +491,7 @@ def main() -> None:
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
-    key, _ = load_key(seed)
+    key, _ = load_key(seed, seed_file)
     print(did_of(key))
     print(signature(key, canonical))
 

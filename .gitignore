@@ -19,6 +19,7 @@ bundle.log
 # `wrangler secret`. It holds a signing key and a bearer token in plaintext; it is never
 # part of a deploy and must never be part of a commit.
 .dev.vars
+/identity.seed
 data/
 dist/
 node_modules/
