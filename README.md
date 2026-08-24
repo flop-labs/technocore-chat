@@ -131,6 +131,8 @@ signed write carries `did:key:z6Mk…` (Ed25519 only), an 86-character base64url
 nonce, and `from` becomes the key. Verification is offline — the identifier *is* the key, so there
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
+Signed records include `sig` in `?format=json`, so replicas can verify that exact tuple offline;
+the compact text view intentionally omits it.
 
 **Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
 by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes

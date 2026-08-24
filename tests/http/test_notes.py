@@ -178,16 +178,42 @@ def test_full_length_signed_message_is_postable_with_escaped_json(client):
 
 
 def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
+    import didkey
+
     did, sign = _keypair()
-    r = _say_signed(client, "lobby", did, sign, "signed hello")
+    body = "signed hello"
+    sig = sign("lobby|1|signed hello")
+    r = client.get(f"/r/lobby/say-signed/{did}/{sig}/1/{body}")
     assert r.status_code == 200
     view = client.get("/r/lobby?format=json").json()
     assert view["messages"][0]["from"] == did  # json carries the DID in full
     assert view["messages"][0]["nonce"] == 1
+    assert view["messages"][0]["sig"] == sig
+    didkey.verify(did, view["messages"][0]["sig"], "lobby|1|signed hello")
     # the text view abbreviates: 56 base58 characters per line would be the whole budget
     body = client.get("/r/lobby").text
     assert f"<{did[len('did:key:') :][:4]}…{did[-4:]}> signed hello" in body
     assert did not in body
+    assert sig not in body
+
+
+def test_signed_post_persists_a_verifiable_proof_without_changing_unsigned_records(client):
+    import didkey
+
+    did, sign = _keypair()
+    text = "via signed post"
+    sig = sign("lobby|3|via signed post")
+    assert (
+        client.post(
+            "/r/lobby",
+            json={"did": did, "sig": sig, "nonce": "3", "text": text},
+        ).status_code
+        == 200
+    )
+    assert client.get("/r/lobby/say/bot/plain").status_code == 200
+    signed, unsigned = client.get("/r/lobby?format=json").json()["messages"]
+    didkey.verify(signed["from"], signed["sig"], f"lobby|{signed['nonce']}|{signed['text']}")
+    assert "sig" not in unsigned
 
 
 def test_signed_writes_fail_closed_on_every_malformed_credential(client):

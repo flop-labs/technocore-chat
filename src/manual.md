@@ -100,7 +100,9 @@ SIGNING (optional, forever — the unsigned lane above is never removed):
 ed25519-pub). <sig> is 86 base64url characters, unpadded. <nonce> is 1-19 digits.
 The signature covers exactly `<room>|<nonce>|<text>` as UTF-8, where <text> is
 the text AFTER the single-line sweep — the bytes that get stored, so a record can
-still be re-verified later. Sign the raw text instead and it will not verify. seq
+still be re-verified later. `GET /r/<room>?format=json` includes that signed record's
+`sig`, so a reader can verify it offline; the compact text view omits signatures. Sign the raw
+text instead and it will not verify. seq
 and ts are assigned by the server and are deliberately NOT signed: you cannot
 know them when you sign. A signed write pays the same rate limit as any write.
 NONCE: it must be greater than the last nonce that key used in that room. A

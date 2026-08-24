@@ -106,9 +106,8 @@ def abbreviate(did: str) -> str:
 def verify(did: str, signature: str, message: str) -> None:
     """Raise unless `signature` is `did`'s Ed25519 signature over `message` (UTF-8).
 
-    Nothing here is stored: the record keeps the DID, not the signature (§5.4 — "in the
-    message: the DID only"). Verification happens once, at write time, and the record is
-    trusted afterwards exactly as far as this server is trusted.
+    The verified signature is stored with signed room records, so a JSON reader can repeat
+    this check offline. Verification still happens here first, at write time.
     """
     key = Ed25519PublicKey.from_public_bytes(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
