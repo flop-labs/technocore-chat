@@ -99,7 +99,11 @@ def abbreviate(did: str) -> str:
     """`did:key:z6Mk…2doK` — 56 characters of base58 tokenize badly, and printed in full on
     a 50-message fetch a DID is ~1200 tokens of pure identifier (design §5.4). The text view
     abbreviates; `?format=json` carries the DID in full."""
+    if not isinstance(did, str) or not did.startswith(PREFIX):
+        return did
     mb = did[len(PREFIX) :]
+    if len(mb) < 8:
+        return did
     return f"{mb[:4]}…{mb[-4:]}"
 
 

@@ -180,6 +180,8 @@ def refill_rate(per_min: int) -> str:
     both accurate and the more useful form: "one every 30s" is a sleep, "0.03 tokens/s" is
     arithmetic the reader has to do first.
     """
+    if per_min <= 0:
+        return "0 tokens/s"
     per_second = per_min / 60.0
     if per_second >= 1.0:
         return f"{per_second:.1f} tokens/s"
