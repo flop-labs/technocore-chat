@@ -760,6 +760,15 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     assert body_limit in doc["paths"]["/kv/{ns}/{key}"]["post"]["responses"]["413"]["description"]
     room = next(p for p in say["parameters"] if p["name"] == "room")
     assert room["schema"]["pattern"] == store.NAME_RE.pattern
+    # Both URL write lanes carry `{text}`, and the signed lane has strictly less URL budget
+    # (its did/sig/nonce sit ahead of the text) — so it must publish the same size warning
+    # and maxLength, not a bare schema. One copy on both lanes, or the weaker one is the
+    # contract a client is built against.
+    signed = doc["paths"]["/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"]["get"]
+    signed_text = next(p for p in signed["parameters"] if p["name"] == "text")
+    assert signed_text["schema"]["maxLength"] == store.MAX_TEXT_CHARS
+    assert signed_text.get("description") == text_param.get("description")
+    assert "use POST for long non-Latin text" in signed_text["description"]
     # …and the version comes from the file that declares it, not a second copy.
     pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
     assert doc["info"]["version"] in pyproject

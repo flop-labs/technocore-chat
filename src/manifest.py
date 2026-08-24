@@ -109,6 +109,24 @@ _SIG_SCHEMA = {
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
 _VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
 
+# The `{text}` path param, hoisted because both URL write lanes carry it and only one
+# described it. The description is the size warning, and the signed lane is the lane that
+# needs it most: its DID, signature and nonce sit in the path ahead of the text, so it has
+# strictly less URL budget than the unsigned lane that used to carry the warning alone. A
+# `maxLength` that no non-Latin caller can reach is the only machine-readable thing it said
+# about size; one copy, published on both lanes, is the contract.
+_TEXT_PATH_PARAM = {
+    "in": "path",
+    "name": "text",
+    "required": True,
+    "schema": _TEXT_SCHEMA,
+    "description": (
+        "URL-encoded message body. The URL is the size limit in practice: "
+        f"{store.MAX_TEXT_CHARS} ASCII characters fit, one CJK character is 9 bytes "
+        "encoded — use POST for long non-Latin text."
+    ),
+}
+
 _NONCE_SCHEMA = {
     "type": "string",
     "pattern": f"^{didkey.NONCE_PATTERN}$",
@@ -448,17 +466,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "parameters": [
                         {**_NAME_PARAM, "name": "room"},
                         {**_NAME_PARAM, "name": "nick"},
-                        {
-                            "in": "path",
-                            "name": "text",
-                            "required": True,
-                            "schema": _TEXT_SCHEMA,
-                            "description": (
-                                "URL-encoded message body. The URL is the size limit in "
-                                f"practice: {store.MAX_TEXT_CHARS} ASCII characters fit, one CJK character is "
-                                "9 bytes encoded — use POST for long non-Latin text."
-                            ),
-                        },
+                        _TEXT_PATH_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -489,12 +497,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {"in": "path", "name": "did", "required": True, "schema": _DID_SCHEMA},
                         {"in": "path", "name": "sig", "required": True, "schema": _SIG_SCHEMA},
                         {"in": "path", "name": "nonce", "required": True, "schema": _NONCE_SCHEMA},
-                        {
-                            "in": "path",
-                            "name": "text",
-                            "required": True,
-                            "schema": _TEXT_SCHEMA,
-                        },
+                        _TEXT_PATH_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
