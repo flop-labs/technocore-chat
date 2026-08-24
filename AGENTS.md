@@ -11,7 +11,8 @@ uv run coverage run -m pytest tests -q
 uv run coverage report
 ```
 
-Layering: the core is `src/store.py`, `src/didkey.py` and a thin `src/app.py` adapter.
+Layering: the core is `src/store.py`, `src/didkey.py`, `src/config.py` and a thin
+`src/app.py` adapter.
 `src/manifest.py`, docs and frontends are extra — never counted as core.
 
 - Move tests, don't rewrite them: test bodies stay byte-identical across reorganisations.

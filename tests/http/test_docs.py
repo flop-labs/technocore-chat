@@ -354,15 +354,23 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     # …and the ceiling is actually wired through it. Checking the helper alone would pass
     # against a MAX_WAIT that still called bare `float()`, which is the mistake this
     # guards: the process has to refuse to start, not merely own a function that could
-    # have refused. config is where the knob is parsed now, so a fresh exec of it —
-    # under a name of its own, no sys.modules surgery — is that boot path.
-    import runpy
+    # have refused. A fresh interpreter importing the real chain — app importing config
+    # importing the environment — is that boot: no sys.modules surgery in this process,
+    # and unlike a re-exec of config alone it fails if app ever stops importing config
+    # (review: PR #59).
+    import os
+    import subprocess
+    import sys
 
-    import config
-
-    monkeypatch.setenv("CHAT_MAX_WAIT", "inf")
-    with pytest.raises(ValueError, match="must be a finite number"):
-        runpy.run_path(config.__file__)  # executes config afresh, no sys.modules surgery
+    src = repr(str(Path(__file__).resolve().parents[2] / "src"))
+    boot = subprocess.run(
+        [sys.executable, "-c", f"import sys; sys.path.insert(0, {src}); import app"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CHAT_MAX_WAIT": "inf"},
+    )
+    assert boot.returncode != 0, "app booted with a non-finite CHAT_MAX_WAIT"
+    assert "must be a finite number" in boot.stderr
 
     # Whatever survives that, the documents stay strict JSON — no bare Infinity or NaN.
     for raw in (client.get("/openapi.json").text, client.get("/.well-known/agent.json").text):
