@@ -285,15 +285,20 @@ _RESERVED_NAMESPACE = _plain(
 # The last path segment of the four URL write lanes is `{text:path}` / `{value:path}`, and
 # Starlette's path convertor is `.*` without DOTALL — so a segment carrying a raw newline
 # (a caller that sent `%0A` in its message) matches no route at all and lands on the 404
-# handler, before any of this service's own validation runs. That is deliberate: the say
-# route's regex never matching a newline is what makes it impossible to forge a second
-# JSONL record out of one message. It was simply never written down, so the contract said
-# a `text` the router silently drops was a 200.
+# handler, before any of this service's own validation runs — with one exception that
+# belongs to the regex, not to this service: Python's `$` also matches immediately before a
+# final newline, so a segment ending in exactly one `%0A` *does* match, and `.*` hands the
+# route a `text` with that newline already stripped off. Two of them, or one anywhere else,
+# still 404. So the router narrows what reaches a write; what actually makes a second JSONL
+# record impossible to forge is `clean_text`, which sweeps every Cc character — the newline
+# among them — on every write in both lanes.
 _UNROUTABLE_PATH = _plain(
-    "No route matched. The free-form final segment cannot contain a raw newline "
+    "No route matched. The free-form final segment cannot carry a raw newline "
     "(`%0A`): the router does not match one, so the request never reaches this "
-    "operation. Send the message through the POST lane, which accepts newlines and "
-    "flattens them, or strip it first. The body lists every route this service has."
+    "operation. The single exception is one trailing `%0A`, which routes with the "
+    "newline already dropped. Send the message through the POST lane, which accepts "
+    "newlines and flattens them, or strip it first. The body lists every route this "
+    "service has."
 )
 
 _BAD_BODY = _plain(

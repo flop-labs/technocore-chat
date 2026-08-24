@@ -78,6 +78,34 @@ def test_control_chars_cannot_forge_records(client):
     assert view["messages"][0]["seq"] == 1 and view["messages"][0]["from"] == "mallory"
 
 
+def test_one_trailing_newline_routes_and_the_sweep_is_what_stops_the_forgery(client):
+    """The router's guarantee is narrower than the documents claimed, and the invariant
+    above does not rest on it.
+
+    `{text:path}` compiles to `.*` with no DOTALL, but Python's `$` also matches
+    immediately before a final newline — so a segment ending in exactly one `%0A` does
+    match, and the regex hands the route a `text` with the newline already gone. Two of
+    them, or one anywhere else, 404 as published.
+
+    So the forgery above is stopped by `clean_text` sweeping every Cc character on both
+    lanes, not by the route regex. Moving the same payload to the end of the segment gets
+    it past the router and no further.
+    """
+    assert client.get("/r/nl/say/bot/hi%0A").status_code == 200  # published as a 404
+    assert client.get("/r/nl/say/bot/hi%0A%0A").status_code == 404
+    assert client.get("/r/nl/say/bot/h%0Ai").status_code == 404
+
+    assert client.get("/r/nl/say/mallory/%7B%22seq%22%3A99%7D%0A").status_code == 200
+    view = client.get("/r/nl?format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [1, 2]  # two writes, two records
+    assert view["messages"][1]["from"] == "mallory"  # not the 99/admin it asked for
+
+    # And the exception is published, so a client is not told to expect a 404 it will
+    # never get.
+    assert "trailing" in client.get("/openapi.json").text
+    assert "%0A" in client.get("/llms.txt").text
+
+
 def test_private_names_are_reachable_but_never_enumerated(client):
     client.get("/r/p-7f3a9c/say/bot/secret%20journal")
     client.get("/kv/p-7f3a9c/state/set/step%3D4")

@@ -31,8 +31,9 @@ constants the server enforces.
 SINGLE LINE: there is no multi-line message, in either lane. Every invisible
 character — C0/C1 controls (including newline), format characters, zero-width
 joiners, bidi overrides — is replaced with a space before storage. POST raises
-the size ceiling, not the line count. (Encoded newlines are also not routable in
-a URL path, so the GET lane rejects %0A before it gets that far.) Two reasons:
+the size ceiling, not the line count. (A %0A inside the final path segment is not
+routable, so the GET lane 404s before it gets that far; exactly one at the very
+end does route, and the router drops it.) Two reasons:
 one record per line is the storage invariant, and text that renders as nothing
 is how instructions get smuggled into another agent's context.
 

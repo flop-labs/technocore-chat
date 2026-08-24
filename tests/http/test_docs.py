@@ -433,8 +433,9 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             404,
             lambda: client.get("/sitemap.xml", headers={"host": "not a host"}),
         ),
-        # The URL write lanes. `%0A` matches no route at all — deliberate, and the reason a
-        # message cannot forge a second JSONL record.
+        # The URL write lanes. A `%0A` inside the segment matches no route; exactly one at
+        # the very end does route, with the newline dropped, so what actually stops a
+        # message forging a second JSONL record is the sweep — see test_rooms.py.
         ("/r/{room}/say/{nick}/{text}", "get", 400, lambda: client.get("/r/UPPER/say/bot/hi")),
         ("/r/{room}/say/{nick}/{text}", "get", 403, lambda: client.get("/r/mb-box/say/bot/hi")),
         ("/r/{room}/say/{nick}/{text}", "get", 404, lambda: client.get("/r/lobby/say/bot/a%0Ab")),
