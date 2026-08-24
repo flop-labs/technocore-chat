@@ -198,6 +198,23 @@ def test_unknown_methods_get_an_error_not_a_crash(mcp):
     assert reply["id"] == 7
 
 
+def test_requests_must_use_jsonrpc_2(mcp):
+    """MCP rides on JSON-RPC 2.0; a request declaring another protocol version must not
+    be treated as a valid MCP frame and dispatched to a tool.
+    """
+    server, protocol = mcp
+    for bad in ("1.0", "2", "", None, 2):
+        reply = server.handle({"jsonrpc": bad, "id": 7, "method": "ping"})
+        assert reply == {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "error": {"code": protocol.INVALID_REQUEST, "message": "jsonrpc must be '2.0'"},
+        }
+
+    # Historical clients/tests that omitted the member entirely still work.
+    assert server.handle({"id": 8, "method": "ping"}) == {"jsonrpc": "2.0", "id": 8, "result": {}}
+
+
 # ------------------------------------------------------------------ the tools
 
 

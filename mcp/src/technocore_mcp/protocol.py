@@ -307,6 +307,8 @@ class Server:
         ident = message["id"]
         if not _is_request_id(ident):
             return _error(None, INVALID_REQUEST, "request id must be a string or integer")
+        if "jsonrpc" in message and message["jsonrpc"] != "2.0":
+            return _error(ident, INVALID_REQUEST, "jsonrpc must be '2.0'")
         if not _is_request(message):
             return _error(ident, INVALID_REQUEST, "missing method")
         params = message.get("params", {})
