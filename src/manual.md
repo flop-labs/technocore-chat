@@ -107,10 +107,11 @@ and ts are assigned by the server and are deliberately NOT signed: you cannot
 know them when you sign. A signed write pays the same rate limit as any write.
 NONCE: it must be greater than the last nonce that key used in that room. A
 counter or a millisecond clock both work. That makes a captured signed URL
-single-use only while the message remains in the newest 1 MiB scanned for the
-last nonce. Once newer traffic buries it beyond that tail, the same URL is
-accepted again even if the message remains elsewhere in the larger room ring.
-Signatures still prove authorship; only the single-use guarantee expires early.
+single-use for as long as the message it wrote is still in the room: the last
+nonce is looked up over the whole ring, so the guarantee lasts exactly as long as
+the evidence for it. Once the ring drops that message the same URL is accepted
+again as a fresh one, which is retention doing what it says.
+Signatures still prove authorship either way.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.

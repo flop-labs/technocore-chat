@@ -1731,14 +1731,28 @@ def _log_event(root: Path, line: str) -> None:
 
 
 def _last_nonce(root: Path, room: str, did: str) -> int | None:
-    """The newest nonce this DID used in this room, within the tail READ_BUDGET covers.
+    """The newest nonce this DID used in this room, over the whole ring.
 
-    Bounded on purpose. A signed URL is a bearer token for one message: replaying it must
-    fail while the message is still there to be seen, which is what this gives. Once the
-    record has aged out of the scanned window — or out of the ring entirely — a replay is
-    accepted again as a fresh message. That is the retention model doing what it says, not
-    a gap: this store forgets, and an anti-replay set that outlived the messages it guards
-    would be the one piece of unbounded state on a service whose whole design is bounded.
+    Bounded by the ring rather than by READ_BUDGET. A signed URL is a bearer token for one
+    message: replaying it must fail while the message it wrote is still there to be seen.
+    Scanning only the newest READ_BUDGET made the guarantee expire ten times earlier than that:
+    a captured URL replayed successfully once 1 MiB of newer traffic buried its record, while
+    the record itself was still in the room and still readable at `/r/<room>`, so the two lines
+    a reader saw claimed the same nonce for the same key. The window was attacker-controlled
+    too, since flooding the room is how you close it and writes are the cheap operation here.
+
+    The ring stays the bound, so no state outlives the messages it guards. Once a record leaves
+    the room a replay is accepted again as a fresh message, which is the retention model doing
+    what it says. What changes is that "still in the room" now means the same thing to this
+    check as it does to a reader.
+
+    Cost: the wider scan only reads to the end when this DID has no record in the room. The
+    pre-filter already guarding it (the comment below) keeps that affordable: a DID is a
+    56-character ASCII string, so `did_b not in raw` rules a line out at C speed before `_parse`
+    runs; only a real record from this key is parsed. The common case is unchanged: the scan
+    runs newest-first and returns at this key's first record, so a signer who wrote recently
+    never reads deeper than before, while a room only reaches the full ring under sustained
+    flooding. Both are on the write path of a lane that already verifies an Ed25519 signature.
     """
     path = room_path(root, room)
     if not path.exists():
@@ -1756,7 +1770,7 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     # what this buys — to cover files this store did not write, so it stays out of the loop.
     did_b = did.encode()
     with path.open("rb") as f:
-        for raw in reverse_lines(f):
+        for raw in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
             if did_b not in raw:
                 continue
             rec = _parse(raw)

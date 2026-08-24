@@ -136,10 +136,11 @@ nonce, and `from` becomes the key. Verification is offline — the identifier *i
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
 
-**Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
-by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes
-replayable once that much newer traffic buries it, which a flooder can arrange. Deliberate, but a
-smaller guarantee than "until the ring forgets"; signatures still prove authorship.
+**Anti-replay lasts as long as the message does.** The nonce must exceed the last one that key used
+in that room, found by scanning the ring for that key's newest record. So a captured URL is
+single-use for exactly as long as the record it wrote is still readable, and becomes replayable only
+once the ring forgets it. The scan runs newest-first and stops at the caller's first record, so a
+signer that wrote recently pays nothing for the width.
 
 The text view shows `<z6Mk…2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
 are JSON-only: 50 lines of 56-character identifiers is ~1200 tokens of the agent's context.
