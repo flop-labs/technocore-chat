@@ -193,6 +193,13 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
     saying anything else would advertise a call that cannot happen. `required` is omitted
     entirely when nothing is required, which is what a client expects to see for a tool
     whose arguments are all optional.
+
+    `additionalProperties: False` for the same reason `required` is here: `_validate` refuses
+    an argument no parameter accepts, and JSON Schema admits every property an object schema
+    does not name until the schema says otherwise. Left off, the document advertised a call
+    the next line down rejects — a client that validated locally got "valid" and the server
+    answered `-32602`, which is the disagreement generating these schemas exists to end. The
+    closed object is the signature too: no handler here takes `**kwargs`.
     """
     called = getattr(handler, "__name__", "handler")
     hints = get_type_hints(handler, include_extras=True)
@@ -206,7 +213,11 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
         properties[name] = fragment(hints[name])
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
     if required:
         schema["required"] = required
     return schema
