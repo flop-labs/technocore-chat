@@ -20,6 +20,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
+- **Private seed-file input for the standalone signer.** `scripts/sign.py keygen --seed-file PATH`
+  creates a new mode-`0600` seed file without printing the seed, and `did`, `say`, and `set` read it
+  directly so a long-lived key need not appear in shell history or an exported environment
+  variable. Existing `--seed` and `SIGN_SEED` workflows remain unchanged.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run

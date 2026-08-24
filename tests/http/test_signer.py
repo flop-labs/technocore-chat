@@ -9,6 +9,7 @@ those promises and anything a gate ran; these tests are the gate (issue #56).
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -50,6 +51,63 @@ def test_a_keygen_seed_reproduces_the_did() -> None:
     )
     again = run("did", "--seed", seed)
     assert again.returncode == 0 and again.stdout.strip() == did
+
+
+def test_a_keygen_seed_file_hides_the_seed_and_reproduces_the_did(tmp_path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    out = run("keygen", "--seed-file", str(seed_file))
+    assert out.returncode == 0
+    assert not any(line.startswith("seed: ") for line in out.stdout.splitlines())
+    did = next(
+        line.removeprefix("did:  ") for line in out.stdout.splitlines() if line.startswith("did:  ")
+    )
+
+    before = run("--seed-file", str(seed_file), "did")
+    after = run("did", "--seed-file", str(seed_file))
+    assert before.returncode == 0 and after.returncode == 0
+    assert before.stdout.strip() == after.stdout.strip() == did
+    if os.name != "nt":
+        assert seed_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_keygen_refuses_to_replace_a_seed_file(tmp_path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    first = run("keygen", "--seed-file", str(seed_file))
+    original = seed_file.read_bytes()
+    second = run("keygen", "--seed-file", str(seed_file))
+    assert first.returncode == 0 and second.returncode != 0
+    assert seed_file.read_bytes() == original
+    assert "cannot create seed file" in (second.stdout + second.stderr)
+
+
+def test_a_posix_seed_file_must_be_private(tmp_path) -> None:
+    if os.name == "nt":
+        return
+    seed_file = tmp_path / "identity.seed"
+    seed_file.write_text(SEED + "\n", encoding="utf-8")
+    seed_file.chmod(0o644)
+    out = run("did", "--seed-file", str(seed_file))
+    assert out.returncode != 0
+    assert "chmod 600" in (out.stdout + out.stderr)
+
+
+def test_seed_and_seed_file_are_mutually_exclusive_across_option_orders(tmp_path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    seed_file.write_text(SEED + "\n", encoding="utf-8")
+    out = run("--seed-file", str(seed_file), "did", "--seed", SEED)
+    assert out.returncode != 0
+    assert "mutually exclusive" in (out.stdout + out.stderr)
+
+
+def test_seed_file_signatures_match_the_existing_seed_input(tmp_path) -> None:
+    seed_file = tmp_path / "identity.seed"
+    seed_file.write_text(SEED + "\n", encoding="utf-8")
+    if os.name != "nt":
+        seed_file.chmod(0o600)
+    from_file = run("say", "--seed-file", str(seed_file), "lobby", "7", "hello")
+    from_argument = run("say", "--seed", SEED, "lobby", "7", "hello")
+    assert from_file.returncode == 0 and from_argument.returncode == 0
+    assert from_file.stdout == from_argument.stdout
 
 
 def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
