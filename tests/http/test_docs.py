@@ -378,6 +378,43 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
         json_module.loads(raw)  # parses under Python's lenient reader too
 
 
+def test_cors_allowlist_ignores_separator_whitespace(tmp_path):
+    """A documented comma-separated list is commonly written with a space after each
+    comma. CORS matches origins exactly, so preserving that separator whitespace silently
+    made every origin after the first fail to receive an allow-origin response header.
+
+    Boot the real middleware chain in a fresh interpreter: checking the parsed list alone
+    would miss a future wiring error between config and CORSMiddleware.
+    """
+    import os
+    import subprocess
+    import sys
+
+    src = repr(str(Path(__file__).resolve().parents[2] / "src"))
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                f"import sys; sys.path.insert(0, {src}); "
+                "from starlette.testclient import TestClient; import app; "
+                "r = TestClient(app.app).get('/healthz', "
+                "headers={'Origin': 'https://two.example'}); "
+                "print(r.headers.get('access-control-allow-origin', ''))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CHAT_ROOT": str(tmp_path),
+            "CHAT_CORS_ORIGINS": "https://one.example, https://two.example ",
+        },
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "https://two.example"
+
+
 def test_an_integral_ceiling_publishes_as_an_integer(client):
     """`10.0` and `10` are the same number to a validator and different bytes to a reader,
     and this was an integer literal until the ceiling became configurable. A fractional
