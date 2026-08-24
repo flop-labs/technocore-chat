@@ -12,6 +12,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Clamp `Accept` q-values to the 0-1 a qvalue is. `float()` also reads `inf` and `nan`, and every
+  comparison against a NaN is False — so `Accept: text/markdown, text/plain;q=nan` lost the
+  markdown preference the caller *had* stated and served `text/plain`. A q the grammar does not
+  allow no longer decides the representation of a range it was not written on.
+
 ### Changed
 
 - Correct `/llms.txt`'s signed-message nonce guidance: replay protection scans the newest 1 MiB
