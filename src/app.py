@@ -963,7 +963,19 @@ def _allowed_keys(room: str) -> set[str]:
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
-    a signature refuses the unsigned lane outright, and the reply says what to send."""
+    a signature refuses the unsigned lane outright, and the reply says what to send.
+
+    The name grammar decides before any class does. A class is the leading `<class>-` markers
+    of a name, so `mb-FOO` carries one while being a name this service will never store — and
+    the checks below then answered *"this is a mailbox, send a signature"* about a room that
+    cannot exist. `GET /r/mb-FOO` says 400, and so does the `say-signed` lane that 403 named
+    as its own correction, because that lane reaches `store.append`. One write, two answers,
+    and the one an agent acts on was the wrong one: 403 says "this room refuses you", 400 says
+    "that name can never exist here", and only the second was ever true. It also put a segment
+    that had passed nothing into a server-authored `text/plain` body, where `{room}` matches
+    the raw newline `{text:path}` deliberately does not.
+    """
+    room = store.valid_name(room)
     denied = _reject_if_events_room(room)
     if denied:
         return denied
@@ -1327,7 +1339,13 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     exception exists because a room owner has to be able to publish an allow-list that a
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
+
+    Grammar first, exactly as in `_room_write_gate` and for the same reason: `ownable(key)`
+    reads a `<class>-` prefix whether or not the whole name is one this service accepts, so
+    `room-owners/D-FOO` answered "cannot be owned" while `room-allow/D-FOO` answered 400 for
+    the identical key — the sibling namespace reads the owner note first, and that validates.
     """
+    ns, key = store.valid_name(ns), store.valid_name(key)
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
