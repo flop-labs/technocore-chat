@@ -1,0 +1,258 @@
+"""The abuse budget: who is calling, what they may spend, and what a refusal says.
+
+Moved out of app.py whole. The knobs arrive as PARAMETERS, not module reads: app keeps
+the module-level aliases (RATE_READ, CLIENT_IP_HEADER, MAX_BUCKETS, ...) that both the
+tests' monkeypatch.setattr(app, ...) and config.override() re-bind, and passes them into
+take()/refund()/client_ip() on every call — a config read here would bypass both mutation
+paths and silently break them. The mutable state (_buckets, _identities, _requests, the
+waiter slots, the proxy evidence) lives here and is re-exported by app as the SAME
+objects, so app._buckets.clear() and friends keep clearing what the limiter reads.
+
+The core is a token bucket per (client IP, kind). `burst` is the bucket's capacity, and
+defaults to one minute's worth because that is what a per-minute budget means. A budget
+measured over a *day* needs the two apart: the capacity is the whole day's allowance and
+`per_min` is only the rate that hands it back. Folded together, a 20-rooms-per-day budget
+would be a bucket holding 0.0139 tokens, which never reaches the 1.0 a grant costs — the
+limit would refuse everything.
+"""
+
+import time
+from collections import OrderedDict
+from contextlib import contextmanager
+
+from starlette.requests import Request
+from starlette.responses import Response
+
+# Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
+# trust them — a direct caller can send any of them, which is the whole reason
+# CLIENT_IP_HEADER is opt-in — but it does mean the request plausibly arrived through that
+# CDN, and if we are not configured to read one, every caller behind it shares a single
+# rate-limit identity. That failure is silent and it gets worse the longer the budget: a
+# shared per-minute limit merely feels strict, a shared per-DAY room budget is a global
+# lockout nobody can distinguish from "the service is broken". So the mismatch is counted
+# and published in /stats rather than guessed at. Detection, not trust.
+PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-client-ip")
+
+# The paths that cost nothing, named once because the 429 body and the manual both list
+# them. A 429 that points at a path which is itself rate limited is advice that fails at
+# exactly the moment it is taken.
+FREE_PATHS = (
+    "/, /llms.txt, /skill.md, /patterns.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
+)
+
+# Bounded LRU, because every unseen IP would otherwise add entries forever and the
+# proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
+# IPv6 /64 or a distributed flood would grow this until the 128 MiB container OOMs.
+# Eviction costs nothing at the margin: an entry idle for a full refill window has
+# refilled to `per_min`, so forgetting it is identical to keeping it, and LRU order
+# evicts the idlest first. A flood of >MAX_BUCKETS *concurrently active* IPs does lose
+# limiter state — which is why the authoritative limit belongs in the proxy (see README).
+MAX_BUCKETS = 20_000
+_buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+
+# Request counters for /stats. Deliberately in-process (the store's counters are the
+# durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
+# sits beside it, not a number that outlives the process it describes.
+_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
+# Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
+# requests that carried a CDN header we are not configured to read; `identities` is how many
+# distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
+# and an `identities` of 1 is not rate limiting anyone individually — it is rate limiting
+# the CDN, and the room budget is being shared by the entire internet.
+_proxy_evidence: dict[str, int] = {"proxied_requests": 0}
+_identities: set[str] = set()
+MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a diagnostic
+
+
+def client_ip(request: Request, ip_header: str = "") -> str:
+    """The socket peer, unless the operator has named a header to trust instead.
+
+    No header is trusted by default. A forwarded-for header is a *claim by the client*; it
+    becomes evidence only when the origin is unreachable except through the proxy that
+    overwrites it. Trusting one unconditionally meant anyone who could reach the container
+    directly got a fresh rate-limit identity per request for the cost of one header — the
+    limiter, the write budget and the long-poll cap all key on this.
+
+    X-Forwarded-For is never consulted implicitly, for the same reason plus one more:
+    proxies *append* to it, so a client sending its own owns the first entry. An operator
+    who really is behind such a proxy can still set CHAT_CLIENT_IP_HEADER=x-forwarded-for,
+    but that is now a deliberate statement about their topology rather than a default.
+
+    Shared by the rate limiter and the long-poll waiter cap: two per-IP bounds keyed on
+    different notions of "IP" would each be bypassable by whichever header the other
+    ignored.
+    """
+    if ip_header:
+        forwarded = request.headers.get(ip_header, "").split(",")[0].strip()
+        if forwarded:
+            return forwarded
+        return request.client.host if request.client else "?"
+    # Not configured to read one. Note whether the request looks proxied anyway, so a
+    # misconfiguration is visible in /stats instead of only in a support ticket.
+    if any(h in request.headers for h in PROXY_IP_HEADERS):
+        _proxy_evidence["proxied_requests"] += 1
+    return request.client.host if request.client else "?"
+
+
+def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BUCKETS):
+    """Token bucket per (client IP, kind). Returns (tokens left, seconds until the
+    next one). Process-local: a real deployment puts the authoritative limit in the
+    reverse proxy.
+
+    `burst` is the bucket's capacity, and defaults to one minute's worth because that is
+    what a per-minute budget means. A budget measured over a *day* needs the two apart:
+    the capacity is the whole day's allowance and `per_min` is only the rate that hands it
+    back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
+    tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
+    """
+    ip = client_ip(request, ip_header)
+    if len(_identities) < MAX_IDENTITIES:
+        _identities.add(ip)
+    now = time.monotonic()
+    cap = float(per_min if burst is None else burst)
+    tokens, last = _buckets.get((ip, kind), (cap, now))
+    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
+    if tokens >= 1.0:  # granted: no wait, even when this was the last token
+        tokens -= 1.0
+        wait = 0.0
+    else:
+        wait = (1.0 - tokens) * 60.0 / per_min
+    _buckets[(ip, kind)] = (tokens, now)
+    _buckets.move_to_end((ip, kind))
+    while len(_buckets) > max_buckets:
+        _buckets.popitem(last=False)
+    # Counted at the one point every rate-limited route already funnels through, so a new
+    # route cannot forget to count itself. In-process, so these reset on restart — /stats
+    # reports them next to `uptime_seconds`, which is what makes them readable.
+    _requests[kind] = _requests.get(kind, 0) + 1
+    if wait:
+        _requests["rate_limited"] += 1
+    return int(tokens), wait
+
+
+def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
+    """Hand one token back to the caller's bucket, capped at its burst.
+
+    `last` is deliberately left alone: it is the refill clock, and moving it would either
+    grant free time or discard earned time. Only the balance changes.
+    """
+    ip = client_ip(request, ip_header)
+    cap = float(per_min if burst is None else burst)
+    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
+    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+
+
+# Set by the room-creation gate on the request it charged, read once by _settle_room_budget.
+# On the scope rather than a module global because it is per-request state, and requests
+# from one IP overlap: a module flag would be read by whichever request finished first.
+CHARGED_CREATION = "_charged_room_creation"
+
+
+def _settle_room_budget(request, record, rooms_per_day, *, ip_header="") -> None:
+    """Refund the room-creation token if this request turned out not to create the room.
+
+    The gate has to charge *before* the write — it exists to refuse a room before it comes
+    into being — so when several callers send a first message to the same absent room at
+    once, they all pass the existence check and all pay. Only one of them creates it; the
+    rest append to a room that already exists by the time the store's create lock lets them
+    through. That is not a rare shape either: agents converging on a shared rendezvous room
+    is a documented pattern, and one swarm behind one NAT could spend a day's budget on a
+    single room.
+
+    `seq == 1` is the store's own answer to "did this call create the room": the record is
+    the first line in the file. A room reaped and recreated starts at 1 again, which is
+    correct — that really is a creation.
+    """
+    if request.scope.pop(CHARGED_CREATION, False) and record.get("seq") != 1:
+        refund(request, "create", rooms_per_day / 1440.0, burst=rooms_per_day, ip_header=ip_header)
+
+
+def refill_rate(per_min: int) -> str:
+    """The refill, phrased so it stays meaningful at whatever limit is configured.
+
+    `{per_min / 60:.1f} tokens/s` reads fine at the default 120/min and degrades to a flat
+    "0.0 tokens/s" for anything under 30/min — a number an agent cannot pace against, on
+    precisely the deployments that most need pacing. Under one per second the period is
+    both accurate and the more useful form: "one every 30s" is a sleep, "0.03 tokens/s" is
+    arithmetic the reader has to do first.
+    """
+    per_second = per_min / 60.0
+    if per_second >= 1.0:
+        return f"{per_second:.1f} tokens/s"
+    return f"one token every {60.0 / per_min:.0f}s"
+
+
+def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: float) -> Response:
+    """429 an agent can act on. The retry delay is repeated in the *body* because
+    most agent harnesses surface only the page text, never the headers.
+
+    It also states the budget itself, which makes this response the primary way an agent
+    learns the numbers: the manual deliberately does not name them (they are per
+    deployment), so a caller that never reads /.well-known/agent.json still finds out what
+    it is pacing against at the one moment the answer matters.
+    """
+    wait = max(1, round(retry_after))
+    other = "write" if kind == "read" else "read"
+    body = (
+        f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
+        f"retry after: {wait}s — the bucket refills continuously "
+        f"({refill_rate(per_min)}), so waiting longer buys a bigger burst, up to "
+        f"{per_min}.\n"
+        f"still open: {other}s are a separate budget and are unaffected, and these paths "
+        f"are never rate limited: {FREE_PATHS}.\n"
+        f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
+        f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
+        f"{max_wait:g}s instead of twenty.\n"
+        f"the enforced numbers are also published at /.well-known/agent.json under "
+        f"limits.{kind}s_per_minute_per_ip."
+    )
+    r = text(body, 429)
+    r.headers["Retry-After"] = str(wait)
+    return r
+
+
+def budget_note(kind: str, left: int, per_min: int) -> str:
+    """Warn before the wall, not at it — only once the budget is nearly gone."""
+    if left * 4 > per_min:
+        return ""
+    return (
+        f"\n# budget: {left} of {per_min} {kind}s left this minute "
+        f"(refills {refill_rate(per_min)}; a 429 states the wait, and the full limits are "
+        f"in /.well-known/agent.json)"
+    )
+
+
+# Long-poll bounds. `?wait=` holds a connection open, which is a cost model the
+# request-counting rate limiter does not bound at all: 30 writes/min says nothing about
+# how many sockets one caller may park. On a world-writable service that gap is the whole
+# attack, so waiters are capped twice — per IP, and globally — and exceeding either
+# degrades to an immediate empty reply rather than an error. A caller that cannot get a
+# slot is exactly as well off as before long-polling existed.
+MAX_WAITERS_TOTAL = 64
+MAX_WAITERS_PER_IP = 4
+_waiters_by_ip: dict[str, int] = {}
+_waiters_total = 0
+
+
+@contextmanager
+def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
+    """Reserve one long-poll slot, or yield False when either cap is full.
+
+    Plain integers, no lock: this is a single-threaded event loop, and every acquire and
+    release happens without an await between the check and the mutation.
+    """
+    global _waiters_total
+    if _waiters_total >= max_total or _waiters_by_ip.get(ip, 0) >= max_per_ip:
+        yield False
+        return
+    _waiters_total += 1
+    _waiters_by_ip[ip] = _waiters_by_ip.get(ip, 0) + 1
+    try:
+        yield True
+    finally:
+        _waiters_total -= 1
+        left = _waiters_by_ip.get(ip, 1) - 1
+        if left > 0:
+            _waiters_by_ip[ip] = left
+        else:
+            _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
