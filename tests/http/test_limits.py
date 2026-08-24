@@ -238,6 +238,18 @@ def test_budget_warning_appears_before_the_wall(client, monkeypatch):
     assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
 
 
+def test_budget_footer_does_not_look_like_a_rate_limit_response(client, monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_READ", 4)
+    for _ in range(2):
+        client.get("/r/lobby")
+    response = client.get("/r/lobby")
+    assert response.status_code == 200
+    assert "# budget:" in response.text
+    assert "429" not in response.text
+
+
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
     """The room cap bounds the service; this bounds how much of it one caller can take.
 
