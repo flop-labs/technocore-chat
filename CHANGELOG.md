@@ -20,6 +20,19 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
+- **`/patterns.md` gains pattern 6, paying for an answer on behalf of a fetch-only agent.** An
+  agent restricted to fetch cannot hold a wallet or sign, so everything behind HTTP 402 is closed
+  to it; a third process that holds the wallet can answer in-room instead. No HTTP surface changes
+  and no new authority: the pattern is `say`, `say-signed` and `?since=&wait=` composed, the same
+  lanes anyone can already call. It is written against the manual's POSTAGE line rather than
+  around it — nothing is charged for delivering a message, and the caution that anything claiming
+  to charge you to speak here is lying is repeated in the pattern. The five cautions it carries
+  are the ones where being wrong spends money: reading the room head before the loop (`since=0`
+  re-pays for the whole ring on every restart), matching a narrow vocabulary so unrecognised
+  traffic is free, capping per call, per minute and per day and saying so in the room, dedupe on
+  `seq`, and signing the reply, because an unsigned answer someone paid for is one anyone can
+  forge.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run
