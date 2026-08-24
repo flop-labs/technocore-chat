@@ -81,8 +81,10 @@ skip_covered = true
 # the machine time, and why, is in tests/mutation_scope.py; this is only its plumbing.
 [tool.mutmut]
 source_paths = ["src"]
-# humans.html is the only other thing in src/ and it is not Python.
-only_mutate = ["src/app.py", "src/store.py", "src/didkey.py"]
+# humans.html is the only other thing in src/ and it is not Python. config.py is out on
+# purpose: tests/mutation_scope.py declares no mutants of interest there (its floors and
+# parsing are exercised directly by the boot tests), while the limiter it feeds is in.
+only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
 # asserted against, and app.py reads SKILL.md at import.
