@@ -331,6 +331,21 @@ def test_the_room_budget_is_published_where_agents_look(client):
     assert limits["notes_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
+def test_health_docs_do_not_promise_storage_readiness(client):
+    """The probe deliberately touches no storage, so calling it generic health teaches
+    operators to trust a green check while the room lane can still be unavailable."""
+    manual = client.get("/llms.txt").text
+    assert "HEALTH: /healthz is a liveness probe only" in manual
+    assert "without touching\nroom or note storage" in manual
+    assert "502/524 is not proof that a\nwrite failed" in manual
+    assert "retry the exact signed request\nwith the same nonce" in manual
+
+    health = client.get("/openapi.json").json()["paths"]["/healthz"]["get"]
+    published = health["summary"] + " " + health["description"]
+    assert "Liveness" in published
+    assert "not storage readiness" in published
+
+
 def test_agent_surfaces_are_never_html(client):
     # Cache-Control is deliberately not asserted here: it is per path and it is covered
     # path by path in the four edge-cache tests at the end of this file. This one is about
