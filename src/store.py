@@ -766,29 +766,72 @@ def _cached_topic(root: Path, room: str, stamp: tuple, now: float) -> str | None
     return cache[room]
 
 
+# Why the overview carries two counts, and why publishing the second one is safe.
+#
+# `room_stats` skips every name it would not list, which is right for the rows it renders:
+# an unlisted room's name is the only secret protecting it. It was also where `total` and
+# `bytes` came from, and those two are what a caller reads as headroom against MAX_ROOMS and
+# MAX_TOTAL_ROOM_BYTES. The caps skip nothing — `_check_room_capacity` scans every `*.jsonl`
+# — so a service held full by `p-` rooms listed nothing, reported the whole byte budget free,
+# and refused every creation. The text view went further and printed the URL that would
+# create one.
+#
+# Fixing it by widening `total` was the wrong shape: `total` pairs with `rooms` and is how a
+# client knows the listing was truncated (/humans renders "showing 50 of N"), so counting
+# names that can never be shown would trade this bug for "your room is gone" on a full page.
+# Hence a second pair, and flat rather than nested so the names sit beside the numbers they
+# qualify — `..._counted_by_caps` is the whole documentation of what they are.
+#
+# They are measured the way the caps measure: every `*.jsonl`, no name filter, matching
+# `_scan` exactly. Filtering them by NAME_RE the way a *listing* is filtered would be the
+# same bug one size smaller, because a file the validator would reject today still holds a
+# slot and still costs bytes.
+#
+# Publishing them is a count, never a name. That is the line `note_stats` already draws on
+# this same response and defends at length: namespaces are unenumerable and their note count
+# is published anyway, because a count and a byte total are enough to watch the capacity that
+# bounds the disk and useless for finding anyone's notes. The cost, stated rather than
+# glossed: an observer polling this sees the count rise with no new row, which puts a private
+# room's creation inside a polling interval — no name, coarse, and already true of the note
+# count beside it. A capacity figure wrong by the whole budget is the worse failure, because
+# it is what a caller consults before creating a room and what /humans warns from.
+
+
 def room_stats(root: Path, limit: int = 50) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
-    memoized against that same stat — so a walk re-reads only rooms that changed since
-    the last one. See WINDOW_BYTES for the per-room worst-case bound.
+    memoized against that same stat, so a walk re-reads only rooms that changed since the
+    last one. See WINDOW_BYTES for the per-room worst-case bound.
+
+    `total` and `bytes` are the listed rooms, which is what the rows are and how a client
+    knows the listing was truncated. The `..._counted_by_caps` pair is every room, which is
+    what MAX_ROOMS and MAX_TOTAL_ROOM_BYTES are enforced against, so it is the pair that says
+    whether a new room will be accepted. Both come out of this one walk: it stats every room
+    to count the caps and keeps the listable ones for the rows.
     """
     d = root / "rooms"
     now = time.time()
     entries = []
+    counted = 0
+    counted_bytes = 0
     try:
         with os.scandir(d) as rooms:
             for e in rooms:
                 if not e.name.endswith(".jsonl"):
                     continue
-                name = e.name[: -len(".jsonl")]
-                if not _listable(name):
-                    continue
                 try:
                     st = e.stat()
                 except OSError:
                     continue  # reaped between the readdir and the stat
+                # Count every room the caps count, before the listing filter drops the
+                # unlisted ones: a p- room holds a slot and bytes it cannot show as a row.
+                counted += 1
+                counted_bytes += st.st_size
+                name = e.name[: -len(".jsonl")]
+                if not _listable(name):
+                    continue
                 entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     except FileNotFoundError:
         pass
@@ -815,6 +858,11 @@ def room_stats(root: Path, limit: int = 50) -> dict:
         "total": len(entries),
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
+        # `total`/`bytes` above are the listed rooms. This pair is every room the caps count,
+        # listable or not, so it is what says whether the next creation is accepted. A count
+        # and a byte total, never a name, the line note_stats already draws on this response.
+        "total_counted_by_caps": counted,
+        "bytes_counted_by_caps": counted_bytes,
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.

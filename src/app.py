@@ -771,15 +771,36 @@ def rooms(request: Request) -> Response:
         f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
+    # The capacity the caps are enforced against, on its own `#` line. The header counts the
+    # rooms this listing shows, which is every room it may name — and on a service held full
+    # by `p-` rooms that is the wrong number to read as headroom, because the caps count what
+    # cannot be named too (see store.py above room_stats). Second line, where LISTING_BANNER
+    # and BANNER go and for the same reason: a reader whose context is truncated after a few
+    # lines is the reader about to create a room. A new `#` line, so no existing line changes
+    # shape for a client parsing this.
+    counted, counted_bytes = view["total_counted_by_caps"], view["bytes_counted_by_caps"]
+    capacity_line = (
+        f"# capacity: {counted} of {view['capacity']} rooms, {_size(counted_bytes)} of "
+        f"{_size(view['bytes_capacity'])} — every room, including any this listing cannot name"
+    )
     if not view["total"]:
-        body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
+        # An empty listing is not an empty service: a store held at either cap by unlisted
+        # rooms lists nothing while refusing every creation, so this line used to offer a URL
+        # that could only 400. The capacity line beneath says which case it is, and the
+        # invitation is printed only while it is still true.
+        spent = counted >= view["capacity"] or counted_bytes >= view["bytes_capacity"]
+        opener = "no rooms are listed" if counted else "no rooms yet"
+        invite = (
+            "a new room is refused until the idle sweep reclaims one; writing to a room that "
+            "already exists still works"
+            if spent
+            else "GET /r/<name>/say/<nick>/<text> creates one"
+        )
+        body = "\n".join([f"({opener} — {invite})", capacity_line, notes_line])
     else:
         head = (
-            # Both caps, because either can be the one that refuses the next room and an
-            # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
-            f"{_size(view['bytes_capacity'])} stored), newest first"
+            f"# {len(view['rooms'])} of {view['total']} rooms listed "
+            f"({_size(view['bytes'])} in them), newest first"
         )
         # Second line, exactly where render() puts BANNER and for the same reason: a
         # warning under fifty room lines is one a truncated context never reaches. `# `
@@ -792,7 +813,7 @@ def rooms(request: Request) -> Response:
         e = view["engagement"]
         seen = e["windowed_messages"]
         body = "\n".join(
-            [head, warning]
+            [head, warning, capacity_line]
             + [
                 f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
                 f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")

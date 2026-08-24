@@ -357,7 +357,11 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     assert view["total"] == 3 and view["capacity"] == store.MAX_ROOMS and view["bytes"] > 0
 
     body = client.get("/rooms").text
-    assert "3 of 3 rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+    assert "3 of 3 rooms listed" in body and "/r/busy" in body and "seq 2" in body
+    assert "ago" in body
+    # The caps are on their own line and cover every room, so it agrees with the listing
+    # only while nothing unlisted exists — which is the case here.
+    assert f"# capacity: 3 of {store.MAX_ROOMS} rooms," in body
 
 
 def test_rooms_marks_the_caller_chosen_name_and_topic_as_untrusted(client):
@@ -453,6 +457,11 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        # The pair the caps are enforced against, present on an empty store too and reading
+        # zero here because the store really is empty. On a store held full by unlisted
+        # rooms these are the only two fields in this response that say so.
+        "total_counted_by_caps": 0,
+        "bytes_counted_by_caps": 0,
         "notes": {
             "total": 0,
             "bytes": 0,
@@ -473,6 +482,100 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     client.get("/r/p-secret/say/bot/hi")
     view = client.get("/rooms?format=json").json()
     assert view["total"] == 0 and view["rooms"] == []  # p- stays invisible in stats too
+    # …and is counted anyway, because the caps count it. These two lines are the whole
+    # distinction: the listing may not name it, the capacity figure must not omit it.
+    assert view["total_counted_by_caps"] == 1 and view["bytes_counted_by_caps"] > 0
+
+
+def test_a_service_held_full_by_unlisted_rooms_does_not_report_itself_empty(
+    client, tmp_path, monkeypatch
+):
+    """The listing counts what it may name; the caps count what is on disk. Where those two
+    disagree, only one of them can answer "will a new room be accepted".
+
+    An unlisted room is enumerated nowhere \u2014 its name is the only thing protecting it \u2014 so
+    `total` and `bytes` skip it, correctly. They were also the figures a caller read as
+    headroom, and `_check_room_capacity` skips nothing. So a store held at MAX_ROOMS by `p-`
+    rooms listed zero rooms, reported the whole byte budget free, printed the URL that
+    creates a room, and refused that exact call. Every number in the response was wrong in
+    the direction that gets a caller to retry.
+
+    `total_counted_by_caps` and `bytes_counted_by_caps` are the enforced pair, and they are a
+    count and a byte total with no name in them \u2014 the same line `note_stats` draws for
+    unenumerable namespaces on this same response.
+    """
+    import json
+
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 4)
+    for i in range(4):
+        assert client.get(f"/r/p-hidden{i}/say/bot/hi").status_code == 200
+    refused = client.get("/r/wanted/say/bot/hi")
+    assert refused.status_code == 400 and "room limit reached" in refused.text
+
+    view = client.get("/rooms?format=json").json()
+    assert view["total"] == 0 and view["rooms"] == []  # the listing cannot name them
+    assert view["total_counted_by_caps"] == 4  # the caps count them, so this must too
+    assert view["capacity"] == 4
+    assert view["bytes_counted_by_caps"] > 0
+
+    body = client.get("/rooms").text
+    # No invitation to do the thing that just 400d, and the reason is on the page.
+    assert "GET /r/<name>/say/<nick>/<text> creates one" not in body
+    assert "no rooms are listed" in body and "a new room is refused" in body
+    assert "# capacity: 4 of 4 rooms," in body
+    # Still no name, no size and no timestamp for any of them: the fix publishes a count,
+    # and a count is the whole of what it publishes.
+    for i in range(4):
+        assert f"p-hidden{i}" not in body
+    assert "p-hidden" not in json.dumps(view)
+
+
+def test_the_byte_budget_half_of_the_capacity_line_counts_unlisted_rooms_too(
+    client, tmp_path, monkeypatch
+):
+    """The count is not the disk budget, and either can be the cap that bites \u2014 so the same
+    blind spot existed twice. A store whose bytes are all in unlisted rooms reported
+    `bytes: 0` while the budget that refuses creation was spent."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 2048)
+    for i in range(6):
+        client.get(f"/r/p-bulk{i}/say/bot/{'x' * 300}")
+    refused = client.get("/r/wanted/say/bot/hi")
+    assert refused.status_code == 400 and "room storage is full" in refused.text
+
+    view = client.get("/rooms?format=json").json()
+    assert view["bytes"] == 0  # nothing listed, so nothing listed has bytes
+    assert view["bytes_counted_by_caps"] >= 2048  # \u2026and the budget is spent regardless
+    assert view["bytes_capacity"] == 2048
+    assert "a new room is refused" in client.get("/rooms").text
+
+
+def test_the_capacity_figure_counts_exactly_what_the_cap_counts(client, tmp_path):
+    """`_listable` refuses an on-disk name the validator would reject today, so a
+    hand-created file is never echoed into a listing. It is still a slot and still bytes:
+    `_check_room_capacity` scans `*.jsonl` with no name filter, so a capacity figure that
+    filtered by name would understate the pressure by exactly those files \u2014 the same bug as
+    the `p-` one, one size smaller.
+
+    So the assertion is equality with `_scan`, not a hand-counted number: whatever the cap
+    counts is what gets published.
+    """
+    import store
+
+    client.get("/r/real/say/bot/hi")
+    client.get("/r/p-hidden/say/bot/hi")
+    (tmp_path / "rooms" / "NotValid.jsonl").write_bytes(b'{"seq":1,"from":"x","text":"y"}\n')
+
+    view = client.get("/rooms?format=json").json()
+    assert view["total"] == 2  # `real` plus the events room its creation announced
+    assert {r["room"] for r in view["rooms"]} == {"real", "events"}  # neither other name
+    count, used = store._scan(tmp_path / "rooms", ".jsonl", sized=True)
+    assert (
+        (view["total_counted_by_caps"], view["bytes_counted_by_caps"]) == (count, used) == (4, used)
+    )
 
 
 def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
@@ -483,6 +586,8 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
     view = client.get("/rooms?limit=3&format=json").json()
     # 8 rooms + the events room the first of them created
     assert len(view["rooms"]) == 3 and view["total"] == 9  # count is complete, detail is capped
+    # The capacity pair is not capped by `limit`: it is a directory measurement, not a page.
+    assert view["total_counted_by_caps"] == 9
     assert store.room_stats(tmp_path, limit=0)["rooms"] != []  # limit floors at 1, never 0
     # junk limits fall back rather than 500 (the _cursor rule, incl. Unicode digits)
     for bad in ("abc", "\u00b2", "-4", ""):

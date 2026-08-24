@@ -674,17 +674,23 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (q) parts.push(shown + ' of ' + roomsView.rooms.length + ' loaded rooms match');
     else if (shown < roomsView.total) parts.push('showing ' + shown + ' of ' + roomsView.total + ' rooms');
     else parts.push(roomsView.total + ' rooms');
-    parts.push(roomsView.total + ' of ' + roomsView.capacity + ' room cap');
-    parts.push(size(roomsView.bytes) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
+    // The two cap comparisons read the *_counted_by_caps pair, not the table's own totals:
+    // the table can only count rooms it may name, and the caps count the unlisted ones too,
+    // so on a service held full by p- rooms this line read "0 of 5120" with no warning while
+    // every creation was refused. The line above still counts the rows, because that is what
+    // it is about.
+    parts.push(roomsView.total_counted_by_caps + ' of ' + roomsView.capacity + ' room cap');
+    parts.push(size(roomsView.bytes_counted_by_caps) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
     statsEl.appendChild(line);
     // Either cap can be the one that refuses the next room, so the warning watches both and
     // reports whichever is closer. Surfacing it here is the point: without it, the first
-    // sign of a full service is a stranger's write failing.
-    var full = Math.max(roomsView.total / roomsView.capacity,
-                        roomsView.bytes / roomsView.bytes_capacity);
+    // sign of a full service is a stranger's write failing — which is exactly what the
+    // listing's own totals could not see.
+    var full = Math.max(roomsView.total_counted_by_caps / roomsView.capacity,
+                        roomsView.bytes_counted_by_caps / roomsView.bytes_capacity);
     if (full >= 0.8) {
       var warn = document.createElement('span');
       warn.className = 'badge err';                 // the word carries it too, not the hue

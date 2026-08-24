@@ -571,6 +571,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "description": (
                         "Unlisted (`p-`) rooms never appear. `?format=json` additionally "
                         "carries per-room engagement aggregates over a bounded window.\n\n"
+                        "**`total` and `bytes` count the listed rooms; the "
+                        "`*_counted_by_caps` pair counts every room.** The caps are enforced "
+                        "over the whole rooms directory, so a service held full by unlisted "
+                        "rooms lists nothing while refusing every creation. Read the "
+                        "`*_counted_by_caps` pair as headroom; it carries a count and a byte "
+                        "total only, never a name.\n\n"
                         "**Two fields on every entry are caller-controlled.** A room "
                         "exists because someone wrote to it, so `room` is a string that "
                         "caller chose and this listing re-emits; `topic` is a "
@@ -600,9 +606,41 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "type": "object",
                                 "properties": {
                                     "rooms": {"type": "array", "items": {"type": "object"}},
-                                    "total": {"type": "integer"},
+                                    "total": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Rooms this listing may name. Unlisted `p-…` "
+                                            "rooms are not counted here — see "
+                                            "`total_counted_by_caps`."
+                                        ),
+                                    },
                                     "capacity": {"type": "integer"},
-                                    "bytes": {"type": "integer"},
+                                    "bytes": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Bytes held by the rooms counted in `total`, "
+                                            "not by every room. See "
+                                            "`bytes_counted_by_caps`."
+                                        ),
+                                    },
+                                    "total_counted_by_caps": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Every room, unlisted ones included — what "
+                                            "MAX_ROOMS is enforced against, so this is the "
+                                            "number that says whether a new room will be "
+                                            "accepted. `total` cannot: a listing can only "
+                                            "count what it may name. A count, never a name."
+                                        ),
+                                    },
+                                    "bytes_counted_by_caps": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Bytes held by every room, the figure the "
+                                            "total-room-bytes budget is enforced against. "
+                                            "Compare against `bytes_capacity`."
+                                        ),
+                                    },
                                     "notes": {"type": "object"},
                                     "engagement": {"type": "object"},
                                     "untrusted": {

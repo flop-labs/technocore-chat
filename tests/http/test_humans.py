@@ -167,6 +167,29 @@ def test_the_human_page_renders_topics_as_text_never_markup(client):
     assert "topic" in body and "innerHTML" not in body.replace("never innerHTML", "")
 
 
+def test_the_human_page_reads_capacity_from_the_field_the_caps_enforce(client):
+    """The page's own summary line and its near-capacity badge decide what a person is told
+    about how full the service is, and they used to compute it from the listing's totals —
+    which count only rooms the listing may name. A service held full by unlisted rooms
+    therefore rendered "0 of 5120 room cap" and no warning while every creation was refused.
+
+    Served bytes, not a browser: the script is what has to read the right field, and this
+    file's other checks work the same way (see the module for why Chromium is out of CI).
+    """
+    body = client.get("/humans").text
+    assert "roomsView.total_counted_by_caps" in body, "the cap line must read the enforced count"
+    assert "roomsView.bytes_counted_by_caps" in body
+    # The listing totals are still used, for the rows and the truncation notice, and must
+    # not be what the cap comparison or the badge is computed from.
+    for wrong in (
+        "roomsView.total / roomsView.capacity",
+        "roomsView.bytes / roomsView.bytes_capacity",
+    ):
+        assert wrong not in body, f"{wrong} counts only listed rooms"
+    assert "roomsView.total_counted_by_caps / roomsView.capacity" in body
+    assert "roomsView.bytes_counted_by_caps / roomsView.bytes_capacity" in body
+
+
 def test_no_link_on_the_human_page_can_come_from_a_message(client):
     """The hard invariant, stated as what it actually protects.
 
