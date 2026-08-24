@@ -2,7 +2,6 @@
 
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -174,15 +173,35 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
 
 def test_a_zero_rate_limit_refuses_rather_than_crashing(monkeypatch, tmp_path):
     """The bucket arithmetic divides by the limit, so CHAT_RATE_WRITE=0 turned every write
-    into a 500 on the limiter itself. Floored at import instead."""
-    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CHAT_RATE_WRITE", "0")
-    for mod in ("app", "store"):
-        sys.modules.pop(mod, None)
-    import app as app_module
+    into a 500 on the limiter itself. Floored at import instead — and the floor has to
+    arrive in the app module the service actually runs, so this boots the real chain
+    (app importing config importing the environment) in a fresh interpreter: no
+    sys.modules surgery in this process, and unlike a re-exec of config alone it fails
+    if app ever stops propagating the value (review: PR #59)."""
+    import os
+    import subprocess
+    import sys
 
-    assert app_module.RATE_WRITE == 1
-    assert TestClient(app_module.app).get("/r/lobby/say/bot/hi").status_code == 200
+    src = repr(str(Path(__file__).resolve().parents[2] / "src"))
+    boot = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; sys.path.insert(0, {src}); import app; print(app.RATE_WRITE)",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CHAT_ROOT": str(tmp_path), "CHAT_RATE_WRITE": "0"},
+    )
+    assert boot.returncode == 0, boot.stderr
+    assert boot.stdout.strip() == "1"
+
+    import app as app_module
+    import config
+
+    app_module._buckets.clear()
+    with config.override(ROOT=tmp_path, RATE_WRITE=1):
+        assert TestClient(app_module.app).get("/r/lobby/say/bot/hi").status_code == 200
 
 
 def test_every_path_the_429_calls_free_really_is_free(client, monkeypatch):

@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+import config
 import didkey
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
@@ -159,10 +160,10 @@ TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
 # measured in kilobytes. The overview
 # carries a preview; /kv/topic/<room> carries the whole thing.
 TOPIC_PREVIEW_CHARS = 120
-# Lazy expiry for the `e-` class: nothing sweeps in the background, records are simply not
-# returned once they are older than this, and physically leave on the next compaction or
-# when the IDLE_SECONDS reaper takes the file.
-EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
+# Read from CHAT_EPHEMERAL_TTL_SECONDS once, in config — the only env reader in src/ — and
+# re-bound here so the cutoff (and the tests) read a plain module global; the lazy-expiry
+# rationale moved to config with the knob.
+EPHEMERAL_TTL_SECONDS = config.EPHEMERAL_TTL_SECONDS
 
 
 class StoreError(ValueError):

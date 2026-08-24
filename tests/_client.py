@@ -1,7 +1,6 @@
 """Run: uv run --group dev python -m pytest tests"""
 
 import os
-import sys
 import time
 from contextlib import contextmanager
 
@@ -10,13 +9,20 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture()
-def client(tmp_path, monkeypatch):
-    os.environ["CHAT_ROOT"] = str(tmp_path)
-    for mod in ("app", "store"):
-        sys.modules.pop(mod, None)
+def client(tmp_path):
+    """One shared app, a fresh ROOT per test: config.override re-binds the knob (and app's
+    copy of it) for exactly this test, where the old fixture re-imported app against a
+    CHAT_ROOT env var. The limiter buckets and the /rooms cache are process state a fresh
+    import used to reset for free, so they are cleared here instead."""
     import app as app_module
+    import config
 
-    return TestClient(app_module.app)
+    app_module._buckets.clear()
+    app_module._rooms_cache.clear()
+    app_module._identities.clear()
+    app_module._proxy_evidence["proxied_requests"] = 0
+    with config.override(ROOT=tmp_path):
+        yield TestClient(app_module.app)
 
 
 # --------------------------------------------------------------------------- shared helpers

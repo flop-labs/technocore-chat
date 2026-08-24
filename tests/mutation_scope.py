@@ -62,8 +62,8 @@ SCOPE: dict[str, tuple[str, ...]] = {
         "store.x__ring_limit__*",  # the full ring, or the floor under pressure
         "store.x_room_bytes_used__*",
         "store.x_clean_text__*",  # the character caps, and the invisible-character sweep
-        "app.x_take__*",  # the rate limiter
-        "app.x_refund__*",
+        "limit.x_take__*",  # the rate limiter (src/limit.py since the extraction)
+        "limit.x_refund__*",
         "app.x__room_create_gate__*",  # new rooms per IP per day
         "app.x_read_json__*",  # the body cap, on both the header and the stream
     ),
@@ -73,8 +73,8 @@ SCOPE: dict[str, tuple[str, ...]] = {
         "app.x_allowed_methods__*",  # …and the Allow header it has to carry
         "app.x_on_bad_input__*",
         "app.x_on_conflict__*",  # the current value, and what to do with it
-        "app.x_limited__*",  # the bucket, the refill rate, the retry delay
-        "app.x_budget_note__*",
+        "limit.x_limited__*",  # the bucket, the refill rate, the retry delay
+        "limit.x_budget_note__*",
     ),
 }
 

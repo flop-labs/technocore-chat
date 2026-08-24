@@ -13,13 +13,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
-import os
 import secrets
 import time
 import tomllib
 from collections import OrderedDict
-from contextlib import contextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -30,12 +27,29 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Match, Route
 
+import config
 import didkey
+import limit
 import manifest
 import store
 from store import StoreConflictError, StoreError
 
-ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
+# The CHAT_* knobs are read from the environment exactly once, in config — the only
+# module in src/ that reads it — and re-bound here so request handlers (and the
+# tests that monkeypatch app.RATE_WRITE &c.) keep reading plain module globals. Tests that
+# need a different value for a whole request use config.override(...), which re-binds both
+# copies and restores them on exit.
+ROOT = config.ROOT
+RATE_READ = config.RATE_READ  # requests/min/IP
+RATE_WRITE = config.RATE_WRITE
+RATE_ROOMS_PER_DAY = config.RATE_ROOMS_PER_DAY
+CORS_ORIGINS = config.CORS_ORIGINS
+STATS_TOKEN = config.STATS_TOKEN
+STATS_CACHE_SECONDS = config.STATS_CACHE_SECONDS
+ROOMS_CACHE_SECONDS = config.ROOMS_CACHE_SECONDS
+SECURITY_CONTACT = config.SECURITY_CONTACT
+CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
+PUBLIC_URL = config.PUBLIC_URL
 
 # Sized from what the wire actually carries, not from what a parser tolerates. A real
 # agent request through Cloudflare — Host, UA, Accept, CF-Connecting-IP, CF-Ray,
@@ -55,80 +69,17 @@ MAX_HEADER_BYTES = 8192
 # each, ~192 KiB before the envelope. 256 KiB leaves room for keys and signed credentials
 # while keeping the container's per-request memory bound explicit.
 MAX_BODY = 256 << 10
-# Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
-# configured by hand would turn every rate-limited route into a 500 rather than into the
-# refusal the operator presumably meant. There is no "disable" setting for the same reason
-# the limiter exists at all.
-RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min/IP
-RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
-# A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
-# minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
-# caller could create, and those are not the same resource. At RATE_WRITE a single caller
-# exhausts MAX_ROOMS in a matter of hours, and the slots it takes are everyone's — the
-# next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
-# a cap on the service rather than a race won by whoever creates rooms fastest.
-RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
-# Both of the above are per deployment, which is why no document states them as prose:
+# RATE_READ / RATE_WRITE / RATE_ROOMS_PER_DAY live in config; the comment that floors them
+# moved with them. Both are per deployment, which is why no document states them as prose:
 # /.well-known/agent.json publishes what this process actually enforces, and the manual
 # points there. A manual naming a number the server does not enforce is worse than one
 # naming none, because a machine reader paces itself to it.
 #
-# The paths that cost nothing, named once because the 429 body and the manual both list
-# them. A 429 that points at a path which is itself rate limited is advice that fails at
-# exactly the moment it is taken.
-FREE_PATHS = (
-    "/, /llms.txt, /skill.md, /patterns.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
-)
-CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o]
-# /stats is the one internal surface. Growth numbers are not published — the design doc's
-# §I.2.3 caution against count-based marketing is exactly why they stay off the public
-# service — so the endpoint exists only when a token is configured, and answers 404 rather
-# than 401 to anyone without it: a 401 would confirm the endpoint is there to probe.
-#
-# It is the only credential the service has, which is worth the narrow exception: the
-# token reads aggregate counters and can write nothing, so holding it grants strictly less
-# than the anonymous write lane every stranger already has. Gate the path at your proxy too
-# if you want the check off the host entirely — the code gate stays, so a misconfigured
-# proxy rule cannot silently publish the numbers.
-STATS_TOKEN = os.environ.get("CHAT_STATS_TOKEN", "")
-STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
-# /rooms walks every room for size and mtime and every note for the capacity line — at the
-# caps that is ~46k stat calls, and it was doing it per request. It is also the most polled
-# read on the service: /humans refreshes it every 5s per open tab, and it is how an agent
-# discovers what exists. Nothing in it is per-caller, so N pollers within the window can
-# share one walk. Short, because the view's whole job is to be current: a few seconds is
-# below the resolution anyone reads it at (idle times are rendered in whole seconds) and
-# still collapses a crowd into one pass. 0 disables it.
-ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
-# Empty by default, and that default is a security property rather than a convenience.
-# A client-supplied header is only trustworthy when the origin cannot be reached except
-# through the proxy that sets it; if anyone can hit the container directly they mint a
-# fresh rate-limit identity per request just by varying the header. Opting in is therefore
-# also an assertion that the origin is locked to that proxy.
-# Where /.well-known/security.txt sends a reporter. Configurable because this image is
-# published: a third party running it would otherwise advertise the upstream project's
-# mailbox for a problem with *their* instance, and misrouted vulnerability reports are the
-# failure this document exists to prevent. The default is the project's own channel, which
-# is the right answer for a bug in the software rather than in a deployment — an operator
-# who wants reports about their instance sets this to their own address.
-SECURITY_CONTACT = os.environ.get("CHAT_SECURITY_CONTACT", "security@flop.finance").strip()
-CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
-# Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
-# trust them — a direct caller can send any of them, which is the whole reason
-# CLIENT_IP_HEADER is opt-in — but it does mean the request plausibly arrived through that
-# CDN, and if we are not configured to read one, every caller behind it shares a single
-# rate-limit identity. That failure is silent and it gets worse the longer the budget: a
-# shared per-minute limit merely feels strict, a shared per-DAY room budget is a global
-# lockout nobody can distinguish from "the service is broken". So the mismatch is counted
-# and published in /stats rather than guessed at. Detection, not trust.
-PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-client-ip")
-# The origin to print in /openapi.json and /.well-known/agent.json. Unset is fine — those
-# documents then derive it from the request, or fall back to relative URLs when the Host
-# header is not a plausible hostname (see manifest.public_base). Set it when the service
-# sits behind a proxy that rewrites Host, or when you want the published URLs to be one
-# fixed string no matter who asks.
-PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
-
+# FREE_PATHS and PROXY_IP_HEADERS moved to limit with the 429 body and the client-IP
+# logic that reads them (FREE_PATHS is aliased in the re-export block below the helpers;
+# PROXY_IP_HEADERS resolves through the module __getattr__). STATS_TOKEN /
+# STATS_CACHE_SECONDS / ROOMS_CACHE_SECONDS / SECURITY_CONTACT / CLIENT_IP_HEADER live in
+# config; their rationale moved with them.
 # robots.txt moved to manifest.robots_txt(base): the Sitemap directive takes an absolute
 # URL, so the document depends on the origin and can no longer be a constant. Agents are
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
@@ -190,94 +141,39 @@ LISTING_BANNER = (
 
 # --------------------------------------------------------------------------- helpers
 
-# Bounded LRU, because every unseen IP would otherwise add entries forever and the
-# proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
-# IPv6 /64 or a distributed flood would grow this until the 128 MiB container OOMs.
-# Eviction costs nothing at the margin: an entry idle for a full refill window has
-# refilled to `per_min`, so forgetting it is identical to keeping it, and LRU order
-# evicts the idlest first. A flood of >MAX_BUCKETS *concurrently active* IPs does lose
-# limiter state — which is why the authoritative limit belongs in the proxy (see README).
-MAX_BUCKETS = 20_000
-_buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+# The abuse budget lives in limit.py; app keeps the module-level surface the tests and
+# config.override() mutate. The state names below re-export limit's objects — the SAME
+# references, not copies — so app_module._buckets.clear() clears what the limiter reads,
+# and the knobs (RATE_*, CLIENT_IP_HEADER, MAX_BUCKETS, MAX_WAITERS_*) are read here at
+# call time and passed into limit as parameters, exactly as per_min/burst already were.
+MAX_BUCKETS, CHARGED_CREATION = limit.MAX_BUCKETS, limit.CHARGED_CREATION
+MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP = limit.MAX_WAITERS_TOTAL, limit.MAX_WAITERS_PER_IP
+FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
+_requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
+# _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
+# read from outside (tests, /stats prose), never rebound or read by app's own code — they
+# resolve through the module __getattr__ at the bottom instead of aliases here.
 
-# Request counters for /stats. Deliberately in-process (the store's counters are the
-# durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
-# sits beside it here, not a number that outlives the process it describes.
-_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
+# The request counters (_requests) moved to limit with the limiter that mutates them;
+# _started stays beside the /stats handler that reads it. Traffic is only ever read as a
+# rate, and a rate needs this uptime, not a number that outlives the process it describes.
 _started = time.time()
-# Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
-# requests that carried a CDN header we are not configured to read; `identities` is how many
-# distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
-# and an `identities` of 1 is not rate limiting anyone individually — it is rate limiting
-# the CDN, and the room budget is being shared by the entire internet.
-_proxy_evidence: dict[str, int] = {"proxied_requests": 0}
-_identities: set[str] = set()
-MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a diagnostic
 
 
 def client_ip(request: Request) -> str:
-    """The socket peer, unless the operator has named a header to trust instead.
-
-    No header is trusted by default. A forwarded-for header is a *claim by the client*; it
-    becomes evidence only when the origin is unreachable except through the proxy that
-    overwrites it. Trusting one unconditionally meant anyone who could reach the container
-    directly got a fresh rate-limit identity per request for the cost of one header — the
-    limiter, the write budget and the long-poll cap all key on this.
-
-    X-Forwarded-For is never consulted implicitly, for the same reason plus one more:
-    proxies *append* to it, so a client sending its own owns the first entry. An operator
-    who really is behind such a proxy can still set CHAT_CLIENT_IP_HEADER=x-forwarded-for,
-    but that is now a deliberate statement about their topology rather than a default.
-
-    Shared by the rate limiter and the long-poll waiter cap: two per-IP bounds keyed on
-    different notions of "IP" would each be bypassable by whichever header the other
-    ignored.
-    """
-    if CLIENT_IP_HEADER:
-        forwarded = request.headers.get(CLIENT_IP_HEADER, "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-        return request.client.host if request.client else "?"
-    # Not configured to read one. Note whether the request looks proxied anyway, so a
-    # misconfiguration is visible in /stats instead of only in a support ticket.
-    if any(h in request.headers for h in PROXY_IP_HEADERS):
-        _proxy_evidence["proxied_requests"] += 1
-    return request.client.host if request.client else "?"
+    # Thin adapter over limit.client_ip: the header allowance is read HERE, at call time,
+    # so both monkeypatch.setattr(app, "CLIENT_IP_HEADER", ...) and config.override()
+    # keep reaching the limiter. Rationale lives in limit.client_ip's docstring.
+    return limit.client_ip(request, CLIENT_IP_HEADER)
 
 
-def take(
-    request: Request, kind: str, per_min: float, burst: float | None = None
-) -> tuple[int, float]:
-    """Token bucket per (client IP, kind). Returns (tokens left, seconds until the
-    next one). Process-local: a real deployment puts the authoritative limit in the
-    reverse proxy.
-
-    `burst` is the bucket's capacity, and defaults to one minute's worth because that is
-    what a per-minute budget means. A budget measured over a *day* needs the two apart:
-    the capacity is the whole day's allowance and `per_min` is only the rate that hands it
-    back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
-    tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
-    """
-    ip = client_ip(request)
-    if len(_identities) < MAX_IDENTITIES:
-        _identities.add(ip)
-    now = time.monotonic()
-    cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, now))
-    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
-    if tokens >= 1.0:  # granted: no wait, even when this was the last token
-        tokens -= 1.0
-        wait = 0.0
-    else:
-        wait = (1.0 - tokens) * 60.0 / per_min
-    _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
-    while len(_buckets) > MAX_BUCKETS:
-        _buckets.popitem(last=False)
-    # Counted at the one point every rate-limited route already funnels through, so a new
-    # route cannot forget to count itself. In-process, so these reset on restart — /stats
-    # reports them next to `uptime_seconds`, which is what makes them readable.
-    _requests[kind] = _requests.get(kind, 0) + 1
+def take(request, kind, per_min, burst=None) -> tuple[int, float]:
+    # Thin adapter over limit.take: the knobs are read HERE, at call time, so
+    # monkeypatch.setattr(app, "MAX_BUCKETS", ...) and config.override() keep reaching
+    # the bucket arithmetic.
+    left, wait = limit.take(
+        request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
+    )
     # And the /rooms cache is dropped here. This is the fast path, not the guarantee: it
     # runs *before* the store write, so on its own it loses the race against a concurrent
     # reader that walks while the writer is still in fsync. `_rooms_stamp` is what closes
@@ -285,27 +181,7 @@ def take(
     # note writes, which change the notes line and the topics shown beside a room.
     if kind == "write":
         _rooms_cache.clear()
-    if wait:
-        _requests["rate_limited"] += 1
-    return int(tokens), wait
-
-
-def refund(request: Request, kind: str, per_min: float, burst: float | None = None) -> None:
-    """Hand one token back to the caller's bucket, capped at its burst.
-
-    `last` is deliberately left alone: it is the refill clock, and moving it would either
-    grant free time or discard earned time. Only the balance changes.
-    """
-    ip = client_ip(request)
-    cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
-
-
-# Set by _room_create_gate on the request it charged, read once by _settle_room_budget.
-# On the scope rather than a module global because it is per-request state, and requests
-# from one IP overlap: a module flag would be read by whichever request finished first.
-CHARGED_CREATION = "_charged_room_creation"
+    return left, wait
 
 
 def _room_exists(room: str) -> bool:
@@ -316,78 +192,11 @@ def _room_exists(room: str) -> bool:
     return store.room_path(ROOT, room).exists()
 
 
-def _settle_room_budget(request: Request, record: dict) -> None:
-    """Refund the room-creation token if this request turned out not to create the room.
-
-    The gate has to charge *before* the write — it exists to refuse a room before it comes
-    into being — so when several callers send a first message to the same absent room at
-    once, they all pass the existence check and all pay. Only one of them creates it; the
-    rest append to a room that already exists by the time the store's create lock lets them
-    through. That is not a rare shape either: agents converging on a shared rendezvous room
-    is a documented pattern, and one swarm behind one NAT could spend a day's budget on a
-    single room.
-
-    `seq == 1` is the store's own answer to "did this call create the room": the record is
-    the first line in the file. A room reaped and recreated starts at 1 again, which is
-    correct — that really is a creation.
-    """
-    if request.scope.pop(CHARGED_CREATION, False) and record.get("seq") != 1:
-        refund(request, "create", RATE_ROOMS_PER_DAY / 1440.0, burst=RATE_ROOMS_PER_DAY)
-
-
-def refill_rate(per_min: int) -> str:
-    """The refill, phrased so it stays meaningful at whatever limit is configured.
-
-    `{per_min / 60:.1f} tokens/s` reads fine at the default 120/min and degrades to a flat
-    "0.0 tokens/s" for anything under 30/min — a number an agent cannot pace against, on
-    precisely the deployments that most need pacing. Under one per second the period is
-    both accurate and the more useful form: "one every 30s" is a sleep, "0.03 tokens/s" is
-    arithmetic the reader has to do first.
-    """
-    per_second = per_min / 60.0
-    if per_second >= 1.0:
-        return f"{per_second:.1f} tokens/s"
-    return f"one token every {60.0 / per_min:.0f}s"
-
-
-def limited(kind: str, per_min: int, retry_after: float) -> Response:
-    """429 an agent can act on. The retry delay is repeated in the *body* because
-    most agent harnesses surface only the page text, never the headers.
-
-    It also states the budget itself, which makes this response the primary way an agent
-    learns the numbers: the manual deliberately does not name them (they are per
-    deployment), so a caller that never reads /.well-known/agent.json still finds out what
-    it is pacing against at the one moment the answer matters.
-    """
-    wait = max(1, round(retry_after))
-    other = "write" if kind == "read" else "read"
-    body = (
-        f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
-        f"retry after: {wait}s — the bucket refills continuously "
-        f"({refill_rate(per_min)}), so waiting longer buys a bigger burst, up to "
-        f"{per_min}.\n"
-        f"still open: {other}s are a separate budget and are unaffected, and these paths "
-        f"are never rate limited: {FREE_PATHS}.\n"
-        f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-        f"the room, and prefer &wait={MAX_WAIT:g} to tight polling — one request per "
-        f"{MAX_WAIT:g}s instead of twenty.\n"
-        f"the enforced numbers are also published at /.well-known/agent.json under "
-        f"limits.{kind}s_per_minute_per_ip."
-    )
-    r = text(body, 429)
-    r.headers["Retry-After"] = str(wait)
-    return r
-
-
-def budget_note(kind: str, left: int, per_min: int) -> str:
-    """Warn before the wall, not at it — only once the budget is nearly gone."""
-    if left * 4 > per_min:
-        return ""
-    return (
-        f"\n# budget: {left} of {per_min} {kind}s left this minute "
-        f"(refills {refill_rate(per_min)}; a 429 states the wait, and the full limits are "
-        f"in /.well-known/agent.json)"
-    )
+# limited() and _settle_room_budget() are called as limit.limited(...) /
+# limit._settle_room_budget(...) directly from the routes, with the app-side knobs passed
+# in exactly as per_min/burst are: MAX_WAIT is monkeypatched by tests and RATE_ROOMS_PER_DAY
+# by config.override(), so both must be read here at call time, and the render helpers
+# (refill_rate, budget_note) and state resolve through the re-exports above.
 
 
 def _cursor[D: (int, None)](value: str | None, default: D) -> int | D:
@@ -828,7 +637,7 @@ def _rooms_view(limit: int) -> dict:
 def rooms(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
-        return limited("read", RATE_READ, retry)
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
     view = _rooms_view(_cursor(q.get("limit"), 50))
     notes_line = (
@@ -879,85 +688,52 @@ def rooms(request: Request) -> Response:
     return respond(request, view, body, budget_note("read", left, RATE_READ))
 
 
-# Long-poll bounds. `?wait=` holds a connection open, which is a cost model the
-# request-counting rate limiter does not bound at all: 30 writes/min says nothing about
-# how many sockets one caller may park. On a world-writable service that gap is the whole
-# attack, so waiters are capped twice — per IP, and globally — and exceeding either
-# degrades to an immediate empty reply rather than an error. A caller that cannot get a
-# slot is exactly as well off as before long-polling existed.
-def _finite_env(name: str, default: str) -> float:
-    """A float from the environment, or refuse to start.
-
-    Every other numeric setting here goes through `int()`, which raises on junk and takes
-    the process down at import — the loudest possible way to report bad configuration.
-    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
-    value is *published*. A non-finite ceiling reaches /openapi.json and
-    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
-    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
-    document: a browser, a Go or Rust client, a validating registry. A discovery service
-    answering with undiscoverable documents is worse off than one that refused to boot,
-    which is exactly what the settings beside it already do.
-    """
-    raw = os.environ.get(name, default)
-    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {raw!r}")
-    return value
-
-
-# Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
-# hold. Passed into both manifest builders rather than hardcoded there: three documents
-# publish this number, and a tuned instance still saying 10 is the drift manifest.py
-# exists to prevent.
-MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
+# Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
+# of the abuse budget (see the re-export block above the helpers); the constants are
+# aliased from there so tests that monkeypatch MAX_WAITERS_TOTAL keep reaching them.
+# The CHAT_MAX_WAIT parse (and its refuse-to-boot finiteness check — see config._finite_env,
+# where the knob now lives) is aliased so tests that probe it keep calling app._finite_env.
+_finite_env = config._finite_env
+MAX_WAIT = config.MAX_WAIT
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
-MAX_WAITERS_TOTAL = 64
-MAX_WAITERS_PER_IP = 4
-_waiters_by_ip: dict[str, int] = {}
-_waiters_total = 0
 
 
-@contextmanager
 def _waiter_slot(ip: str):
-    """Reserve one long-poll slot, or yield False when either cap is full.
+    # Thin adapter: the caps are read HERE, at call time, so monkeypatch.setattr(
+    # app, "MAX_WAITERS_TOTAL", ...) keeps gating the slots.
+    return limit._waiter_slot(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP)
 
-    Plain integers, no lock: this is a single-threaded event loop, and every acquire and
-    release happens without an await between the check and the mutation.
-    """
-    global _waiters_total
-    if _waiters_total >= MAX_WAITERS_TOTAL or _waiters_by_ip.get(ip, 0) >= MAX_WAITERS_PER_IP:
-        yield False
-        return
-    _waiters_total += 1
-    _waiters_by_ip[ip] = _waiters_by_ip.get(ip, 0) + 1
-    try:
-        yield True
-    finally:
-        _waiters_total -= 1
-        left = _waiters_by_ip.get(ip, 1) - 1
-        if left > 0:
-            _waiters_by_ip[ip] = left
-        else:
-            _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
+
+def __getattr__(name: str):
+    # Anything app does not define itself resolves on limit: _waiters_total is an int
+    # rebound by limit's `global` on every acquire and release, so no import-time alias
+    # can stay live, and _buckets / _waiters_by_ip / refill_rate / MAX_IDENTITIES /
+    # PROXY_IP_HEADERS are only ever read from outside app, never by app's own code.
+    # Dunder probes are refused rather than forwarded.
+    if name.startswith("__"):
+        raise AttributeError(name)
+    return getattr(limit, name)
 
 
 async def room_read(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
-        return limited("read", RATE_READ, retry)
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
     since = _cursor(q.get("since"), None)
-    limit = _cursor(q.get("limit"), 50)
+    # `tail`, not `limit`: the query param keeps its published name, the local must not
+    # shadow the limit module the refusal two lines above calls into.
+    tail = _cursor(q.get("limit"), 50)
     room = request.path_params["room"]
     # Tail reads are blocking file IO. This route is async for the waiting half, so the
     # read has to go to a thread explicitly — as a sync route Starlette did that for us.
-    view = await run_in_threadpool(store.read_messages, ROOT, room, limit=limit, since=since)
+    view = await run_in_threadpool(store.read_messages, ROOT, room, limit=tail, since=since)
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
     wait = _seconds(q.get("wait"))
     if wait and since is not None and not view["messages"]:
-        fresh = await _await_messages(request, room, limit, since, wait)
+        fresh = await _await_messages(request, room, tail, since, wait)
         if fresh is not None:
             view = fresh
     return respond(request, view, note=budget_note("read", left, RATE_READ))
@@ -1129,13 +905,13 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
 def room_say(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     room = request.path_params["room"]
     denied = _room_write_gate(request, room, None)
     if denied:
         return denied
     rec = store.append(ROOT, room, request.path_params["nick"], request.path_params["text"])
-    _settle_room_budget(request, rec)
+    limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
@@ -1151,7 +927,7 @@ def room_say_signed(request: Request) -> Response:
     """
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     room, nonce = p["room"], p["nonce"]
     body = store.clean_text(p["text"])  # sweep first: the signature covers what is stored
@@ -1162,7 +938,7 @@ def room_say_signed(request: Request) -> Response:
     if denied:
         return denied
     rec = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
-    _settle_room_budget(request, rec)
+    limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
@@ -1224,7 +1000,7 @@ async def room_post(request: Request) -> Response:
     lane, by carrying `did`/`sig`/`nonce` beside `text`."""
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     payload = await read_json(request)
     if isinstance(payload, Response):
         return payload
@@ -1255,7 +1031,7 @@ async def room_post(request: Request) -> Response:
             )
         else:
             posted = store.append(ROOT, room, "", body, did=signer, nonce=int(nonce))
-        _settle_room_budget(request, posted)
+        limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
             request,
             {**store.read_messages(ROOT, room, limit=20), "posted": posted},
@@ -1268,7 +1044,7 @@ async def room_post(request: Request) -> Response:
 def note_read(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
-        return limited("read", RATE_READ, retry)
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     value = store.note_get(ROOT, p["ns"], p["key"])
     if value is None:
@@ -1400,7 +1176,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
 def note_write(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
     denied = _note_write_gate(p["ns"], p["key"], value, None)
@@ -1450,7 +1226,7 @@ def note_write_signed(request: Request) -> Response:
     """The signed note lane, scoped to the two room-ownership namespaces."""
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     ns, key, nonce = p["ns"], p["key"], p["nonce"]
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
@@ -1480,7 +1256,7 @@ async def note_post(request: Request) -> Response:
     this lane the documented note cap was unreachable."""
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
-        return limited("write", RATE_WRITE, retry)
+        return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     payload = await read_json(request)
     if isinstance(payload, Response):
         return payload
@@ -1521,7 +1297,7 @@ async def note_post(request: Request) -> Response:
 def note_list(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
-        return limited("read", RATE_READ, retry)
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     ns = request.path_params["ns"]
     keys = store.list_notes(ROOT, ns)
     return respond(

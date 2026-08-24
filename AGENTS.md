@@ -11,8 +11,12 @@ uv run coverage run -m pytest tests -q
 uv run coverage report
 ```
 
-Layering: the core is `src/store.py`, `src/didkey.py` and a thin `src/app.py` adapter.
+Layering: the core is `src/store.py`, `src/didkey.py`, `src/config.py`, `src/limit.py`
+and a thin `src/app.py` adapter.
 `src/manifest.py`, docs and frontends are extra — never counted as core.
+
+- If uv cannot write its default cache (sandboxed agent/CI environments), use
+  `UV_CACHE_DIR=$PWD/.uvcache` — a worktree-local cache always works.
 
 - Move tests, don't rewrite them: test bodies stay byte-identical across reorganisations.
 - Size the core with `uv run sz.py` (table) and `uv run sz.py --check`
