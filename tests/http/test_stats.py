@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import _client
@@ -31,14 +30,20 @@ def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatc
 @pytest.fixture()
 def stats_client(tmp_path, monkeypatch):
     """A client whose service has the stats token configured (the deployed shape)."""
-    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CHAT_STATS_TOKEN", "s3cret")
-    monkeypatch.setenv("CHAT_STATS_CACHE_SECONDS", "0")  # every call recomputes, so
-    for mod in ("app", "store"):  # a test can observe its own writes
-        sys.modules.pop(mod, None)
     import app as app_module
+    import config
 
-    return TestClient(app_module.app)
+    # Test bodies read CHAT_ROOT back for direct store access; the knob itself comes from
+    # config.override now, not the environment.
+    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
+    app_module._buckets.clear()
+    app_module._rooms_cache.clear()
+    app_module._identities.clear()
+    app_module._proxy_evidence["proxied_requests"] = 0
+    with config.override(  # every stats call recomputes, so a test can observe its writes
+        ROOT=tmp_path, STATS_TOKEN="s3cret", STATS_CACHE_SECONDS=0
+    ):
+        yield TestClient(app_module.app)
 
 
 def test_stats_does_not_exist_without_a_token(client):

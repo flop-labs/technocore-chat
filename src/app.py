@@ -13,8 +13,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
-import os
 import secrets
 import time
 import tomllib
@@ -30,12 +28,28 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Match, Route
 
+import config
 import didkey
 import manifest
 import store
 from store import StoreConflictError, StoreError
 
-ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
+# The CHAT_* knobs are read from the environment exactly once, in config — the only
+# module in src/ that reads it — and re-bound here so request handlers (and the
+# tests that monkeypatch app.RATE_WRITE &c.) keep reading plain module globals. Tests that
+# need a different value for a whole request use config.override(...), which re-binds both
+# copies and restores them on exit.
+ROOT = config.ROOT
+RATE_READ = config.RATE_READ  # requests/min/IP
+RATE_WRITE = config.RATE_WRITE
+RATE_ROOMS_PER_DAY = config.RATE_ROOMS_PER_DAY
+CORS_ORIGINS = config.CORS_ORIGINS
+STATS_TOKEN = config.STATS_TOKEN
+STATS_CACHE_SECONDS = config.STATS_CACHE_SECONDS
+ROOMS_CACHE_SECONDS = config.ROOMS_CACHE_SECONDS
+SECURITY_CONTACT = config.SECURITY_CONTACT
+CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
+PUBLIC_URL = config.PUBLIC_URL
 
 # Sized from what the wire actually carries, not from what a parser tolerates. A real
 # agent request through Cloudflare — Host, UA, Accept, CF-Connecting-IP, CF-Ray,
@@ -55,20 +69,8 @@ MAX_HEADER_BYTES = 8192
 # each, ~192 KiB before the envelope. 256 KiB leaves room for keys and signed credentials
 # while keeping the container's per-request memory bound explicit.
 MAX_BODY = 256 << 10
-# Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
-# configured by hand would turn every rate-limited route into a 500 rather than into the
-# refusal the operator presumably meant. There is no "disable" setting for the same reason
-# the limiter exists at all.
-RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min/IP
-RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
-# A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
-# minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
-# caller could create, and those are not the same resource. At RATE_WRITE a single caller
-# exhausts MAX_ROOMS in a matter of hours, and the slots it takes are everyone's — the
-# next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
-# a cap on the service rather than a race won by whoever creates rooms fastest.
-RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
-# Both of the above are per deployment, which is why no document states them as prose:
+# RATE_READ / RATE_WRITE / RATE_ROOMS_PER_DAY live in config; the comment that floors them
+# moved with them. Both are per deployment, which is why no document states them as prose:
 # /.well-known/agent.json publishes what this process actually enforces, and the manual
 # points there. A manual naming a number the server does not enforce is worse than one
 # naming none, because a machine reader paces itself to it.
@@ -79,40 +81,8 @@ RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20"))
 FREE_PATHS = (
     "/, /llms.txt, /skill.md, /patterns.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
 )
-CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o]
-# /stats is the one internal surface. Growth numbers are not published — the design doc's
-# §I.2.3 caution against count-based marketing is exactly why they stay off the public
-# service — so the endpoint exists only when a token is configured, and answers 404 rather
-# than 401 to anyone without it: a 401 would confirm the endpoint is there to probe.
-#
-# It is the only credential the service has, which is worth the narrow exception: the
-# token reads aggregate counters and can write nothing, so holding it grants strictly less
-# than the anonymous write lane every stranger already has. Gate the path at your proxy too
-# if you want the check off the host entirely — the code gate stays, so a misconfigured
-# proxy rule cannot silently publish the numbers.
-STATS_TOKEN = os.environ.get("CHAT_STATS_TOKEN", "")
-STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
-# /rooms walks every room for size and mtime and every note for the capacity line — at the
-# caps that is ~46k stat calls, and it was doing it per request. It is also the most polled
-# read on the service: /humans refreshes it every 5s per open tab, and it is how an agent
-# discovers what exists. Nothing in it is per-caller, so N pollers within the window can
-# share one walk. Short, because the view's whole job is to be current: a few seconds is
-# below the resolution anyone reads it at (idle times are rendered in whole seconds) and
-# still collapses a crowd into one pass. 0 disables it.
-ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
-# Empty by default, and that default is a security property rather than a convenience.
-# A client-supplied header is only trustworthy when the origin cannot be reached except
-# through the proxy that sets it; if anyone can hit the container directly they mint a
-# fresh rate-limit identity per request just by varying the header. Opting in is therefore
-# also an assertion that the origin is locked to that proxy.
-# Where /.well-known/security.txt sends a reporter. Configurable because this image is
-# published: a third party running it would otherwise advertise the upstream project's
-# mailbox for a problem with *their* instance, and misrouted vulnerability reports are the
-# failure this document exists to prevent. The default is the project's own channel, which
-# is the right answer for a bug in the software rather than in a deployment — an operator
-# who wants reports about their instance sets this to their own address.
-SECURITY_CONTACT = os.environ.get("CHAT_SECURITY_CONTACT", "security@flop.finance").strip()
-CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
+# STATS_TOKEN / STATS_CACHE_SECONDS / ROOMS_CACHE_SECONDS / SECURITY_CONTACT /
+# CLIENT_IP_HEADER live in config; their rationale moved with them.
 # Headers a CDN sets and overwrites on every request. Their *presence* is not permission to
 # trust them — a direct caller can send any of them, which is the whole reason
 # CLIENT_IP_HEADER is opt-in — but it does mean the request plausibly arrived through that
@@ -122,13 +92,6 @@ CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
 # lockout nobody can distinguish from "the service is broken". So the mismatch is counted
 # and published in /stats rather than guessed at. Detection, not trust.
 PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-client-ip")
-# The origin to print in /openapi.json and /.well-known/agent.json. Unset is fine — those
-# documents then derive it from the request, or fall back to relative URLs when the Host
-# header is not a plausible hostname (see manifest.public_base). Set it when the service
-# sits behind a proxy that rewrites Host, or when you want the published URLs to be one
-# fixed string no matter who asks.
-PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
-
 # robots.txt moved to manifest.robots_txt(base): the Sitemap directive takes an absolute
 # URL, so the document depends on the origin and can no longer be a constant. Agents are
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
@@ -885,31 +848,10 @@ def rooms(request: Request) -> Response:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-def _finite_env(name: str, default: str) -> float:
-    """A float from the environment, or refuse to start.
-
-    Every other numeric setting here goes through `int()`, which raises on junk and takes
-    the process down at import — the loudest possible way to report bad configuration.
-    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
-    value is *published*. A non-finite ceiling reaches /openapi.json and
-    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
-    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
-    document: a browser, a Go or Rust client, a validating registry. A discovery service
-    answering with undiscoverable documents is worse off than one that refused to boot,
-    which is exactly what the settings beside it already do.
-    """
-    raw = os.environ.get(name, default)
-    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {raw!r}")
-    return value
-
-
-# Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
-# hold. Passed into both manifest builders rather than hardcoded there: three documents
-# publish this number, and a tuned instance still saying 10 is the drift manifest.py
-# exists to prevent.
-MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
+# The CHAT_MAX_WAIT parse (and its refuse-to-boot finiteness check — see config._finite_env,
+# where the knob now lives) is aliased so tests that probe it keep calling app._finite_env.
+_finite_env = config._finite_env
+MAX_WAIT = config.MAX_WAIT
 WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
 MAX_WAITERS_TOTAL = 64
 MAX_WAITERS_PER_IP = 4

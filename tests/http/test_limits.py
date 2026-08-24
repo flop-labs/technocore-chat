@@ -2,7 +2,6 @@
 
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -174,15 +173,21 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
 
 def test_a_zero_rate_limit_refuses_rather_than_crashing(monkeypatch, tmp_path):
     """The bucket arithmetic divides by the limit, so CHAT_RATE_WRITE=0 turned every write
-    into a 500 on the limiter itself. Floored at import instead."""
-    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
-    monkeypatch.setenv("CHAT_RATE_WRITE", "0")
-    for mod in ("app", "store"):
-        sys.modules.pop(mod, None)
-    import app as app_module
+    into a 500 on the limiter itself. Floored at import instead — at config import now,
+    which is the one place the environment is read, so a fresh exec of that module with the
+    bad value is the boot path."""
+    import runpy
 
-    assert app_module.RATE_WRITE == 1
-    assert TestClient(app_module.app).get("/r/lobby/say/bot/hi").status_code == 200
+    import app as app_module
+    import config
+
+    monkeypatch.setenv("CHAT_RATE_WRITE", "0")
+    fresh = runpy.run_path(config.__file__)  # executes config afresh, no sys.modules surgery
+    assert fresh["RATE_WRITE"] == 1
+
+    app_module._buckets.clear()
+    with config.override(ROOT=tmp_path, RATE_WRITE=fresh["RATE_WRITE"]):
+        assert TestClient(app_module.app).get("/r/lobby/say/bot/hi").status_code == 200
 
 
 def test_every_path_the_429_calls_free_really_is_free(client, monkeypatch):

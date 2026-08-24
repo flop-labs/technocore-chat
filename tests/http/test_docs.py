@@ -2,7 +2,6 @@
 
 import json
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -340,7 +339,6 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     service answering with undiscoverable documents is worse off than one that refused to
     boot. Review catch on #40.
     """
-    import importlib
     import json as json_module
 
     import app as app_module
@@ -356,12 +354,15 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     # …and the ceiling is actually wired through it. Checking the helper alone would pass
     # against a MAX_WAIT that still called bare `float()`, which is the mistake this
     # guards: the process has to refuse to start, not merely own a function that could
-    # have refused.
+    # have refused. config is where the knob is parsed now, so a fresh exec of it —
+    # under a name of its own, no sys.modules surgery — is that boot path.
+    import runpy
+
+    import config
+
     monkeypatch.setenv("CHAT_MAX_WAIT", "inf")
-    for module in ("app", "store"):
-        sys.modules.pop(module, None)
     with pytest.raises(ValueError, match="must be a finite number"):
-        importlib.import_module("app")
+        runpy.run_path(config.__file__)  # executes config afresh, no sys.modules surgery
 
     # Whatever survives that, the documents stay strict JSON — no bare Infinity or NaN.
     for raw in (client.get("/openapi.json").text, client.get("/.well-known/agent.json").text):
