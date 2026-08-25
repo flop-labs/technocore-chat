@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /rooms` no longer answers 500 when a write clears its cache mid-refresh.** The refresh
+  promoted its cache entry with `move_to_end` in a separate step from the insert, and a concurrent
+  write clearing the cache between the two left no key to promote. The entry is popped before it is
+  re-inserted instead, which is the same promotion with no key that can go missing.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

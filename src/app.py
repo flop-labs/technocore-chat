@@ -661,8 +661,14 @@ def _rooms_view(limit: int) -> dict:
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
     if config.ROOMS_CACHE_SECONDS > 0:
+        # Popped before it is re-inserted, because a concurrent write clears this cache
+        # (see `take`) and sync endpoints run in the threadpool, so the clear really can
+        # land between two of these lines. move_to_end was then promoting a key that was
+        # no longer there, and its KeyError answered the most polled read on the service
+        # with a 500. A fresh insert is already last, so this buys the same LRU promotion
+        # with no key to go missing.
+        _rooms_cache.pop(limit, None)
         _rooms_cache[limit] = (stamp, now, view)
-        _rooms_cache.move_to_end(limit)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
             _rooms_cache.popitem(last=False)
     return view

@@ -940,3 +940,41 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
     with config.override(EDGE_CACHE_SECONDS=0):
         assert client.get("/rooms").headers["cache-control"] == "no-store"
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
+
+
+def test_a_write_clearing_the_cache_mid_refresh_is_not_a_500(client, monkeypatch):
+    """`take` drops the /rooms cache on every write, and the refresh that repopulates it
+    mutates the shared OrderedDict in more than one step. Sync endpoints run in the
+    threadpool, so that clear can land between two of those steps, and it must not reach
+    the caller as a 500 on the most polled read on the service.
+    """
+    from collections import OrderedDict
+
+    import app
+
+    fired = []
+
+    class ClearingCache(OrderedDict):
+        # A real OrderedDict. The only addition is that the first insert lets a real
+        # write through, which is the interleaving take() -> _rooms_cache.clear() makes.
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if not fired:
+                fired.append(True)
+                client.get("/r/cache-race/say/writer/hello")
+
+    monkeypatch.setattr(app, "_rooms_cache", ClearingCache())
+    assert client.get("/rooms?format=json").status_code == 200
+    assert fired, "the cache was never cleared mid-refresh — this test proved nothing"
+
+
+def test_the_rooms_cache_still_evicts_down_to_its_cap(client):
+    """The promotion moved, so the bound it feeds has to be pinned: one entry per distinct
+    ?limit=, oldest evicted first, never more than the cap.
+    """
+    import app
+
+    client.get("/r/kept/say/alice/hello")
+    for n in range(app.MAX_ROOMS_CACHE + 20):
+        assert client.get(f"/rooms?limit={n + 1}").status_code == 200
+    assert len(app._rooms_cache) == app.MAX_ROOMS_CACHE
