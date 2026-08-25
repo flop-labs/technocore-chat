@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import _client
+import pytest
 from starlette.testclient import TestClient
 
 client = _client.client  # the shared TestClient fixture
@@ -593,6 +594,28 @@ def test_malformed_payload_shapes_are_400_not_500(client):
         assert r.status_code == 400, body
     assert client.post("/r/lobby", content=b"{not json").status_code == 400
     assert client.post("/r/lobby", json={}).status_code == 400  # empty from/text
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_constants_are_not_accepted_as_json(client, constant):
+    """Python's decoder accepts these extensions by default, but RFC 8259 does not.
+
+    The two POST lanes publish application/json, so accepting a different language here
+    makes a payload this Python service accepts fail in a strict implementation of the same
+    protocol. It also used to persist NaN as the ordinary text ``nan`` after coercion.
+    """
+    room = client.post(
+        "/r/lobby",
+        content=f'{{"from":"bot","text":{constant}}}'.encode(),
+        headers={"content-type": "application/json"},
+    )
+    note = client.post(
+        "/kv/plans/next",
+        content=f'{{"value":{constant}}}'.encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert room.status_code == note.status_code == 400
+    assert constant in room.text and constant in note.text
 
 
 def test_a_malformed_note_post_names_the_note_shape_to_send_next(client):

@@ -948,6 +948,10 @@ def _payload_credentials(payload: dict) -> tuple[str, str, str] | None:
     return did, str(payload.get("sig", "")).strip(), str(payload.get("nonce", "")).strip()
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"{value} is not valid JSON")
+
+
 async def read_json(request: Request) -> dict | Response:
     """Refuse on Content-Length, then cap the stream.
 
@@ -973,7 +977,9 @@ async def read_json(request: Request) -> dict | Response:
         if len(raw) > MAX_BODY:
             return text(f"{too_large}\nthe stream passed it before it ended.", 413)
     try:
-        payload = json.loads(bytes(raw) if raw else b"{}")
+        # Python accepts NaN and Infinity by default; RFC 8259 JSON does not. Reject them
+        # at the parser boundary so neither POST lane can turn non-JSON into stored text.
+        payload = json.loads(bytes(raw) if raw else b"{}", parse_constant=_reject_json_constant)
     except ValueError as exc:
         return text(
             f"400 body must be JSON, and this did not parse: {exc}.\n"
