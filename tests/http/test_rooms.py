@@ -484,6 +484,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
             "windowed_messages": 0,
             "zero_response_share": None,
             "nick_diversity": None,
+            "low_frequency_message_share": None,
             "windowed_note_to_message_ratio": None,
         },
     }
@@ -519,6 +520,7 @@ def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client,
         "window": 0,
         "zero_response_share": None,  # "no messages" is not "0% unanswered"
         "nick_diversity": None,
+        "low_frequency_message_share": None,  # and "no writers" is not "100% one-shots"
     }
     e = client.get("/rooms?format=json").json()["engagement"]
     assert e["windowed_messages"] == 0 and e["zero_response_share"] is None
@@ -538,12 +540,16 @@ def test_engagement_rollup_pools_every_scanned_window(client):
     assert e["window_cap"] == 200 and e["windowed_messages"] == 9
     assert e["zero_response_share"] == 0.6667
     assert e["nick_diversity"] == 0.4444  # {s, a, b, server} / 9 — pooled, not per room
+    # solo: s x3 -> 0/3 low-frequency; chat: a,b x2 each -> 4/4; events server x2 -> 2/2.
+    # pooled by messages: (0 + 4 + 2) / 9
+    assert e["low_frequency_message_share"] == 0.6667
     assert e["windowed_note_to_message_ratio"] == 0.1111  # 1 note, windowed denominator
 
     body = client.get("/rooms").text
     line = [ln for ln in body.splitlines() if ln.startswith("# engagement")]
     assert line == [
-        "# engagement over 9 msgs scanned: zero-response 67%, nick diversity 0.44, notes/msg 0.11"
+        "# engagement over 9 msgs scanned: zero-response 67%, nick diversity 0.44, "
+        "low-frequency share 67%, notes/msg 0.11"
     ]
 
 
