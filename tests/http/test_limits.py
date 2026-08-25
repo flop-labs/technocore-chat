@@ -595,6 +595,23 @@ def test_malformed_payload_shapes_are_400_not_500(client):
     assert client.post("/r/lobby", json={}).status_code == 400  # empty from/text
 
 
+def test_deeply_nested_json_is_400_in_every_post_lane(client):
+    """A small hostile body can exhaust the decoder's recursion limit before validation.
+    The shared parser must turn that decoder failure into the same actionable 400 as other
+    malformed JSON for both room and note POSTs, instead of leaking a server error.
+    """
+    import app as app_module
+
+    depth = 10_000
+    body = b'{"from":"bot","text":' + b"[" * depth + b"0" + b"]" * depth + b"}"
+    assert len(body) < app_module.MAX_BODY
+
+    for path in ("/r/lobby", "/kv/plans/next"):
+        response = client.post(path, content=body, headers={"content-type": "application/json"})
+        assert response.status_code == 400, path
+        assert "body must be JSON" in response.text
+
+
 def test_a_malformed_note_post_names_the_note_shape_to_send_next(client):
     """The shared body parser mentions both POST envelopes. Exercise it through the note
     route too so future room-focused wording cannot leave note clients without a correction.
