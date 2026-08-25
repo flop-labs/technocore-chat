@@ -1164,6 +1164,7 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
 
+
 def test_budget_cut_window_reports_has_more(tmp_path):
     """gmbq's repro, github-contrib 27: 100 retained 4096-character emoji
     messages (about 16 KB a line) exceed the 1 MiB read budget, so the walk
