@@ -16,6 +16,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+PATCH: a room reaped after the idle/stillborn rule and later recreated under the same name no longer restarts its seq at 1. A cursor from the old generation used to read `count: 0` forever, silently, since `first_seq` itself reset instead of jumping past `since`; the reaper now leaves a seq floor behind that the next write clears.
+
 ## [0.9.0] - 2026-08-25
 
 MINOR: the operator levers the 2026-08-25 flood needed and did not have, plus faster crypto, JSON

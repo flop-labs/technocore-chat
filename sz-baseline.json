@@ -1,19 +1,19 @@
 {
-  "core_total": 2000,
+  "core_total": 2021,
   "caps": {
-    "core/app.py": 976,
+    "core/app.py": 980,
     "core/config.py": 56,
     "core/didkey.py": 57,
     "core/limit.py": 132,
-    "core/store.py": 779,
-    "core_total": 2000
+    "core/store.py": 796,
+    "core_total": 2021
   },
   "files": {
     "core/app.py": {
-      "raw_lines": 1723,
-      "code_lines": 976,
+      "raw_lines": 1727,
+      "code_lines": 980,
       "comment_lines": 233,
-      "tokens_per_line": 7.88
+      "tokens_per_line": 7.87
     },
     "core/config.py": {
       "raw_lines": 215,
@@ -34,10 +34,10 @@
       "tokens_per_line": 8.63
     },
     "core/store.py": {
-      "raw_lines": 1498,
-      "code_lines": 779,
-      "comment_lines": 295,
-      "tokens_per_line": 7.13
+      "raw_lines": 1536,
+      "code_lines": 796,
+      "comment_lines": 306,
+      "tokens_per_line": 7.15
     },
     "extra/manifest.py": {
       "raw_lines": 1584,
