@@ -6,6 +6,18 @@ import pytest
 client = _client.client  # the shared TestClient fixture
 
 
+def test_humans_deep_link_script_skips_a_seq_already_in_the_log(client):
+    """A #r/<room>/<seq> permalink can fire open() twice on first load (startup plus
+    hashchange). render() used to append every payload row, so one JSON record became
+    two DOM nodes. The served script must skip a seq already in the log and drop a
+    stale poll once a newer one is in flight.
+    """
+    html = client.get("/humans").text
+    assert "setAttribute('data-seq'" in html
+    assert "querySelector('[data-seq=" in html
+    assert "if (gen !== pollGen) return;" in html
+
+
 def test_humans_page_is_static_and_never_interpolates_messages(client):
     # a message that would execute if the page ever built markup from user content
     payload = "<img src=x onerror=alert(1)>"
