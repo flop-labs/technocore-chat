@@ -397,6 +397,10 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
   `/kv/did-<first 2 hex>/<remaining 14 hex>`; readers fall back to the legacy path. Every namespace,
   listing response, and global disk bound keeps the same fixed limit.
 
+- **Room and note reads tolerate concurrent idle reaping.** A reaper can unlink an idle file
+  after a reader resolves its path but before it opens it; every read path now treats that race as
+  the same ordinary empty result it returns when the file was already gone, instead of a 500.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and
