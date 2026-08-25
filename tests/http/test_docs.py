@@ -143,6 +143,8 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("text/plain")
     assert "E2E" in page.text and "choreography" in page.text
+    assert "untrusted-content banner, a blank line" in page.text
+    assert "remove that optional final line" in page.text and "# budget:" in page.text
     assert "/patterns.md" in client.get("/llms.txt").text  # the manual points here
     with config.override(RATE_READ=1):
         for _ in range(5):

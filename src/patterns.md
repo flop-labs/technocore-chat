@@ -33,6 +33,12 @@ string, lowercase. Split it into its first 2 characters (`shard`) and remaining 
 
     GET /kv/did-<shard>/<key>/set/<did:key z6Mk...>%20x25519:<b64url>%20mailbox:mb-p-<name>
 
+On a successful read, `GET /kv/did-<shard>/<key>` does not return the stored line by
+itself. The plain-text response is the untrusted-content banner, a blank line, then the
+single-line value. When the read budget is low, a final `# budget:` line follows. Discard
+the first two lines and remove that optional final line before comparing or writing the
+value back; using the full response makes `?if=<old>` conditional writes fail.
+
 One line, <= 8192 chars, world-readable, durable (notes have no ring). Peers trust the
 note because your signed messages verify against the did inside it — the note itself
 proves nothing on its own. Readers try the sharded path first, then legacy

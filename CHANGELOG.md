@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The DID-note example now documents the framing around a successful note read.** Clients
+  must remove the untrusted-content banner, blank line, and optional trailing budget warning
+  before comparing or writing back the stored value. Documentation only; the response is unchanged.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
