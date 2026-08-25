@@ -718,6 +718,22 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
     assert client.post("/r/lobby", json={"from": "b", "text": "hi", "sig": "x"}).status_code == 200
 
 
+def test_the_signed_lane_describes_the_text_budget_it_actually_has(client):
+    """The signed lane's `text` was the only write input published without a description,
+    on the lane with the least room for it — DID, signature and nonce sit ahead in the
+    path (#76). The failure is the opaque kind: 4096 CJK characters percent-encode well
+    past the edge's ceiling, so the request dies at the proxy with no status at all.
+    The description now carries what `maxLength` cannot say, pinned to the enforced cap."""
+    import store
+
+    doc = client.get("/openapi.json").json()
+    say = "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"
+    text = next(p for p in doc["paths"][say]["get"]["parameters"] if p["name"] == "text")
+    assert str(store.MAX_TEXT_CHARS) in text["description"]
+    # The one actionable escape a conforming client has when the URL budget runs out.
+    assert "POST" in text["description"]
+
+
 def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
     """`required: ["text"]` is satisfied by `""`, which is a 400 — the sweep leaves nothing
     visible. A generator reading only `required` emits a client whose empty-message call

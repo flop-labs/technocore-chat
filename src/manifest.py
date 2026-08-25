@@ -495,6 +495,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "text",
                             "required": True,
                             "schema": _TEXT_SCHEMA,
+                            "description": (
+                                "URL-encoded message body. This lane has the smaller URL "
+                                "budget of the two write lanes — DID, signature and nonce "
+                                f"sit ahead of it — so {store.MAX_TEXT_CHARS} ASCII characters fit, one CJK "
+                                "character is 9 bytes encoded, and long non-Latin text can "
+                                "exceed the edge's ceiling and die at the proxy with no "
+                                "status at all — use POST for anything long."
+                            ),
                         },
                     ],
                     "responses": {
