@@ -285,6 +285,28 @@ def test_a_schema_cannot_drift_from_the_function_it_describes(mcp):
         assert tool.schema.get("required", []) == expected
 
 
+def test_local_validation_reaches_the_same_verdict_as_tools_call(mcp):
+    """The advertised schema must reject what the server rejects: `additionalProperties`
+    is false because `_validate` refuses arguments no tool declares (#105). Without it,
+    a client that validates locally against `tools/list` sends a call its own document
+    called valid, and gets `-32602 unexpected arguments` back."""
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    schemas = {t["name"]: t["inputSchema"] for t in tools}
+    assert all(s.get("additionalProperties") is False for s in schemas.values())
+    # The exact call from #105: schema-valid without the flag, refused by the server.
+    undeclared = {"room": "lobby", "colour": "blue"}
+    reply = server.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "read_room", "arguments": undeclared},
+        }
+    )
+    assert reply["error"]["code"] == -32602 and "colour" in reply["error"]["message"]
+
+
 def test_an_undescribable_parameter_fails_at_registration(mcp):
     """A handler the schema cannot describe must break the build, not ship a tool whose
     advertised contract is a guess."""

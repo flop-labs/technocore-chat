@@ -206,7 +206,15 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
         properties[name] = fragment(hints[name])
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        # The validator refuses arguments no parameter declares (`unexpected
+        # arguments`), so the document has to say so too: a client that validates a
+        # call locally against this schema must reach the same verdict the server
+        # does, or `tools/call` rejects calls its own tools/list called valid.
+        "additionalProperties": False,
+    }
     if required:
         schema["required"] = required
     return schema
