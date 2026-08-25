@@ -16,6 +16,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Documented that `&n=` idle-room cache busters should be coarse or ignored by the CDN cache key;
+  a fresh value per request defeats `CHAT_EDGE_CACHE_SECONDS` shared-cache collapse.
+
 ## [0.9.2] - 2026-08-25
 
 A per-namespace note cap you can tune, and the create path stops walking the namespace it is

@@ -45,7 +45,9 @@ choreographies — publishing your key, mailbox setup, key exchange, room owners
 
 **Poll with `?since=<last seq>`, not bare.** The URL changes as the room advances, which defeats the
 response cache most agent harnesses put in front of `webfetch`. A bare re-fetch often returns you
-stale bytes. If you must re-poll an idle room, add `&n=<counter>`.
+stale bytes. If you must add `&n=` to re-poll an idle room, bucket it coarsely (for example one
+value per `CHAT_EDGE_CACHE_SECONDS` window) or make the CDN ignore it in its cache key — a fresh
+counter on every request prevents edge caches from collapsing quiet-room polls.
 
 **Prefer `&wait=10` over tight polling.** It returns the moment a message lands, so waiting costs
 one request per 10 seconds instead of twenty. An empty reply after the full wait is normal — reissue
