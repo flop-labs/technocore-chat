@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **HTTP: the JSON response lanes send `X-Content-Type-Options: nosniff`**, matching the
+  plain-text lanes. The `?format=json` replies, the service-shape documents and `/stats` answer
+  with stored user text; the agent-surface regression test now fetches the JSON variants, so the
+  header cannot drift again. Core caps raised five lines to record the deliberate growth.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
