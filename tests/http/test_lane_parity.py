@@ -183,3 +183,52 @@ def test_one_note_write_lands_identically_through_all_three_lanes(lanes):
         call(mcp_server.server, "read_note", {"namespace": "zz-parity", "key": "http"})
     )
     assert wrapped_read == http_read
+
+
+# --------------------------------------------------------------------------- name grammar
+#
+# One rejected name, asked through every write lane, asserting they all reject it the same
+# way. The class of bug: a room class is a name PREFIX, so `room_classes` reads a class off
+# a string the grammar refuses — and both write gates asked their class question before
+# anything read the grammar. `mb-FOO` was answered 403 "send a signature", and the signed
+# lane it named as the correction answered 400 "bad name". One write, two answers, and the
+# 403 pointed at the lane that contradicted it.
+#
+# This lives here rather than beside the mailbox tests because that is exactly what this
+# file is for: a disagreement between lanes is invisible to every single-lane test.
+
+BAD_NAMES = ["mb-FOO", "d-FOO", "e-FOO", "p-FOO", "mb-p-FOO"]
+
+
+@pytest.mark.parametrize("bad", BAD_NAMES)
+def test_bad_room_name_is_a_400_on_every_write_lane(lanes, bad):
+    _root, client, _mcp = lanes
+    lanes = {
+        "unsigned say": client.get(f"/r/{bad}/say/bot/hi"),
+        "signed say": client.get(f"/r/{bad}/say-signed/did:key:z6Mk/" + "A" * 86 + "/1/hi"),
+        "post": client.post(f"/r/{bad}", json={"from": "bot", "text": "hi"}),
+        "read": client.get(f"/r/{bad}"),
+    }
+    for lane, r in lanes.items():
+        assert r.status_code == 400, f"{lane} answered {r.status_code} for {bad!r}: {r.text[:120]}"
+        assert "bad name" in r.text, f"{lane} did not name the grammar: {r.text[:120]}"
+
+
+@pytest.mark.parametrize("bad", ["D-FOO", "d-FOO"])
+def test_bad_owner_key_is_a_400_on_both_ownership_lanes(lanes, bad):
+    _root, client, _mcp = lanes
+    # `room-owners` asked `store.ownable` first and `room-allow` validated on the way to the
+    # note, so the identical key got 403 from one and 400 from the other.
+    owners = client.get(f"/kv/room-owners/{bad}/set/did:key:z6Mk")
+    allow = client.get(f"/kv/room-allow/{bad}/set/did:key:z6Mk")
+    assert owners.status_code == 400 and "bad name" in owners.text, owners.text[:160]
+    assert allow.status_code == 400 and "bad name" in allow.text, allow.text[:160]
+
+
+def test_a_valid_class_name_still_gets_its_class_answer(lanes):
+    _root, client, _mcp = lanes
+    # The mirror, and the reason this is an ordering fix rather than a new rejection: a name
+    # the grammar ACCEPTS must still be answered on class grounds. Without this the test
+    # above passes just as happily if the gate started refusing every mailbox.
+    r = client.get("/r/mb-real/say/bot/hi")
+    assert r.status_code == 403 and "mailbox" in r.text, r.text[:160]

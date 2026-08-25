@@ -829,8 +829,15 @@ def _allowed_keys(room: str) -> set[str]:
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
-    a signature refuses the unsigned lane outright, and the reply says what to send."""
-    denied = _reject_if_events_room(room)
+    a signature refuses the unsigned lane outright, and the reply says what to send.
+
+    The grammar is asked FIRST. A class is a name prefix, so `room_classes` reads one off a
+    string this service will never store — and the gate then answered `mb-FOO` on class
+    grounds with a 403 whose named correction, the signed lane, reaches `store.append` and
+    answers 400. One write, two answers, and the 403 sent the caller to the lane that
+    contradicted it. `valid_name` raises StoreError, which is already mapped to the same
+    400 the storage layer produces, so this borrows the message rather than restating it."""
+    denied = _reject_if_events_room(store.valid_name(room))
     if denied:
         return denied
     if store.is_mailbox(room) and signer is None:
@@ -1121,6 +1128,10 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
     """
+    # Same order, same reason as `_room_write_gate`: `ownable` reads a class marker off a
+    # name the grammar refuses, so `D-FOO` was answered "cannot be owned" (403) while the
+    # allow-list lane, which validates on the way to the note, answered "bad name" (400).
+    ns, key = store.valid_name(ns), store.valid_name(key)
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
