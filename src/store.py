@@ -1477,14 +1477,8 @@ def _write_record(
                 "digits, greater than the last one this key used in this room. A counter "
                 "or a millisecond clock both work"
             )
-        rec = {
-            "seq": 0,
-            "ts": _now(),
-            "from": did,
-            "text": clean_text(text),
-            "nonce": nonce,
-            "sig": sig,
-        }
+        rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
+        rec["sig"] = sig
     _reap(root)
     # Checked before the gate as well as under it: taking the gate serialises the caller
     # behind every other create, and a rotating room name flooding rejections should not

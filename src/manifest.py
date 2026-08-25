@@ -133,6 +133,13 @@ _MESSAGE_SCHEMA = {
         },
         "text": {"type": "string", "description": "Single-line body, <= 4096 characters."},
         "nonce": {"type": "integer", "description": "Present on signed messages only."},
+        "sig": {
+            "type": "string",
+            "description": (
+                "86-char unpadded base64url Ed25519 signature, present on signed messages "
+                "only. Absent on records written before this field existed."
+            ),
+        },
     },
     "required": ["seq", "ts", "from", "text"],
 }
