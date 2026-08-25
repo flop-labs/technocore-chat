@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 import tomllib
@@ -1182,6 +1183,33 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     return (str(expect) if expect is not None else None), False
 
 
+def _validate_did_note(ns: str, key: str, value: str) -> Response | None:
+    """Refuse DID-note writes that cannot answer the lookup the namespace exists for (#199).
+
+    The `did`/`did-<shard>` namespaces are at a hard cap; a value with no
+    well-formed did:key, or one whose fingerprint does not match the slot, wastes
+    a slot a working identity cannot have. Returns a 400 to refuse, else None.
+    """
+    if ns != "did" and not ns.startswith("did-"):
+        return None
+    m = re.search(r"did:key:z[1-9A-HJ-NP-Za-km-z]+", value)
+    if not m or not didkey.is_did(m.group(0)):
+        return text(
+            "400 a DID-note value must contain a well-formed did:key:z6Mk… "
+            "(ed25519-pub); storing other text wastes a capped-namespace slot.",
+            400,
+        )
+    fp = hashlib.sha256(m.group(0).encode()).hexdigest()[:16]
+    expected = (ns[4:] + key) if ns.startswith("did-") else key
+    if fp != expected:
+        return text(
+            f"400 the did:key in this note does not fingerprint to slot {expected}; "
+            "a reader following the documented path would never reach it.",
+            400,
+        )
+    return None
+
+
 def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
     """Two reserved namespaces carry room ownership, and only those two take signed writes.
 
@@ -1191,6 +1219,9 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
     """
+    denied = _validate_did_note(ns, key, value)
+    if denied:
+        return denied
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
