@@ -1742,10 +1742,23 @@ def _count_new_note(root: Path, ns_dir: Path, size: int, delta: int) -> None:
         _write_note_count(ns_dir, max(0, ns_count + delta), max(0, ns_used + size * delta))
 
 
-def _at_capacity(cap: int, what: str) -> StoreError:
+def _at_capacity(cap: int, what: str, ns: str | None = None) -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
-    blocked here can always keep working in a room or note it is already using."""
+    blocked here can always keep working in a room or note it is already using.
+
+    `ns` distinguishes the note case: without it, a caller hitting a full `did` namespace
+    was told "note limit reached" with no namespace named, and pointed at `GET /rooms` —
+    which lists rooms, not notes, and has never told anyone what is in `did`. `GET /kv/<ns>`
+    is the endpoint that actually answers "what's already there" for notes (see #145).
+    """
+    if ns is not None:
+        return StoreError(
+            f"namespace `{ns}`'s {what} limit reached ({cap} is the cap, and this would "
+            f"be a new one). Existing {what}s in `{ns}` still accept writes, so reuse one "
+            f"you already have — GET /kv/{ns} shows what exists. Idle {what}s are "
+            "reclaimed after 7 days."
+        )
     return StoreError(
         f"{what} limit reached ({cap} is the cap, and this would be a new one). "
         f"Existing {what}s still accept writes, so reuse one you already have — "
@@ -1842,6 +1855,10 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     notes was ~20,000 directory entries read to answer one comparison, on every write, while
     the writes were themselves growing it. `CHAT_MAX_NOTES_PER_NS` made that worse by
     exactly the factor it raises: the cap is what the directory is allowed to grow to.
+
+    `ns_dir.name` is the plain namespace string (namespace directories are never sharded --
+    only the keys inside one are), so it names which namespace is full in the refusal
+    instead of the generic message the shared `_at_capacity` produces without it (#145).
     """
     if path.exists():
         return
@@ -1849,7 +1866,7 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
     if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
-        raise _at_capacity(MAX_NOTES_PER_NS, "note")
+        raise _at_capacity(MAX_NOTES_PER_NS, "note", ns=ns_dir.name)
     _check_note_total(root)
 
 

@@ -169,7 +169,9 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
     # Two note caps, two messages, and the number is the actionable part of both.
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
     store.note_set(tmp_path, "plans", "only", "hi")
-    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap"):
+    with pytest.raises(
+        store.StoreError, match=r"namespace `plans`'s note limit reached \(1 is the cap"
+    ):
         store.note_set(tmp_path, "plans", "second", "hi")
 
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 10_000)
@@ -1163,3 +1165,34 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+def test_full_namespace_names_itself_and_points_at_kv_not_rooms(tmp_path, monkeypatch):
+    """#145: hitting a full `did` namespace used to say "note limit reached" with no
+    namespace named, and pointed callers at GET /rooms -- which lists rooms, not notes,
+    and never told anyone what /kv/did actually holds."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "did", "existing-fingerprint", "profile data")
+    with pytest.raises(store.StoreError) as excinfo:
+        store.note_set(tmp_path, "did", "new-fingerprint", "profile data")
+
+    message = str(excinfo.value)
+    assert "namespace `did`" in message
+    assert "GET /kv/did" in message
+    assert "GET /rooms" not in message
+
+
+def test_room_capacity_message_is_unchanged_by_the_namespace_addition(tmp_path, monkeypatch):
+    """The room cap shares `_at_capacity` with notes -- ns=None there must still produce
+    the original room wording, unqualified by a namespace it doesn't have."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "only", "bot", "hi")
+    with pytest.raises(store.StoreError) as excinfo:
+        store.append(tmp_path, "second", "bot", "hi")
+
+    message = str(excinfo.value)
+    assert message.startswith("room limit reached (1 is the cap")
+    assert "GET /rooms shows what exists" in message
+    assert "namespace `" not in message
