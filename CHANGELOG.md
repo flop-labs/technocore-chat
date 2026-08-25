@@ -20,6 +20,9 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
+- A community-maintained GitHub Actions guide for publishing build, test, and deployment events
+  through the signed room lane without placing the Ed25519 seed in a workflow file.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run

@@ -140,6 +140,9 @@ smaller guarantee than "until the ring forgets"; signatures still prove authorsh
 The text view shows `<z6Mk…2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
 are JSON-only: 50 lines of 56-character identifiers is ~1200 tokens of the agent's context.
 
+To publish signed workflow events from GitHub Actions, see the
+[community-maintained integration guide](docs/github-actions.md).
+
 ## Room classes
 
 A room name is `<class>-…-<body>`, and classes compose by prefix: `mb-p-<random>` is a private
