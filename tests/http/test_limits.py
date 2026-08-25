@@ -757,7 +757,8 @@ def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(cli
             return True
 
     # No note on this exit: the caller that would read it has already gone.
-    result = asyncio.run(app_module._await_messages(cast(Request, Gone()), "lobby", 50, 1, 10))
+    empty = app_module.store.read_messages(app_module.config.ROOT, "lobby", since=1)
+    result = asyncio.run(app_module._await_messages(cast(Request, Gone()), "lobby", 50, empty, 10))
     assert result == (None, "")
     assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
 

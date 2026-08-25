@@ -30,7 +30,7 @@ backs `scripts/sign.py` and the docs examples, not the verify path.
 
 | | |
 |---|---|
-| `GET /r/<room>` | last 50 messages, oldest first (`?since=<seq>`, `?limit=1..200`, `?format=json`) |
+| `GET /r/<room>` | last 50 messages, oldest first (`?since=<seq>`, `?limit=1..200`, `?format=json`; `?from=<did:key…>` or `?signed=1` keep only one verified signer or the signed lane) |
 | `GET /r/<room>?since=<seq>&wait=<0..10>` | long-poll: returns as soon as a message lands, else empty after the requested wait |
 | `GET /r/<room>/export` | the retained ring as raw JSONL, byte-exact and snapshotted at open, so signed records re-verify from the dump alone; `X-Room-Generation` stamps the epoch |
 | `GET /r/<room>/say/<nick>/<text>` | append (URL-encoded, single-line) |

@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -849,10 +849,41 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
+Keep = Callable[[dict], bool] | None  # a read filter: accept this record, or not
+
+
+def read_filter(writer: str | None) -> Keep:
+    """Keep only records a verified writer signed, and only `writer`'s if one is named.
+
+    A nickname proves nothing, so this names verified writers only: a value that is not a
+    did:key this server would verify matches nothing — `from=alice` is empty, never alice's
+    lines. The per-record test is the `did:key:` prefix, which the name allowlist keeps out
+    of the unsigned lane, so the scan pays no key parsing.
+    """
+    writer = writer if writer is None or didkey.is_did(writer) else ""
+
+    def keep(m: dict) -> bool:
+        return str(m.get("from", "")).startswith(didkey.PREFIX) and writer in (None, m["from"])
+
+    return keep
+
+
 def read_messages(
-    root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
+    root: Path,
+    room: str,
+    limit: int = DEFAULT_LIMIT,
+    since: int | None = None,
+    keep: Keep = None,
 ) -> dict:
-    """Return the newest `limit` messages (oldest-first) with seq > `since`."""
+    """Return the newest `limit` messages (oldest-first) with seq > `since`.
+
+    `keep(rec)` narrows the scan to the records it accepts (the read filters). `first_seq`
+    and `last_seq` describe the *scan*, accepted or not: for an unfiltered read those are
+    the oldest and newest lines returned, as before. Under a filter `last_seq` lets a
+    poller's cursor advance past lines it was not shown, and `first_seq > since + 1` keeps
+    meaning "lines you never saw" (ring or read budget) — a line missing *between* the two
+    was dropped by the filter, never lost.
+    """
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
     # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. Records are
@@ -861,6 +892,7 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    top = bottom = None
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
@@ -871,6 +903,9 @@ def read_messages(
                     break
                 if cutoff is not None and _expired(rec, cutoff):
                     break
+                top, bottom = (rec["seq"] if top is None else top), rec["seq"]
+                if keep is not None and not keep(rec):
+                    continue
                 out.append(rec)
                 if len(out) >= limit:
                     break
@@ -878,8 +913,8 @@ def read_messages(
     return {
         "room": room,
         "count": len(out),
-        "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "first_seq": bottom,
+        "last_seq": top if top is not None else (since or 0),
         "generation": room_generation(root, room),
         "messages": out,
     }
