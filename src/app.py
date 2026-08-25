@@ -1689,6 +1689,10 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
 
 
 async def on_bad_input(request: Request, exc: Exception) -> Response:
+    # A 400 from a room write means the create gate charged a token for a write that did
+    # not happen (bad nick, text that sweeps to empty). Settling against an empty record
+    # carries no seq, so the charge refunds and only real creations spend the budget.
+    limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     return text(f"400 {exc}", 400)
 
 

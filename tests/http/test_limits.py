@@ -909,3 +909,18 @@ def test_waiter_slots_are_bounded_per_ip(client):
                 assert other is True  # a different IP is unaffected
     assert app._waiters_total == 0  # every slot released
     assert app._waiters_by_ip == {}  # and the table does not grow per distinct IP
+
+
+def test_a_failed_room_write_does_not_spend_the_creation_budget(client, monkeypatch):
+    """The gate charges before the store validates the text, and a caller-input StoreError
+    unwinds past _settle_room_budget. Three whitespace-only writes burned a whole day's
+    budget and refused the fourth, perfectly valid one; the 400 handler settles the charge
+    now, so only writes that bring a room into existence keep a token spent.
+    """
+    import config
+
+    with config.override(RATE_ROOMS_PER_DAY=2):
+        for name in ("waste1", "waste2"):
+            assert client.get(f"/r/{name}/say/bot/%20%20%20").status_code == 400
+        # Both charges refunded: a valid third room still fits the budget of 2.
+        assert client.get("/r/legitroom/say/bot/hello").status_code == 200
