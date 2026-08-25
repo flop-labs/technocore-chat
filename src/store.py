@@ -739,7 +739,11 @@ def _parse(line: bytes) -> dict | None:
 
 
 def read_messages(root: Path, room: str, limit: int = 50, since: int | None = None) -> dict:
-    """Return the newest `limit` messages (oldest-first) with seq > `since`."""
+    """Return the newest `limit` messages (oldest-first) with seq > `since`.
+
+    `has_more` is true exactly when the window filled before the walk reached
+    `since`: at least one older record past the cursor exists but did not fit,
+    so a poller that believes it is current can be told it is not."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
     # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. Records are
@@ -748,6 +752,7 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    has_more = False
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
@@ -758,9 +763,13 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
                     break
                 if cutoff is not None and _expired(rec, cutoff):
                     break
-                out.append(rec)
                 if len(out) >= limit:
+                    # The window filled before the walk did: one more record past
+                    # `since` provably exists (this one), so the gap is reported
+                    # rather than left for the reader to infer from first_seq.
+                    has_more = True
                     break
+                out.append(rec)
     out.reverse()
     return {
         "room": room,
@@ -768,6 +777,7 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
         "first_seq": out[0]["seq"] if out else None,
         "last_seq": out[-1]["seq"] if out else (since or 0),
         "generation": room_generation(root, room),
+        "has_more": has_more,
         "messages": out,
     }
 

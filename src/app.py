@@ -403,6 +403,12 @@ def render(view: dict) -> str:
         if store.is_mailbox(view["room"])
         else f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
     )
+    if view.get("has_more"):
+        lines += [
+            "",
+            f"has_more: window full - {view['count']} shown is the NEWEST {view['count']} past your since; "
+            "older records exist. Raise limit (<= 200) to page further back.",
+        ]
     lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}", say]
     return "\n".join(lines)
 

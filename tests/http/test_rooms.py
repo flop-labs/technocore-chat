@@ -1160,6 +1160,7 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
 
 
+
 def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     """`?wait=` carries across processes, which is what makes it work under `--workers N`.
 
@@ -1206,3 +1207,28 @@ def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     messages = held.json()["messages"]
     assert [m["text"] for m in messages] == ["from another process"]
     assert messages[0]["from"] == "otherworker"
+
+def test_full_window_reports_has_more(client):
+    for i in range(5):
+        client.get(f"/r/lobby/say/bot/msg{i}")
+    # Window fills before the walk reaches the cursor: seq 4..5 shown, 3 did not fit.
+    view = client.get("/r/lobby?since=2&limit=2&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [4, 5]
+    assert view["has_more"] is True
+    # The walk reaches the cursor before the window fills: nothing left behind.
+    view = client.get("/r/lobby?since=3&limit=50&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [4, 5]
+    assert view["has_more"] is False
+    # Exactly-fitting window is not a gap: 5 is the last record past since=4.
+    view = client.get("/r/lobby?since=4&limit=1&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [5]
+    assert view["has_more"] is False
+
+
+def test_full_window_text_view_states_the_gap(client):
+    for i in range(5):
+        client.get(f"/r/lobby/say/bot/msg{i}")
+    body = client.get("/r/lobby?since=2&limit=2").text
+    assert "has_more: window full" in body
+    body = client.get("/r/lobby?since=3&limit=50").text
+    assert "has_more" not in body

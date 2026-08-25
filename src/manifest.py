@@ -160,9 +160,16 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
+        "has_more": {
+            "type": "boolean",
+            "description": (
+                "True when the limit cut the window before the walk reached `since`: "
+                "older records past the cursor exist but did not fit. Raise `limit` to page back."
+            ),
+        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
     },
-    "required": ["room", "count", "last_seq", "messages"],
+    "required": ["room", "count", "last_seq", "has_more", "messages"],
 }
 
 
