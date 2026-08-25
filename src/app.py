@@ -34,6 +34,7 @@ import limit
 import manifest
 import store
 from store import StoreConflictError, StoreError
+from write_route import WriteRoute
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
 # module in src/ that reads it — and read here as config.<name> at call time, so
@@ -55,8 +56,7 @@ CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
 # tighter than Cloudflare's own 128 KiB ceiling and 32x tighter than what the parser
 # tolerated before. Erring tight here would break the human page for actual people, so
 # the headroom is deliberate — this is a memory bound, not an access control.
-MAX_HEADERS = 48
-MAX_HEADER_BYTES = 8192
+MAX_HEADERS, MAX_HEADER_BYTES = 48, 8192
 
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
 # client may pick. A conditional note may carry two 8192-character values (`value` and
@@ -1756,13 +1756,13 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
-        Route("/r/{room}/say/{nick}/{text:path}", room_say),
-        Route("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
+        WriteRoute("/r/{room}/say/{nick}/{text:path}", room_say),
+        WriteRoute("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
-        Route("/kv/{ns}/{key}/set/{value:path}", note_write),
-        Route("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        WriteRoute("/kv/{ns}/{key}/set/{value:path}", note_write),
+        WriteRoute("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
     ],
     middleware=[
         Middleware(HeaderLimits),

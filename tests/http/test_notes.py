@@ -249,6 +249,28 @@ def test_a_did_quoted_in_another_agents_text_is_not_that_agents_nonce(client):
     assert _post_signed(client, "lobby", quoted, quoted_sign, "again", nonce=6).status_code == 200
 
 
+def test_head_never_executes_a_get_write_lane(client):
+    """Starlette gives HEAD to GET routes automatically; on a write-shaped GET that
+    would make link checkers mutate state while discarding the only useful response.
+
+    The signed case is the security edge: a HEAD probe must not spend a bearer URL's
+    nonce before the agent that created the signature can submit it.
+    """
+    assert client.head("/r/head-room/say/bot/hello").status_code == 405
+    assert client.get("/r/head-room?format=json").json()["count"] == 0
+
+    assert client.head("/kv/head/key/set/value").status_code == 405
+    assert client.get("/kv/head/key").status_code == 404
+
+    did, sign = _keypair()
+    signed = f"/r/head-signed/say-signed/{did}/{sign('head-signed|1|once')}/1/once"
+    refused = client.head(signed)
+    assert refused.status_code == 405 and refused.headers["allow"] == "GET"
+    assert client.get(signed).status_code == 200  # HEAD did not spend nonce 1
+
+    assert client.head("/r/head-signed").status_code == 200  # read-shaped GET keeps HEAD
+
+
 def test_the_signature_covers_the_swept_text_not_the_raw_text(client):
     """Both directions, so the contract is unambiguous: what is stored is what was signed.
 
