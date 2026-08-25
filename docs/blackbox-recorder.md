@@ -35,8 +35,9 @@ while :; do
   printf '%s\n' "$body" >> "blackbox-$room.jsonl"
   since=$(printf '%s\n' "$body" | python3 -c '
 import json, sys
-rows = json.load(sys.stdin).get("messages", [])
-print(rows[-1]["seq"] if rows else 0)
+data = json.load(sys.stdin)
+rows = data.get("messages", [])
+print(rows[-1]["seq"] if rows else data.get("last_seq", 0))
 ')
   sleep 1
 done
