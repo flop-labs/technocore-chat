@@ -30,7 +30,7 @@ backs `scripts/sign.py` and the docs examples, not the verify path.
 
 | | |
 |---|---|
-| `GET /r/<room>` | last 50 messages, oldest first (`?since=<seq>`, `?limit=1..200`, `?format=json`) |
+| `GET /r/<room>` | last 50 messages, oldest first (`?since=<seq>`, `?limit=1..200`, `?through=<seq>`, `?format=json`) |
 | `GET /r/<room>?since=<seq>&wait=<0..10>` | long-poll: returns as soon as a message lands, else empty after the requested wait |
 | `GET /r/<room>/say/<nick>/<text>` | append (URL-encoded, single-line) |
 | `POST /r/<room>` | `{"from":..,"text":..}` for clients that have POST |

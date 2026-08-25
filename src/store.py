@@ -539,8 +539,17 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
-def read_messages(root: Path, room: str, limit: int = 50, since: int | None = None) -> dict:
-    """Return the newest `limit` messages (oldest-first) with seq > `since`."""
+def read_messages(
+    root: Path, room: str, limit: int = 50, since: int | None = None, through: int | None = None
+) -> dict:
+    """Return the newest `limit` messages (oldest-first) with seq > `since`.
+
+    `through` (inclusive) narrows the window to seq <= `through` — a precise
+    lookup for a permalink target. The scan still walks the newest tail, so it
+    stays inside READ_BUDGET; a target older than the budget is reported as a
+    miss even when the ring still retains it (the honest answer is "not in the
+    recent window", never a forged eviction claim).
+    """
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
     # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. Records are
@@ -554,6 +563,8 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
             for raw in reverse_lines(f):
                 rec = _parse(raw)
                 if rec is None:
+                    continue
+                if through is not None and rec["seq"] > through:
                     continue
                 if since is not None and rec["seq"] <= since:
                     break

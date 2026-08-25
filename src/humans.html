@@ -500,7 +500,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var textEl = document.getElementById('text');
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
-  var room = 'lobby', since = 0, timer = null, targetSeq = 0;
+  var room = 'lobby', since = 0, timer = null, targetSeq = 0, lookupDone = false;
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: poll() already binds that name to its own payload.
@@ -786,7 +786,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since)
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (view) {
-        if (view.first_seq && since && view.first_seq > since + 1) {
+        // The gap note is for live tail polls: first_seq is the oldest record of THIS
+        // response, which proves the ring dropped lines only when the cursor moved.
+        // A permalink fetch starts at since=target-1, so first_seq > since+1 can be
+        // nothing but the 50-record window — the target may still be retained, and the
+        // precise lookup below is the arbiter (issue #152).
+        if (!targetSeq && view.first_seq && since && view.first_seq > since + 1) {
           var gap = document.createElement('div');
           gap.className = 'empty';
           gap.textContent = '… older messages were dropped (ring retention) …';
@@ -797,17 +802,35 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         // server keeps ~10 MiB. Say so in plain text rather than showing an empty room and
         // letting the reader think the link was wrong.
         if (targetSeq && !log.querySelector('.msg.target')) {
-          var evicted = view.first_seq !== null && view.first_seq > targetSeq;
-          var pending = targetSeq > view.last_seq;
-          if (evicted || pending) {
+          if (targetSeq > view.last_seq) {
+            // Newer than the newest record: it cannot exist yet. A precise lookup would
+            // only repeat this, so say it once and stop polling for it.
             var note = document.createElement('div');
             note.className = 'empty';
-            note.textContent = evicted
-              ? 'message ' + targetSeq + ' is no longer in the room’s window — the ring '
-                + 'keeps recent messages only'
-              : 'message ' + targetSeq + ' has not been posted yet';
+            note.textContent = 'message ' + targetSeq + ' has not been posted yet';
             log.appendChild(note);
-            targetSeq = 0;               // said once, not on every poll
+            targetSeq = 0;
+          } else if (!lookupDone) {
+            // The 50-record tail can miss a target the ring still retains. first_seq is
+            // the oldest record of THIS response, not the retained floor, so it proves
+            // nothing about eviction — ask for the target precisely instead.
+            lookupDone = true;
+            fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + (targetSeq - 1)
+                + '&through=' + targetSeq + '&limit=1')
+              .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+              .then(function (pv) {
+                if (pv.messages.length) {
+                  render(pv.messages);          // the .msg.target row scrolls into view
+                } else {
+                  var note = document.createElement('div');
+                  note.className = 'empty';
+                  note.textContent = 'message ' + targetSeq + ' is not in the recent window — '
+                    + 'the ring keeps recent messages only, and older ones are dropped';
+                  log.appendChild(note);
+                }
+                targetSeq = 0;                  // said once, not on every poll
+              })
+              .catch(function (e) { fail(String(e.message || e)); targetSeq = 0; });
           }
         }
         say('seq ' + since);
@@ -818,6 +841,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function open(next, seq) {
     room = (next || 'lobby').trim().toLowerCase();
     targetSeq = seq || 0;
+    lookupDone = false;
     // Start the cursor just before the target so the first fetch contains it: the default
     // tail is the newest 50, which a permalink into older history would miss entirely.
     since = targetSeq ? targetSeq - 1 : 0;
