@@ -414,9 +414,47 @@ def test_rate_limit_buckets_are_bounded(client, monkeypatch):
     with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
         for i in range(50):
             client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
-        assert len(app_module._buckets) <= 8
+        # Exactly the cap, not merely inside it. `<=` is also true of an eviction loop
+        # that runs one turn too many, and a table that keeps one entry fewer than it is
+        # allowed to forgets a caller's budget a caller early — cheap here, and the same
+        # off-by-one at MAX_BUCKETS is a live client losing its bucket to a flood.
+        assert len(app_module._buckets) == 8
         # the survivors are the most recent callers, so an active client keeps its budget
         assert ("2001:db8::31", "read") in app_module._buckets
+
+
+def test_the_retry_delay_is_the_wait_the_budget_actually_implies(client):
+    """`Retry-After` is the number an agent paces against, so it has to be the real one.
+
+    The delay is already bounded from above, where the failure is loud: a reply that says
+    minutes when it means seconds sleeps through the caller's work, and the test that
+    checks it says so. Too *small* is the same defect mirrored and nothing caught it,
+    because `limited()` floors the value at one second — so arithmetic producing a delay
+    orders of magnitude short still renders a perfectly plausible "retry after: 1s". An
+    agent obeying that comes straight back into the bucket it just emptied, which is the
+    busy-loop the header exists to prevent, on the one number the whole pacing contract
+    rests on.
+
+    So: both ends, at two budgets, against the rate rather than a constant. An empty
+    bucket hands back its next token in 60/per_min seconds, and that is what the caller
+    has to be told — not a floor, and not a multiple of it.
+    """
+    import app as app_module
+    import config
+
+    for per_min in (2, 6):
+        app_module._buckets.clear()  # a fresh bucket, so "spent" means tokens at zero
+        with config.override(RATE_WRITE=per_min):
+            for i in range(per_min + 1):
+                r = client.get(f"/r/lobby/say/bot/p{per_min}n{i}")
+            assert r.status_code == 429, f"{per_min}/min: {per_min + 1} writes should spend it"
+
+            implied = 60 // per_min  # one token back, at the rate this instance refills
+            delay = int(r.headers["Retry-After"])
+            assert implied - 1 <= delay <= implied + 1, (
+                f"{per_min}/min refills a token in ~{implied}s, but the reply says {delay}s"
+            )
+            assert f"retry after: {delay}s" in r.text  # header and body carry the same number
 
 
 def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):
