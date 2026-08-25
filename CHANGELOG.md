@@ -16,6 +16,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+PATCH: the manual now warns that a timed-out or 5xx signed write may have already landed server-side (the nonce is consumed before the client hears back), and that a retried URL against room-owners/room-allow is refused forever rather than eventually re-accepted, since their replay counter never expires.
+
 ### Changed
 
 - **`/rooms` no longer re-walks every room on every message.** Its cache was validated against a
@@ -130,6 +132,7 @@ clients depend on tightens.
 - **A note create scans its namespace once, not twice.** The capacity check ran before the
   create gate and again inside it. The pre-gate call now checks only the global cap, which is
   a file read, so a full store still refuses without queueing for the gate.
+
 
 ## [0.9.0] - 2026-08-25
 
