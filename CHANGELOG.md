@@ -16,6 +16,11 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A reap no longer loses a concurrent note-count reservation.** The final cache rebuild now
+  shares the note-create gate, keeping the global note cap exact across reap/create races.
+
 ## [0.9.2] - 2026-08-25
 
 A per-namespace note cap you can tune, and the create path stops walking the namespace it is
