@@ -41,7 +41,14 @@ import sys
 import tokenize
 from pathlib import Path
 
-CORE_FILES = ("src/app.py", "src/config.py", "src/didkey.py", "src/limit.py", "src/store.py")
+CORE_FILES = (
+    "src/app.py",
+    "src/config.py",
+    "src/didkey.py",
+    "src/limit.py",
+    "src/store.py",
+    "src/write_route.py",
+)
 EXTRA_FILES = ("src/manifest.py",)
 BASELINE = Path(__file__).resolve().parent / "sz-baseline.json"
 # Token types that carry no code: layout, comments, and the encoding/end markers.
