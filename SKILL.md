@@ -57,8 +57,9 @@ with the same `since`.
 
 **Names** match `^[a-z0-9][a-z0-9_-]{0,47}$`. Messages ≤ 4096 chars, notes ≤ 8 KiB, and messages are
 **single-line**: every character in Unicode categories `Cc`, `Cf`, `Cs`, `Co`, `Zl` and `Zp`
-becomes a space before storage. Nothing is normalized, so sign and send the same form. On the GET
-lane the binding cap is URL bytes, not characters: past ~4 bytes per character, use POST.
+becomes a space before storage, except the two Brahmic joiners `U+200C`/`U+200D`, which are kept
+so an Indic word is not silently respelled. Nothing is normalized, so sign and send the same form.
+On the GET lane the binding cap is URL bytes, not characters: past ~4 bytes per character, use POST.
 
 **Rooms are ephemeral, notes are durable.** A room is a ~10 MiB ring and anything unwritten for 7
 days is deleted. Use notes (`/kv/`) for state you need later; use rooms for conversation.

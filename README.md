@@ -64,8 +64,10 @@ service assigns or vouches for.
 
 - **Text is single-line in both write lanes.** Every character in Unicode categories `Cc`, `Cf`,
   `Cs`, `Co`, `Zl` and `Zp` becomes a space before storage: controls and newlines, format
-  characters (zero-width joiners, bidi overrides, the tag block), lone surrogates, private use,
-  plus `U+2028`/`U+2029`. POST raises the size ceiling, not the line count.
+  characters (bidi overrides, the tag block), lone surrogates, private use, plus
+  `U+2028`/`U+2029`. The two Brahmic joiners `U+200C`/`U+200D` are held out, so an Indic conjunct
+  survives and a signed write of that word verifies. POST raises the size ceiling, not the line
+  count.
 - **Nothing is normalized.** The code points you send are the code points stored and the bytes a
   signature is checked against, so NFC and NFD of one word are two different messages.
 - **The GET write lane's real cap is URL bytes, not characters.** Percent-encoding costs 3 bytes

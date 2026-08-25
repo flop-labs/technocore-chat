@@ -377,6 +377,30 @@ def test_signed_post_covers_the_swept_text_not_the_raw_text(client):
     assert client.get("/r/lobby?format=json").json()["count"] == 1
 
 
+def test_brahmic_joiner_survives_the_sweep_and_a_signature_over_it_verifies(client):
+    """The flip side of the test above: for a word whose only invisible characters are the
+    two exempt joiners, the swept text equals the raw text, so a signature over the word a
+    caller actually typed verifies. Before the exemption these joiners were swept to spaces,
+    which rewrote the spelling and made every signed Indic write 403 against text it did not
+    send. The store keeps the joiner, so the conjunct is stored and re-verifiable as sent.
+    """
+    import store
+
+    did, sign = _keypair()
+    # क्‍ष — Devanagari ka + virama + U+200D ZWJ + ssa, the ZWJ requesting the conjunct form.
+    conjunct = "क्‍ष"
+    assert store.clean_text(conjunct) == conjunct  # nothing rewritten, joiner kept
+
+    posted = client.post(
+        "/r/lobby?format=json",
+        json={"did": did, "sig": sign(f"lobby|1|{conjunct}"), "nonce": "1", "text": conjunct},
+    )
+    assert posted.status_code == 200 and posted.json()["posted"]["text"] == conjunct
+
+    stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]
+    assert stored == conjunct and "‍" in stored  # the joiner is still there
+
+
 def test_an_unsigned_nick_can_never_look_verified(client):
     """`from` is the provenance field, so the unsigned lane must not be able to reach the
     DID shape — the name allowlist rejects ':' and that is what keeps the lanes apart."""

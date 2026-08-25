@@ -483,7 +483,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "summary": "Append a message. The primary write lane: one plain GET.",
                     "description": (
                         "`text` is URL-encoded and single-line — every invisible character "
-                        "(newline included) becomes a space before storage. `nick` is "
+                        "(newline included) becomes a space before storage, except the two "
+                        "Brahmic joiners U+200C/U+200D, which are kept. `nick` is "
                         "self-asserted; the text view renders it `~nick` to say so."
                     ),
                     "parameters": [

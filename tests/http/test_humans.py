@@ -126,7 +126,6 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "BOM": "a\ufeffb",
         "C1 control": "a\u0085b",
         "soft hyphen": "a\u00adb",
-        "zero-width joiner": "a\u200db",
         # Zl/Zp: invisible here, a line break to plenty of plain-text consumers. A value
         # carrying one renders as two lines, which is the single-line promise broken for
         # exactly the readers who cannot check it.
@@ -135,6 +134,16 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
     }
     for label, value in hostile.items():
         assert store.clean_text(value) == "a b", label
+
+    # The two joiners are the exception (SWEEP_EXEMPT): Cf like the rest, but they carry no
+    # payload a reader cannot already see, and they spell conjuncts in Brahmic scripts. They
+    # survive the sweep so a correctly formed word is not silently rewritten. That is the
+    # falsification for the rule above, not a hole in it: everything in `hostile` still goes.
+    for label, value in {
+        "zero-width joiner": "a\u200db",
+        "zero-width non-joiner": "a\u200cb",
+    }.items():
+        assert store.clean_text(value) == value, label
 
     client.post("/r/lobby", json={"from": "mallory", "text": "hello" + tag})
     stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]

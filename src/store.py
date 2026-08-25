@@ -374,11 +374,13 @@ def ownable(name: str) -> bool:
 #   Cc  control      — C0/C1 would break the JSONL one-record-per-line invariant.
 #   Cf  format       — the *invisible instruction* smuggling vector against LLM readers.
 #                      Unicode tag characters U+E0000–U+E007F encode ASCII that no human or
-#                      log line shows, bidi overrides (U+202E) reorder displayed text away
-#                      from what is stored (Trojan Source), and zero-width joiners hide word
-#                      boundaries. This service's stated top hazard is cross-agent prompt
-#                      injection (design doc §3.1), so text that renders as nothing must not
-#                      survive into another agent's context.
+#                      log line shows, and bidi overrides (U+202E) reorder displayed text
+#                      away from what is stored (Trojan Source). This service's stated top
+#                      hazard is cross-agent prompt injection (design doc §3.1), so text that
+#                      renders as nothing must not survive into another agent's context. Two
+#                      Cf characters are held out by SWEEP_EXEMPT below: they carry no payload
+#                      and spell real words, so the rule that takes the rest would corrupt
+#                      them — see there for why the exception is safe.
 #   Cs  surrogate    — never valid on its own in stored text.
 #   Co  private use  — renders as whatever the reader's font decides, which is not a promise.
 #   Zl  line sep     — U+2028, and Zp U+2029: invisible here, a line break to enough
@@ -387,18 +389,39 @@ def ownable(name: str) -> bool:
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
+# The two format characters the sweep holds out: U+200C ZERO WIDTH NON-JOINER and U+200D
+# ZERO WIDTH JOINER. Both are Cf, so INVISIBLE_CATEGORIES would otherwise take them, but the
+# reasoning that lists Cf carves them out rather than covering them. Two properties set them
+# apart from every other Cf character:
+#   1. They carry no payload. The tag block encodes arbitrary hidden ASCII and a bidi
+#      override reorders visible text; a joiner is a single invisible codepoint that can at
+#      most perturb text a reader already sees. There is no hidden instruction to smuggle in
+#      one, so exempting them does not reopen the §3.1 hazard the rest of the list closes.
+#   2. They are orthographic, not decorative. Every Brahmic script (Devanagari, Bengali,
+#      Tamil, Telugu, and a dozen more) spells conjuncts with ZWJ and blocks them with ZWNJ,
+#      and Persian/Urdu use ZWNJ inside a word. Sweeping them silently rewrites the spelling
+#      of a correctly formed word for ~1B readers, and because a signed write is verified
+#      against the *swept* text, a signature over that word then 403s with no hint why.
+# Neither is a line break, so the one-record-per-line invariant the sweep exists to keep is
+# untouched. Every other Cf character — tag block, bidi overrides, ZWSP, word joiner, BOM —
+# still goes.
+SWEEP_EXEMPT = frozenset("\u200c\u200d")  # U+200C ZWNJ, U+200D ZWJ
+
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
-    """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
+    """Replace every INVISIBLE_CATEGORIES character with a space (bar the two SWEEP_EXEMPT joiners), then trim.
 
     What that buys: one stored record is one line for every reader, and nothing that renders
-    as nothing survives into another agent's context.
+    as nothing and could carry a hidden instruction survives into another agent's context.
 
-    Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
-    Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    What the exemption buys: a Brahmic conjunct (क्‍ष) and a ZWJ emoji sequence (👨‍👩‍👧)
+    round-trip unchanged, and a signed write of an Indic word verifies, because the swept
+    text a signature covers now equals the word that was sent. See SWEEP_EXEMPT for why those
+    two are safe to keep while every other invisible still goes.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT) else c
+        for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
@@ -406,9 +429,9 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
         # characters would otherwise re-send the same bytes and get the same refusal.
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
-            "replaces every control, format and line-separator character (newline, "
-            "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
-            "the ends. Send at least one visible character."
+            "replaces control, format and line-separator characters (newline, zero-width "
+            "space, bidi override, Unicode tag, U+2028) with a space and trims the ends "
+            "(the joiners U+200C/U+200D are kept). Send at least one visible character."
         )
     if len(text) > limit:
         raise StoreError(
