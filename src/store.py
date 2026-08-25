@@ -685,11 +685,15 @@ def _bump(root: Path, **deltas: int) -> None:
 # --------------------------------------------------------------------------- reading
 
 
-def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = READ_BUDGET):
+def reverse_lines(
+    f, chunk_size: int = 65536, max_bytes: int = READ_BUDGET, status: dict | None = None
+):
     """Yield complete lines from the end of a binary file, newest first.
 
     Reads backwards in chunks and stops after `max_bytes`, so cost is bounded by
-    the caller's window, not by file size.
+    the caller's window, not by file size. When the budget, not the file start,
+    ended the walk, `status["truncated"]` is set so callers can tell a cut
+    window from a complete one.
     """
     f.seek(0, os.SEEK_END)
     pos = f.tell()
@@ -708,6 +712,8 @@ def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = READ_BUDGET):
                 yield line
     if head and pos == 0:
         yield head
+    elif pos > 0 and status is not None:
+        status["truncated"] = True
 
 
 def _cutoff(room: str) -> float | None:
@@ -742,8 +748,9 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     """Return the newest `limit` messages (oldest-first) with seq > `since`.
 
     `has_more` is true exactly when the window filled before the walk reached
-    `since`: at least one older record past the cursor exists but did not fit,
-    so a poller that believes it is current can be told it is not."""
+    `since` - by count limit or by read budget: at least one older record past
+    the cursor may exist but did not fit, so a poller that believes it is
+    current can be told it is not."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
     # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. Records are
@@ -753,23 +760,32 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     cutoff = _cutoff(room)
     out: list[dict] = []
     has_more = False
+    settled = False  # the walk reached the cursor, expiry, or a full window
+    status: dict = {}
     if path.exists():
         with path.open("rb") as f:
-            for raw in reverse_lines(f):
+            for raw in reverse_lines(f, status=status):
                 rec = _parse(raw)
                 if rec is None:
                     continue
                 if since is not None and rec["seq"] <= since:
+                    settled = True
                     break
                 if cutoff is not None and _expired(rec, cutoff):
+                    settled = True
                     break
                 if len(out) >= limit:
                     # The window filled before the walk did: one more record past
                     # `since` provably exists (this one), so the gap is reported
                     # rather than left for the reader to infer from first_seq.
                     has_more = True
+                    settled = True
                     break
                 out.append(rec)
+    if not settled and status.get("truncated"):
+        # The byte budget cut the walk before it reached `since`: records older
+        # than the window may exist, the same situation as a full count window.
+        has_more = True
     out.reverse()
     return {
         "room": room,

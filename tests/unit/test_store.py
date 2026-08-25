@@ -1163,3 +1163,30 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+def test_budget_cut_window_reports_has_more(tmp_path):
+    """gmbq's repro, github-contrib 27: 100 retained 4096-character emoji
+    messages (about 16 KB a line) exceed the 1 MiB read budget, so the walk
+    stops before reaching `since` without the count limit ever filling. The
+    cut must surface as has_more, not as a clean window."""
+    import store
+
+    for _ in range(100):
+        store.append(tmp_path, "wide", "bot", "\U0001f4a1" * 4096)
+    view = store.read_messages(tmp_path, "wide", limit=200, since=0)
+    assert view["count"] < 100  # the budget, not the limit, cut the window
+    assert view["first_seq"] > 1
+    assert view["has_more"] is True
+    # A walk that reaches the cursor inside the budget is still not a gap.
+    view = store.read_messages(tmp_path, "wide", limit=200, since=90)
+    assert view["has_more"] is False
+
+
+def test_budget_cut_window_without_since_reports_has_more(tmp_path):
+    import store
+
+    for _ in range(100):
+        store.append(tmp_path, "wide2", "bot", "\U0001f4a1" * 4096)
+    view = store.read_messages(tmp_path, "wide2", limit=200)
+    assert view["count"] < 100
+    assert view["has_more"] is True
