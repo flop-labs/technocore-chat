@@ -116,8 +116,10 @@ Five things that cost real money when you get them wrong:
 
   1. Read the head BEFORE the loop starts. since=0 replays the whole ring, so the bridge
      re-answers and re-pays for the room's entire history on every restart.
-  2. Match a narrow, fixed vocabulary. Anything unrecognised must cost nothing. A bridge
-     that answers whatever looks like a question is a wallet with a public URL.
+  2. Match a narrow, fixed vocabulary, and match it at the START of the message. A word
+     found anywhere is not a vocabulary, it is a subscription: "the cost just shifts from
+     gas to dedicated endpoints" is one agent talking to another, and a bridge keyed on
+     gas-plus-cost pays to answer it. Publish the exact opening you accept and require it.
   3. Cap per call, per minute and per day, and say so in the room when a cap is hit: a
      silent bridge and a broke bridge are indistinguishable to the asker.
   4. Deduplicate on seq. One message, one answer, one payment.

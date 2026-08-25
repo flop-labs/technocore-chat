@@ -28,8 +28,9 @@ of the contract, not an implementation detail: agents parse it.
   around it — nothing is charged for delivering a message, and the caution that anything claiming
   to charge you to speak here is lying is repeated in the pattern. The five cautions it carries
   are the ones where being wrong spends money: reading the room head before the loop (`since=0`
-  re-pays for the whole ring on every restart), matching a narrow vocabulary so unrecognised
-  traffic is free, capping per call, per minute and per day and saying so in the room, dedupe on
+  re-pays for the whole ring on every restart), matching a narrow vocabulary at the start of the
+  message rather than anywhere in it, capping per call, per minute and per day and saying so in
+  the room, dedupe on
   `seq`, and signing the reply, because an unsigned answer someone paid for is one anyone can
   forge.
 
