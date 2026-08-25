@@ -129,6 +129,12 @@ class StoreLifecycle(RuleBasedStateMachine):
         # Simulated seconds since each record was written, and since each file last was.
         self.record_age: dict[str, dict[int, int]] = {room: {} for room in ROOMS}
         self.room_age: dict[str, int] = dict.fromkeys(ROOMS, 0)
+        # #139: the seq a reaped room's next write must clear, and how long that floor
+        # note has stood — separate from self.seq/room_age, which track the *current*
+        # generation's file and reset to 0 the moment the room is gone (see
+        # last_seq_never_goes_backwards, which checks exactly that against store.last_seq).
+        self.floor: dict[str, int] = dict.fromkeys(ROOMS, 0)
+        self.floor_age: dict[str, int] = dict.fromkeys(ROOMS, 0)
         self.note_age: dict[tuple[str, str], int] = dict.fromkeys(NOTES, 0)
         self.notes: dict[tuple[str, str], str] = {}
 
@@ -178,11 +184,34 @@ class StoreLifecycle(RuleBasedStateMachine):
             return "gone" if not self.said[name] else self._room_verdict(name)
         return "gone"
 
+    def _floor_verdict(self, room: str) -> str | None:
+        """Same three answers as `_note_verdict`, for the seq floor #139 leaves behind.
+
+        It is a plain note under the hood (SEQ_FLOOR_NS), so it ages out on the same flat
+        IDLE_SECONDS rule as any other note — no guard-note tie-in, because nothing is
+        still using a room that does not exist to gate exemption against.
+        """
+        if not self.floor[room]:
+            return None  # no floor recorded, or it already expired in the model
+        age = self.floor_age[room]
+        if abs(age - store.IDLE_SECONDS) <= GUARD_SECONDS:
+            return None
+        return "gone" if age > store.IDLE_SECONDS else "kept"
+
     def _reap_model(self) -> None:
         """Apply the reaper's rules to the model, wherever the store would have run a pass
         — which, with REAP_EVERY at zero, is before every append and every note write."""
         for room in ROOMS:
+            # Ambiguous ages return None from `_floor_verdict`/`_room_verdict` and are left
+            # for `_resync` to read back — same convention as everywhere else in this model.
+            if self._floor_verdict(room) == "gone":
+                self.floor[room] = 0
             if self._room_verdict(room) == "gone":
+                # Read the seq *before* clearing it, same order `_leave_seq_floor` uses
+                # against the real file: the floor is what was there, not 0.
+                if self.seq[room] > 0:
+                    self.floor[room] = self.seq[room]
+                    self.floor_age[room] = 0
                 self.seq[room] = 0
                 self.said[room].clear()
                 self.record_age[room].clear()
@@ -220,6 +249,10 @@ class StoreLifecycle(RuleBasedStateMachine):
                 # The file is gone, so the store's counter is gone with it: the next write
                 # starts this room over at 1. Nothing else in the store restarts.
                 self.seq[room] = 0
+            # Ground truth for #139's floor, replacing the forward guess `_reap_model` made
+            # for the `say` assertion — same role this whole method plays for everything
+            # else here. 0 means either no floor was ever left, or its own note has aged out.
+            self.floor[room] = store._seq_floor(self.root, room)
         for key in list(self.notes):
             if store.note_get(self.root, *key) is None:
                 del self.notes[key]
@@ -237,8 +270,13 @@ class StoreLifecycle(RuleBasedStateMachine):
         self._reap_model()
         for text in texts:
             record = store.append(self.root, room, nick, text)
-            assert record["seq"] == self.seq[room] + 1, (
-                f"{room}: seq jumped from {self.seq[room]} to {record['seq']}"
+            # #139: after a reap, self.seq[room] is back to 0 (it mirrors store.last_seq,
+            # which is 0 with no file), but a floor may still be in force — the next seq
+            # must clear whichever of the two is higher, same as store.py's own max(...).
+            expected = max(self.seq[room], self.floor[room]) + 1
+            assert record["seq"] == expected, (
+                f"{room}: seq jumped from {self.seq[room]} (floor {self.floor[room]}) "
+                f"to {record['seq']}, expected {expected}"
             )
             self.seq[room] = record["seq"]
             self.said[room][record["seq"]] = (nick, text)
@@ -361,6 +399,8 @@ class StoreLifecycle(RuleBasedStateMachine):
             self.room_age[room] += seconds
             for seq in self.record_age[room]:
                 self.record_age[room][seq] += seconds
+            if self.floor[room]:
+                self.floor_age[room] += seconds
         for key in NOTES:
             self.note_age[key] += seconds
 

@@ -273,13 +273,15 @@ _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
 # the character cap, and — on the note lane — a signed write aimed at a namespace that
 # does not take one. Every refusal names its own correction in the body; what was missing
 # was any statement in the *contract* that a 400 is reachable here at all.
-# The 403 the note lanes share. Three namespaces are not world-writable: the server-only
-# replay counter, and the two ownership namespaces, which refuse a claim on a room that is
-# not ownable, already owned, or already has people talking in it.
+# The 403 the note lanes share. Four namespaces are not world-writable: the two
+# server-only ones (the replay counter, and the seq floor a reaped room leaves behind —
+# #139), and the two ownership namespaces, which refuse a claim on a room that is not
+# ownable, already owned, or already has people talking in it.
 _RESERVED_NAMESPACE = _plain(
-    f"A reserved namespace refused the write: `{store.NONCE_NS}` is server-written, "
-    f"and `{store.OWNERS_NS}`/`{store.ALLOW_NS}` take only the room owner's signed "
-    "writes. The body names the lane that would work."
+    f"A reserved namespace refused the write: `{store.NONCE_NS}` and "
+    f"`{store.SEQ_FLOOR_NS}` are server-written, and `{store.OWNERS_NS}`/"
+    f"`{store.ALLOW_NS}` take only the room owner's signed writes. The body names the "
+    "lane that would work."
 )
 
 # The last path segment of the four URL write lanes is `{text:path}` / `{value:path}`, and

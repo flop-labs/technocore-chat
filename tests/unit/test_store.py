@@ -1019,3 +1019,63 @@ def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
     store.note_path(tmp_path, store.TOPIC_NS, "aaa").unlink()  # a reaper-style deletion
     with config.override(NOTE_STATS_CACHE_SECONDS=0):
         assert topics()["aaa"] is None  # visible once the clock (here: disabled) expires
+
+
+def test_recreated_room_seq_does_not_go_backwards_after_reap(tmp_path):
+    """#139: a reaped room reused under the same name used to restart at seq 1, so any
+    cursor still holding a seq from the old generation read count:0 forever -- a silent,
+    permanent starve, not a transient "you missed lines" the existing signals catch."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", ["alice", "bob"][i % 2], f"msg {i}")
+    cursor = store.read_messages(tmp_path, "d-talk")["last_seq"]
+    assert cursor == 6
+
+    _age(store.room_path(tmp_path, "d-talk"), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
+    assert not store.room_path(tmp_path, "d-talk").exists()
+
+    store.append(tmp_path, "d-talk", "mallory", "fresh start")
+    rec = store.append(tmp_path, "d-talk", "carol", "can anyone hear me?")
+
+    assert rec["seq"] > cursor
+    result = store.read_messages(tmp_path, "d-talk", since=cursor)
+    assert result["count"] == 2
+    assert [m["text"] for m in result["messages"]] == ["fresh start", "can anyone hear me?"]
+
+
+def test_seq_floor_is_server_only_over_http(tmp_path, monkeypatch):
+    """The floor namespace must reject a caller-supplied write the same way room-nonce
+    does -- otherwise anyone could reset or forge the anti-starvation floor."""
+    import app
+    import store
+
+    denied = app._note_write_gate(store.SEQ_FLOOR_NS, "some-room", "999999", None)
+    assert denied is not None
+    assert denied.status_code == 403
+
+    denied_signed = app._note_write_gate(
+        store.SEQ_FLOOR_NS, "some-room", "1", "did:key:z6MkfakeSignerForGateTestOnly"
+    )
+    assert denied_signed is not None
+    assert denied_signed.status_code == 403
+
+
+def test_seq_floor_note_itself_ages_out_like_any_other_note(tmp_path):
+    """The floor is a plain note under the hood, so it follows the same IDLE_SECONDS
+    reap rule as everything else in notes/ -- it is not meant to be permanent state."""
+    import store
+
+    store.append(tmp_path, "d-talk", "bot", "hi")
+    _age(store.room_path(tmp_path, "d-talk"), store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
+
+    floor_path = store.note_path(tmp_path, store.SEQ_FLOOR_NS, "d-talk")
+    assert floor_path.exists()
+    assert store._seq_floor(tmp_path, "d-talk") == 1
+
+    _age(floor_path, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
+    assert not floor_path.exists()
+    assert store._seq_floor(tmp_path, "d-talk") == 0

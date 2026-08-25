@@ -40,9 +40,9 @@
       "tokens_per_line": 7.13
     },
     "extra/manifest.py": {
-      "raw_lines": 1582,
-      "code_lines": 1163,
-      "comment_lines": 113,
+      "raw_lines": 1584,
+      "code_lines": 1164,
+      "comment_lines": 114,
       "tokens_per_line": 3.87
     }
   }

@@ -190,6 +190,12 @@ ALLOW_NS = "room-allow"  # /kv/room-allow/<room>  -> space-separated did:keys
 # for its own atomicity. MAX_NOTES_PER_NS = MAX_ROOMS, so every room may hold an owner.
 NONCE_NS = "room-nonce"
 TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
+# Server-written only (see app.py's note gate, same pattern as NONCE_NS). Left behind when
+# a room is reaped so a same-named room created later starts its seq above the old
+# generation's high-water mark instead of restarting at 1 -- see #139: without this, every
+# cursor still polling the old generation reads count:0 forever once the name is reused,
+# because seq goes backwards and none of the existing "you missed lines" signals fire.
+SEQ_FLOOR_NS = "room-seq-floor"
 # A topic is an ordinary note (MAX_VALUE_CHARS), and /rooms shows one per room it lists:
 # printed in full that is a reply measured in hundreds of KB, against a response budget
 # measured in kilobytes. The overview
@@ -781,6 +787,30 @@ def _stillborn(path: Path) -> bool:
     return True
 
 
+def _seq_floor(root: Path, room: str) -> int:
+    """The seq a recreated `room` must not repeat, left behind by a previous reap. 0 if the
+    room has never been reaped (or the floor note itself has since expired -- see SEQ_FLOOR_NS)."""
+    try:
+        return int(note_path(root, SEQ_FLOOR_NS, room).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+
+
+def _leave_seq_floor(root: Path, room: str, seq: int) -> None:
+    """Best-effort, called from inside `_reap` itself: must not call back into `_reap` (via
+    `note_set`) or hold a lock this thread already holds elsewhere. `_locked` mkdirs the
+    parent and serialises against a concurrent reap of the same name; a failed write costs
+    a future reader a stale cursor, same as before this fix existed -- never a room write."""
+    if seq <= 0:
+        return
+    path = note_path(root, SEQ_FLOOR_NS, room)
+    try:
+        with _locked(path):
+            path.write_text(str(seq), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
     """Which threshold retires `path`, or None if neither does yet.
 
@@ -860,6 +890,11 @@ def _reap(root: Path) -> None:
                 with _locked(p):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
+                        # Rooms only (sub == "rooms"): notes have no seq to protect, and
+                        # reading last_seq off a notes .txt file would misparse it anyway.
+                        # Must happen before unlink -- this is the last moment `p` exists.
+                        if sub == "rooms":
+                            _leave_seq_floor(root, p.stem, last_seq(root, p.stem))
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -1327,7 +1362,10 @@ def _write_record(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
-        rec["seq"] = last_seq(root, room) + 1
+        # max(...) rather than plain +1: on a room's first write after being reaped and
+        # recreated, last_seq(root, room) is 0 for the new file, but a stale cursor from
+        # the old generation may still point past that -- see #139 and SEQ_FLOOR_NS above.
+        rec["seq"] = max(last_seq(root, room), _seq_floor(root, room)) + 1
         line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one

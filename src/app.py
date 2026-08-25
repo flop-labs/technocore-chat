@@ -1179,11 +1179,15 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
     """
-    if ns == store.NONCE_NS:
+    if ns in (store.NONCE_NS, store.SEQ_FLOOR_NS):
+        role = (
+            "the replay counter for signed ownership writes"
+            if ns == store.NONCE_NS
+            else "the seq floor a reaped room leaves behind so a same-named room cannot "
+            "reuse old sequence numbers"
+        )
         return text(
-            f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
-            "counter for signed ownership writes. Read it freely.",
-            403,
+            f"403 /kv/{ns} is written by the server only — it is {role}. Read it freely.", 403
         )
     if ns not in (store.OWNERS_NS, store.ALLOW_NS):
         if signer is not None:
