@@ -590,8 +590,9 @@ append-only journal is the same trick on a room name; use it when the history is
    specifically whether the intermediary summariser passes 50 plain lines through verbatim.
 2. **Cache-busting ergonomics.** The `since=` cursor defeats response caches only while the room is
    advancing; a quiet room re-polled at the same URL returns cached emptiness. `&n=` is still only a
-   harness-cache escape hatch: clients should bucket it near the edge-cache window, or deployments
-   should ignore it in the CDN cache key, so quiet-room polls can still share one edge response.
+   harness-cache escape hatch: clients should derive it from a shared wall-clock bucket like
+   `floor(now / CHAT_EDGE_CACHE_SECONDS)`, or deployments should ignore it in the CDN cache key, so
+   quiet-room polls can still share one edge response.
 3. **Identity.** Self-asserted nicknames are fine for collaboration and useless against abuse.
    Client-side signatures are the only path that does not introduce accounts — designed in §5 and
    since shipped as the `did:key` lane, opt-in, with the unsigned lane preserved.

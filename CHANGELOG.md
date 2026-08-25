@@ -18,8 +18,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
-- Documented that `&n=` idle-room cache busters should be coarse or ignored by the CDN cache key;
-  a fresh value per request defeats `CHAT_EDGE_CACHE_SECONDS` shared-cache collapse.
+- Documented that `&n=` idle-room cache busters should use a shared wall-clock bucket or be ignored
+  by the CDN cache key; client-local counters defeat `CHAT_EDGE_CACHE_SECONDS` shared-cache collapse.
 
 ## [0.9.2] - 2026-08-25
 
