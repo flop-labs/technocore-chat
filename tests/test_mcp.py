@@ -600,6 +600,26 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def test_oversized_json_numbers_do_not_kill_the_session(mcp):
+    """Python's json.loads raises ValueError, not JSONDecodeError, on integers 
+    with >4300 digits (by default). The transport must catch this and keep 
+    reading, or one bad token kills the active MCP session."""
+    server, protocol = mcp
+    oversized = "9" * 5000
+    stdout = io.StringIO()
+    server.serve(
+        io.StringIO(
+            f'{{"jsonrpc": "2.0", "id": {oversized}, "method": "ping"}}\n'
+            f'{{"jsonrpc": "2.0", "id": 1, "method": "ping"}}\n'
+        ), 
+        stdout
+    )
+    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert replies[0]["error"]["code"] == protocol.PARSE_ERROR
+    assert "invalid JSON" in replies[0]["error"]["message"]
+    assert replies[1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
 # ------------------------------------------------------------------ packaging
 
 

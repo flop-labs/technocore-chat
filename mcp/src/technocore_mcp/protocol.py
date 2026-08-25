@@ -376,7 +376,10 @@ class Server:
                 continue
             try:
                 message = json.loads(line)
-            except json.JSONDecodeError as exc:
+            except (json.JSONDecodeError, ValueError) as exc:
+                # Python can raise ValueError for a valid JSON token whose integer exceeds
+                # its configured conversion limit. It is still malformed input for this
+                # transport, so report a parse error and keep the session alive.
                 _write(stdout, _error(None, PARSE_ERROR, f"invalid JSON: {exc}"))
                 continue
             # Batches were removed in 2025-06-18 but older clients may still send one.
