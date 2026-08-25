@@ -54,6 +54,18 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+# The note-capacity walk (~41k stats at the cap) and topic previews, reused across
+# /rooms requests. Stamped on the notes_written counter, so a note write invalidates
+# immediately from any worker; only reaper deletions can be this stale. 0 disables.
+NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
+# s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
+# origin request per interval. Browsers still revalidate (max-age=0); long-polls are
+# never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
+EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
+# Whether a room append fsyncs before the 200 — the write-throughput ceiling on one
+# disk. 0 trades a host-crash window (the final moments of appends) for headroom;
+# torn-tail healing bounds a cut-short write to one record. Compaction always fsyncs.
+FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a
@@ -77,6 +89,33 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # returned once they are older than this, and physically leave on the next compaction or
 # when the IDLE_SECONDS reaper takes the file.
 EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
+
+# How many rooms the service will track. Floored at 1 for the same reason the rate knobs
+# are: the capacity check divides the tracked count against it, and a zero would refuse
+# every creation rather than the "no limit" a hand-edited 0 presumably meant. The default
+# is the 5120 this was hardcoded to before, so an instance that sets nothing does not move.
+#
+# It became a knob because it is a *fail-closed* cap on a shared resource: past it nobody
+# creates a room, not just the caller who filled it. A flood took production from 147 to
+# 1319 rooms in 16 hours, which put the hardcoded ceiling ~9 hours out with no lever short
+# of a release. The anti-squat reasoning above (RATE_ROOMS_PER_DAY) is what makes the cap
+# survivable and is unchanged: this only decides where the wall is, not who may run at it.
+# Raising it costs directory walks (the reaper and /rooms are O(cap)), not disk — the disk
+# budget is MAX_TOTAL_ROOM_BYTES and is enforced separately.
+MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
+# Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
+# real ceiling is N times these — which is the reason they are knobs at all: an operator
+# adding workers has no other way to hold the total where it was. 0 is meaningful here and
+# is therefore allowed: it refuses every long-poll slot, degrading `?wait=` to an immediate
+# empty reply, which is exactly what exceeding the cap already does.
+MAX_WAITERS_TOTAL = max(0, int(os.environ.get("CHAT_MAX_WAITERS_TOTAL", "64")))
+MAX_WAITERS_PER_IP = max(0, int(os.environ.get("CHAT_MAX_WAITERS_PER_IP", "4")))
+# Not a CHAT_ knob, and not read for behaviour: uvicorn's own worker-count variable, echoed
+# into /stats so a reader can tell that the request counters beside it are one worker's
+# share. uvicorn takes it as the default for --workers, so setting WEB_CONCURRENCY=3 drives
+# both the process count and this figure from one place; passing --workers 3 instead leaves
+# this at 1 and /stats will say so honestly rather than guess.
+WORKERS = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
 
 
 def _finite_env(name: str, default: str) -> float:
@@ -104,6 +143,24 @@ def _finite_env(name: str, default: str) -> float:
 # publish this number, and a tuned instance still saying 10 is the drift manifest.py
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
+
+# How long an identical unsigned write is answered with the message it repeats instead of
+# writing a second one. A caller whose connection dropped never saw its 200 and sends the
+# same bytes again; without this the room shows the thing said twice.
+#
+# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
+# request distinguishes a retry from a caller that meant to say the same thing twice, so
+# this trades a duplicate for a *dropped message* — and on this service identical rapid
+# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
+# and text back to back and require all of them to land, `test_lane_parity` among them,
+# because one write through each lane IS the same nick and text. Enabling it silently
+# collapses those. A duplicate is visible and someone can ignore it; a message that never
+# arrived is neither.
+#
+# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
+# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
+# short either way — past a few seconds a repeat is a conversation, not a retry.
+DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
 
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one

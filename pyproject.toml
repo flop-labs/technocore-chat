@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.7.0"
+version = "0.9.1"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -10,6 +10,16 @@ requires-python = ">=3.12"
 dependencies = [
     "starlette==1.6.0",
     "uvicorn[standard]==0.52.2",
+    # Signature *verification* only (src/didkey.py) — libsodium is ~2x OpenSSL per verify
+    # (bench/ed25519_backends.py), and provably the same verdicts (tests/unit).
+    "pynacl==1.6.2",
+    # Every stored record passes through this: ~4.7x stdlib on the read path and ~13.7x on
+    # the append, byte-identical output for the shapes store.py writes (so no migration),
+    # and it rejects the NaN/Infinity literals stdlib accepts. app.py keeps stdlib json for
+    # the three published documents, which use indent=1 and orjson only does indent 2.
+    "orjson==3.12.0",
+    # Still required: scripts/sign.py generates keys with it, and the docs examples
+    # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
     "cryptography==50.0.0",
 ]
 
@@ -58,6 +68,7 @@ known-first-party = ["app", "didkey", "store"]
 # Same reason: `import store` resolves only with src/ on the path. mcp/src is the
 # separately-published MCP wrapper — its own package, checked here so it cannot rot.
 extra-paths = ["./src", "./mcp/src"]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

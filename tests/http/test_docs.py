@@ -100,7 +100,12 @@ def test_agent_surfaces_are_never_html(client):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        assert r.headers["cache-control"] == "no-store", path
+        # The two polled reads are edge-cacheable for a second (see app._edge_cacheable);
+        # every other agent surface stays no-store.
+        if path in ("/r/lobby", "/rooms"):
+            assert "public" in r.headers["cache-control"], path
+        else:
+            assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
@@ -173,15 +178,16 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     did_a, _sign_a = _keypair(7)
     a_static = X25519PrivateKey.from_private_bytes(bytes([7]) * 32)
     fp = hashlib.sha256(did_a.encode()).hexdigest()[:16]
+    did_path = f"/kv/did-{fp[:2]}/{fp[2:]}"
     mailbox = "mb-p-inbox-of-a"
     note = f"{did_a} x25519:{b64(a_static.public_key().public_bytes_raw())} mailbox:{mailbox}"
-    assert client.post(f"/kv/did/{fp}", json={"value": note}).status_code == 200
+    assert client.post(did_path, json={"value": note}).status_code == 200
 
     # B (sender): reads the note, seals a room key to A with an ephemeral key.
     did_b, sign_b = _keypair(8)
     # The value is the last non-empty line: note reads open with the untrusted-content
     # banner, and a real reader has to skip it exactly like this.
-    fetched = [ln for ln in client.get(f"/kv/did/{fp}").text.splitlines() if ln.strip()][-1]
+    fetched = [ln for ln in client.get(did_path).text.splitlines() if ln.strip()][-1]
     b_x25519 = dict(f.split(":", 1) for f in fetched.split(" ")[1:])
     eph = X25519PrivateKey.from_private_bytes(bytes([8]) * 32)
     a_pub = X25519PrivateKey.from_private_bytes(bytes([7]) * 32).public_key()
@@ -880,10 +886,12 @@ def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
 
 def test_the_manual_defines_every_convention_it_names(client):
     """A convention an agent cannot derive is a convention it will get wrong. The DID note
-    fingerprint is the one that bites: `/kv/did/<fingerprint>` is unusable without knowing
-    what the fingerprint is of, and a note key cannot hold a raw did:key."""
+    fingerprint is the one that bites: the sharded path is unusable without knowing what
+    the fingerprint is of and exactly where to split it."""
     manual = client.get("/llms.txt").text
-    assert "first 16 hex characters of the" in manual and "SHA-256" in manual
+    assert "first 16 lowercase hex characters of SHA-256" in manual
+    assert "/kv/did-<first 2>/<remaining 14>" in manual
+    assert "legacy /kv/did/<fingerprint>" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
     assert "newest 1 MiB" in manual
     assert "even if the message remains elsewhere in the larger room ring" in manual

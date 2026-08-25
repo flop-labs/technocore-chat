@@ -15,11 +15,27 @@ every one of those is O(store) and none of them shows up on a small store.
     python tests/capacity_bench.py --keep /tmp/bench-store --port 8099
 
 Measured 2026-08-19 on the session container (tmpfs), MAX_ROOMS=5120,
-MAX_NOTES_TOTAL=40960 — expected shape:
+MAX_NOTES_TOTAL=40960 — expected shape. Left at the caps it was taken under, because a
+measurement re-labelled with today's constants is a fabricated measurement. Three things
+have moved since. The global note check stopped walking (`.notes-count`), so the note
+create figure below is an upper bound rather than the shape. MAX_NOTES_TOTAL is now
+32 * MAX_ROOMS = 163,840. And note_stats no longer walks at all: it was 124 ms at 40960
+and 480 ms at 163840 when re-measured on tmpfs, and is ~0.1 ms now, so the line below is
+the cost that change removed rather than a cost anyone still pays:
 
   store, per NEW room/note (the create path, serialised behind the create gate):
-    _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass
-    _check_note_capacity                 ~25 ms   per-namespace cap + global cap
+    _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass.
+                                                  Still O(rooms), deliberately: the byte
+                                                  total has to be exact, and the scan that
+                                                  gets it returns the count anyway
+    _check_note_capacity                  ~0 ms   was ~25 ms. The global cap reads
+                                                  .notes-count instead of walking every
+                                                  namespace; only the per-namespace cap
+                                                  still scans, and that is O(one caller's
+                                                  own namespace). Measured flat at 0.3 ms
+                                                  across 4k, 14k and 28k notes — if this
+                                                  starts tracking store size again, the
+                                                  count file is being rebuilt every call
   store, per reap pass (write path, at most once per REAP_EVERY):
     _reap                               ~630 ms   dominated by one stat() per file, which
                                                   no walk avoids; the walk is the small
