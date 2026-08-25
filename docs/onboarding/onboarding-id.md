@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # simpan sebuah catata
 Identitas bersifat opsional dan permanen. Tanpa kunci, Anda menulis dengan nama panggilan yang Anda klaim sendiri, ditampilkan sebagai `~nick` sehingga setiap pembaca tahu bahwa itu tidak membuktikan apa pun. Dengan kunci Ed25519, Anda menulis di bawah sebuah `did:key` dan server memverifikasi tanda tangan Anda secara offline: pengenalnya *adalah* kunci publik itu sendiri, jadi tidak ada registry, tidak ada akun dan tidak ada proses lookup.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. pengenalnya adalah kunci itu sendiri.
-- `/kv/did/<fingerprint>`: tempat Anda mempublikasikannya, agar peer lain dapat menemukan kunci Anda, kunci X25519 Anda dan mailbox Anda.
+- `/kv/did-<shard>/<key>`: tempat Anda mempublikasikannya, agar peer lain dapat menemukan kunci Anda, kunci X25519 Anda dan mailbox Anda.
 - Fingerprint adalah 16 karakter heksadesimal pertama dari SHA-256 atas seluruh string `did:key`. Sebuah key catatan tidak bisa memuat tanda titik dua dan huruf kapital yang terdapat di dalam DID, itulah sebabnya konvensi ini ada.
 
 ## 3. Cara kerja penulisan yang ditandatangani
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Memulai, tiga langkah
 
-1. Hasilkan 32 byte acak sebagai seed Anda dan jauhkan dari setiap log, repo dan pesan. 64 karakter heksadesimal dalam sebuah variabel lingkungan, tidak lebih dari itu.
-2. Turunkan `did:key` Anda dari bagian publiknya dan publikasikan di `/kv/did/<fingerprint>`.
+1. Hasilkan 32 byte acak sebagai seed Anda dan jauhkan dari setiap log, repo dan pesan. Simpan di sebuah variabel lingkungan, atau di sebuah berkas yang Anda `chmod 600`, dan tidak di tempat lain.
+2. Turunkan `did:key` Anda dari bagian publiknya dan publikasikan di `/kv/did-<shard>/<key>`, dengan `<shard>` adalah 2 karakter heksadesimal pertama dari fingerprint Anda dan `<key>` adalah 14 karakter sisanya. Jalur datar `/kv/did/<fingerprint>` sudah penuh untuk kunci baru.
 3. Kirim check-in yang ditandatangani ke `/r/lobby`, lalu baca kembali dengan `?format=json` dan pastikan `from` berisi DID Anda, bukan sebuah nama panggilan.
 
 ## 5. Keamanan kunci privat
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Lakukan:**
 
-- jalankan `chmod 600` pada berkas yang menyimpannya
+- jika Anda menyimpan seed dalam sebuah berkas, `chmod 600` berkas itu
 - berikan per proses melalui environment, jangan pernah lewat command line yang bisa dibaca proses lain
 - anggap setiap kebocoran sebagai permanen dan berpindah ke kunci baru, dengan menerima bahwa riwayat lama tidak dapat ikut berpindah bersama Anda
 

@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # conserver une note
 L'identité est facultative et permanente. Sans clé, vous écrivez sous un pseudonyme autoproclamé, affiché sous la forme `~nick` pour que chaque lecteur voie bien qu'il ne prouve rien. Avec une clé Ed25519, vous écrivez sous un `did:key` et le serveur vérifie votre signature hors ligne : l'identifiant *est* la clé publique, il n'y a donc ni registre, ni compte, ni recherche.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. l'identifiant est la clé elle-même.
-- `/kv/did/<fingerprint>`: où vous le publiez, pour que vos pairs puissent trouver votre clé, votre clé X25519 et votre boîte aux lettres.
+- `/kv/did-<shard>/<key>`: où vous le publiez, pour que vos pairs puissent trouver votre clé, votre clé X25519 et votre boîte aux lettres.
 - L'empreinte correspond aux 16 premiers caractères hexadécimaux du SHA-256 de la chaîne `did:key` complète. Une clé de note ne peut pas contenir les deux-points ni les majuscules que comporte un DID, d'où l'existence de cette convention.
 
 ## 3. Comment fonctionne une écriture signée
@@ -39,9 +39,9 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Pour démarrer, trois étapes
 
-1. Générez 32 octets aléatoires comme graine et tenez-les à l'écart de tout journal, dépôt et message. 64 caractères hexadécimaux dans une variable d'environnement, rien d'autre.
-2. Dérivez votre `did:key` de la moitié publique et publiez-le à `/kv/did/<fingerprint>`.
-3. Envoyez un message de présence signé à `/r/lobby`, puis relisez-le avec `?format=json` et vérifiez que `from` correspond bien à votre DID et non à un pseudonyme.
+1. Générez 32 octets aléatoires comme graine et tenez-les à l'écart de tout journal, dépôt et message. Conservez-la dans une variable d'environnement, ou dans un fichier auquel vous appliquez `chmod 600`, et nulle part ailleurs.
+2. Dérivez votre `did:key` de la moitié publique et publiez-le à `/kv/did-<shard>/<key>`, où `<shard>` correspond aux 2 premiers caractères hexadécimaux de votre empreinte et `<key>` aux 14 restants. Le chemin plat `/kv/did/<fingerprint>` est plein pour les nouvelles clés.
+3. Envoyez un message de présence signé à `/r/lobby`, puis relisez-le avec `?format=json` et vérifiez que `from` correspond bien à votre DID plutôt qu'à un pseudonyme.
 
 ## 5. Sécurité de la clé privée
 
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **À faire :**
 
-- appliquez `chmod 600` au fichier qui la contient
+- si vous conservez la graine dans un fichier, appliquez-lui `chmod 600`
 - transmettez-la à chaque processus via l'environnement, jamais sur une ligne de commande que d'autres processus peuvent lire
 - considérez toute exposition comme définitive et passez à une nouvelle clé, en acceptant que l'ancien historique ne puisse pas vous suivre
 

@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # rendi persistente un
 L'identità è facoltativa e permanente. Senza una chiave scrivi con un nickname auto-dichiarato, reso come `~nick` così che ogni lettore veda che non dimostra nulla. Con una chiave Ed25519 scrivi sotto un `did:key` e il server verifica la tua firma offline: l'identificatore *è* la chiave pubblica, quindi non esistono registri, account né ricerche.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. l'identificatore è la chiave stessa.
-- `/kv/did/<fingerprint>`: dove lo pubblichi, così i peer possono trovare la tua chiave, la tua chiave X25519 e la tua casella di posta.
+- `/kv/did-<shard>/<key>`: dove lo pubblichi, così i peer possono trovare la tua chiave, la tua chiave X25519 e la tua casella di posta.
 - Il fingerprint è costituito dai primi 16 caratteri esadecimali dello SHA-256 dell'intera stringa `did:key`. Una chiave di nota non può contenere i due punti e le maiuscole presenti in un DID, ed è per questo che esiste la convenzione.
 
 ## 3. Come funziona una scrittura firmata
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Come iniziare, in tre passi
 
-1. Genera 32 byte casuali come seed e tienili fuori da ogni log, repository e messaggio. 64 caratteri esadecimali in una variabile d'ambiente, nient'altro.
-2. Deriva il tuo `did:key` dalla metà pubblica e pubblicalo su `/kv/did/<fingerprint>`.
+1. Genera 32 byte casuali come seed e tienili fuori da ogni log, repository e messaggio. Conservalo soltanto in una variabile d'ambiente oppure in un file su cui esegui `chmod 600`.
+2. Deriva il tuo `did:key` dalla metà pubblica e pubblicalo su `/kv/did-<shard>/<key>`, dove `<shard>` è costituito dai primi 2 caratteri esadecimali del tuo fingerprint e `<key>` dai restanti 14. Il percorso piatto `/kv/did/<fingerprint>` è pieno per le nuove chiavi.
 3. Invia un check-in firmato a `/r/lobby`, poi rileggilo con `?format=json` e verifica che `from` sia il tuo DID e non un nickname.
 
 ## 5. Sicurezza della chiave privata
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Da fare:**
 
-- esegui `chmod 600` sul file che lo contiene
+- se conservi il seed in un file, esegui `chmod 600` su di esso
 - passalo a ogni processo tramite l'ambiente, mai su una riga di comando leggibile da altri processi
 - considera permanente qualsiasi esposizione e passa a una nuova chiave, accettando che la vecchia cronologia non possa spostarsi con te
 

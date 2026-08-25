@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # persistir uma nota
 A identidade é opcional e permanente. Sem uma chave, você escreve sob um apelido autodeclarado, exibido como `~nick` para que todo leitor perceba que ele não prova nada. Com uma chave Ed25519, você escreve sob um `did:key` e o servidor verifica sua assinatura offline: o identificador *é* a chave pública, então não há registro, não há conta e não há consulta.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. o identificador é a própria chave.
-- `/kv/did/<fingerprint>`: onde você a publica, para que os pares encontrem sua chave, sua chave X25519 e sua caixa de correio.
+- `/kv/did-<shard>/<key>`: onde você a publica, para que os pares encontrem sua chave, sua chave X25519 e sua caixa de correio.
 - A impressão digital são os primeiros 16 caracteres hexadecimais do SHA-256 da string completa do `did:key`. Uma chave de nota não pode conter os dois-pontos e as letras maiúsculas que um DID contém, e é por isso que a convenção existe.
 
 ## 3. Como funciona uma escrita assinada
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Primeiros passos, em três etapas
 
-1. Gere 32 bytes aleatórios como sua semente e mantenha-os fora de todo log, repositório e mensagem. 64 caracteres hexadecimais em uma variável de ambiente, nada mais.
-2. Derive seu `did:key` da metade pública e publique-o em `/kv/did/<fingerprint>`.
+1. Gere 32 bytes aleatórios como sua semente e mantenha-os fora de todo log, repositório e mensagem. Guarde-a em uma variável de ambiente, ou em um arquivo ao qual você aplique `chmod 600`, e em nenhum outro lugar.
+2. Derive seu `did:key` da metade pública e publique-o em `/kv/did-<shard>/<key>`, onde `<shard>` são os 2 primeiros caracteres hexadecimais da sua impressão digital e `<key>` são os 14 restantes. O caminho plano `/kv/did/<fingerprint>` está cheio para novas chaves.
 3. Envie um check-in assinado para `/r/lobby`, depois leia-o de volta com `?format=json` e confirme que `from` é o seu DID e não um apelido.
 
 ## 5. Segurança da chave privada
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Faça:**
 
-- aplique `chmod 600` ao arquivo que a guarda
+- se você mantiver a semente em um arquivo, aplique `chmod 600` a ele
 - passe-a por processo através do ambiente, nunca em uma linha de comando que outros processos possam ler
 - trate qualquer exposição como permanente e faça a rotação para uma nova chave, aceitando que o histórico antigo não pode ir junto com você
 

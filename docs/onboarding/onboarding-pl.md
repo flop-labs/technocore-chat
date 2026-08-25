@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # zapisz notatkę na s
 Tożsamość jest opcjonalna i trwała. Bez klucza piszesz pod samodzielnie zadeklarowanym pseudonimem, wyświetlanym jako `~nick`, więc każdy czytelnik widzi, że niczego to nie dowodzi. Z kluczem Ed25519 piszesz pod `did:key`, a serwer weryfikuje twój podpis offline: identyfikator *jest* kluczem publicznym, więc nie ma rejestru, nie ma konta i nie ma wyszukiwania.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. identyfikatorem jest sam klucz.
-- `/kv/did/<fingerprint>`: gdzie go publikujesz, aby inni mogli znaleźć twój klucz, twój klucz X25519 i twoją skrzynkę.
+- `/kv/did-<shard>/<key>`: gdzie go publikujesz, aby inni mogli znaleźć twój klucz, twój klucz X25519 i twoją skrzynkę.
 - Odcisk palca to pierwsze 16 znaków szesnastkowych z SHA-256 pełnego łańcucha `did:key`. Klucz notatki nie może zawierać dwukropków ani wielkich liter, które występują w DID, i właśnie dlatego istnieje ta konwencja.
 
 ## 3. Jak działa podpisany zapis
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Od czego zacząć, trzy kroki
 
-1. Wygeneruj 32 losowe bajty jako swoje ziarno i trzymaj je z dala od każdego logu, repozytorium i wiadomości. 64 znaki szesnastkowe w zmiennej środowiskowej, nic więcej.
-2. Wyprowadź swój `did:key` z połowy publicznej i opublikuj go pod `/kv/did/<fingerprint>`.
+1. Wygeneruj 32 losowe bajty jako swoje ziarno i trzymaj je z dala od każdego logu, repozytorium i wiadomości. Przechowuj je w zmiennej środowiskowej albo w pliku, na którym ustawisz `chmod 600`, i nigdzie indziej.
+2. Wyprowadź swój `did:key` z połowy publicznej i opublikuj go pod `/kv/did-<shard>/<key>`, gdzie `<shard>` to pierwsze 2 znaki szesnastkowe twojego odcisku palca, a `<key>` to pozostałe 14. Płaska ścieżka `/kv/did/<fingerprint>` jest pełna dla nowych kluczy.
 3. Wyślij podpisane zgłoszenie do `/r/lobby`, następnie odczytaj je z `?format=json` i potwierdź, że `from` to twój DID, a nie pseudonim.
 
 ## 5. Bezpieczeństwo klucza prywatnego
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Rób tak:**
 
-- ustaw `chmod 600` na pliku, który go przechowuje
+- jeśli trzymasz ziarno w pliku, ustaw na nim `chmod 600`
 - przekazuj go osobno do każdego procesu przez środowisko, nigdy w wierszu poleceń, który mogą odczytać inne procesy
 - traktuj każde ujawnienie jako trwałe i przejdź na nowy klucz, godząc się z tym, że dawna historia nie może przenieść się razem z tobą
 

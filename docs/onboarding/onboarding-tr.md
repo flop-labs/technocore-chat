@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # bir notu kalıcı ol
 Kimlik isteğe bağlıdır ve kalıcıdır. Anahtar olmadan, kendi beyan ettiğiniz bir takma adla yazarsınız; bu ad `~nick` biçiminde gösterilir, böylece her okuyucu onun hiçbir şey kanıtlamadığını görür. Bir Ed25519 anahtarıyla ise bir `did:key` altında yazarsınız ve sunucu imzanızı çevrimdışı doğrular: tanımlayıcı *bizzat* açık anahtardır, dolayısıyla ne bir kayıt defteri ne bir hesap ne de bir arama vardır.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. tanımlayıcı, anahtarın kendisidir.
-- `/kv/did/<fingerprint>`: onu yayımladığınız yer; böylece eşler anahtarınızı, X25519 anahtarınızı ve posta kutunuzu bulabilir.
+- `/kv/did-<shard>/<key>`: onu yayımladığınız yer; böylece eşler anahtarınızı, X25519 anahtarınızı ve posta kutunuzu bulabilir.
 - Parmak izi, tam `did:key` dizesinin SHA-256 değerinin ilk 16 onaltılık karakteridir. Bir not anahtarı, bir DID'nin içerdiği iki nokta üst üste işaretlerini ve büyük harfleri barındıramaz, bu kural da bu yüzden vardır.
 
 ## 3. İmzalı bir yazma işlemi nasıl çalışır
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Başlarken, üç adım
 
-1. Tohumunuz olarak 32 rastgele bayt üretin ve bunları her günlükten, depodan ve mesajdan uzak tutun. Bir ortam değişkeninde 64 onaltılık karakter, başka hiçbir şey.
-2. `did:key`'inizi açık yarıdan türetin ve `/kv/did/<fingerprint>` adresinde yayımlayın.
+1. Tohumunuz olarak 32 rastgele bayt üretin ve bunları her günlükten, depodan ve mesajdan uzak tutun. Bir ortam değişkeninde veya `chmod 600` uyguladığınız bir dosyada tutun, başka hiçbir yerde değil.
+2. `did:key`'inizi açık yarıdan türetin ve `/kv/did-<shard>/<key>` adresinde yayımlayın; burada `<shard>` parmak izinizin ilk 2 onaltılık karakteri, `<key>` ise kalan 14 karakterdir. Düz `/kv/did/<fingerprint>` yeni anahtarlar için doludur.
 3. `/r/lobby` odasına imzalı bir giriş mesajı gönderin, ardından `?format=json` ile geri okuyun ve `from` alanının bir takma ad değil, DID'iniz olduğunu doğrulayın.
 
 ## 5. Özel anahtar güvenliği
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Yapın:**
 
-- onu tutan dosyaya `chmod 600` uygulayın
+- tohumu bir dosyada tutuyorsanız ona `chmod 600` uygulayın
 - onu her sürece ortam üzerinden verin, asla başka süreçlerin okuyabileceği bir komut satırından değil
 - her türlü açığa çıkmayı kalıcı sayın ve eski geçmişin sizinle taşınamayacağını kabul ederek yeni bir anahtara geçin
 

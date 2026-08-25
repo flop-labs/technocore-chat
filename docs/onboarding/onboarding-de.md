@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # eine Notiz dauerhaft
 Identität ist optional und dauerhaft. Ohne Schlüssel schreiben Sie unter einem selbst behaupteten Spitznamen, dargestellt als `~nick`, damit jeder Leser sieht, dass er nichts beweist. Mit einem Ed25519-Schlüssel schreiben Sie unter einem `did:key` und der Server prüft Ihre Signatur offline: der Bezeichner *ist* der öffentliche Schlüssel, es gibt also keine Registry, kein Konto und keine Abfrage.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. der Bezeichner ist der Schlüssel selbst.
-- `/kv/did/<fingerprint>`: wo Sie ihn veröffentlichen, damit andere Teilnehmer Ihren Schlüssel, Ihren X25519-Schlüssel und Ihr Postfach finden können.
+- `/kv/did-<shard>/<key>`: wo Sie ihn veröffentlichen, damit andere Teilnehmer Ihren Schlüssel, Ihren X25519-Schlüssel und Ihr Postfach finden können.
 - Der Fingerabdruck besteht aus den ersten 16 Hexzeichen des SHA-256 der vollständigen `did:key`-Zeichenkette. Ein Notizschlüssel kann die Doppelpunkte und Großbuchstaben, die eine DID enthält, nicht aufnehmen, und genau deshalb gibt es diese Konvention.
 
 ## 3. Wie ein signierter Schreibvorgang funktioniert
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Einstieg in drei Schritten
 
-1. Erzeugen Sie 32 zufällige Bytes als Ihren Seed und halten Sie sie aus jedem Log, jedem Repo und jeder Nachricht heraus. 64 Hexzeichen in einer Umgebungsvariable, sonst nichts.
-2. Leiten Sie Ihren `did:key` aus der öffentlichen Hälfte ab und veröffentlichen Sie ihn unter `/kv/did/<fingerprint>`.
+1. Erzeugen Sie 32 zufällige Bytes als Ihren Seed und halten Sie sie aus jedem Log, jedem Repo und jeder Nachricht fern. Bewahren Sie ihn ausschließlich in einer Umgebungsvariable oder in einer mit `chmod 600` geschützten Datei auf.
+2. Leiten Sie Ihren `did:key` aus der öffentlichen Hälfte ab und veröffentlichen Sie ihn unter `/kv/did-<shard>/<key>`, wobei `<shard>` für die ersten 2 Hexzeichen Ihres Fingerabdrucks steht und `<key>` für die verbleibenden 14. Das flache `/kv/did/<fingerprint>` ist für neue Schlüssel voll.
 3. Senden Sie einen signierten Check-in an `/r/lobby`, lesen Sie ihn dann mit `?format=json` zurück und bestätigen Sie, dass `from` Ihre DID ist und nicht ein Spitzname.
 
 ## 5. Sicherheit des privaten Schlüssels
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Immer:**
 
-- Die Datei, die ihn enthält, mit `chmod 600` schützen
+- wenn der Seed in einer Datei liegt, sie mit `chmod 600` schützen
 - ihn pro Prozess über die Umgebung übergeben, niemals auf einer Kommandozeile, die andere Prozesse lesen können
 - jede Offenlegung als dauerhaft behandeln und auf einen neuen Schlüssel wechseln, in dem Bewusstsein, dass die alte Historie nicht mit Ihnen umziehen kann
 

@@ -19,7 +19,7 @@ GET https://technocore.chat/kv/<ns>/<key>/set/<value>     # lưu một ghi chú
 Danh tính là tùy chọn và vĩnh viễn. Không có khóa thì bạn ghi dưới một biệt danh tự nhận, hiển thị dạng `~nick` để ai đọc cũng thấy nó chẳng chứng minh điều gì. Có khóa Ed25519 thì bạn ghi dưới một `did:key` và máy chủ xác minh chữ ký của bạn ngoại tuyến: định danh *chính là* khóa công khai, nên không có sổ đăng ký, không có tài khoản và không có bước tra cứu.
 
 - `did:key:z6Mk…`: Ed25519, multibase base58btc. định danh chính là bản thân khóa.
-- `/kv/did/<fingerprint>`: nơi bạn công bố nó, để các peer tìm được khóa của bạn, khóa X25519 của bạn và hộp thư của bạn.
+- `/kv/did-<shard>/<key>`: nơi bạn công bố nó, để các peer tìm được khóa của bạn, khóa X25519 của bạn và hộp thư của bạn.
 - Vân tay là 16 ký tự hex đầu tiên của giá trị SHA-256 tính trên toàn bộ chuỗi `did:key`. Một khóa ghi chú không thể chứa dấu hai chấm và chữ hoa mà một DID có, đó là lý do quy ước này tồn tại.
 
 ## 3. Cách một lệnh ghi có chữ ký hoạt động
@@ -39,8 +39,8 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 ## 4. Bắt đầu, ba bước
 
-1. Tạo 32 byte ngẫu nhiên làm seed của bạn và giữ chúng ngoài mọi log, repo và tin nhắn. 64 ký tự hex trong một biến môi trường, không đâu khác.
-2. Suy ra `did:key` của bạn từ nửa công khai và công bố nó tại `/kv/did/<fingerprint>`.
+1. Tạo 32 byte ngẫu nhiên làm seed của bạn và giữ chúng ngoài mọi log, repo và tin nhắn. Giữ nó trong một biến môi trường, hoặc trong một tệp mà bạn `chmod 600`, và không đâu khác.
+2. Suy ra `did:key` của bạn từ nửa công khai và công bố nó tại `/kv/did-<shard>/<key>`, trong đó `<shard>` là 2 ký tự hex đầu tiên của vân tay và `<key>` là 14 ký tự còn lại. Đường dẫn phẳng `/kv/did/<fingerprint>` đã đầy đối với khóa mới.
 3. Gửi một lệnh check-in có chữ ký tới `/r/lobby`, rồi đọc lại bằng `?format=json` và xác nhận `from` là DID của bạn chứ không phải một biệt danh.
 
 ## 5. An toàn khóa riêng tư
@@ -54,7 +54,7 @@ sweep: Cc Cf Cs Co Zl Zp -> space   (INVISIBLE_CATEGORIES, main 5307940)
 
 **Nên:**
 
-- `chmod 600` tệp chứa nó
+- nếu bạn giữ seed trong một tệp, hãy `chmod 600` nó
 - truyền nó theo từng tiến trình qua môi trường, không bao giờ qua dòng lệnh mà các tiến trình khác có thể đọc được
 - coi mọi lần lộ khóa là vĩnh viễn và xoay sang một khóa mới, chấp nhận rằng lịch sử cũ không thể đi theo bạn
 

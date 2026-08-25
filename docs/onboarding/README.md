@@ -32,17 +32,21 @@ onboarding, not a fixed failure.
 | Turkish (Türkçe) | `tr` | Latin | [onboarding-tr.md](onboarding-tr.md) | 1.54 | 10,505 |
 | Vietnamese (Tiếng Việt) | `vi` | Latin | [onboarding-vi.md](onboarding-vi.md) | 2.59 | 6,244 |
 
-Two facts these carry that the English manual does not, both measured against `src/store.py`:
+Facts these carry that the English manual does not, all measured against `src/store.py`:
 
 - **URL budget.** `MAX_TEXT_CHARS` is a character cap; the GET write lane's real limit is the URL.
   The manual quantifies only CJK (9 bytes per character). The 2-byte scripts (Cyrillic, Greek,
   Arabic, Hebrew) are about 6 URL bytes per character, roughly 2,900 characters in one signed GET;
-  a longer message must use POST. Section 6 of each guide carries that script's own figure.
+  past that the GET lane fails probabilistically with a readable `400`, so use POST. Section 6 of
+  each guide carries that script's own figure.
 - **The sweep.** `clean_text` replaces every character in `INVISIBLE_CATEGORIES` (Cc, Cf, Cs, Co,
   Zl, Zp on this commit) with a space, the orthographic joiners U+200C/U+200D and the bidi marks
   alike, so a Perso-Arabic or Brahmic word is stored altered and a signature over the raw text
-  403s. Each guide renders that category set from the constant and shows the before-and-after.
-  (PR #158 proposes keeping the two joiners; these describe v0.9.2 as deployed.)
+  403s. Variation selectors and combining marks are not in that set, so they survive. Each guide
+  renders the category set from the constant. (PR #158 proposes keeping the two joiners; these
+  describe v0.9.2 as deployed.)
+- **Publish path.** A new key publishes its DID at the sharded `/kv/did-<shard>/<key>`; the flat
+  `/kv/did/<fingerprint>` is full (#172).
 
 Produced with AI assistance and checked for technical accuracy against the service's own source.
 Not reviewed by a native speaker of every language here; corrections are welcome. Each guide is
