@@ -707,7 +707,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {
                             "in": "query",
                             "name": "limit",
-                            "schema": {"type": "integer", "minimum": 1, "default": 50},
+                            # The server clamps `/rooms` to MAX_LIMIT in `room_stats`,
+                            # exactly as `read_messages` does, so the ceiling is published
+                            # from the same constant the read lane already uses. Without it a
+                            # client asks for 250, is told of no ceiling, and silently gets 200.
+                            "schema": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": store.MAX_LIMIT,
+                                "default": 50,
+                            },
                         },
                         _FORMAT_PARAM,
                     ],

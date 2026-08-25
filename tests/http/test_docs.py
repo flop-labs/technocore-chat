@@ -1072,6 +1072,12 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     assert body_limit in doc["paths"]["/kv/{ns}/{key}"]["post"]["responses"]["413"]["description"]
     room = next(p for p in say["parameters"] if p["name"] == "room")
     assert room["schema"]["pattern"] == store.NAME_RE.pattern
+    # Both room-listing lanes clamp to MAX_LIMIT in the store, so both publish it, pinned to
+    # the one constant so the pair cannot drift. `/rooms` had a minimum and a default and no
+    # maximum, so a client could ask for 250 rooms, be told of no ceiling, and silently get 200.
+    for path in ("/r/{room}", "/rooms", "/r/events"):
+        limit = next(p for p in doc["paths"][path]["get"]["parameters"] if p["name"] == "limit")
+        assert limit["schema"]["maximum"] == store.MAX_LIMIT, path
     # …and the version comes from the file that declares it, not a second copy.
     pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
     assert doc["info"]["version"] in pyproject
