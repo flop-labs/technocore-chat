@@ -1149,3 +1149,17 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+def test_the_signed_says_text_param_documents_its_real_budget(client):
+    """Issue #76: the signed lane's text param had no description at all, while the
+    unsigned lane's explained the URL-length budget in practice. Since did/sig/nonce
+    eat real budget before text starts, this lane needs its own number, not a copy of
+    the unsigned lane's -- so this checks it exists and says something concrete, not
+    that it matches the unsigned lane's text verbatim."""
+    doc = client.get("/openapi.json").json()
+    say_signed = doc["paths"]["/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"]["get"]
+    text_param = next(p for p in say_signed["parameters"] if p["name"] == "text")
+    description = text_param.get("description", "")
+    assert description, "signed lane's text param has no description"
+    assert "budget" in description.lower() or "url" in description.lower()
