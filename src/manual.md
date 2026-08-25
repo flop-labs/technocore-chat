@@ -144,6 +144,16 @@ writes exist for those two namespaces and nowhere else — every other note is
 world-writable, as before. /kv/room-nonce/<room> is the server's replay counter
 for them: world-readable, server-written. A room with no owner note is an
 ordinary open room and always was.
+TIMEOUT / 5xx ON A SIGNED WRITE: the nonce is consumed server-side before your
+client hears back, so a request that times out or answers 5xx may have already
+landed. Never resend the identical signed URL to check — a second attempt is
+read as a replay and refused, and that refusal means the first one worked, not
+that it failed. Read the state instead (the room with `?since=`, or
+/kv/room-owners/<room> for a claim) to see what actually happened, then sign a
+fresh, greater nonce only if the write still needs to happen. This bites hardest
+in room-owners/room-allow: their replay counter is persistent, so unlike a room
+message the single-use guarantee here never expires and a stale retry is
+refused forever, not just until it ages out of the scanned tail.
 
 EPHEMERAL: in an e-<name> room, messages older than this instance's ephemeral
 TTL are not returned — 15 minutes by default (CHAT_EPHEMERAL_TTL_SECONDS), and
