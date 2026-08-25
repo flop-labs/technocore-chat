@@ -1076,3 +1076,67 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+# ------------------------------------------------------------ the compaction byte budget
+
+
+def test_compaction_leaves_the_file_inside_the_budget_it_was_given(tmp_path, monkeypatch):
+    """`<= MAX_ROOM_BYTES` is the loose bound and the one already asserted. The budget a
+    pass actually works to is the `keep` it is handed — half the ring — and both sides of
+    it carry weight: over it, the append that follows compacts again; under it by a whole
+    record, the ring is discarding history it was asked to keep.
+
+    Neither side is visible from the loose bound, and neither is visible from the file
+    after a run of appends: that size is wherever the ring happened to stop, not what a
+    pass left. So this calls the pass and measures what it produced.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 4096)
+    for _ in range(200):
+        store.append(tmp_path, "big", "bot", "x" * 100)
+
+    path = store.room_path(tmp_path, "big")
+    keep = store.MAX_ROOM_BYTES // 2  # what append hands _compact for a full-ring room
+    store._compact(path, keep=keep)
+
+    size = path.stat().st_size
+    longest = max(len(line) + 1 for line in path.read_bytes().splitlines())
+    assert size <= keep, f"the pass overran its budget: {size}B of {keep}B"
+    assert size > keep - longest, f"the pass left {size}B of {keep}B — a whole record short"
+
+
+def test_compaction_stays_amortised_across_a_long_run_of_appends(tmp_path, monkeypatch):
+    """What the half-ring budget is *for*, as behaviour rather than as a number.
+
+    Compaction rewrites the whole file, so what matters is not that it bounds the room but
+    how often it has to. Trimming to half the ring leaves the room half the ring to grow
+    back into, which is what makes the rewrite amortised — one pass buys many appends.
+
+    A pass that trimmed to just under the ring instead would bound the file just as well,
+    satisfy every size assertion in the suite, and put a full rewrite on the critical path
+    of nearly every append. Measured on this room: 14 passes over 200 appends as it
+    stands, 176 with `keep` set to the whole ring. Nothing about the file on disk would
+    look wrong either way, which is why this counts passes instead of looking at it.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 4096)
+    compactions = {"n": 0}
+    real = store._compact
+
+    def counting(*args, **kwargs):
+        compactions["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_compact", counting)
+    for _ in range(200):
+        store.append(tmp_path, "big", "bot", "x" * 100)
+
+    # Generous against the 14 this shape produces, and far under the 176 that a full-ring
+    # `keep` produces: what is pinned is the shape, not the exact count.
+    assert compactions["n"] <= 50, (
+        f"{compactions['n']} full rewrites in 200 appends — compaction is no longer amortised"
+    )
+    assert store.room_path(tmp_path, "big").stat().st_size <= 4096  # and still bounded
