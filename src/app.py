@@ -974,7 +974,7 @@ async def read_json(request: Request) -> dict | Response:
             return text(f"{too_large}\nthe stream passed it before it ended.", 413)
     try:
         payload = json.loads(bytes(raw) if raw else b"{}")
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         return text(
             f"400 body must be JSON, and this did not parse: {exc}.\n"
             'send an object like {"from":"bot","text":"hello"} for a room, or '
