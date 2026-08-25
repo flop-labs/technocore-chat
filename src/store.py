@@ -17,7 +17,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -270,6 +270,12 @@ class StoreConflictError(ValueError):
     def __init__(self, message: str, current: str | None) -> None:
         super().__init__(message)
         self.current = current
+
+
+class StorePermissionError(StoreError):
+    """A write lost an authorization race. Maps to HTTP 403."""
+
+    status = 403
 
 
 def valid_name(name: str) -> str:
@@ -670,10 +676,7 @@ def _rollup(windows: list[list[str]]) -> dict:
 
 
 def list_rooms(root: Path) -> list[str]:
-    d = root / "rooms"
-    if not d.is_dir():
-        return []
-    return sorted(p.stem for p in d.glob("*.jsonl") if _listable(p.stem))
+    return sorted(p.stem for p in (root / "rooms").glob("*.jsonl") if _listable(p.stem))
 
 
 # (top, nicks) per room, validated against the (mtime_ns, size) stat the overview walk
@@ -790,24 +793,22 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
     rooms = dict.fromkeys(keys, 0)
     room_bytes = 0
-    d = root / "rooms"
-    if d.is_dir():
-        for p in d.glob("*.jsonl"):
-            name = p.stem
-            if not NAME_RE.fullmatch(name):
-                continue  # same rule as _listable: never count what we would not accept
-            try:
-                room_bytes += p.stat().st_size
-            except OSError:
-                continue  # reaped between glob and stat
-            classes = room_classes(name)
-            rooms["total"] += 1
-            rooms["unlisted" if "p" in classes else "listed"] += 1
-            for marker, key in (("mb", "mailbox"), ("d", "ownable"), ("e", "ephemeral")):
-                if marker in classes:
-                    rooms[key] += 1
-            if not classes:
-                rooms["open"] += 1
+    for p in (root / "rooms").glob("*.jsonl"):
+        name = p.stem
+        if not NAME_RE.fullmatch(name):
+            continue  # same rule as _listable: never count what we would not accept
+        try:
+            room_bytes += p.stat().st_size
+        except OSError:
+            continue  # reaped between glob and stat
+        classes = room_classes(name)
+        rooms["total"] += 1
+        rooms["unlisted" if "p" in classes else "listed"] += 1
+        for marker, key in (("mb", "mailbox"), ("d", "ownable"), ("e", "ephemeral")):
+            if marker in classes:
+                rooms[key] += 1
+        if not classes:
+            rooms["open"] += 1
     notes = note_stats(root)
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
@@ -894,6 +895,13 @@ def _guards_a_live_room(root: Path, path: Path, now: float) -> bool:
         return False  # no room left to guard
 
 
+def _due(marker: Path, every: float, now: float | None = None) -> bool:
+    try:
+        return (time.time() if now is None else now) - marker.stat().st_mtime >= every
+    except OSError as exc:
+        return isinstance(exc, FileNotFoundError)
+
+
 def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
@@ -905,11 +913,8 @@ def _reap(root: Path) -> None:
     """
     marker = root / ".reaped"
     now = time.time()
-    try:
-        if now - marker.stat().st_mtime < REAP_EVERY:
-            return
-    except FileNotFoundError:
-        pass
+    if not _due(marker, REAP_EVERY, now):
+        return
     root.mkdir(parents=True, exist_ok=True)
     marker.touch()
     # Rooms only: the stillborn rule is a room rule, so folding reaped notes into the same
@@ -921,17 +926,14 @@ def _reap(root: Path) -> None:
     ):
         for p in _walk(root / sub, suffix, nested):
             try:
-                if _guards_a_live_room(root, p, now):
-                    continue
-                if not _reapable(p, now, stillborn_rule):
+                if _guards_a_live_room(root, p, now) or not _reapable(p, now, stillborn_rule):
                     continue
                 # Recheck under the lock: a writer may have refreshed the file since the
                 # stat above, and deleting a just-written room would lose live messages.
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 with _locked(p):
-                    reason = _reapable(p, now, stillborn_rule)
-                    if reason:
+                    if reason := _reapable(p, now, stillborn_rule):
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -1026,27 +1028,20 @@ def _snapshot(root: Path) -> None:
     """
     marker = root / SNAPSHOTS_FILE
     now = time.time()
-    try:
-        if now - marker.stat().st_mtime < SNAPSHOT_EVERY:
-            return
-    except FileNotFoundError:
-        pass
-    except OSError:
+    if not _due(marker, SNAPSHOT_EVERY, now):
         return
     try:
         with _locked(marker):
             # Re-check under the lock: two writers racing the stat above would otherwise
             # both take a sample, and the file is the throttle as well as the data.
-            try:
-                if time.time() - marker.stat().st_mtime < SNAPSHOT_EVERY:
-                    return
-            except FileNotFoundError:
-                pass
+            if not _due(marker, SNAPSHOT_EVERY):
+                return
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
-            tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
-            os.replace(tmp, marker)
+            marker.with_name(f"{marker.name}.tmp").write_bytes(
+                b"".join(orjson.dumps(r) + b"\n" for r in kept)
+            )
+            os.replace(marker.with_name(f"{marker.name}.tmp"), marker)
     except OSError:
         pass
 
@@ -1072,14 +1067,13 @@ def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
     try:
         with os.scandir(d) as entries:
             for e in entries:
-                if not e.name.endswith(suffix):
-                    continue
-                count += 1
-                if sized:
-                    try:
-                        size += e.stat().st_size
-                    except OSError:
-                        continue  # reaped between the readdir and the stat
+                if e.name.endswith(suffix):
+                    count += 1
+                    if sized:
+                        try:
+                            size += e.stat().st_size
+                        except OSError:
+                            continue  # reaped between the readdir and the stat
     except FileNotFoundError:
         pass  # nothing has been created yet; an absent directory is an empty one here
     return count, size
@@ -1144,9 +1138,8 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     """
     path = root / NOTES_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(f"{total} {size}", encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    path.with_name(f"{path.name}.tmp").write_text(f"{total} {size}", encoding="utf-8")
+    os.replace(path.with_name(f"{path.name}.tmp"), path)  # readers never see half a file
 
 
 def _ns_totals(d: Path) -> tuple[int, int]:
@@ -1373,6 +1366,7 @@ def append(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    unowned: bool = False,
 ) -> dict:
     """Append a message, and announce the room the first time it appears.
 
@@ -1389,7 +1383,7 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
-    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce)
+    rec, created = _write_record(root, room, nick, text, did, nonce, unowned)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
     # counts what callers wrote, which is what "new messages" has to mean.
@@ -1444,6 +1438,7 @@ def _write_record(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    unowned: bool = False,
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
@@ -1478,6 +1473,8 @@ def _write_record(
         # Under the lock, before the write: two concurrent first-writers must not both
         # decide they created the room and announce it twice.
         created = not path.exists()
+        if unowned and note_get(root, OWNERS_NS, room) is not None:
+            raise StorePermissionError("ownership changed while waiting; retry signed")
         # Also under the lock, or two concurrent replays of one captured URL would both
         # read the same "last nonce" and both write.
         if did is not None:
@@ -1573,6 +1570,7 @@ def note_set(
     value: str,
     expect: str | None = None,
     expect_absent: bool = False,
+    claim_owner: bool = False,
 ) -> dict:
     """Write a note, optionally only if it still holds what the caller last read.
 
@@ -1587,18 +1585,19 @@ def note_set(
     nothing revokes the first caller's belief. CAS orders writes; it does not order the
     side effects those writes describe.
     """
+
     path = note_path(root, ns, key)
     value = clean_text(value, MAX_VALUE_CHARS)
     _reap(root)
-    # The global half only, and only for a create. This used to be the whole check, which
-    # meant every create scanned its namespace twice — once here and once as the gate's
-    # own check — to buy a property the gate already has: its check runs in `__enter__`,
-    # strictly before `_locked(path)` is entered, so a refusal never leaves a sidecar lock
-    # or a namespace directory behind either way. What this call is actually worth is
-    # shedding a full store's worth of refusals without queueing for the gate first.
+    room_gate = _locked(root / ".rooms-create") if claim_owner else nullcontext()
+    room_lock = _locked(room_path(root, key)) if claim_owner else nullcontext()
+    # The global half only, and only for a create. This sheds a full store's refusals
+    # without queueing for the gate; its check inside the gate stays authoritative.
     if not path.exists():
         _check_note_total(root)
     with (
+        room_gate,
+        room_lock,
         _create_gate(
             root / ".notes-create",
             path,
@@ -1607,9 +1606,11 @@ def note_set(
         ),
         _locked(path),
     ):
-        if expect_absent or expect is not None:
+        if claim_owner and last_seq(root, key):
+            raise StorePermissionError(f"/r/{key} already has messages")
+        if claim_owner or expect_absent or expect is not None:
             current = path.read_text(encoding="utf-8") if path.exists() else None
-            if expect_absent and current is not None:
+            if (claim_owner or expect_absent) and current is not None:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="exists")
                 raise StoreConflictError(f"note {ns}/{key} already exists", current)
             if expect is not None and current != expect:
@@ -1618,8 +1619,7 @@ def note_set(
         tmp = path.with_suffix(".tmp")
         tmp.write_text(value, encoding="utf-8")
         os.replace(tmp, path)
-    # After the write is on disk, like append's bump: the counter invalidates the
-    # note-derived caches, and being on disk every worker sees it.
+    # After the write is on disk, like append's bump: invalidate note-derived caches.
     _bump(root, notes_written=1)
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 
