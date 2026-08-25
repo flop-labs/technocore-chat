@@ -100,7 +100,12 @@ def test_agent_surfaces_are_never_html(client):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        assert r.headers["cache-control"] == "no-store", path
+        # The two polled reads are edge-cacheable for a second (see app._edge_cacheable);
+        # every other agent surface stays no-store.
+        if path in ("/r/lobby", "/rooms"):
+            assert "public" in r.headers["cache-control"], path
+        else:
+            assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):

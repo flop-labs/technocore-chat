@@ -16,8 +16,19 @@ from __future__ import annotations
 import base64
 import re
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+# libsodium rather than OpenSSL: same Ed25519, roughly twice the verifies per second
+# (1.8-2.3x depending on host load; bench/ed25519_backends.py measures it). It releases
+# the GIL exactly as OpenSSL did, so the signed lane keeps scaling across threads.
+#
+# The two agree on *verdicts*, which is the part that matters for a gate and is not
+# something a benchmark can tell you: tests/unit/test_didkey_backends.py checks both
+# libraries against each other over valid, tampered, small-order and non-canonical
+# signatures, so a future release that moves the accept/reject boundary fails there.
+#
+# `cryptography` stays a dependency: scripts/sign.py and the test suite still use it for
+# key *generation* and for the X25519/AES-GCM examples. Only verification moved.
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 PREFIX = "did:key:"
 # multicodec `ed25519-pub`, varint-encoded: every Ed25519 did:key starts z6Mk.
@@ -110,11 +121,15 @@ def verify(did: str, signature: str, message: str) -> None:
     message: the DID only"). Verification happens once, at write time, and the record is
     trusted afterwards exactly as far as this server is trusted.
     """
-    key = Ed25519PublicKey.from_public_bytes(public_key(did))
+    key = VerifyKey(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
         raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
     try:
-        key.verify(raw, message.encode("utf-8"))
-    except InvalidSignature:
+        # Note the argument order: libsodium takes (message, signature), the reverse
+        # of the OpenSSL binding this replaced. Backwards does not fail *open* -- a
+        # short message read as a signature is a length error, not a pass -- but it
+        # would refuse every good signature, so the signed-lane tests are the gate.
+        key.verify(message.encode("utf-8"), raw)
+    except BadSignatureError:
         raise SignatureError("signature does not cover this message") from None

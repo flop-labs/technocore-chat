@@ -837,3 +837,68 @@ def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path,
     # The loser's claim does not land: the room stays unowned rather than owned by whoever
     # lost the race for its counter.
     assert store.note_get(tmp_path, store.OWNERS_NS, "d-first") is None
+
+
+def test_note_capacity_walk_is_cached_and_a_note_write_invalidates_it(client, monkeypatch):
+    """The note walk is the expensive half of /rooms (~41k stats at the cap) and changes
+    only when a note is written or reaped, so it lives behind its own generation-stamped
+    cache: reused across /rooms requests, dropped the moment a note handler writes."""
+    import app as app_module
+    import config
+
+    real = app_module.store.note_stats
+    calls = []
+
+    def counted(root):
+        calls.append(root)
+        return real(root)
+
+    monkeypatch.setattr(app_module.store, "note_stats", counted)
+    with config.override(ROOMS_CACHE_SECONDS=0, NOTE_STATS_CACHE_SECONDS=60):
+        client.get("/rooms")
+        client.get("/rooms")
+        assert len(calls) == 1  # the second /rooms reused the walk
+
+        client.get("/kv/plans/next/set/ship%20it")
+        body = client.get("/rooms").text
+        assert len(calls) == 2, "a note write must invalidate the cached walk"
+        assert "# notes 1 of" in body  # and the writer sees their own note counted
+
+        # The stamp is the on-disk notes_written counter, not process state: a write that
+        # never touched this process's handlers — another uvicorn worker — invalidates too.
+        app_module.store.note_set(config.ROOT, "plans", "later", "v")
+        assert "# notes 2 of" in client.get("/rooms").text
+        assert len(calls) == 3
+
+    with config.override(ROOMS_CACHE_SECONDS=0, NOTE_STATS_CACHE_SECONDS=0):
+        client.get("/rooms")
+        client.get("/rooms")
+        assert len(calls) == 5  # 0 disables reuse entirely
+
+
+def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(client):
+    """/rooms and plain room reads carry s-maxage so a CDN can collapse a poll storm;
+    a long-poll is one caller's cursor at one moment and a write ack is one caller's
+    budget, so both keep no-store. 0 restores no-store everywhere."""
+    import config
+
+    with config.override(EDGE_CACHE_SECONDS=2):
+        assert client.get("/rooms").headers["cache-control"] == (
+            "public, max-age=0, s-maxage=2, stale-while-revalidate=10"
+        )
+        assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
+        for url in ("/r/lobby", "/r/lobby?format=json", "/r/lobby?since=1&limit=5"):
+            assert "s-maxage=2" in client.get(url).headers["cache-control"], url
+        held = client.get("/r/lobby?since=1&wait=0.01")
+        assert held.headers["cache-control"] == "no-store"
+    # A reply carrying the budget footer is one caller's pacing — never shared-cacheable.
+    with config.override(EDGE_CACHE_SECONDS=2, RATE_READ=8):
+        for _ in range(5):
+            client.get("/rooms")
+        low = client.get("/rooms")
+        assert "# budget" in low.text and low.headers["cache-control"] == "no-store"
+        low = client.get("/r/lobby")
+        assert "# budget" in low.text and low.headers["cache-control"] == "no-store"
+    with config.override(EDGE_CACHE_SECONDS=0):
+        assert client.get("/rooms").headers["cache-control"] == "no-store"
+        assert client.get("/r/lobby").headers["cache-control"] == "no-store"

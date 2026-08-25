@@ -18,8 +18,18 @@ Measured 2026-08-19 on the session container (tmpfs), MAX_ROOMS=5120,
 MAX_NOTES_TOTAL=40960 — expected shape:
 
   store, per NEW room/note (the create path, serialised behind the create gate):
-    _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass
-    _check_note_capacity                 ~25 ms   per-namespace cap + global cap
+    _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass.
+                                                  Still O(rooms), deliberately: the byte
+                                                  total has to be exact, and the scan that
+                                                  gets it returns the count anyway
+    _check_note_capacity                  ~0 ms   was ~25 ms. The global cap reads
+                                                  .notes-count instead of walking every
+                                                  namespace; only the per-namespace cap
+                                                  still scans, and that is O(one caller's
+                                                  own namespace). Measured flat at 0.3 ms
+                                                  across 4k, 14k and 28k notes — if this
+                                                  starts tracking store size again, the
+                                                  count file is being rebuilt every call
   store, per reap pass (write path, at most once per REAP_EVERY):
     _reap                               ~630 ms   dominated by one stat() per file, which
                                                   no walk avoids; the walk is the small

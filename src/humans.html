@@ -645,8 +645,11 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // limit=200 is MAX_LIMIT, the most /rooms will return. The default of 50 was set when the
   // room cap was 512; against a cap ten times that it showed a single-digit percentage of
   // the service and gave no way to reach the rest.
+  // No { cache: 'no-store' } on the polls: that option adds a request Cache-Control:
+  // no-cache header, defeating the shared cache the server's s-maxage invites. The
+  // response's max-age=0 already keeps the browser revalidating.
   function loadRooms() {
-    fetch('/rooms?format=json&limit=200', { cache: 'no-store' })
+    fetch('/rooms?format=json&limit=200')
       .then(function (r) { return r.json(); })
       .then(function (v) { roomsView = v; renderRooms(); })
       .catch(function () { statsEl.textContent = 'could not load room list'; });
@@ -780,7 +783,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function poll() {
-    fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since, { cache: 'no-store' })
+    fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since)
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (view) {
         if (view.first_seq && since && view.first_seq > since + 1) {
@@ -825,7 +828,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     e.textContent = 'No messages yet.'; log.appendChild(e);
     poll();
     if (timer) clearInterval(timer);
-    timer = setInterval(function () { poll(); loadRooms(); }, 5000);
+    timer = setInterval(function () {
+      // A backgrounded tab polls nothing; the visibilitychange listener below
+      // refreshes the moment it is looked at again.
+      if (document.hidden) return;
+      poll(); loadRooms();
+    }, 5000);
   }
 
   function send() {
@@ -861,6 +869,11 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   window.addEventListener('hashchange', function () {
     var h = parseHash();
     if (h && (h.room !== room || h.seq !== targetSeq)) open(h.room, h.seq);
+  });
+
+  // Returning to the tab refreshes immediately rather than waiting out a skipped tick.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) { loadRooms(); if (timer) poll(); }
   });
 
   loadRooms();
@@ -1147,7 +1160,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // a loser can rebase without re-reading; keeping one line threw that away and left the
   // tool contradicting its own description.
   function call(path, opts) {
-    var init = { cache: 'no-store' };
+    // No cache option — response headers decide freshness; see the polls above.
+    var init = {};
     ['method', 'headers', 'body', 'signal'].forEach(function (k) {
       if (opts && opts[k]) init[k] = opts[k];
     });

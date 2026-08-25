@@ -14,9 +14,8 @@ uv run coverage report
 Layering: the core is `src/store.py`, `src/didkey.py`, `src/config.py`, `src/limit.py`
 and a thin `src/app.py` adapter.
 `src/manifest.py`, docs and frontends are extra — never counted as core.
-Core size caps (code-lines, `uv run sz.py --caps`): app 919, config 48, didkey 57,
-limit 110, store 714 — total 1848. Growth past a cap needs a new primitive, or belongs
-in extra.
+Core size caps live in `sz-baseline.json` (`caps`); check with `uv run sz.py --caps`.
+Growth past a cap needs a new primitive, or belongs in extra.
 
 - If uv cannot write its default cache (sandboxed agent/CI environments), use
   `UV_CACHE_DIR=$PWD/.uvcache` — a worktree-local cache always works.
