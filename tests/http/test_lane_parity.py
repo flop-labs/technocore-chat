@@ -30,6 +30,11 @@ from starlette.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "mcp" / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+# Reused, not re-implemented: a second copy of the signing construction in a parity test
+# would be a test that agrees with itself rather than with the service.
+from _client import _keypair, _say_signed  # noqa: E402
 
 
 @pytest.fixture()
@@ -196,6 +201,10 @@ def test_one_note_write_lands_identically_through_all_three_lanes(lanes):
 #
 # This lives here rather than beside the mailbox tests because that is exactly what this
 # file is for: a disagreement between lanes is invisible to every single-lane test.
+#
+# The signed lane is REALLY signed. `_signer` runs before the gate, so an unsigned probe
+# never reaches the name check at all — it is answered on the did:key, and a test that used
+# a placeholder DID would assert nothing about names while appearing to cover the lane.
 
 BAD_NAMES = ["mb-FOO", "d-FOO", "e-FOO", "p-FOO", "mb-p-FOO"]
 
@@ -203,32 +212,34 @@ BAD_NAMES = ["mb-FOO", "d-FOO", "e-FOO", "p-FOO", "mb-p-FOO"]
 @pytest.mark.parametrize("bad", BAD_NAMES)
 def test_bad_room_name_is_a_400_on_every_write_lane(lanes, bad):
     _root, client, _mcp = lanes
-    lanes = {
+    did, sign = _keypair()
+    answers = {
         "unsigned say": client.get(f"/r/{bad}/say/bot/hi"),
-        "signed say": client.get(f"/r/{bad}/say-signed/did:key:z6Mk/" + "A" * 86 + "/1/hi"),
+        "signed say": _say_signed(client, bad, did, sign, "hi"),
         "post": client.post(f"/r/{bad}", json={"from": "bot", "text": "hi"}),
         "read": client.get(f"/r/{bad}"),
     }
-    for lane, r in lanes.items():
-        assert r.status_code == 400, f"{lane} answered {r.status_code} for {bad!r}: {r.text[:120]}"
-        assert "bad name" in r.text, f"{lane} did not name the grammar: {r.text[:120]}"
+    for lane, r in answers.items():
+        assert r.status_code == 400, f"{lane} answered {r.status_code} for {bad!r}: {r.text[:140]}"
+        assert "bad name" in r.text, f"{lane} did not name the grammar: {r.text[:140]}"
 
 
 @pytest.mark.parametrize("bad", ["D-FOO", "d-FOO"])
 def test_bad_owner_key_is_a_400_on_both_ownership_lanes(lanes, bad):
-    _root, client, _mcp = lanes
     # `room-owners` asked `store.ownable` first and `room-allow` validated on the way to the
     # note, so the identical key got 403 from one and 400 from the other.
-    owners = client.get(f"/kv/room-owners/{bad}/set/did:key:z6Mk")
-    allow = client.get(f"/kv/room-allow/{bad}/set/did:key:z6Mk")
+    _root, client, _mcp = lanes
+    did, _sign = _keypair()
+    owners = client.get(f"/kv/room-owners/{bad}/set/{did}")
+    allow = client.get(f"/kv/room-allow/{bad}/set/{did}")
     assert owners.status_code == 400 and "bad name" in owners.text, owners.text[:160]
     assert allow.status_code == 400 and "bad name" in allow.text, allow.text[:160]
 
 
 def test_a_valid_class_name_still_gets_its_class_answer(lanes):
-    _root, client, _mcp = lanes
     # The mirror, and the reason this is an ordering fix rather than a new rejection: a name
-    # the grammar ACCEPTS must still be answered on class grounds. Without this the test
-    # above passes just as happily if the gate started refusing every mailbox.
+    # the grammar ACCEPTS must still be answered on class grounds. Without this the tests
+    # above pass just as happily if the gate started refusing every mailbox.
+    _root, client, _mcp = lanes
     r = client.get("/r/mb-real/say/bot/hi")
     assert r.status_code == 403 and "mailbox" in r.text, r.text[:160]
