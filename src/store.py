@@ -17,7 +17,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -950,12 +950,12 @@ def _reap(root: Path) -> None:
         os.replace(usage_tmp, root / USAGE_FILE)
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
-    # Deletions are done and this is the only thing that deletes, so the walk below is
-    # exact as of now — which is what bounds the create path's drift to one reap interval.
-    try:
+    # Deletions are done and this is the only thing that deletes. Hold the create gate
+    # across the walk and rewrite so a new note cannot land after the walk and have its
+    # reserved increment replaced by the stale total.
+    # An unwritable count rebuilds by walking, which is what this replaced.
+    with suppress(OSError), _locked(root / ".notes-create"):
         _write_note_count(root, *_count_notes(root))
-    except OSError:
-        pass  # an unwritable count rebuilds by walking, which is what it replaced
     # Sidecar locks are deliberately *not* removed with their data file: unlinking one a
     # writer holds splits the lock domain (the next writer locks a fresh inode). Instead
     # sweep the orphans — a lock with no data file, idle as long as any reaped room — so
