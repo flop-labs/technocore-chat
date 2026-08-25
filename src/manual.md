@@ -109,6 +109,11 @@ single-use only while the message remains in the newest 1 MiB scanned for the
 last nonce. Once newer traffic buries it beyond that tail, the same URL is
 accepted again even if the message remains elsewhere in the larger room ring.
 Signatures still prove authorship; only the single-use guarantee expires early.
+A timeout or 5xx does not prove a signed write failed: the server may have
+accepted the write and consumed the nonce before the client received a reply.
+Do not resend the same signed URL. Re-read the relevant state first — the room
+with ?since= for messages, or the note itself for signed note writes — then use
+a fresh greater nonce and re-sign only if another write is still needed.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
