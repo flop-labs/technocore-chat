@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -524,3 +525,130 @@ def test_the_byte_gauge_tracks_creates_and_a_reap_settles_overwrites(tmp_path, m
     monkeypatch.setattr(store, "REAP_EVERY", 0)
     store._reap(tmp_path)
     assert store.note_stats(tmp_path)["bytes"] == 17, "and a reap settles it"
+
+
+# ------------------------------------------------------- the count file's own temp name
+
+
+def _reaping_mid_replace(monkeypatch, root: Path):
+    """Land a whole reap between a create's write of a count file and its replace of it.
+
+    The window the create path is actually exposed to. `_reap` rewrites the global count
+    and drops every per-namespace one, it runs on any request's write path rather than on
+    a timer of its own, and it holds none of the locks the create path holds — so on a
+    busy store it lands inside a create regularly. Driven by a joined thread rather than a
+    sleep so the interleaving is the same on every run, and from a thread that is not the
+    creator so the reap's own replaces do not re-enter this hook.
+    """
+    import store
+
+    real_replace = store.os.replace
+
+    def reap_now():
+        os.utime(root / ".reaped", (0, 0))  # due again, whatever the throttle says
+        store._reap(root)
+
+    def replace(src, dst):
+        if threading.current_thread().name == "creator" and str(dst).endswith(store.NOTES_FILE):
+            reaper = threading.Thread(target=reap_now)
+            reaper.start()
+            reaper.join()
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", replace)
+
+
+def _as_creator(work):
+    """Run `work` on the thread `_reaping_mid_replace` fires on, and re-raise what it hit."""
+    escaped = []
+
+    def body():
+        try:
+            work()
+        except BaseException as exc:  # noqa: BLE001 — re-raised below, on the calling thread
+            escaped.append(exc)
+
+    thread = threading.Thread(target=body, name="creator")
+    thread.start()
+    thread.join()
+    if escaped:
+        raise escaped[0]
+
+
+def test_a_reap_landing_inside_a_create_does_not_refuse_the_create(tmp_path, monkeypatch) -> None:
+    """Two writers of one count file must not fight over one temp file.
+
+    Every writer used to build the same `<name>.tmp`, which is only safe while they all
+    hold the same lock — and the reaper holds none. So the reap's os.replace consumed the
+    create's temp file, and the create's own replace then raised FileNotFoundError over a
+    write that had in fact succeeded. `_count_new_note` deliberately does not swallow
+    (a caller that cannot record a create must not make one), so it left the request with
+    a 500 and no note, for a collision that says nothing about the caller or the store.
+    """
+    import store
+
+    store.note_set(tmp_path, "did", "seed", "v")
+    (tmp_path / ".reaped").touch()
+    _reaping_mid_replace(monkeypatch, tmp_path)
+
+    _as_creator(lambda: store.note_set(tmp_path, "did", "fresh", "v"))
+    assert store.note_get(tmp_path, "did", "fresh") == "v", "the create must survive the reap"
+
+    # …and the count is still a count. A reap inside a create is allowed to cost the
+    # drift the source already documents; it is not allowed to leave a wrong figure
+    # standing, so the pass that ends the interval has to agree with the disk.
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store._reap(tmp_path)
+    assert store._note_count(tmp_path) == store._count_notes(tmp_path)[0] == 2
+
+
+def test_a_reap_landing_inside_a_refusal_still_returns_the_409(tmp_path, monkeypatch) -> None:
+    """The same collision on the give-back path, where it costs more than a retry.
+
+    A refused write gives its reservation back from the gate's `finally`, so an exception
+    raised there replaces the exception the caller was owed: a documented 409 carrying the
+    current value became an undocumented 500, and — because the give-back never ran — the
+    refusal kept the note slot it had reserved. That is the free-of-charge namespace fill
+    `test_a_refused_write_counts_nothing` exists to prevent, reachable again whenever a
+    reap overlapped the refusal.
+    """
+    import store
+
+    store.note_set(tmp_path, "did", "real", "v")
+    (tmp_path / ".reaped").touch()
+    _reaping_mid_replace(monkeypatch, tmp_path)
+
+    with pytest.raises(store.StoreConflictError):
+        _as_creator(lambda: store.note_set(tmp_path, "did", "ghost", "v", expect="nope"))
+    assert not store.note_path(tmp_path, "did", "ghost").exists(), "a refusal writes nothing"
+
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store._reap(tmp_path)
+    assert store._note_count(tmp_path) == 1, "the refused create must not hold a slot"
+
+
+def test_a_count_write_that_fails_leaves_no_temp_file_behind(tmp_path, monkeypatch) -> None:
+    """The strand a per-writer temp name would otherwise make permanent.
+
+    A shared `<name>.tmp` was self-healing by accident — the next writer overwrote whatever
+    a failed one had left. A name per writer is not, and a stray file inside a namespace is
+    exactly what stops the reaper's rmdir from ever reaching it. So the failure path has to
+    remove its own temp file, and the error still has to reach the caller: a create that
+    could not be recorded must not go on to be made.
+    """
+    import store
+
+    store.note_set(tmp_path, "did", "seed", "v")
+
+    def no_space(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store.os, "replace", no_space)
+    with pytest.raises(OSError, match="No space left"):
+        store._write_note_count(tmp_path, 5, 5)
+    monkeypatch.undo()
+
+    assert not list(tmp_path.glob(f"{store.NOTES_FILE}*.tmp")), "the failed write left a temp file"
+    assert store._note_count(tmp_path) == 1, "…and the count it could not write is untouched"
