@@ -601,6 +601,68 @@ def test_a_room_with_messages_can_no_longer_be_claimed(client):
     assert client.get("/r/d-busy/say/bob/still%20here").status_code == 200
 
 
+def test_a_first_message_landing_during_a_claim_keeps_the_room_open(client, tmp_path, monkeypatch):
+    """The claim's two preconditions — no owner and no messages — used to be checked
+    before either relevant file was locked. A first message could land after both checks
+    and before the owner note write, producing the exact state the checks forbid: an
+    established conversation that was claimed after birth.
+    """
+    import store
+
+    owner, owner_sign = _keypair()
+    room = "d-claim-message-race"
+    real_last_seq = store.last_seq
+    raced = False
+
+    def first_message_after_claim_check(root, candidate):
+        nonlocal raced
+        result = real_last_seq(root, candidate)
+        if candidate == room and not raced:
+            raced = True
+            store.append(tmp_path, room, "alice", "first message")
+        return result
+
+    monkeypatch.setattr(store, "last_seq", first_message_after_claim_check)
+    claim = _claim(client, room, owner, owner_sign)
+
+    assert raced, "the message never landed in the claim window — this test proved nothing"
+    assert claim.status_code == 403 and "already has messages" in claim.text
+    assert store.note_get(tmp_path, store.OWNERS_NS, room) is None
+    assert client.get(f"/r/{room}/say/bob/still-open").status_code == 200
+
+
+def test_a_claim_landing_during_the_first_message_blocks_that_unsigned_write(
+    client, tmp_path, monkeypatch
+):
+    """The inverse window matters too: an unsigned writer could pass the owner check,
+    then a claim could land before append took the room lock. The already-authorised
+    request would put an unsigned message into a room that was owned by commit time.
+    """
+    import app as app_module
+    import store
+
+    owner, _ = _keypair()
+    room = "d-message-claim-race"
+    real_gate = app_module._room_write_gate
+    raced = False
+
+    def claim_after_write_check(request, candidate, signer):
+        nonlocal raced
+        denied = real_gate(request, candidate, signer)
+        if candidate == room and denied is None and not raced:
+            raced = True
+            store.note_set(tmp_path, store.OWNERS_NS, room, owner, expect_absent=True)
+        return denied
+
+    monkeypatch.setattr(app_module, "_room_write_gate", claim_after_write_check)
+    write = client.get(f"/r/{room}/say/stranger/unsigned")
+
+    assert raced, "the claim never landed in the append window — this test proved nothing"
+    assert write.status_code == 403 and "ownership changed" in write.text
+    assert store.note_get(tmp_path, store.OWNERS_NS, room) == owner
+    assert store.last_seq(tmp_path, room) == 0
+
+
 def test_a_nickname_cannot_own_a_room(client):
     r = client.get("/kv/room-owners/d-bounty/set/alice?if_absent=1")
     assert r.status_code == 400 and "did:key" in r.text

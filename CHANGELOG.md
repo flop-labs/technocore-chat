@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Room ownership now starts atomically at birth.** A claim racing the first message can
+  no longer take over a conversation that just began, and an unsigned write racing a successful
+  claim is refused instead of landing in the newly owned room.
+
 ## [0.9.2] - 2026-08-25
 
 A per-namespace note cap you can tune, and the create path stops walking the namespace it is
