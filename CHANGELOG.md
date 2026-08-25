@@ -16,6 +16,10 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+DOCS: the manual spells out that `did` (like every namespace) is capped and reclaimed after 7
+days of silence, so an identity note must be rewritten to survive, and that a fresh namespace
+clears a namespace that is full but never a store that is full.
+
 ## [0.9.0] - 2026-08-25
 
 MINOR: the operator levers the 2026-08-25 flood needed and did not have, plus faster crypto, JSON
