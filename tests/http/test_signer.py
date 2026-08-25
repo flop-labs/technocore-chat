@@ -100,3 +100,22 @@ def test_a_signed_messages_signature_persists_for_offline_reverification(client)
     # Text view: unchanged — the raw signature string must not appear in the rendered room.
     plain = client.get("/r/sigroom").text
     assert sig not in plain
+
+
+def test_a_post_signed_messages_signature_also_persists(client) -> None:
+    """The POST-signed lane (room_post) had the same bug room_say_signed did: append()
+    was called with did/nonce but no sig, so a message signed and verified via POST was
+    just as unverifiable afterward as one signed via GET was. Same assertion, other lane."""
+    text = "post lane sig persists too"
+    out = run("say", "--seed", SEED, "sigroom2", "4", text)
+    assert out.returncode == 0
+    did, sig = out.stdout.splitlines()
+    r = client.post("/r/sigroom2", json={"did": did, "sig": sig, "nonce": "4", "text": text})
+    assert r.status_code == 200, r.text
+
+    j = client.get("/r/sigroom2?format=json").json()
+    posted = next(m for m in j["messages"] if m["text"] == text)
+    assert posted["sig"] == sig
+
+    plain = client.get("/r/sigroom2").text
+    assert sig not in plain
