@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP: a lone surrogate in a tool-call argument key no longer kills the stdio session.** The
+  unexpected-arguments error names keys through `repr`, so a key no UTF-8 stream can encode fails
+  that one call instead of the wrapper process.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

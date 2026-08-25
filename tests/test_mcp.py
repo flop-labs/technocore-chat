@@ -600,6 +600,28 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def test_a_surrogate_argument_key_does_not_kill_the_session(mcp):
+    """A lone surrogate in an argument key reaches the unexpected-arguments error before
+    any handler runs, and the reply writer serializes with ensure_ascii=False. The
+    raw key would then raise UnicodeEncodeError inside serve() and end the session. The host
+    relays model-composed dicts verbatim, so one glitched escape must not cost the agent
+    every tool. Values are already safe: they hit quote() inside the handler, whose
+    errors _call turns into a normal isError result."""
+    server, protocol = mcp
+    # A real UTF-8 stream, not StringIO: StringIO accepts unencodable str, stdout won't.
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    line = (
+        '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":'
+        '{"name":"read_room","arguments":{"room":"lobby","\\ud800":1}}}\n'
+    )
+    server.serve(io.StringIO(line + '{"jsonrpc":"2.0","id":9,"method":"ping"}\n'), stdout)
+    stdout.seek(0)
+    replies = [json.loads(out) for out in stdout.read().splitlines()]
+    assert replies[0]["error"]["code"] == protocol.INVALID_PARAMS
+    assert replies[0]["error"]["message"] == "unexpected arguments: '\\ud800'"
+    assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
+
+
 # ------------------------------------------------------------------ packaging
 
 

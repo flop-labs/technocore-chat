@@ -231,7 +231,11 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
     properties: dict[str, dict[str, Any]] = schema["properties"]
     unexpected = set(arguments) - set(properties)
     if unexpected:
-        raise _BadParamsError(f"unexpected arguments: {', '.join(sorted(unexpected))}")
+        # repr, not the raw key: a lone surrogate in an argument key (a model-side
+        # glitch the host relays verbatim) is not encodable to UTF-8 stdout, and the
+        # reply writer serializes with ensure_ascii=False. An unencodable message
+        # here would raise inside serve() and end the session, not scold one call.
+        raise _BadParamsError(f"unexpected arguments: {', '.join(map(repr, sorted(unexpected)))}")
     missing = set(schema.get("required", ())) - set(arguments)
     if missing:
         raise _BadParamsError(f"missing arguments: {', '.join(sorted(missing))}")
