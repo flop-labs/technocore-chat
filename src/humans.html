@@ -758,7 +758,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var placeholder = log.querySelector('.placeholder');
     if (placeholder) log.removeChild(placeholder);
     messages.forEach(function (m) {
+      if (log.querySelector('[data-seq="' + m.seq + '"]')) return;
       var row = document.createElement('div'); row.className = 'msg';
+      row.setAttribute('data-seq', String(m.seq));
       // The seq is a copy-link button, not an anchor: it puts the permalink on the
       // clipboard and in the address bar, without ever being something a reader can
       // follow. Nothing on this page navigates.
@@ -782,10 +784,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     else log.scrollTop = log.scrollHeight;
   }
 
+  var pollGen = 0;
   function poll() {
+    var gen = ++pollGen;
     fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since)
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (view) {
+        if (gen !== pollGen) return;
         if (view.first_seq && since && view.first_seq > since + 1) {
           var gap = document.createElement('div');
           gap.className = 'empty';
@@ -816,6 +821,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function open(next, seq) {
+    pollGen++;
     room = (next || 'lobby').trim().toLowerCase();
     targetSeq = seq || 0;
     // Start the cursor just before the target so the first fetch contains it: the default
