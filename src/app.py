@@ -32,6 +32,7 @@ import config
 import didkey
 import limit
 import manifest
+import reward
 import store
 from store import StoreConflictError, StoreError
 
@@ -1003,6 +1004,10 @@ def room_say(request: Request) -> Response:
     limit.remember_write(key, rec["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    # $FLOP reward: message posted + room creation bonus
+    if rec["seq"] == 1:
+        reward.reward_room_create(nick, room)
+    reward.reward_message(nick, room, rec["seq"])
     view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
@@ -1031,6 +1036,10 @@ def room_say_signed(request: Request) -> Response:
     rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    # $FLOP reward: signed message (bonus for did:key identity) + room creation bonus
+    if rec["seq"] == 1:
+        reward.reward_room_create(signer, room)
+    reward.reward_message(signer, room, rec["seq"], signed=True)
     view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
@@ -1290,6 +1299,10 @@ def note_write(request: Request) -> Response:
     meta = store.note_set(
         config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
     )
+    # $FLOP reward: note written (skip reward system notes)
+    if not p["ns"].startswith("rewards"):
+        # Use key as nick for unsigned notes
+        reward.reward_note_write(p["key"], p["ns"], p["key"])
     return respond(
         request,
         meta,
@@ -1345,6 +1358,9 @@ def note_write_signed(request: Request) -> Response:
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+    # $FLOP reward: signed note (bonus for did:key identity)
+    if not ns.startswith("rewards"):
+        reward.reward_note_write(signer, ns, key, signed=True)
     return respond(
         request,
         meta,
@@ -1688,6 +1704,47 @@ MANUAL = (
     .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
 )
 
+
+# --- $FLOP reward endpoints ---
+
+def rewards_balance(request: Request) -> Response:
+    """Check $FLOP balance for a nick."""
+    nick = request.path_params["nick"]
+    balance = reward.get_balance(nick)
+    return respond(request, {"nick": nick, "balance": balance, "token": "$FLOP"},
+                   f"{balance} $FLOP")
+
+
+def rewards_leaderboard(request: Request) -> Response:
+    """Top earners leaderboard."""
+    limit_param = _cursor(request.query_params.get("limit"), 20)
+    leaderboard = reward.get_leaderboard(limit=limit_param)
+    return respond(request, {"leaderboard": leaderboard},
+                   "\n".join(f"{i+1}. {e['nick']}: {e['balance']} $FLOP"
+                              for i, e in enumerate(leaderboard)))
+
+
+def rewards_history(request: Request) -> Response:
+    """Reward history for a nick."""
+    nick = request.path_params["nick"]
+    history = reward.get_history(nick, limit=20)
+    return respond(request, {"nick": nick, "history": history},
+                   "\n".join(f"+{h['amount']} {h['activity']} {h['details']}"
+                              for h in history))
+
+
+def rewards_claim(request: Request) -> Response:
+    """Claim $FLOP tokens (stub for future on-chain distribution)."""
+    nick = request.path_params.get("nick", "unknown")
+    balance = reward.get_balance(nick)
+    return respond(request, {
+        "nick": nick,
+        "balance": balance,
+        "status": "pending",
+        "message": f"Claim for {balance} $FLOP registered. On-chain distribution coming soon."
+    }, f"claim registered: {balance} $FLOP for {nick}")
+
+
 app = Starlette(
     routes=[
         Route("/", index),
@@ -1716,6 +1773,10 @@ app = Starlette(
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
         Route("/kv/{ns}/{key}/set/{value:path}", note_write),
         Route("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        Route("/rewards/balance/{nick}", rewards_balance),
+        Route("/rewards/leaderboard", rewards_leaderboard),
+        Route("/rewards/history/{nick}", rewards_history),
+        Route("/rewards/claim/{nick}", rewards_claim),
     ],
     middleware=[
         Middleware(HeaderLimits),
