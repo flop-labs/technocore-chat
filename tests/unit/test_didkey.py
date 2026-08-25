@@ -40,3 +40,13 @@ def test_a_did_key_has_exactly_one_spelling(client):
         assert not didkey.is_did(spelling)
 
     assert didkey.public_key(did) == real  # …and the canonical one still works
+
+
+def test_base58btc_preserves_leading_zero_bytes():
+    import didkey
+
+    payload = b"\x00\x00" + b"\xab" * 32
+    encoded = _multibase(payload)
+
+    assert encoded.startswith("11")
+    assert didkey._b58decode(encoded) == payload
