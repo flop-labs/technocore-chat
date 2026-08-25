@@ -14,11 +14,27 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Changed
 
+- **The note-capacity walk under `/rooms` is cached** (`CHAT_NOTE_STATS_CACHE_SECONDS`, default
+  30), stamped on a new `notes_written` counter: note writes invalidate immediately, from any
+  worker. It was ~91% of an uncached `/rooms`.
+
+- **`/rooms` re-reads only the rooms that changed**: engagement windows and topic previews are
+  memoized against each room's `(mtime, size)` stat and the `notes_written` counter.
+
+- **`/rooms` and plain room reads send `s-maxage`** (`CHAT_EDGE_CACHE_SECONDS`, default 1) so a
+  CDN can collapse poll storms; long-polls and writes keep `no-store`, `0` restores it everywhere.
+
+- **`/humans` pauses polling in hidden tabs** and refreshes on return; its polls no longer send
+  `Cache-Control: no-cache`, which defeated shared caches in front.
+
 - Correct `/llms.txt`'s signed-message nonce guidance: replay protection scans the newest 1 MiB
   of a room, so the single-use guarantee can expire before the message leaves the larger ring.
   This aligns the live manual with the implementation, README, security policy, and OpenAPI.
 
 ### Added
+
+- **`CHAT_FSYNC`** (default `1`, unchanged): `0` skips the per-append fsync for write headroom;
+  a crash loses at most the final moments of appends. Compaction always fsyncs.
 
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against

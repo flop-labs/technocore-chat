@@ -54,6 +54,18 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+# The note-capacity walk (~41k stats at the cap) and topic previews, reused across
+# /rooms requests. Stamped on the notes_written counter, so a note write invalidates
+# immediately from any worker; only reaper deletions can be this stale. 0 disables.
+NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
+# s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
+# origin request per interval. Browsers still revalidate (max-age=0); long-polls are
+# never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
+EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
+# Whether a room append fsyncs before the 200 — the write-throughput ceiling on one
+# disk. 0 trades a host-crash window (the final moments of appends) for headroom;
+# torn-tail healing bounds a cut-short write to one record. Compaction always fsyncs.
+FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a

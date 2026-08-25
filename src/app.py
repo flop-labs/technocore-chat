@@ -167,11 +167,9 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     left, wait = limit.take(
         request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
     )
-    # And the /rooms cache is dropped here. This is the fast path, not the guarantee: it
-    # runs *before* the store write, so on its own it loses the race against a concurrent
-    # reader that walks while the writer is still in fsync. `_rooms_stamp` is what closes
-    # that; this clear is kept because it costs nothing and covers what the stamp cannot —
-    # note writes, which change the notes line and the topics shown beside a room.
+    # The /rooms cache is dropped here — the fast path, not the guarantee: it runs
+    # *before* the store write, so `_rooms_stamp` (which covers note writes too, via
+    # notes_written) is what closes the race against a concurrent walker.
     if kind == "write":
         _rooms_cache.clear()
     return left, wait
@@ -375,6 +373,19 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
     return text((body_text if body_text is not None else render(view)) + note)
+
+
+def _edge_cacheable(resp: Response) -> Response:
+    """Mark a world-readable read as briefly shareable by the CDN in front. Only /rooms
+    and plain room reads pass here — never a long-poll (one caller's cursor) or a reply
+    carrying a budget footer (one caller's pacing). The CDN still needs a rule marking
+    these paths cache-eligible."""
+    seconds = config.EDGE_CACHE_SECONDS
+    if seconds:
+        resp.headers["Cache-Control"] = (
+            f"public, max-age=0, s-maxage={seconds}, stale-while-revalidate={seconds * 5}"
+        )
+    return resp
 
 
 # --------------------------------------------------------------------------- routes
@@ -585,11 +596,31 @@ def _rooms_stamp() -> tuple:
     newer than the data the walk sees. A stale entry is therefore always detected, whatever
     order the two requests interleaved in.
 
-    The clear in `take` stays because it is free and catches what the counters do not —
-    note writes, which change the notes line and the topics shown beside a room.
+    notes_written makes note and topic writes invalidate too, from any worker.
     """
     counted = store.counters(config.ROOT)
     return tuple(counted[key] for key in store.COUNTER_KEYS)
+
+
+# One entry — the note walk does not depend on `limit`. Stamped on ROOT and the on-disk
+# notes_written counter (bumped after each note write, read by every worker), with the
+# same read-before-walk ordering as _rooms_stamp.
+_note_stats_cache: tuple[tuple, float, dict] | None = None
+
+
+def _note_stats() -> dict:
+    """store.note_stats through its own cache: the note gauge changes only when a note
+    is written or reaped, while the rooms walk is stale on every message. Fused, the
+    41k-stat walk re-ran per message; the clock only bounds reaper deletions."""
+    global _note_stats_cache
+    stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
+    now = time.monotonic()
+    hit = _note_stats_cache
+    if config.NOTE_STATS_CACHE_SECONDS > 0 and hit and hit[0] == stamp and now < hit[1]:
+        return hit[2]
+    view = store.note_stats(config.ROOT)
+    _note_stats_cache = (stamp, now + config.NOTE_STATS_CACHE_SECONDS, view)
+    return view
 
 
 def _rooms_view(limit: int) -> dict:
@@ -609,7 +640,7 @@ def _rooms_view(limit: int) -> dict:
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
-    view["notes"] = store.note_stats(config.ROOT)
+    view["notes"] = _note_stats()
     # Unconditional, including when `rooms` is empty: it describes the schema, not the
     # payload. A field that shows up only once a hostile room exists is one clients parse
     # without, and the listing that needed it is the one that breaks. `fields` is the
@@ -680,7 +711,10 @@ def rooms(request: Request) -> Response:
                 else []
             )
         )
-    return respond(request, view, body, budget_note("read", left, RATE_READ))
+    note = budget_note("read", left, RATE_READ)
+    resp = respond(request, view, body, note)
+    # A budget footer is one caller's pacing — a reply carrying one stays no-store.
+    return resp if note else _edge_cacheable(resp)
 
 
 # Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
@@ -731,7 +765,9 @@ async def room_read(request: Request) -> Response:
         fresh = await _await_messages(request, room, tail, since, wait)
         if fresh is not None:
             view = fresh
-    return respond(request, view, note=budget_note("read", left, RATE_READ))
+    note = budget_note("read", left, RATE_READ)
+    resp = respond(request, view, note=note)
+    return resp if wait or note else _edge_cacheable(resp)
 
 
 async def _await_messages(

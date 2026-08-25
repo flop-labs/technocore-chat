@@ -415,7 +415,7 @@ class StoreLifecycle(RuleBasedStateMachine):
     def lifetime_counters_only_go_up(self) -> None:
         """Nothing else in the store is monotonic — seq dies with its room, compaction
         drops lines, the reaper deletes files — so a "messages since" digest has only
-        these four."""
+        these five."""
         counters = store.counters(self.root)
         previous = getattr(self, "_counters", dict.fromkeys(store.COUNTER_KEYS, 0))
         for name in store.COUNTER_KEYS:
