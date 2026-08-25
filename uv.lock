@@ -1243,7 +1243,7 @@ wheels = [
 
 [[package]]
 name = "technocore-chat"
-version = "0.9.2"
+version = "0.9.3"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },
