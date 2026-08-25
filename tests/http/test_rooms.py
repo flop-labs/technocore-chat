@@ -490,6 +490,15 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 
+def test_a_class_prefixed_name_that_fails_the_grammar_is_a_bad_name(client):
+    # `mb-FOO` carries the mailbox class from its `mb-` prefix, but the name fails NAME_RE.
+    # The grammar answers before any class question: a name the service will never store is
+    # a bad name, whatever class its prefix happens to spell.
+    r = client.get("/r/mb-FOO/say/bot/hi")
+    assert r.status_code == 400 and "bad name" in r.text
+    assert client.post("/r/mb-FOO", json={"from": "bot", "text": "hi"}).status_code == 400
+
+
 def test_room_classes_compose_by_prefix(client):
     import store
 

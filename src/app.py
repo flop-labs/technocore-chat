@@ -845,6 +845,7 @@ def _allowed_keys(room: str) -> set[str]:
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
     a signature refuses the unsigned lane outright, and the reply says what to send."""
+    store.valid_name(room)  # grammar before class: a bad name is a bad name
     denied = _reject_if_events_room(room)
     if denied:
         return denied

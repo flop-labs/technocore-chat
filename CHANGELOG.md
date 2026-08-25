@@ -16,6 +16,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unsigned room write with an invalid name now answers `400 bad name`, not
+  `403 mailbox`.** The write gate classified the room before checking the name
+  grammar, so `mb-FOO` (a class prefix that fails `NAME_RE`) fell into the mailbox
+  branch on the `say` lane. The gate now checks `valid_name` first, matching the
+  read and signed lanes.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
