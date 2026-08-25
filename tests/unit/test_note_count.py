@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -437,6 +438,54 @@ def test_the_cached_count_survives_reap_and_create_interleaving(tmp_path, monkey
         # must agree with the increments — a reap is not allowed to lose a concurrent create.
         assert store._note_count(tmp_path) == expected, f"after reap {round_}"
         assert store._count_notes(tmp_path)[0] == expected, "and it must match the disk"
+
+
+def test_a_create_cannot_land_between_the_reap_count_and_cache_rewrite(
+    tmp_path, monkeypatch
+) -> None:
+    """A reap must serialize its final count-and-rewrite with the complete create path.
+
+    Pause the reap after its disk walk has returned. On the broken path a create can finish
+    in that window, then the reap overwrites its increment with the stale walked count.
+    A shared create gate makes that creator wait; once the reap releases the gate, the note
+    and its increment land together and the cache still matches the disk.
+    """
+    import store
+
+    store.note_set(tmp_path, "seed", "one", "v")
+    (tmp_path / ".reaped").unlink()
+
+    walked = Event()
+    release_reap = Event()
+    create_done = Event()
+    real_count_notes = store._count_notes
+
+    def paused_count_notes(root):
+        totals = real_count_notes(root)
+        walked.set()
+        assert release_reap.wait(5), "test did not release the paused reap"
+        return totals
+
+    monkeypatch.setattr(store, "_count_notes", paused_count_notes)
+
+    reap = Thread(target=store._reap, args=(tmp_path,))
+    reap.start()
+    assert walked.wait(5), "reap never reached its final note walk"
+
+    def create() -> None:
+        store.note_set(tmp_path, "fresh", "two", "v")
+        create_done.set()
+
+    creator = Thread(target=create)
+    creator.start()
+    create_done.wait(1)
+    release_reap.set()
+    reap.join(5)
+    creator.join(5)
+
+    assert not reap.is_alive()
+    assert not creator.is_alive()
+    assert store._note_count(tmp_path) == real_count_notes(tmp_path)[0] == 2
 
 
 def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(
