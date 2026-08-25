@@ -58,8 +58,9 @@ the cost that change removed rather than a cost anyone still pays:
   http (every figure here is measured through `curl`, so ~6 ms of process spawn is the
   floor — the /healthz rows below measure that floor as much as anything):
     GET /rooms cold                     ~171 ms
-    GET /rooms cached                     ~7 ms   i.e. at the floor. ROOMS_CACHE_SECONDS,
-                                                  and writes invalidate it immediately
+    GET /rooms cached                     ~7 ms   i.e. at the floor. ROOMS_CACHE_SECONDS.
+                                                  A message no longer ends the window; a
+                                                  create, reap or topic still does
     event loop unserved during one write:
       GET  /r/<room>/say/...             ~25 ms   sync endpoint: Starlette threadpools it
       POST /r/<room>                     ~11 ms   was ~385 ms before it was threadpooled
@@ -100,6 +101,27 @@ own room and ignores --scale, so these do not move with the caps:
     parse every    26% _parse · 23% the scan loop · 21% orjson.loads · 11% dict.get
     bytes reject   63% the scan loop · 17% reverse_lines · 14% bytes.split · 3% read
   The parse leaves the profile; what remains is reading the window.
+
+Measured 2026-08-25 for the /rooms stamp change, same container (tmpfs), 10,240 rooms, at
+production's mix — 24 messages/second and 2.85 /rooms/second — over a 20s window, before and
+after in one session so host drift cancels. `newfstatat` is counted with `strace -f -c` on
+the worker (no bpftrace in this container; it counts the same syscall), and a "walk" is a
+/rooms response over 50 ms, which an uncached one is by an order of magnitude:
+
+                                     before     after
+    /rooms requests served               58        58
+    of those, walks                      50         6    one per ROOMS_CACHE_SECONDS
+                                                         rather than one per request
+    median /rooms latency           52.6 ms    2.5 ms
+    newfstatat per /rooms request    12,389     1,807    under strace, which serves fewer
+                                                         requests but stats the same per walk
+
+  The after figures are set by the clock and not by the traffic: the walk rate is capped at
+  1/ROOMS_CACHE_SECONDS whatever the request rate, so the ratio keeps falling the harder
+  /rooms is polled, and what is left of it is the write path (~58 stats per append) rather
+  than the walk. Before, `messages` was in the cache stamp — at 24 messages/second it turned
+  over ~72 times per 3s window, so the cache was correct, never hit, and every request walked
+  every room.
 
 The two numbers worth watching are the last pair. A sync handler costs the loop nothing
 because Starlette runs it in a threadpool; an `async def` handler that calls blocking store
@@ -301,7 +323,9 @@ def http_bench(port: int, room: str) -> None:
     # this should time regardless: the reap runs inside append either way, and appending is
     # what the service spends its life doing.
     subprocess.run(["curl", "-s", "-o", "/dev/null", f"{base}/r/{room}/say/b/hi"], check=False)
-    print(f"  {'GET /rooms cold (after a write)':<38} {_get(base + '/rooms'):7.1f} ms")
+    # Cold because nothing has asked yet, not because of the write above: a message does not
+    # end the cache window any more (see app._rooms_stamp). Run this against a fresh server.
+    print(f"  {'GET /rooms cold':<38} {_get(base + '/rooms'):7.1f} ms")
     cached = min(_get(base + "/rooms") for _ in range(3))
     print(f"  {'GET /rooms cached':<38} {cached:7.1f} ms")
 

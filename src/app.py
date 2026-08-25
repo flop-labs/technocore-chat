@@ -170,11 +170,13 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     left, wait = limit.take(
         request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
     )
-    # The /rooms cache is dropped here — the fast path, not the guarantee: it runs
-    # *before* the store write, so `_rooms_stamp` (which covers note writes too, via
-    # notes_written) is what closes the race against a concurrent walker.
-    if kind == "write":
-        _rooms_cache.clear()
+    # Deliberately no /rooms cache clear here. It was only ever the fast path — it runs
+    # *before* the store write, so `_rooms_stamp` is what closes the race against a
+    # concurrent walker — and every structural write it caught moves a counter that stamp
+    # reads anyway. What was left of it was invalidation on *message* writes, in this
+    # worker, which is the exact cost `messages` left the stamp to stop paying: a local
+    # clear on a worker taking its share of ~24 messages/second empties the cache as
+    # reliably as a stamp turning over 72 times per window did.
     return left, wait
 
 
@@ -586,23 +588,46 @@ _rooms_cache: OrderedDict[int, tuple[tuple, float, dict]] = OrderedDict()
 MAX_ROOMS_CACHE = 64
 
 
+# Spelt out rather than taken as store.COUNTER_KEYS: this tuple is the definition of what
+# /rooms is allowed to be stale about, so a counter added to the store later must be
+# considered here on purpose instead of silently joining a correctness-sensitive value.
+# `messages` is the one deliberately absent — see _rooms_stamp.
+ROOMS_STAMP_KEYS = ("rooms_created", "reaped_idle", "reaped_stillborn", "notes_written")
+
+
 def _rooms_stamp() -> tuple:
-    """A cheap value that changes whenever the room list does. One small file read against
-    a ~46k-file walk.
+    """A cheap value that changes whenever the room list changes *structurally*. One small
+    file read against a ~46k-file walk.
 
-    This is what makes the cache correct rather than merely quick. Clearing on write (see
-    `take`) is not enough on its own: the clear happens *before* the store write, so a
-    /rooms request that arrives while the writer is still in fsync, the reaper or the
-    create lock can walk the pre-write state and cache it — and nothing clears it again
-    afterwards. Validating against a stamp has no such ordering: store.append bumps these
-    counters *after* the record is on disk, so a stamp read before the walk can never be
-    newer than the data the walk sees. A stale entry is therefore always detected, whatever
-    order the two requests interleaved in.
+    This is what makes the cache correct rather than merely quick, and the ordering is the
+    whole argument: store.append, the create path and the reaper all bump these counters
+    *after* the record is on disk (or gone from it), so a stamp read before the walk can
+    never be newer than the data the walk sees. A stale entry is therefore always detected,
+    whatever order two concurrent requests interleaved in — a /rooms request that walks the
+    pre-write state while a writer is still in fsync, the reaper or the create lock caches
+    that view under the *old* stamp and the next request rejects it. Nothing has to
+    invalidate anything for that to hold, which is why it survives a second worker.
 
-    notes_written makes note and topic writes invalidate too, from any worker.
+    That argument holds for every key here, and `messages` is deliberately not one of them.
+    It is a single global lifetime counter, not per-room, so one message anywhere aged out
+    every listing: measured at ~24 messages/second against a 3s window, the stamp turned
+    over ~72 times per window, the hit rate was 0, and every /rooms request walked all
+    10,240 rooms — which made newfstatat the busiest syscall on the box by an order of
+    magnitude. What that precision bought was discarded immediately downstream anyway:
+    ROOMS_CACHE_SECONDS already declares 3s of staleness acceptable and the CDN serves the
+    result up to EDGE_CACHE_SECONDS stale on top of it.
+
+    So the split is structural-exact, recency-bounded. A room appearing (rooms_created),
+    a room disappearing (reaped_idle, reaped_stillborn) and a topic change — a topic is an
+    ordinary note, hence notes_written — are still reflected at once, from any worker.
+    `idle_seconds`, `last_seq`, the recency order and the engagement aggregates now lag by
+    up to ROOMS_CACHE_SECONDS: the clock is their bound, not the stamp. That is the right
+    split for an endpoint whose job is showing what is active rather than reporting a
+    message count, and CHAT_ROOMS_CACHE_SECONDS=0 remains the escape hatch for a caller
+    that needs a message reflected on the very next request.
     """
     counted = store.counters(config.ROOT)
-    return tuple(counted[key] for key in store.COUNTER_KEYS)
+    return tuple(counted[key] for key in ROOMS_STAMP_KEYS)
 
 
 # One entry — the note gauge does not depend on `limit`. Stamped on ROOT and the on-disk

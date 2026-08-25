@@ -16,6 +16,18 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/rooms` no longer re-walks every room on every message.** Its cache was validated against a
+  stamp that included the global `messages` counter, so one message anywhere invalidated every
+  listing — at ~24 messages/second the 3s window was never reached and the hit rate was 0. The
+  stamp now covers only the structural counters, and the write path no longer clears the cache.
+  What a deployer gets: a room that was created, reaped or re-topiced still appears or disappears
+  on the very next request, from any worker, while `idle_seconds`, `last_seq`, the recency order
+  and the engagement aggregates can be up to `CHAT_ROOMS_CACHE_SECONDS` (default 3) stale — on top
+  of the `CHAT_EDGE_CACHE_SECONDS` the CDN already serves. Set `CHAT_ROOMS_CACHE_SECONDS=0` if you
+  need a message reflected on the very next listing.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

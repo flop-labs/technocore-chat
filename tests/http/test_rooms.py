@@ -1,5 +1,6 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import time
 from pathlib import Path
 
 import _client
@@ -88,25 +89,92 @@ def test_private_names_are_reachable_but_never_enumerated(client):
     assert "p-draft" not in client.get("/kv/plans").text
 
 
-def test_rooms_is_cached_but_never_stale_for_a_caller_that_just_wrote(client):
-    """The /rooms walk is cached; read-your-writes is what makes that safe.
+def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, tmp_path):
+    """What the /rooms cache is allowed to be stale about, and what it never is.
 
     A time-only cache breaks the one thing the view is for: an agent creates a room, checks
-    /rooms, and does not find it. Writes therefore invalidate, and they do it in `take` —
-    the single point every write route already passes through — so a route added later
-    cannot forget to.
+    /rooms, and does not find it. `_rooms_stamp` is what stops that, and it stamps exactly
+    the structural counters — so a create, a topic and a reap are all still immediate, from
+    any worker, while message recency is left to the clock. The window is pinned far above
+    anything this test spends so that only the stamp can be the thing invalidating.
     """
+    import config
+    import store
+
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        client.get("/r/first/say/bot/hi")
+        assert "first" in client.get("/rooms").text  # populates the cache
+
+        # A created room appears at once: the create bumps rooms_created, which is stamped.
+        client.get("/r/second/say/bot/hi")
+        assert "second" in client.get("/rooms").text, "a room created a moment ago must appear"
+
+        # So does a topic. A topic is an ordinary note, so it moves notes_written.
+        client.get("/kv/topic/first/set/what%20first%20is%20for")
+        assert "what first is for" in client.get("/rooms").text
+
+        # A message in an existing room moves it up the recency order and bumps its seq —
+        # and that, deliberately, is served stale. `messages` is one global lifetime
+        # counter, so stamping it made one message anywhere invalidate every listing and
+        # the cache never hit at all (see _rooms_stamp).
+        client.get("/r/first/say/bot/again")
+        by_name = {r["room"]: r for r in client.get("/rooms?format=json").json()["rooms"]}
+        assert by_name["first"]["last_seq"] == 1, "recency comes from the cache, not the walk"
+
+        # A reap is structural again: the room is gone from the very next listing.
+        _age(store.room_path(tmp_path, "second"), store.IDLE_SECONDS + 60)
+        (tmp_path / ".reaped").unlink(missing_ok=True)  # the reaper is throttled; let it run
+        client.get("/r/first/say/bot/reap%20now")
+        assert "second" not in client.get("/rooms").text, "a reaped room must disappear at once"
+
+
+def test_a_message_reaches_rooms_within_the_cache_window(client):
+    """The lag that dropping `messages` from the stamp introduces is bounded by
+    ROOMS_CACHE_SECONDS, and that bound is the contract now — not merely "eventually".
+
+    Paired with the assertion above that the same message is *not* visible before the
+    window elapses: together they say the clock is what releases it, and how long that is.
+    """
+    import config
+
     client.get("/r/first/say/bot/hi")
-    assert "first" in client.get("/rooms").text  # populates the cache
+    window = 0.25
+    with config.override(ROOMS_CACHE_SECONDS=window):
+        client.get("/rooms")  # populates the cache
+        client.get("/r/first/say/bot/again")
+        time.sleep(window)
+        by_name = {r["room"]: r for r in client.get("/rooms?format=json").json()["rooms"]}
+        assert by_name["first"]["last_seq"] == 2, "the message must land within the window"
 
-    client.get("/r/second/say/bot/hi")
-    body = client.get("/rooms").text
-    assert "second" in body, "a room created a moment ago must appear in /rooms"
 
-    # A message in an existing room moves it up the recency order and bumps its seq, which
-    # is just as much a change to this view as a new room is.
-    client.get("/r/first/say/bot/again")
-    assert "seq 2" in client.get("/rooms").text
+def test_a_room_created_during_a_rooms_walk_is_listed_once_the_create_returns(
+    client, tmp_path, monkeypatch
+):
+    """The ordering `_rooms_stamp` is written for, driven rather than argued.
+
+    A /rooms request that lands while a create is between its read and its lock walks the
+    pre-create state, and nothing invalidates that entry afterwards — the write path holds
+    no cache clear, and would run before the store write even if it did. The stamp is the
+    whole guarantee: rooms_created is bumped *after* the room is on disk, so the poisoned
+    entry was cached under the older stamp and the next request rejects it instead of
+    serving pre-create state for the rest of the window.
+    """
+    import config
+    import store
+
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        client.get("/r/first/say/bot/hi")
+        client.get("/rooms")  # an entry to poison
+        raced = _race_before_lock(
+            monkeypatch,
+            store,
+            store.room_path(tmp_path, "racer"),
+            lambda: client.get("/rooms"),  # walks and caches while `racer` is not on disk yet
+        )
+        client.get("/r/racer/say/bot/hi")
+
+        assert raced, "the race never happened — this test proved nothing"
+        assert "racer" in client.get("/rooms").text
 
 
 def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monkeypatch):
@@ -129,6 +197,13 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         client.get("/rooms?limit=7")
         client.get("/rooms?limit=7")
         assert calls == [7, 7] and app_module._rooms_cache == {}
+        # Zero is also the exactness escape hatch, now that message recency is otherwise
+        # bounded by the clock rather than by the stamp: with the cache off, a message is
+        # on the very next listing rather than up to ROOMS_CACHE_SECONDS later.
+        client.get("/r/first/say/bot/hi")
+        client.get("/r/first/say/bot/again")
+        listed = {r["room"]: r for r in client.get("/rooms?format=json").json()["rooms"]}
+        assert listed["first"]["last_seq"] == 2
 
     with config.override(ROOMS_CACHE_SECONDS=60):
         monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
