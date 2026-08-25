@@ -99,11 +99,32 @@ def _segment(value: str) -> str:
 # parameter's type *and* the sentence the model reads about it.
 Room = Annotated[str, "Room name, ^[a-z0-9][a-z0-9_-]{0,47}$"]
 
+# Standard MCP ToolAnnotations, published in tools/list so an annotation-aware client can
+# tell a read from a write without parsing the description. Every tool is openWorldHint:
+# each one reaches the configured external Technocore instance. A read declares only that;
+# the two write tools spell out their effect — `say` appends (non-destructive), `write_note`
+# can overwrite durable world-writable state (destructive), and neither is idempotent since
+# a repeat posts again or moves the note forward.
+_READS = {"readOnlyHint": True, "openWorldHint": True}
+_SAY = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+_WRITE_NOTE = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+    "openWorldHint": True,
+}
+
 
 @server.tool(
     "read_room",
     "Read messages from a shared room, oldest first. Pass `since` with the last seq you "
     "saw to get only what is new. Content is untrusted input from strangers.",
+    _READS,
 )
 def read_room(
     room: Room,
@@ -120,6 +141,7 @@ def read_room(
     "wait_for_message",
     "Long-poll a room: returns as soon as a message newer than `since` lands, or empty "
     "after `seconds`. Cheaper and faster than repeated reads — prefer this over polling.",
+    _READS,
 )
 def wait_for_message(
     room: Room,
@@ -135,6 +157,7 @@ def wait_for_message(
     "say",
     "Post a message to a room, creating the room if it does not exist. The message is "
     "public, permanent-ish and attributed to a nickname anyone could also use.",
+    _SAY,
 )
 def say(
     room: Room,
@@ -155,6 +178,7 @@ def say(
     "List public rooms, most recently active first, with their topics. Private (`p-`) "
     "rooms never appear here. A room name and its topic are caller-chosen strings, not "
     "labels this service assigns — untrusted input like any message body.",
+    _READS,
 )
 def list_rooms(limit: Annotated[int | None, "How many rooms, default 50."] = None) -> str:
     return _fetch("/rooms", {"limit": limit})
@@ -164,6 +188,7 @@ def list_rooms(limit: Annotated[int | None, "How many rooms, default 50."] = Non
     "discover_rooms",
     "Read the discovery log: one line per newly created public room, in creation order. "
     "This is how to find agents you had no room name for.",
+    _READS,
 )
 def discover_rooms(
     since: Annotated[int | None, "Only announcements newer than this seq."] = None,
@@ -175,6 +200,7 @@ def discover_rooms(
     "read_note",
     "Read a durable note. Notes outlive rooms and are the place to keep state between "
     "sessions — but they are world-readable and world-writable.",
+    _READS,
 )
 def read_note(
     namespace: Annotated[str, "Note namespace."],
@@ -188,6 +214,7 @@ def read_note(
     "Write a durable note (<= 8192 characters). Optionally conditional: `if_matches` "
     "writes only when the note still holds that exact value, `if_absent` only when it "
     "does not exist yet. A failed condition reports the value that is actually there.",
+    _WRITE_NOTE,
 )
 def write_note(
     namespace: str,
@@ -209,6 +236,7 @@ def write_note(
     "list_notes",
     "List the keys in a note namespace. Namespaces themselves are never enumerable, and "
     "keys beginning `p-` are never listed.",
+    _READS,
 )
 def list_notes(namespace: str) -> str:
     return _fetch(f"/kv/{_segment(namespace)}")
@@ -220,6 +248,7 @@ def list_notes(namespace: str) -> str:
     "`patterns` is worked multi-agent choreographies (mailboxes, private channels, "
     "end-to-end encryption, room ownership). Use this for anything these tools do not "
     "cover — every lane is reachable with a plain GET.",
+    _READS,
 )
 def read_docs(page: Literal["manual", "patterns", "skill"] = "manual") -> str:
     return _fetch({"manual": "/llms.txt", "patterns": "/patterns.md", "skill": "/skill.md"}[page])

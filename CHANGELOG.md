@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **The stdio MCP server publishes standard `ToolAnnotations` in `tools/list`.** Each tool now
+  carries the effect hints (`readOnlyHint`, `openWorldHint`, and `destructiveHint`/`idempotentHint`
+  on the two writes) so an annotation-aware client can tell a read from a write without parsing the
+  description. Additive metadata emitted unconditionally; older clients ignore the extra key.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

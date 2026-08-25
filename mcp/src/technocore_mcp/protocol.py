@@ -262,18 +262,32 @@ class Tool:
     asks for: a failed tool call is data the model can react to, not a protocol fault.
     """
 
-    def __init__(self, name: str, description: str, handler: Callable[..., str]):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        handler: Callable[..., str],
+        annotations: dict[str, bool] | None = None,
+    ):
         self.name = name
         self.description = description
         self.handler = handler
         self.schema = schema_of(handler)
+        # Standard MCP ToolAnnotations — effect hints (readOnly/destructive/…) an
+        # annotation-aware client reads to tell a read from a write. Optional: the
+        # 2024-11-05 Tool shape predates the field, so it is emitted only when set and an
+        # older client ignores the extra key.
+        self.annotations = annotations
 
     def spec(self) -> dict[str, Any]:
-        return {
+        spec: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "inputSchema": self.schema,
         }
+        if self.annotations:
+            spec["annotations"] = self.annotations
+        return spec
 
 
 class Server:
@@ -283,11 +297,14 @@ class Server:
         self.instructions = instructions
         self.tools: dict[str, Tool] = {}
 
-    def tool(self, name: str, description: str) -> Callable:
-        """Register a handler as a tool. Its parameters describe themselves."""
+    def tool(
+        self, name: str, description: str, annotations: dict[str, bool] | None = None
+    ) -> Callable:
+        """Register a handler as a tool. Its parameters describe themselves; `annotations`
+        are the optional MCP effect hints published alongside the generated schema."""
 
         def register(fn: Callable[..., str]) -> Callable[..., str]:
-            self.tools[name] = Tool(name, description, fn)
+            self.tools[name] = Tool(name, description, fn, annotations)
             return fn
 
         return register

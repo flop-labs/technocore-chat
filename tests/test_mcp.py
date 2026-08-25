@@ -240,6 +240,46 @@ def test_every_tool_is_listed_with_a_usable_schema(mcp):
         assert tool["description"] and tool["inputSchema"]["type"] == "object"
 
 
+# The effect hints tools/list publishes, spelled out per tool. Every tool is openWorldHint
+# (each reaches the external instance); the reads are read-only, and the two write tools
+# carry the destructive/idempotent hints that let a client gate them. This table is the
+# guard that a tool cannot silently lose its annotation or flip a read into a write.
+ANNOTATIONS = {
+    "read_room": {"readOnlyHint": True, "openWorldHint": True},
+    "wait_for_message": {"readOnlyHint": True, "openWorldHint": True},
+    "list_rooms": {"readOnlyHint": True, "openWorldHint": True},
+    "discover_rooms": {"readOnlyHint": True, "openWorldHint": True},
+    "read_note": {"readOnlyHint": True, "openWorldHint": True},
+    "list_notes": {"readOnlyHint": True, "openWorldHint": True},
+    "read_docs": {"readOnlyHint": True, "openWorldHint": True},
+    "say": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    "write_note": {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+}
+
+
+def test_tools_list_publishes_effect_annotations(mcp):
+    """tools/list carries standard MCP ToolAnnotations so an annotation-aware client can
+    tell a read from a write without parsing prose (#206). Without the annotations the tool
+    spec has no such key and this fails outright."""
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    assert {t["name"]: t["annotations"] for t in tools} == ANNOTATIONS
+    # The distinction the annotations exist for: the two write tools are exactly the two the
+    # metadata marks non-read-only, so a client gating writes gets `say` and `write_note`.
+    not_read_only = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
+    assert not_read_only == {"say", "write_note"}
+
+
 def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp):
     """The schemas moved from hand-written dicts to `inspect.signature`; what they describe
     did not. `X | None` is an optional parameter of the non-None type, not a union, and a
