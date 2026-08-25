@@ -33,7 +33,7 @@ RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
 # next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
 # a cap on the service rather than a race won by whoever creates rooms fastest.
 RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
-CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o]
+CORS_ORIGINS = [o.strip() for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o.strip()]
 # /stats is the one internal surface. Growth numbers are not published — the design doc's
 # §I.2.3 caution against count-based marketing is exactly why they stay off the public
 # service — so the endpoint exists only when a token is configured, and answers 404 rather

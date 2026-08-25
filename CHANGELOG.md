@@ -62,6 +62,11 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
 
 ### Fixed
 
+- **`CHAT_CORS_ORIGINS` ignores separator whitespace.** A conventional comma-separated value
+  such as `https://one.example, https://two.example` previously preserved the leading space on
+  the second origin. CORS matching is exact, so every spaced entry silently failed to receive an
+  allow-origin response header even though the configuration documented it as allowlisted.
+
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
   both built artifacts use the required archive paths, contain byte-identical legal files, and
