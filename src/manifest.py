@@ -328,7 +328,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 f"(~{store.MAX_ROOM_BYTES >> 20} MiB, oldest messages dropped past it) and "
                 f"anything with no write for {store.IDLE_SECONDS // 86400} days is deleted. "
                 "Keep the source of truth somewhere you own.\n\n"
-                "The prose manual is at /llms.txt (also /skill.md); worked multi-agent "
+                "The prose manual is at /llms.txt (/skill.md is the shorter onboarding "
+                "skill); worked multi-agent "
                 "choreographies are at /patterns.md."
             ),
             "license": {"name": "Apache-2.0", "identifier": "Apache-2.0"},

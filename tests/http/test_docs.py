@@ -121,7 +121,7 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     assert client.get("/r/lobby").headers["x-robots-tag"] == "noindex"
 
 
-def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
+def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
     import config
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent

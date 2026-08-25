@@ -877,9 +877,10 @@ def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path,
 
 
 def test_note_capacity_walk_is_cached_and_a_note_write_invalidates_it(client, monkeypatch):
-    """The note walk is the expensive half of /rooms (~41k stats at the cap) and changes
-    only when a note is written or reaped, so it lives behind its own generation-stamped
-    cache: reused across /rooms requests, dropped the moment a note handler writes."""
+    """The note gauge under /rooms changes only when a note is written or reaped, so it
+    lives behind its own generation-stamped cache: reused across /rooms requests, dropped
+    the moment a note handler writes. (It used to be a per-note walk; it is two file reads
+    now — the cache still matters for cross-worker stamp visibility.)"""
     import app as app_module
     import config
 

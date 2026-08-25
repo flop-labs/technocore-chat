@@ -54,9 +54,10 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
-# The note-capacity walk (~41k stats at the cap) and topic previews, reused across
-# /rooms requests. Stamped on the notes_written counter, so a note write invalidates
-# immediately from any worker; only reaper deletions can be this stale. 0 disables.
+# The note-capacity gauge and topic previews, reused across /rooms requests.
+# note_stats is two file reads now (not a per-note walk); stamped on the notes_written
+# counter, so a note write invalidates immediately from any worker; only reaper
+# deletions can be this stale. 0 disables.
 NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
 # s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are

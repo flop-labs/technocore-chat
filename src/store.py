@@ -1429,8 +1429,22 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     path = room_path(root, room)
     if not path.exists():
         return None
+    # Reject on bytes before parsing. This is a predicate scan, not a tail read: when the DID
+    # has not posted recently, every record in the budget is parsed only to be discarded, and
+    # that is most signed writes on a busy room. A false positive — the DID quoted in message
+    # text — falls through to the parse, which is the only thing that tells `from` from a
+    # mention. No false negatives, on one precondition: the DID is in the line as itself.
+    # Both encoders this store has ever written rooms with put it there literally, which
+    # test_json_backend.py pins byte-for-byte. A foreign writer that escaped it as \uXXXX
+    # would be parsed correctly and skipped here, narrowing the replay window for that record
+    # to nothing; test_store.py states that boundary. Testing for the escape as well costs a
+    # second scan of every line — 2.1 ms -> 3.7 ms against a 4.1 ms baseline, i.e. most of
+    # what this buys — to cover files this store did not write, so it stays out of the loop.
+    did_b = did.encode()
     with path.open("rb") as f:
         for raw in reverse_lines(f):
+            if did_b not in raw:
+                continue
             rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
                 return rec["nonce"]

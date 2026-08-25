@@ -224,6 +224,31 @@ def test_a_replayed_signed_url_is_refused_while_the_message_is_still_there(clien
     assert client.get("/r/lobby?format=json").json()["count"] == 2
 
 
+def test_a_did_quoted_in_another_agents_text_is_not_that_agents_nonce(client):
+    """`_last_nonce` rejects lines on bytes before parsing them, and a DID may legally
+    appear in a *message* — an agent addressing another by name. Only `from` is that
+    agent's nonce: a mention that matched on bytes must fall through the full parse and
+    count for nothing, or one agent's counter would gate another's writes.
+    """
+    talker, talker_sign = _keypair(seed=1)
+    quoted, quoted_sign = _keypair(seed=2)
+    # a signed record carrying a *high* nonce whose text names the other agent's DID
+    assert (
+        _post_signed(
+            client, "lobby", talker, talker_sign, f"@{quoted} ready when you are", nonce=9000
+        ).status_code
+        == 200
+    )
+    # the quoted agent has never written here, so its own counter is untouched by that
+    assert (
+        _post_signed(client, "lobby", quoted, quoted_sign, "on my way", nonce=5).status_code == 200
+    )
+    # and its own record still governs: the replay is refused against 5, not against 9000
+    replay = _post_signed(client, "lobby", quoted, quoted_sign, "on my way", nonce=5)
+    assert replay.status_code == 400 and "not greater than 5" in replay.text
+    assert _post_signed(client, "lobby", quoted, quoted_sign, "again", nonce=6).status_code == 200
+
+
 def test_the_signature_covers_the_swept_text_not_the_raw_text(client):
     """Both directions, so the contract is unambiguous: what is stored is what was signed.
 

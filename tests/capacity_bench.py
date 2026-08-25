@@ -84,6 +84,23 @@ shape it was reading as flat is a line:
     room_stats(limit=50)  6.61 ms -> 5.14 ms   memoizing `_listable`; the walk is now within
                                                a sixth of its floor of one stat() per room
 
+Measured 2026-08-25 for 0.9.3, same container (tmpfs). The signed-write section builds its
+own room and ignores --scale, so these do not move with the caps:
+
+  per _last_nonce call, 8,255 records of 196 B, of which READ_BUDGET covers ~5,300:
+                                  scan-only   parse every   bytes reject
+    DID absent from the window       0.8 ms        3.9 ms         2.2 ms   1.8x
+    DID posted 3 records ago             n/a       ~0 ms          ~0 ms
+    DID quoted in every record       0.8 ms        3.9 ms         5.9 ms   0.6x
+    scan-only is reverse_lines with no parse: the floor. The absent-DID case went from
+    over 5x it to under 3x. The last row is the adversarial shape — every line a false
+    positive, so the filter is pure overhead on top of the parse.
+
+  Under cProfile the absent-DID case (shares, not ms — cProfile inflates totals):
+    parse every    26% _parse · 23% the scan loop · 21% orjson.loads · 11% dict.get
+    bytes reject   63% the scan loop · 17% reverse_lines · 14% bytes.split · 3% read
+  The parse leaves the profile; what remains is reading the window.
+
 The two numbers worth watching are the last pair. A sync handler costs the loop nothing
 because Starlette runs it in a threadpool; an `async def` handler that calls blocking store
 code stalls every other request for the duration, and at a full store that duration is the
@@ -105,7 +122,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import didkey  # noqa: E402
 import store  # noqa: E402
+
+B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
 def bench(label: str, fn, rounds: int = 5, setup=None) -> None:
@@ -172,6 +192,80 @@ def store_bench(root: Path) -> None:
     bench("glob  notes/*/*.txt", lambda: _drain(root.glob("notes/*/*.txt")))
     bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt", True)))
     bench("_scan notes .txt (count only)", lambda: _scan_notes(root))
+
+
+def _did(i: int) -> str:
+    """A distinct, real did:key — a shape the verifier would reject measures nothing."""
+    n = int.from_bytes(didkey.MULTICODEC_ED25519 + i.to_bytes(4, "big") + b"\x00" * 28)
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = B58[rem] + out
+    return f"{didkey.PREFIX}z{B58[0] * (didkey.MULTIBASE_CHARS - 1 - len(out))}{out}"
+
+
+def _build_nonce_room(root: Path, room: str, records: int, mention: str | None = None) -> Path:
+    """One signed record per distinct DID — the shape that makes the nonce scan expensive.
+    `mention` quotes a DID in every record's *text*: legal, not that DID's nonce, and the
+    case a bytes-level pre-filter matches wrongly."""
+    path = store.room_path(root, room)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as f:
+        for seq in range(1, records + 1):
+            text = f"@{mention} ack {seq}" if mention else "the quick brown fox jumps " + "x" * 25
+            rec = {"seq": seq, "ts": store._now(), "from": _did(seq), "text": text, "nonce": seq}
+            f.write(json.dumps(rec).encode() + b"\n")
+    return path
+
+
+def _parse_every(root: Path, room: str, did: str) -> int | None:
+    """`_last_nonce` before the bytes-level reject. Kept here because a baseline that only
+    exists in git history stops being run."""
+    with store.room_path(root, room).open("rb") as f:
+        for raw in store.reverse_lines(f):
+            rec = store._parse(raw)
+            if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
+                return rec["nonce"]
+    return None
+
+
+def _scan_only(root: Path, room: str) -> None:
+    """The floor: read the window backwards and parse nothing."""
+    with store.room_path(root, room).open("rb") as f:
+        for _ in store.reverse_lines(f):
+            pass
+
+
+def nonce_bench(root: Path, records: int) -> None:
+    """A predicate scan, not a tail read: a DID that has NOT posted lately costs the whole
+    READ_BUDGET, which is the common case (lobby: 826 signed writes/min, 770 distinct DIDs,
+    a ~5,400-record window). It holds the room lock, so every signed write pays it. Both
+    loops run over one file, so only the loop differs."""
+    room, absent = "nonce-bench", _did(records + 5_000)
+    path = _build_nonce_room(root, room, records)
+    size = path.stat().st_size
+    print(
+        f"\nsigned-write path — _last_nonce over {records} records, {size >> 10} KiB "
+        f"({size // records} B each); READ_BUDGET covers ~{store.READ_BUDGET // (size // records)}"
+    )
+    assert didkey.is_did(absent), absent  # the shape claim, not a hope
+    assert store._last_nonce(root, room, absent) is None
+    bench("absent DID  scan-only (the floor)", lambda: _scan_only(root, room), rounds=20)
+    bench("absent DID  parse every record", lambda: _parse_every(root, room, absent), rounds=20)
+    bench("absent DID  bytes reject first", lambda: store._last_nonce(root, room, absent), 20)
+
+    recent = _did(records - 2)
+    bench("recent DID  parse every record", lambda: _parse_every(root, room, recent), rounds=200)
+    bench("recent DID  bytes reject first", lambda: store._last_nonce(root, room, recent), 200)
+
+    # The adversarial shape: every line quotes the DID looked up, so every match is a false
+    # positive and the filter is pure overhead. Bounded by the same budget, but measured.
+    quoted = _did(7_777_777)
+    _build_nonce_room(root, room, records, mention=quoted)
+    assert store._last_nonce(root, room, quoted) is None  # a mention is not a `from`
+    bench("quoted DID  parse every record", lambda: _parse_every(root, room, quoted), rounds=20)
+    bench("quoted DID  bytes reject first", lambda: store._last_nonce(root, room, quoted), 20)
+    path.unlink()
 
 
 def _unlink(path: Path) -> None:
@@ -249,6 +343,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scale", type=float, default=1.0, help="fraction of the caps to build")
     parser.add_argument("--keep", help="build here and leave it (share it with a server)")
+    parser.add_argument(
+        "--records", type=int, default=8255, help="records in the room the nonce scan reads"
+    )
     parser.add_argument("--port", type=int, help="also measure a server already on this port")
     parser.add_argument("--room", default="r0", help="an EXISTING room for --port to write to")
     args = parser.parse_args()
@@ -262,6 +359,7 @@ def main() -> None:
         if not (root / "rooms").exists():
             build(root, args.scale)
         store_bench(root)
+        nonce_bench(root, args.records)
         if args.port:
             http_bench(args.port, args.room)
     finally:

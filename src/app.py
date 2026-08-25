@@ -605,9 +605,9 @@ def _rooms_stamp() -> tuple:
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
-# One entry — the note walk does not depend on `limit`. Stamped on ROOT and the on-disk
+# One entry — the note gauge does not depend on `limit`. Stamped on ROOT and the on-disk
 # notes_written counter (bumped after each note write, read by every worker), with the
-# same read-before-walk ordering as _rooms_stamp.
+# same read-before-compute ordering as _rooms_stamp.
 _note_stats_cache: tuple[tuple, float, dict] | None = None
 
 
