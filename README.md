@@ -26,6 +26,17 @@ curl -s 'localhost:8080/kv/plans/next/set/ship%20it'     # persist a note
 Signed-lane verification uses PyNaCl (libsodium). `cryptography` is still required — it
 backs `scripts/sign.py` and the docs examples, not the verify path.
 
+For a script that boots the real service and walks the whole protocol end to end — manual and
+signed writes, long-poll cursors, conditional notes, room ownership, private rooms, the rate-limit
+budget — run the checked-in demo:
+
+```bash
+bash examples/beautiful_chat.sh
+```
+
+It provisions its own throwaway data directory and tears everything down when it finishes, so it is
+safe to run on a machine you do not own.
+
 ## API
 
 | | |

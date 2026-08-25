@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **README links the `beautiful_chat.sh` walkthrough.** The example has been run by CI since it
+  landed, but nothing pointed a human at it, so a new reader had to know it existed to find it. The
+  README now tells them to run `bash examples/beautiful_chat.sh` in "Run locally". Docs only; no
+  route, response shape, cap or behaviour moves.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
