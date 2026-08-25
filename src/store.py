@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import threading
 import time
 import unicodedata
 from collections import OrderedDict
@@ -432,6 +433,34 @@ def _locked(target: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+def _replace_atomically(path: Path, data: bytes) -> None:
+    """Put `data` at `path` in one step, so a reader sees the old bytes or the new ones.
+
+    The temp name carries the writer's identity, and that is the whole point of the
+    helper. One shared `<name>.tmp` is only safe while every writer of that file holds the
+    same lock, and two of this store's files are written without one — `USAGE_FILE` and
+    `NOTES_FILE` are both rewritten by the reaper, which runs on any request's write path
+    and races the create path by design. With a shared name the second writer's os.replace
+    consumes the first's temp file and the *first* raises FileNotFoundError over a write
+    that in fact succeeded. The reaper swallows that; `_count_new_note` deliberately does
+    not, so a reap landing on a note create refused it with a 500, and on the give-back
+    path it replaced the caller's 409 with one and leaked the reservation the give-back
+    exists to return.
+
+    Unlinked on failure, so the only thing that can strand a temp file is a hard kill in
+    the microseconds between the write and the replace — bounded like every other unclean
+    shutdown here, and unlike a shared name a stranded one is never rewritten into a
+    live file by the next writer.
+    """
+    tmp = path.parent / f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _now() -> str:
     """UTC to the microsecond.
 
@@ -476,9 +505,7 @@ def _bump(root: Path, **deltas: int) -> None:
             current = counters(root)
             for key, delta in deltas.items():
                 current[key] = current.get(key, 0) + delta
-            tmp = path.parent / f"{path.name}.tmp"
-            tmp.write_bytes(orjson.dumps(current))
-            os.replace(tmp, path)  # atomic: readers never see a half-written file
+            _replace_atomically(path, orjson.dumps(current))
     except OSError:
         pass
 
@@ -945,9 +972,7 @@ def _reap(root: Path) -> None:
     # bought because the alternative is walking it on every append instead.
     try:
         used = _scan(root / "rooms", ".jsonl", sized=True)[1]
-        usage_tmp = root / f"{USAGE_FILE}.tmp"
-        usage_tmp.write_text(str(used), encoding="utf-8")
-        os.replace(usage_tmp, root / USAGE_FILE)
+        _replace_atomically(root / USAGE_FILE, str(used).encode())
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
     # Deletions are done and this is the only thing that deletes, so the walk below is
@@ -1044,9 +1069,7 @@ def _snapshot(root: Path) -> None:
                 pass
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
-            tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
-            os.replace(tmp, marker)
+            _replace_atomically(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
     except OSError:
         pass
 
@@ -1144,9 +1167,7 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     """
     path = root / NOTES_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(f"{total} {size}", encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    _replace_atomically(path, f"{total} {size}".encode())
 
 
 def _ns_totals(d: Path) -> tuple[int, int]:
@@ -1629,9 +1650,7 @@ def note_set(
             if expect is not None and current != expect:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(value, encoding="utf-8")
-        os.replace(tmp, path)
+        _replace_atomically(path, value.encode())
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
     _bump(root, notes_written=1)

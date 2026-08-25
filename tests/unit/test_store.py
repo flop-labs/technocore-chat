@@ -1078,6 +1078,92 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert store._last_nonce(tmp_path, "lobby", did) is None
 
 
+# --------------------------------------------------------------- the retention boundaries
+
+# Every retention test above ages a file to `threshold + 60`, which is the rule as anyone
+# would describe it and says nothing about where the rule turns over. The whole promise is
+# four comparisons (tests/mutation_scope.py, `ttl`), and an off-by-one in one of them keeps
+# data a day longer or deletes it a day early without ever raising — so the four are pinned
+# here at the instant they change their mind, by passing `now` rather than by waiting.
+
+
+def test_a_room_idle_for_exactly_the_threshold_is_not_reaped_yet(tmp_path) -> None:
+    """`idle > IDLE_SECONDS`, not `>=`: the promise is *untouched for seven days*, so the
+    room that has been idle for exactly seven days is the last one still kept."""
+    import store
+
+    store.append(tmp_path, "edge", "bot", "hi")
+    path = store.room_path(tmp_path, "edge")
+    mtime = path.stat().st_mtime
+
+    assert store._reapable(path, mtime + store.IDLE_SECONDS, False) is None
+    assert store._reapable(path, mtime + store.IDLE_SECONDS + 1, False) == "idle"
+
+
+def test_a_stillborn_room_at_exactly_its_threshold_is_not_reaped_yet(tmp_path) -> None:
+    """The same edge on the shorter rule. One message and nobody answered gets 24 hours,
+    and the 24th hour is still inside it."""
+    import store
+
+    store.append(tmp_path, "opener", "bot", "anyone there?")
+    path = store.room_path(tmp_path, "opener")
+    mtime = path.stat().st_mtime
+    assert store._stillborn(path), "premise: one message, so the stillborn rule applies"
+
+    assert store._reapable(path, mtime + store.STILLBORN_SECONDS, True) is None
+    assert store._reapable(path, mtime + store.STILLBORN_SECONDS + 1, True) == "stillborn"
+
+
+def test_a_guard_note_outlives_a_room_idle_for_exactly_the_threshold(tmp_path) -> None:
+    """`<= IDLE_SECONDS`: the guard goes when the room goes, not one second before it.
+
+    A guard that expired first is the failure the rule exists to prevent — the allow-list
+    disappears while the room is still live, and every listed key silently loses write
+    access to a room people are still using.
+    """
+    import store
+
+    store.append(tmp_path, "d-live", "bot", "hi")
+    did, _ = _keypair()
+    store.note_set(tmp_path, store.OWNERS_NS, "d-live", did)
+    note = store.note_path(tmp_path, store.OWNERS_NS, "d-live")
+    room_mtime = store.room_path(tmp_path, "d-live").stat().st_mtime
+
+    assert store._guards_a_live_room(tmp_path, note, room_mtime + store.IDLE_SECONDS)
+    assert not store._guards_a_live_room(tmp_path, note, room_mtime + store.IDLE_SECONDS + 1)
+
+
+def test_an_e_room_record_expires_against_utc_not_the_servers_clock(tmp_path) -> None:
+    """`ts` is stamped UTC and has to be read back as UTC, whatever TZ the host is set to.
+
+    Parsed without a timezone it would be read as *local* time, so the same record would
+    look up to a day older or younger depending on where the container runs — an `e-` room
+    dropping records early on one host and holding them late on another, from a deployment
+    detail nobody would think to look at. CI runs in UTC, where the two agree exactly,
+    which is what lets this go unnoticed: the assertion below is identical on both and only
+    the timezone around it makes it discriminate.
+    """
+    import time as time_module
+    from datetime import UTC, datetime
+
+    import store
+
+    stamped = "2026-01-01T00:00:00.000000Z"
+    cutoff = datetime(2026, 1, 1, tzinfo=UTC).timestamp() - 3600  # an hour before it: alive
+    original = os.environ.get("TZ")
+    try:
+        for tz in ("UTC", "XXX-14", "XXX+12"):  # POSIX offsets, so no tzdata is required
+            os.environ["TZ"] = tz
+            time_module.tzset()
+            assert not store._expired({"ts": stamped}, cutoff), f"read as local time under {tz}"
+    finally:
+        if original is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original
+        time_module.tzset()
+
+
 # ------------------------------------------------------------ the compaction byte budget
 
 
