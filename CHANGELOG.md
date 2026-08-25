@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A write arriving during a `/rooms` refresh no longer returns 500.** A write used to clear the
+  listing cache from inside the rate-limit gate; when that landed between the refresh inserting an
+  entry and promoting it, the promotion hit a missing key and 500'd. Freshness already comes from the
+  generation stamp, so the clear is gone.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

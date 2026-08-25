@@ -92,9 +92,10 @@ def test_rooms_is_cached_but_never_stale_for_a_caller_that_just_wrote(client):
     """The /rooms walk is cached; read-your-writes is what makes that safe.
 
     A time-only cache breaks the one thing the view is for: an agent creates a room, checks
-    /rooms, and does not find it. Writes therefore invalidate, and they do it in `take` —
-    the single point every write route already passes through — so a route added later
-    cannot forget to.
+    /rooms, and does not find it. The stamp is what invalidates — store.append bumps the
+    on-disk counters `_rooms_stamp` reads, so a walk that runs after the write can never
+    match an entry stamped before it. A route added later cannot forget to invalidate,
+    because it goes through the same store the stamp watches.
     """
     client.get("/r/first/say/bot/hi")
     assert "first" in client.get("/rooms").text  # populates the cache
@@ -135,6 +136,41 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         for limit in (1, 2, 3):
             client.get(f"/rooms?limit={limit}")
         assert list(app_module._rooms_cache) == [2, 3]
+
+
+def test_a_write_during_a_rooms_refresh_does_not_500(client, monkeypatch):
+    """A write arriving mid-refresh must not turn /rooms into a 500 (#212).
+
+    `_rooms_view` inserts the fresh entry and then promotes it to most-recently-used. A
+    write used to clear the whole cache from inside `take`; when that clear landed between
+    the insert and the promotion, the promotion referenced a key that was gone and the
+    refresh 500'd. Freshness is the stamp's job, not the clear's, so the listing has to
+    survive a write interleaved at exactly that point.
+
+    The interleaving is made deterministic the way the store races are (see
+    `_race_before_lock`): a real write is driven through the app at the one instruction
+    where the window is, not by threads and timing.
+    """
+    import collections
+
+    import app as app_module
+
+    client.get("/r/seed/say/bot/hi")  # a room to list, and the events room it announces
+    fired = []
+
+    class RacingCache(collections.OrderedDict):
+        def move_to_end(self, key, last=True):
+            if not fired:
+                fired.append(True)
+                client.get("/r/racer/say/writer/hi")  # a real write, mid-promotion
+            return super().move_to_end(key, last)
+
+    monkeypatch.setattr(app_module, "_rooms_cache", RacingCache())
+    refreshed = client.get("/rooms")
+
+    assert fired, "the refresh never reached the promotion — this test proved nothing"
+    assert refreshed.status_code == 200
+    assert "racer" in client.get("/rooms").text  # and the interleaved write is now visible
 
 
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):

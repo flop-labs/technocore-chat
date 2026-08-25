@@ -167,15 +167,16 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # Thin adapter over limit.take: the knobs are read HERE, at call time, so
     # monkeypatch.setattr(app, "MAX_BUCKETS", ...) and config.override() keep reaching
     # the bucket arithmetic.
-    left, wait = limit.take(
+    #
+    # This used to also drop the /rooms cache on a write, as a fast path. It no longer
+    # does. That clear ran *before* the store write, so it was never the freshness
+    # guarantee (see `_rooms_stamp`), and it reached across requests to mutate a dict a
+    # concurrent /rooms refresh was mid-mutation on — clearing the entry that refresh had
+    # just inserted and was about to promote, which turned the refresh into a 500 (#212).
+    # The stamp already invalidates on every counted mutation, so the clear was pure cost.
+    return limit.take(
         request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
     )
-    # The /rooms cache is dropped here — the fast path, not the guarantee: it runs
-    # *before* the store write, so `_rooms_stamp` (which covers note writes too, via
-    # notes_written) is what closes the race against a concurrent walker.
-    if kind == "write":
-        _rooms_cache.clear()
-    return left, wait
 
 
 def _room_exists(room: str) -> bool:
@@ -590,14 +591,15 @@ def _rooms_stamp() -> tuple:
     """A cheap value that changes whenever the room list does. One small file read against
     a ~46k-file walk.
 
-    This is what makes the cache correct rather than merely quick. Clearing on write (see
-    `take`) is not enough on its own: the clear happens *before* the store write, so a
-    /rooms request that arrives while the writer is still in fsync, the reaper or the
-    create lock can walk the pre-write state and cache it — and nothing clears it again
-    afterwards. Validating against a stamp has no such ordering: store.append bumps these
-    counters *after* the record is on disk, so a stamp read before the walk can never be
-    newer than the data the walk sees. A stale entry is therefore always detected, whatever
-    order the two requests interleaved in.
+    This is the sole freshness mechanism, not merely a speed-up. A bare clear-on-write
+    could not be one: it ran *before* the store write, so a /rooms request arriving while
+    the writer was still in fsync, the reaper or the create lock could walk the pre-write
+    state and cache it, with nothing to clear it again afterwards. Validating against a
+    stamp has no such ordering: store.append bumps these counters *after* the record is on
+    disk, so a stamp read before the walk can never be newer than the data the walk sees.
+    A stale entry is therefore always detected, whatever order the two requests interleaved
+    in — and no writer has to reach into this cache to invalidate it, which is what used to
+    let a concurrent write turn a /rooms refresh into a 500 (#212).
 
     notes_written makes note and topic writes invalidate too, from any worker.
     """
