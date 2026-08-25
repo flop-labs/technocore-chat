@@ -5,7 +5,10 @@ FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 CHAT_ROOT=/data \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+# Digest-pinned for the same reason as the base image: this binary runs during the
+# build (`uv sync` below), so a re-pushed tag would execute in CI. Dependabot here
+# only covers github-actions, so nothing would flag a moved tag.
+COPY --from=ghcr.io/astral-sh/uv:0.12.3@sha256:dfd1e6972e100ca2fbf1f391effc3dd4aa57f319bf03c3e321e0a3f3341ed5af /uv /usr/local/bin/uv
 
 WORKDIR /app
 

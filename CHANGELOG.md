@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **Docker: the `uv` build image is digest-pinned**, like the base image above it. The tag `0.12.3`
+  runs during the build, so a re-pushed tag would execute in CI. Dependabot here covers only
+  `github-actions`, so a moved tag raised no alert.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
