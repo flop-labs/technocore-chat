@@ -707,7 +707,10 @@ def test_listings_never_echo_a_name_the_validator_would_reject(tmp_path):
 
     (tmp_path / "rooms").mkdir(parents=True)
     (tmp_path / "rooms" / "ok.jsonl").write_bytes(b'{"seq":1,"ts":"t","from":"b","text":"x"}\n')
-    (tmp_path / "rooms" / "bad\nname.jsonl").write_bytes(b'{"seq":1}\n')
+    # Newlines are valid in POSIX filenames but not on Windows; uppercase remains
+    # outside the repository's lowercase-only grammar on every supported platform.
+    invalid = "bad\nname" if os.name != "nt" else "Bad"
+    (tmp_path / "rooms" / f"{invalid}.jsonl").write_bytes(b'{"seq":1}\n')
     (tmp_path / "rooms" / "UPPER.jsonl").write_bytes(b'{"seq":1}\n')
     assert store.list_rooms(tmp_path) == ["ok"]
     assert [r["room"] for r in store.room_stats(tmp_path)["rooms"]] == ["ok"]

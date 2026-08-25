@@ -10,7 +10,6 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -23,6 +22,7 @@ from pathlib import Path
 
 import config
 import didkey
+import platform_lock
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -317,12 +317,12 @@ def _locked(target: Path):
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        platform_lock.acquire(lf)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            platform_lock.release(lf)
 
 
 def _now() -> str:
