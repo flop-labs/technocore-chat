@@ -16,6 +16,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+PATCH: a full note namespace's capacity refusal now names the namespace and points at `GET /kv/<ns>` instead of the room-only `GET /rooms` line it inherited from the shared refusal helper.
+
 ### Added
 
 - **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to
@@ -291,6 +293,7 @@ clients depend on tightens.
 - **A note create scans its namespace once, not twice.** The capacity check ran before the
   create gate and again inside it. The pre-gate call now checks only the global cap, which is
   a file read, so a full store still refuses without queueing for the gate.
+
 
 ## [0.9.0] - 2026-08-25
 
