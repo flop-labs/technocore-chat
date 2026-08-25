@@ -9,6 +9,7 @@ import pytest
 from _client import (
     _age,
     _at,
+    _keypair,
     _race_before_lock,
     _stats_for,
 )
@@ -216,17 +217,42 @@ def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatc
 
 
 def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
-    """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
+    """MAX_NOTES_PER_NS >= MAX_ROOMS is only true if the *global* note cap can cover it.
 
     Raising MAX_ROOMS without raising MAX_NOTES_TOTAL would leave the per-namespace cap
-    nominally equal to the room cap and the global cap binding first — the invariant would
+    nominally at or above the room cap and the global cap binding first — the invariant would
     read as intact in the source and be false on disk.
+
+    A floor rather than an equality since CHAT_MAX_NOTES_PER_NS: an operator may widen one
+    namespace past the room count, and nothing about the reserved namespaces cares that they
+    can. What they may not do is go under it, which is the direction this guards.
     """
     import store
 
-    assert store.MAX_NOTES_PER_NS == store.MAX_ROOMS
+    assert store.MAX_NOTES_PER_NS >= store.MAX_ROOMS
     reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
     assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS
+
+
+def test_listing_notes_does_not_evict_the_room_names(tmp_path):
+    """`_listable` is memoized for the rooms walk, which asks about the same MAX_ROOMS names
+    on every /rooms. Note *keys* go through the same test and there can be MAX_NOTES_PER_NS
+    of them in one listing — enough to flush the cache on a single /kv/<ns> read and leave
+    the walk cold, for entries nothing asks about twice. So `list_notes` calls the
+    undecorated function, and this is what says so.
+    """
+    import store
+
+    for i in range(20):
+        store.append(tmp_path, f"room{i}", "bot", "hi")
+    store.list_rooms(tmp_path)  # warms the cache with room names
+    warm = store._listable.cache_info().currsize
+    assert warm >= 20
+
+    for i in range(200):
+        store.note_set(tmp_path, "did", f"k{i}", "v")
+    assert store.list_notes(tmp_path, "did") == sorted(f"k{i}" for i in range(200))
+    assert store._listable.cache_info().currsize == warm, "a note listing must not touch it"
 
 
 def test_rejected_write_leaves_no_lock_file(tmp_path, monkeypatch):
@@ -1022,3 +1048,34 @@ def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
     store.note_path(tmp_path, store.TOPIC_NS, "aaa").unlink()  # a reaper-style deletion
     with config.override(NOTE_STATS_CACHE_SECONDS=0):
         assert topics()["aaa"] is None  # visible once the clock (here: disabled) expires
+
+
+def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path):
+    """The stated boundary of `_last_nonce`'s bytes-level reject, not a wish.
+
+    The reject assumes the DID is in the line as itself. Both encoders this store has ever
+    written rooms with put it there literally — test_json_backend.py pins that byte-for-byte
+    — so the only way to produce the record below is to write the file with something else.
+    `_parse` still yields the right `from`, and the scan still skips it, which means a replay
+    of that record's nonce is accepted while the record sits in the window.
+
+    That is a real narrowing, kept deliberately: covering it costs a second scan of every
+    line (2.1 ms -> 3.7 ms against a 4.1 ms baseline on tests/capacity_bench.py), which is
+    most of what the reject buys, to defend files this store did not write. Make the scan
+    escape-aware and this test is what tells you: delete it and pin the opposite.
+    """
+    import didkey
+    import store
+
+    did, _ = _keypair()
+    assert didkey.is_did(did)  # a key the verifier would accept, not a did-shaped string
+    escaped = "".join(f"\\u{ord(c):04x}" for c in did)
+    room = store.room_path(tmp_path, "lobby")
+    room.parent.mkdir(parents=True)
+    room.write_bytes(
+        b'{"seq":1,"ts":"t","from":"' + escaped.encode() + b'","text":"signed","nonce":7}\n'
+    )
+    rec = store._parse(room.read_bytes())
+    assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
+    assert did.encode() not in room.read_bytes()  # but not present as itself, so:
+    assert store._last_nonce(tmp_path, "lobby", did) is None

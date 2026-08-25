@@ -54,9 +54,10 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
-# The note-capacity walk (~41k stats at the cap) and topic previews, reused across
-# /rooms requests. Stamped on the notes_written counter, so a note write invalidates
-# immediately from any worker; only reaper deletions can be this stale. 0 disables.
+# The note-capacity gauge and topic previews, reused across /rooms requests.
+# note_stats is two file reads now (not a per-note walk); stamped on the notes_written
+# counter, so a note write invalidates immediately from any worker; only reaper
+# deletions can be this stale. 0 disables.
 NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
 # s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are
@@ -90,6 +91,60 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # when the IDLE_SECONDS reaper takes the file.
 EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
 
+# How many rooms the service will track. Floored at 1 for the same reason the rate knobs
+# are: the capacity check divides the tracked count against it, and a zero would refuse
+# every creation rather than the "no limit" a hand-edited 0 presumably meant. The default
+# is the 5120 this was hardcoded to before, so an instance that sets nothing does not move.
+#
+# It became a knob because it is a *fail-closed* cap on a shared resource: past it nobody
+# creates a room, not just the caller who filled it. A flood took production from 147 to
+# 1319 rooms in 16 hours, which put the hardcoded ceiling ~9 hours out with no lever short
+# of a release. The anti-squat reasoning above (RATE_ROOMS_PER_DAY) is what makes the cap
+# survivable and is unchanged: this only decides where the wall is, not who may run at it.
+# Raising it costs directory walks (the reaper and /rooms are O(cap)), not disk — the disk
+# budget is MAX_TOTAL_ROOM_BYTES and is enforced separately.
+MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
+# What ONE namespace may hold. Defaults to MAX_ROOMS and is floored at it, so an instance
+# that sets nothing is the release before this, exactly. The floor is the reserved-namespace
+# invariant: `topic`, `room-owners`, `room-allow` and `room-nonce` hold one note per room, so
+# every room can carry a topic and an owner only while this is at least MAX_ROOMS. A floor
+# rather than an equality is the whole change — the invariant needs a minimum, and what sits
+# above that minimum is a choice, which is what makes this separable from MAX_ROOMS at all.
+#
+# It became a knob because a full namespace had no lever of its own. On technocore.chat the
+# `did` namespace sat at 10,240 of 10,240 while the whole store was 6.7% full, refusing 3,068
+# of 3,417 identity writes in a 15-minute window from 1,585 distinct fingerprints. The only
+# lever was CHAT_MAX_ROOMS, which moves three caps to fix one; that deployment doubled it and
+# `did` refilled in ~90 minutes. Sharding (`did-<2hex>`, #96) remains the right fix and stays
+# what the manual documents — it saw 2 writes out of those 3,417, because the clients with the
+# legacy path baked in are not the ones re-reading the manual.
+#
+# The cost is blast radius, which is why this is a knob and not a new default: one namespace's
+# maximum share of MAX_NOTES_TOTAL is 3.1% at the default and 12.5% at 4 * MAX_ROOMS. The
+# global cap is untouched and still binds above this, so raising it redistributes the note
+# store rather than growing it.
+#
+# It costs no walk, which was not quite true when the knob landed. 0.9.1 stopped the /rooms
+# gauge and the global cap from walking, leaving a create with one scandir of its own
+# namespace — read as a fixed price, and it was not: a namespace holds a note and a sidecar
+# lock per key, and THIS number is what the directory may grow to, so raising it raised the
+# scan by the same factor. 0.9.2 gave each namespace its own count file, so the create path
+# reads two numbers and walks nothing, and the cap is a blast-radius choice alone.
+MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
+# Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
+# real ceiling is N times these — which is the reason they are knobs at all: an operator
+# adding workers has no other way to hold the total where it was. 0 is meaningful here and
+# is therefore allowed: it refuses every long-poll slot, degrading `?wait=` to an immediate
+# empty reply, which is exactly what exceeding the cap already does.
+MAX_WAITERS_TOTAL = max(0, int(os.environ.get("CHAT_MAX_WAITERS_TOTAL", "64")))
+MAX_WAITERS_PER_IP = max(0, int(os.environ.get("CHAT_MAX_WAITERS_PER_IP", "4")))
+# Not a CHAT_ knob, and not read for behaviour: uvicorn's own worker-count variable, echoed
+# into /stats so a reader can tell that the request counters beside it are one worker's
+# share. uvicorn takes it as the default for --workers, so setting WEB_CONCURRENCY=3 drives
+# both the process count and this figure from one place; passing --workers 3 instead leaves
+# this at 1 and /stats will say so honestly rather than guess.
+WORKERS = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
+
 
 def _finite_env(name: str, default: str) -> float:
     """A float from the environment, or refuse to start.
@@ -116,6 +171,24 @@ def _finite_env(name: str, default: str) -> float:
 # publish this number, and a tuned instance still saying 10 is the drift manifest.py
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
+
+# How long an identical unsigned write is answered with the message it repeats instead of
+# writing a second one. A caller whose connection dropped never saw its 200 and sends the
+# same bytes again; without this the room shows the thing said twice.
+#
+# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
+# request distinguishes a retry from a caller that meant to say the same thing twice, so
+# this trades a duplicate for a *dropped message* — and on this service identical rapid
+# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
+# and text back to back and require all of them to land, `test_lane_parity` among them,
+# because one write through each lane IS the same nick and text. Enabling it silently
+# collapses those. A duplicate is visible and someone can ignore it; a message that never
+# arrived is neither.
+#
+# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
+# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
+# short either way — past a few seconds a repeat is a conversation, not a retry.
+DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
 
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one

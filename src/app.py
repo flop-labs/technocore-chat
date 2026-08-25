@@ -19,6 +19,7 @@ import tomllib
 from collections import OrderedDict
 from pathlib import Path
 
+import orjson
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
@@ -141,6 +142,8 @@ LISTING_BANNER = (
 # call time and passed into limit as parameters, exactly as per_min/burst already were.
 MAX_BUCKETS, CHARGED_CREATION = limit.MAX_BUCKETS, limit.CHARGED_CREATION
 MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP = limit.MAX_WAITERS_TOTAL, limit.MAX_WAITERS_PER_IP
+DEDUP_SECONDS = config.DEDUP_SECONDS
+MAX_RECENT_WRITES = limit.MAX_RECENT_WRITES
 FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
 _requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
 # _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
@@ -602,16 +605,21 @@ def _rooms_stamp() -> tuple:
     return tuple(counted[key] for key in store.COUNTER_KEYS)
 
 
-# One entry — the note walk does not depend on `limit`. Stamped on ROOT and the on-disk
+# One entry — the note gauge does not depend on `limit`. Stamped on ROOT and the on-disk
 # notes_written counter (bumped after each note write, read by every worker), with the
-# same read-before-walk ordering as _rooms_stamp.
+# same read-before-compute ordering as _rooms_stamp.
 _note_stats_cache: tuple[tuple, float, dict] | None = None
 
 
 def _note_stats() -> dict:
     """store.note_stats through its own cache: the note gauge changes only when a note
     is written or reaped, while the rooms walk is stale on every message. Fused, the
-    41k-stat walk re-ran per message; the clock only bounds reaper deletions."""
+    note gauge re-ran per message; the clock only bounds reaper deletions.
+
+    This used to be load-bearing rather than merely useful: store.note_stats stat()ed every
+    note, so a miss here cost 480 ms at the cap. It reads two integers now, and this cache
+    saves a file read. Keep it anyway — the stamp is what makes a second worker's write
+    visible here — but it is no longer the thing standing between /rooms and the store."""
     global _note_stats_cache
     stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
     now = time.monotonic()
@@ -665,10 +673,17 @@ def rooms(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
-    view = _rooms_view(_cursor(q.get("limit"), 50))
+    # Clamped here rather than only inside room_stats, because this number is the cache
+    # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
+    # incrementing it walked every room on every request and evicted everyone else's view
+    # out of a 64-entry cache while doing it. Now the key space is the reply space.
+    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
+    n = view["notes"]
+    # Both note caps, for the reason the room head prints both of its own: either can be the
+    # one that refuses the next write, and the per-namespace figure moves per deployment.
     notes_line = (
-        f"# notes {view['notes']['total']} of {view['notes']['capacity']} "
-        f"({_size(view['notes']['bytes'])} total, namespaces not listed)"
+        f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
+        f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     if not view["total"]:
         body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
@@ -933,6 +948,44 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     return did
 
 
+def _retry_key(request: Request, room: str, nick: str, body: str) -> tuple:
+    """What makes two unsigned writes the same write. The text is digested rather than
+    kept, so the key is a fixed size whatever the caller sent.
+
+    The client is part of the key and has to be: behind a CDN that this deployment is not
+    configured to read a header from, every caller shares one address (see the
+    client_identity block in /stats), and a key without it would let one agent's "ok"
+    swallow another's. Including it can only ever make the key more specific.
+    """
+    digest = hashlib.blake2b(body.encode("utf-8"), digest_size=16).digest()
+    return (client_ip(request), room, nick, digest)
+
+
+def _already_written(request: Request, key: tuple, room: str, left: int) -> Response | None:
+    """The reply an identical write got moments ago, or None to go ahead and write it.
+
+    Answering with the original record rather than an error is the whole point: a retry
+    means the caller never saw its 200, so a refusal would report failure for a write that
+    succeeded. It gets the seq its message actually has.
+
+    The record is recovered from the room view this reply carries anyway, so a hit costs
+    one read and skips the append entirely — no flock, no fsync, no reaper. If the seq has
+    already left the window (a busy room, or compaction), there is nothing to answer with
+    and the write goes ahead: a duplicate is the safe direction, not a dropped message.
+    """
+    if DEDUP_SECONDS <= 0:
+        return None
+    seq = limit.recent_write(key, time.monotonic(), DEDUP_SECONDS)
+    if seq is None:
+        return None
+    view = store.read_messages(config.ROOT, room, limit=20)
+    posted = next((m for m in view["messages"] if m.get("seq") == seq), None)
+    if posted is None:
+        return None
+    config._dbg(3, "retry", room=room, seq=seq)
+    return respond(request, {**view, "posted": posted}, note=budget_note("write", left, RATE_WRITE))
+
+
 def room_say(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
@@ -941,7 +994,13 @@ def room_say(request: Request) -> Response:
     denied = _room_write_gate(request, room, None)
     if denied:
         return denied
-    rec = store.append(config.ROOT, room, request.path_params["nick"], request.path_params["text"])
+    nick, body = request.path_params["nick"], request.path_params["text"]
+    key = _retry_key(request, room, nick, body)
+    replay = _already_written(request, key, room, left)
+    if replay is not None:
+        return replay
+    rec = store.append(config.ROOT, room, nick, body)
+    limit.remember_write(key, rec["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1009,7 +1068,12 @@ async def read_json(request: Request) -> dict | Response:
         if len(raw) > MAX_BODY:
             return text(f"{too_large}\nthe stream passed it before it ended.", 413)
     try:
-        payload = json.loads(bytes(raw) if raw else b"{}")
+        # orjson here, stdlib json for the three documents below. orjson is ~4.7x on the
+        # parse and, on a service whose whole job is hostile input, refuses the
+        # `NaN`/`Infinity` literals stdlib accepts — the same non-finite tokens
+        # config._finite_env already refuses to boot with. The documents keep stdlib
+        # because they are published with indent=1 and orjson only offers indent 2.
+        payload = orjson.loads(bytes(raw) if raw else b"{}")
     except ValueError as exc:
         return text(
             f"400 body must be JSON, and this did not parse: {exc}.\n"
@@ -1059,8 +1123,14 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            posted = store.append(
-                config.ROOT, room, str(payload.get("from", "")), str(payload.get("text", ""))
+            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
+            key = _retry_key(request, room, nick, sent)
+            replay = _already_written(request, key, room, left)
+            if replay is not None:
+                return replay
+            posted = store.append(config.ROOT, room, nick, sent)
+            limit.remember_write(
+                key, posted["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES
             )
         else:
             posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
@@ -1449,7 +1519,22 @@ async def stats(request: Request) -> Response:
         _stats_cache = (now, view)
     view = {
         **view,
-        "requests": {**_requests, "uptime_seconds": int(time.time() - _started)},
+        # Per *worker*, and labelled as such rather than summed. `_requests` is a plain
+        # module dict, so under `--workers N` this endpoint reports roughly one worker's
+        # share of the traffic — the digest that reads it was quietly under-reporting by
+        # 3x once production moved to `--workers 3`. Sharing the counters through a file
+        # in CHAT_ROOT was the alternative and was rejected: it would make them outlive
+        # the process, and `uptime_seconds` sitting beside them is what turns a count into
+        # the rate anyone actually reads (see limit._requests, which says the same). A
+        # durable counter over a per-process uptime is a wrong rate, quietly. So the fix
+        # is to say what the number is: multiply by `workers` for a service-wide estimate,
+        # and see config.WORKERS for why that figure needs WEB_CONCURRENCY to be right.
+        "requests": {
+            **_requests,
+            "uptime_seconds": int(time.time() - _started),
+            "scope": "per_worker",
+            "workers": config.WORKERS,
+        },
         "capacity_limits": {
             "message_chars": store.MAX_TEXT_CHARS,
             "note_chars": store.MAX_VALUE_CHARS,

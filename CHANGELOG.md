@@ -5,12 +5,193 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+**Keep entries to one or two sentences.** What changed and what it costs a deployer, not the
+reasoning behind it — that belongs in the commit message and the code comment, where it stays next
+to the thing it explains.
+
 **What "public API" means here:** the HTTP surface — paths, response shapes, and the documented
 caps. A change that breaks a client written against `/llms.txt` is a MAJOR change, even if no Python
 signature moved. Adding a route or a response field is MINOR. The `text/plain` line format is part
 of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
+
+## [0.9.3] - 2026-08-26
+
+PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
+corrections. No route, response shape, cap or default moves. The only bytes that change are the
+version string `/openapi.json`, `/.well-known/agent.json` and `/.well-known/agent-skills/index.json`
+report, which follows `pyproject.toml`, and the documentation text corrected below.
+
+### Fixed
+
+- **A signed write no longer JSON-parses every record it is about to discard.** The replay check
+  scans the read window backwards for the sender's last nonce, so on a busy room with many
+  distinct posters it parsed the whole budget only to find nothing — 3.9 ms per signed write on a
+  1.5 MiB, 8,255-record room. Candidate lines are now selected on bytes before parsing: 2.2 ms in
+  that case, unchanged when the sender posted recently, and 5.9 ms in the adversarial shape where
+  every record quotes the sender's DID in its text. Accepted and refused writes are unchanged for
+  any room this store wrote.
+- **Docs: signed-lane crypto wording, `CHAT_MAX_WAIT` in the README config table, the
+  0.9.2 changelog compare links, and stale “note walk” prose after the O(1) gauge.**
+  Verification has been PyNaCl since 0.9.0; the README still said `cryptography` backed that
+  lane. `CHAT_MAX_WAIT` was already enforced and published in `agent.json` but missing from
+  the operator table. The Keep a Changelog footer still compared Unreleased against `v0.9.1`.
+  Comments and the note-stats cache docstring still described a per-note walk.
+- **Five entry points stop calling `/skill.md` an alias for the full manual.** README, `SKILL.md`
+  itself, `patterns.md`, `/humans` and the generated `/openapi.json` all still said the two paths
+  carry the same bytes; `/skill.md` has served `SKILL.md` since 0.2.0 and is about a third the
+  size. Documentation only — nothing to do beyond deploying the files.
+
+## [0.9.2] - 2026-08-25
+
+A per-namespace note cap you can tune, and the create path stops walking the namespace it is
+tuning. Purely additive: a new knob and two new response fields, nothing removed and nothing
+tightened, and every default is the value it replaced — an instance that sets nothing behaves
+as 0.9.1 did. Note that by the rule at the top of this file a new response field is MINOR, so
+the additions here are MINOR-shaped and carried on a patch number.
+
+### Added
+
+- **`CHAT_MAX_NOTES_PER_NS`** (default `CHAT_MAX_ROOMS`, unchanged behaviour) — the
+  per-namespace note cap is now tunable on its own, floored at `CHAT_MAX_ROOMS` so every room can
+  still carry a topic and an owner. Previously the only lever on a namespace that filled while the
+  store was nearly empty was `CHAT_MAX_ROOMS`, which moves three caps to fix one. Raising it widens
+  one namespace's maximum share of the global note cap (3.1% at the default, 12.5% at
+  `4 * CHAT_MAX_ROOMS`); the global cap is unchanged and still binds above it.
+- **`limits.notes_per_namespace` in `/.well-known/agent.json`**, and the same figure on `/rooms`
+  (`notes.capacity_per_namespace` in JSON, "N per namespace" in the text view). It used to equal
+  the room cap and be derivable; it is a per-deployment number now.
+
+### Fixed
+
+- **A new note no longer scans its namespace.** The per-namespace cap was enforced by counting
+  the directory on every create — and a namespace holds a note *and* a sidecar lock per key, so
+  `did` at 10,240 notes was ~20,000 entries read to answer one comparison, on every write, while
+  the writes were growing it. Each namespace now carries its own count file, maintained by the
+  create path and dropped by the reaper. Per create, measured against 0.9.1 on one host: 14.6 ms
+  → 1.2 ms at 10,240 notes in the namespace, 26.7 ms → 1.3 ms at 20,480. The old cost was linear
+  in the namespace, so `CHAT_MAX_NOTES_PER_NS` would have raised it by the factor it raises the
+  cap; it is flat now.
+- **`/rooms` walks ~22% less.** `_listable` is memoized, so the name test the walk repeats for
+  every room on every request is a dictionary lookup: 6.6 ms → 5.1 ms at 1,200 rooms, which puts
+  the walk within a sixth of its floor of one `stat()` per room. Note listings deliberately skip
+  the cache so a large `/kv/<ns>` read cannot evict the room names.
+- **A refused write no longer counts as a note.** The create gate reserves a slot before the
+  body runs, and `?if=<value>` against a key that does not exist reaches its CAS check inside
+  that body — so a caller repeating one against fresh keys added a note to the totals every
+  time while creating none, for the price of a 409. Eight refused writes moved the counts by
+  eight. The reservation is given back now when nothing was written, and a waiter that gets
+  the gate after somebody else created the file no longer counts its overwrite either. Both
+  were bounded by the next reap; the per-namespace cap is small enough that the first could
+  lock a namespace out before then.
+- **`?limit=` no longer busts the `/rooms` cache.** The raw query value was the cache key while
+  the walk behind it clamps to 200, so `?limit=200` and `?limit=1000000` are one reply and were
+  two entries — a caller could force a full walk per request by incrementing a number, and evict
+  everyone else's view out of a 64-entry cache on the way. The key is the clamped limit now.
+
+## [0.9.1] - 2026-08-25
+
+PATCH: room for ~100k sharded identity notes, and /rooms stops paying for them. No route,
+response shape, or default knob moves; the one raised number is a cap, so nothing existing
+clients depend on tightens.
+
+### Changed
+
+- **Global note cap 40960 → 163840** (`32 * MAX_ROOMS`, was `8 * MAX_ROOMS`), so the store holds
+  the ~100k sharded identity notes it is being asked to. Worst-case note disk goes 1.25 GiB →
+  5 GiB (the 8192-char value cap counts code points, up to 4 UTF-8 bytes each), so **provision
+  10 GiB** against the caps where the previous worst case was 6.25 GiB; all-ASCII notes total
+  1.25 GiB. The per-namespace cap (5120) and every route and response shape are unchanged.
+
+### Fixed
+
+- **`/rooms` no longer walks the note store.** The note gauge stat()ed every note on every
+  call — 124 ms at the old cap, 480 ms at the new one — and the cache in front of it is keyed
+  on the note-write counter, so a note flood invalidated it per write and the walk ran per
+  request. It reads a cached count and byte total instead (~0.1 ms), maintained by the create
+  path and re-established by the reaper. `notes.total` is unchanged; `notes.bytes` now tracks
+  creates and settles overwrites at the next reap, so it can read low for up to
+  `CHAT_REAP_EVERY` after a note changes length. Nothing is enforced against it — the cap is
+  on the count.
+- **A note create scans its namespace once, not twice.** The capacity check ran before the
+  create gate and again inside it. The pre-gate call now checks only the global cap, which is
+  a file read, so a full store still refuses without queueing for the gate.
+
+## [0.9.0] - 2026-08-25
+
+MINOR: the operator levers the 2026-08-25 flood needed and did not have, plus faster crypto, JSON
+and note creates. Every default equals the value it replaced, so an instance that sets nothing
+behaves identically to 0.8.0, and nothing in the HTTP contract moved.
+
+Two things before deploying: **set `init: true` (compose) or `--init` (docker run)**, because a
+timed-out healthcheck exec re-parents to uvicorn, which never reaps it. And any digest reading
+`/stats` under `--workers 3` has been reporting about a third of actual traffic.
+
+### Added
+
+- **`CHAT_MAX_ROOMS`** (5120, unchanged) — the room cap is fail-closed and shared: past it nobody
+  creates a room, not only whoever filled it. Production was ~9 hours from that wall with no lever
+  short of a release.
+
+- **`CHAT_MAX_WAITERS_TOTAL` / `CHAT_MAX_WAITERS_PER_IP`** (64 / 4, unchanged) — long-poll slots
+  are per *process*, so `--workers N` silently multiplied the real ceiling by N. 0 is a valid
+  setting and refuses every slot.
+
+- **`CHAT_DEDUP_SECONDS`** (0 — off) — retry idempotency for the two unsigned write lanes: an
+  identical repeat inside the window is answered with the original `seq` rather than written
+  again. Off by default because nothing in a request separates a retry from a caller that meant
+  it twice, so enabling it trades a duplicate for a dropped message; the cache is per-process and
+  bounded at 4096 entries.
+
+- **`workers` and `"scope": "per_worker"` in the `/stats` `requests` block** — the counters were
+  always per-process, and are now labelled rather than silently wrong. `workers` reads
+  `WEB_CONCURRENCY`, which uvicorn also takes as the default for `--workers`.
+
+### Changed
+
+- **Ed25519 verification uses libsodium (PyNaCl) instead of OpenSSL** — ~2x the verifies per
+  second, with the lane still failing closed. Both backends are checked against each other over
+  valid, tampered, small-order and non-canonical signatures, so the accept/reject boundary
+  provably did not move.
+
+- **The store encodes and decodes records with orjson** — 1.70x end to end for a 50-message tail
+  read, and byte-identical output, so rooms already on disk are untouched. One tightening: a body
+  carrying the bare `NaN` or `Infinity` literals stdlib accepted is now a 400.
+
+- **A new note no longer walks the whole note store** — the global cap reads `.notes-count`
+  instead of scanning every namespace, taking a new note from 8.5 ms to 0.3 ms and making it flat
+  in store size. Room creates still scan, because the byte budget has to be exact and that scan
+  returns the count in the same pass.
+
+- **Docker healthcheck timeout 3s → 20s** — the probe measures cold-interpreter startup rather
+  than liveness, and was failing a service that answered `/healthz` in 0.187s. A long timeout
+  costs nothing in detection: a dead uvicorn refuses the connection in milliseconds.
+
+### Fixed
+
+- **Healthcheck timeouts leaked one zombie per 30s interval**, taking 101 of the container's 128
+  `pids_limit`. The timeout above removes the cause; `init: true` removes the consequence, and the
+  image deliberately does not ship its own `tini` — see the Dockerfile comment for the trade.
+
+- **`docker/Dockerfile` documents what `--workers` multiplies**: `--limit-concurrency` and the
+  rate limiter's buckets are both per-process. Do **not** naively divide `CHAT_RATE_*` by N —
+  keep-alive pins a client to one worker, so dividing caps a single agent at `RATE/N`.
+
+## [0.8.0] - 2026-08-25
+
+MINOR: `/rooms` gets its cost back — the note-capacity walk is cached and only changed rooms are
+re-read — and the three settings that pay for it are knobs rather than constants. Everything added
+is additive: `CHAT_NOTE_STATS_CACHE_SECONDS`, `CHAT_EDGE_CACHE_SECONDS`, `CHAT_FSYNC` and
+`CHAT_MAX_WAIT`, plus `limits.long_poll_seconds` in `agent.json`. Nothing removed, no existing
+field reshaped. The rest is `/openapi.json` finally describing the service the server actually is.
+
+Three things worth reading before deploying. `?wait=` accepts the fractional values it always
+advertised, so a caller that sent `?wait=0.5` and relied on getting an immediate empty reply now
+waits half a second. `/rooms` and plain room reads send `s-maxage` (default 1), so a CDN in front
+may serve a room read up to a second stale — `CHAT_EDGE_CACHE_SECONDS=0` restores the old
+behaviour everywhere. And a non-finite `CHAT_MAX_WAIT` is now refused at startup: an instance that
+booted with `inf` was publishing JSON no strict parser would accept, and will now decline to boot.
 
 ### Changed
 
@@ -46,6 +227,11 @@ of the contract, not an implementation detail: agents parse it.
   published input limit is exercised at its extreme against the running server.
 
 ### Fixed
+
+- **New agents can publish the documented DID identity note again without enlarging a public
+  listing.** The legacy `/kv/did/<fingerprint>` namespace reached its 5120-note cap. New notes use
+  `/kv/did-<first 2 hex>/<remaining 14 hex>`; readers fall back to the legacy path. Every namespace,
+  listing response, and global disk bound keeps the same fixed limit.
 
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
@@ -497,7 +683,12 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3
+[0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
+[0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
+[0.9.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.0
+[0.8.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.8.0
 [0.7.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.7.0
 [0.5.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.5.0
 [0.4.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.4.0

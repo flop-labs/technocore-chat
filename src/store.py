@@ -10,7 +10,6 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -19,7 +18,10 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
+
+import orjson
 
 import config
 import didkey
@@ -52,7 +54,7 @@ MAX_LIMIT = 200
 #
 # MAX_ROOMS bounds how many rooms the service *tracks* — the directory walks, the reaper,
 # the overview — not the disk.
-MAX_ROOMS = 5120
+MAX_ROOMS = config.MAX_ROOMS
 # MAX_TOTAL_ROOM_BYTES is the disk budget, stated rather than derived, and it is
 # deliberately the OLD product (512 * 10 MiB): ten times the rooms cost exactly the same
 # volume as before, because what filled the old cap was thousands of small rooms and not
@@ -82,21 +84,111 @@ RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
 # there is free, and a stale-by-one-interval number is fine for a bound whose overshoot is
 # bounded by the rate limiter anyway.
 USAGE_FILE = ".usage"
-# = MAX_ROOMS on purpose: the reserved namespaces (topic, room-owners, room-allow,
-# room-nonce) hold at most one note per room, so this equality is the invariant that lets
-# EVERY room carry a topic and an owner. Raising MAX_ROOMS raises this with it.
-MAX_NOTES_PER_NS = MAX_ROOMS
+# How many notes exist and how many bytes they occupy, so neither the global note cap nor
+# the /rooms gauge walks every namespace — the same trade USAGE_FILE already makes for room
+# bytes. Two integers, "count bytes", in one file so one atomic replace keeps them
+# describing the same store.
+#
+# The two have different jobs and different guarantees, which is the thing to keep straight
+# when editing either. The count is a cap input: exact between reaps, because creates
+# increment it under the create gate and only `_reap` deletes. The byte total is a display
+# gauge that nothing is enforced against — MAX_NOTES_TOTAL caps the count, not the disk —
+# so creates keep it current and reaps re-establish it, and an overwrite that changes a
+# note's length leaves it stale until the next pass. Do not add a lock to the overwrite
+# path to close that: it would put a lock on the note-write path to sharpen a number that
+# is only ever read.
+#
+# `_check_note_capacity` summed `_scan` over every namespace to enforce MAX_NOTES_TOTAL, so
+# a new note cost O(all notes) while the notes were themselves growing. In the 2026-08-25
+# flood that was ~1,437 new notes an hour against ~13,000 notes — ~18.6M directory entries
+# stat()ed per hour for one comparison, each stat releasing and reacquiring the GIL.
+#
+# Rooms deliberately still scan: `_check_room_capacity` has to total room *bytes* exactly
+# (see the budget test — `>=` at the cap is an operator-facing promise), and the scan that
+# gets the bytes returns the count in the same pass, so a cached room count would save
+# nothing. It is also the smaller half by ~40x: ~267 new rooms an hour against ~1,800 rooms
+# is ~0.5M entries, where the notes were ~18.6M. Making room bytes incremental instead
+# would mean updating a shared total on every append, which is a lock on the hot path to
+# save one on the rare one.
+#
+# The invariant that makes an incremental count safe: `_reap` is the ONLY thing that
+# deletes (there is no delete route — the manual says so), so between reaps the note count
+# only grows, and the single grower is the create path that writes this file. `_reap` then
+# rewrites the exact figure from a walk it already makes, so drift is bounded by REAP_EVERY
+# and self-heals. That walk is `sized` now, for the byte half — one stat per note on a
+# REAP_EVERY timer, on a pass that already stats every note to decide what is idle, bought
+# so that `note_stats` never stats one again.
+#
+# Fail-closed three ways. The increment happens *before* the note is created, so a crash in
+# between over-counts, and an over-count refuses a write that could have been allowed
+# rather than allowing one that should have been refused. A missing, unreadable or
+# malformed file falls back to the full walk — exactly the old behaviour, so the worst case
+# is the old cost and never a wrong answer, and that is also how a single-integer file from
+# a build before the byte half was added heals itself: it fails to parse, so it is walked. And it is read under `.notes-create`, which
+# already serialises note creation, so the check and the increment cannot interleave.
+#
+# What it does not survive: an unclean shutdown under CHAT_FSYNC=0 can lose the last write,
+# leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
+# alternative is fsyncing a counter on every create, which is the cost being removed.
+NOTES_FILE = ".notes-count"
+# >= MAX_ROOMS, and exactly MAX_ROOMS unless an operator says otherwise: the reserved
+# namespaces (topic, room-owners, room-allow, room-nonce) hold at most one note per room, so
+# that floor is the invariant that lets EVERY room carry a topic and an owner. Raising
+# MAX_ROOMS raises the floor with it; CHAT_MAX_NOTES_PER_NS raises only this, and config
+# holds the floor so nothing here has to re-check it.
+#
+# Deliberately NOT raised when MAX_NOTES_TOTAL below is, and still not the answer to
+# identity. It says what ONE namespace may hold, and the default answer stays "enough for
+# every room to carry a topic". Identity notes reach six figures by being spread across
+# namespaces instead — the did-<2hex> sharding of the DID-note convention (#96), which
+# splits the single `did` namespace this cap had already filled into 256, so 100k identities
+# are 256 namespaces of ~400 and every one stays far under this cap. Sharding is a convention
+# change in the manual, not a server change: nothing here reads it, which is why the only
+# constant this repo has to move for it is the global cap below.
+#
+# What the knob buys is a deployment lever for the gap between those two facts — clients with
+# the pre-sharding path baked in keep filling one namespace, and the operator's only previous
+# move was MAX_ROOMS, which drags three caps along. What it costs is blast radius: raising
+# this widens what one flooded namespace may take out of the global cap (see config for the
+# share arithmetic). An instance that sets nothing keeps today's bound exactly.
+MAX_NOTES_PER_NS = config.MAX_NOTES_PER_NS
 # A per-namespace cap bounds nothing on a public service: namespaces are never enumerated
 # and cost nothing to invent, so a flood picks a fresh one per write. The global cap is the
-# one that holds — MAX_NOTES_TOTAL * MAX_VALUE_CHARS ≈ 320 MiB, and it bounds namespace
-# directories too because a namespace only exists once a note in it was accepted.
+# one that holds, and it bounds namespace directories too because a namespace only exists
+# once a note in it was accepted.
 #
 # Derived from MAX_ROOMS, not a literal, because the two are not independent: the four
 # reserved namespaces hold one note per room each, so anything below 4 * MAX_ROOMS makes
 # the MAX_NOTES_PER_NS invariant above a lie — the global cap would run out before every
-# room could carry a topic and an owner. The multiplier is 8 rather than 4 so the surplus
-# left for agents' own notes stays the share it was at 4096-over-512.
-MAX_NOTES_TOTAL = 8 * MAX_ROOMS
+# room could carry a topic and an owner. Those four are the floor; the multiplier is the
+# surplus left over for the notes agents write themselves, and that surplus is what has to
+# be sized. 8 sized it by ratio — it kept the share it had at 4096-over-512 — and a ratio
+# says nothing about how many notes anyone needs. 32 sizes it by the workload instead:
+# 4 * MAX_ROOMS reserved leaves 28 * MAX_ROOMS = 143,360 for agents, which holds the ~100k
+# identity notes the did-<2hex> shards (#96) are sized for, with room to grow; 8 left
+# 3 * MAX_ROOMS = 15,360 and identity alone would have overrun it six times over.
+#
+# Affordable because a note is small and individually capped, so the worst case multiplies
+# out rather than being guessed at — in BYTES, not characters, because MAX_VALUE_CHARS caps
+# code points (clean_text counts a str's length) and note_set stores UTF-8, where a code
+# point is up to 4 bytes. A note of 8,192 four-byte characters is 32 KiB on disk, so the
+# hostile ceiling is 163,840 * 32 KiB = 5 GiB — equal to MAX_TOTAL_ROOM_BYTES, which makes
+# the volume worst case rooms + notes = 10 GiB. All-ASCII notes (which is what identity
+# notes are) put the same count at 1.25 GiB. Before this raise the same arithmetic gave a
+# 1.25 GiB note ceiling, so the raise moved the provisioning line: a deployment sizing a
+# volume against the stated budgets should count 5 GiB of rooms plus up to 5 GiB of notes.
+#
+# Capping stored *bytes* instead would pin the ceiling at 1.25 GiB, but the 8192-char
+# promise is contract — the manual states it, and design.md already banks on 8192 emoji
+# being legal — so tightening it to bytes rejects values that are legal today: a MAJOR
+# change, not a constant. The count cap plus the per-value char cap is what bounds disk.
+#
+# Disk is therefore not what to watch here, and neither are the walks any more: raising
+# this used to quadruple `note_stats`, which stat()ed every note on every /rooms request.
+# It reads a cached figure now (see NOTES_FILE), so the cap costs O(1) to report and the
+# per-create cost is one scandir of the caller's own namespace. Growing this is a disk
+# decision again, which is what the arithmetic above is for.
+MAX_NOTES_TOTAL = 32 * MAX_ROOMS
 # The room where the server announces new public rooms. Clients may read it like any other
 # room but may NOT write to it (app.py refuses): a discovery log anyone can forge is worse
 # than no log, because monitors would build on it. Server-written lines are the only lines.
@@ -153,7 +245,7 @@ ALLOW_NS = "room-allow"  # /kv/room-allow/<room>  -> space-separated did:keys
 # Notes are durable and have no ring, so unlike a message a captured signed note URL would
 # replay forever — and replaying an *old* allow-list is how a revoked key gets itself back
 # in. This is the smallest state that closes that, and it rides the existing CAS primitive
-# for its own atomicity. MAX_NOTES_PER_NS = MAX_ROOMS, so every room may hold an owner.
+# for its own atomicity. MAX_NOTES_PER_NS >= MAX_ROOMS, so every room may hold an owner.
 NONCE_NS = "room-nonce"
 TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
 # A topic is an ordinary note (MAX_VALUE_CHARS), and /rooms shows one per room it lists:
@@ -199,10 +291,24 @@ def valid_name(name: str) -> str:
     return name
 
 
+@lru_cache(maxsize=MAX_ROOMS)
 def _listable(name: str) -> bool:
     """Enumerable only if the name is one this service would accept today. Anything else
     on disk — hand-created, or left by an older validator — stays out of listings rather
-    than being echoed into a response."""
+    than being echoed into a response.
+
+    Memoized because the rooms walk asks the same question about the same names on every
+    pass, and /rooms is the most polled read on the service: a regex and a class split per
+    room per request, for an answer that is a pure function of the string and cannot change
+    while the name exists. At the cap it was ~17% of the walk and is now ~2%, which puts
+    the walk within a sixth of its floor of one stat() per room.
+
+    Sized to MAX_ROOMS because the room directory is the working set this is for. Note
+    *keys* are not: one `/kv/<ns>` listing can be MAX_NOTES_PER_NS names, which would evict
+    the rooms this exists to hold and never be asked again, so `list_notes` deliberately
+    calls the undecorated function. Names are caller-supplied, so the bound is the point —
+    a flood of fresh names costs misses, never memory.
+    """
     return NAME_RE.fullmatch(name) is not None and not unlisted(name)
 
 
@@ -344,7 +450,7 @@ def counters(root: Path) -> dict:
     """The lifetime counters, with every key present. Read without the lock: the file is
     replaced atomically, so a reader either sees the old bytes or the new ones."""
     try:
-        data = json.loads((root / COUNTERS_FILE).read_text(encoding="utf-8"))
+        data = orjson.loads((root / COUNTERS_FILE).read_bytes())
     except (OSError, ValueError):
         data = {}
     if not isinstance(data, dict):
@@ -371,7 +477,7 @@ def _bump(root: Path, **deltas: int) -> None:
             for key, delta in deltas.items():
                 current[key] = current.get(key, 0) + delta
             tmp = path.parent / f"{path.name}.tmp"
-            tmp.write_text(json.dumps(current), encoding="utf-8")
+            tmp.write_bytes(orjson.dumps(current))
             os.replace(tmp, path)  # atomic: readers never see a half-written file
     except OSError:
         pass
@@ -427,7 +533,7 @@ def _expired(rec: dict, cutoff: float) -> bool:
 
 def _parse(line: bytes) -> dict | None:
     try:
-        rec = json.loads(line)
+        rec = orjson.loads(line)
     except (ValueError, UnicodeDecodeError):
         return None  # torn write at EOF, or hand-edited garbage
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
@@ -844,6 +950,12 @@ def _reap(root: Path) -> None:
         os.replace(usage_tmp, root / USAGE_FILE)
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
+    # Deletions are done and this is the only thing that deletes, so the walk below is
+    # exact as of now — which is what bounds the create path's drift to one reap interval.
+    try:
+        _write_note_count(root, *_count_notes(root))
+    except OSError:
+        pass  # an unwritable count rebuilds by walking, which is what it replaced
     # Sidecar locks are deliberately *not* removed with their data file: unlinking one a
     # writer holds splits the lock domain (the next writer locks a fresh inode). Instead
     # sweep the orphans — a lock with no data file, idle as long as any reaped room — so
@@ -860,8 +972,16 @@ def _reap(root: Path) -> None:
                 p.unlink(missing_ok=True)
             except OSError:
                 continue
+    # Every per-namespace count goes with them, unconditionally. This pass is the only
+    # thing that deletes notes, so it is also the only thing those counts can be wrong
+    # about — dropping them here means a count file never outlives a deletion, and the next
+    # create in that namespace pays one scan to rebuild it and none after. Re-establishing
+    # each figure from the walk above would work too and is strictly more code to be wrong
+    # in; an unlink cannot be off by one. It also puts the directory back to notes and locks
+    # only, which is what makes the rmdir below reach an emptied namespace.
     for d in (root / "notes").glob("*"):
         try:
+            (d / NOTES_FILE).unlink(missing_ok=True)
             d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
         except OSError:
             continue
@@ -877,7 +997,7 @@ def snapshots(root: Path) -> list[dict]:
         return out
     for line in lines:
         try:
-            rec = json.loads(line)
+            rec = orjson.loads(line)
         except ValueError:
             continue
         if isinstance(rec, dict) and isinstance(rec.get("t"), (int, float)):
@@ -925,7 +1045,7 @@ def _snapshot(root: Path) -> None:
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in kept), encoding="utf-8")
+            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
             os.replace(tmp, marker)
     except OSError:
         pass
@@ -990,6 +1110,110 @@ def _walk(d: Path, suffix: str, nested: bool = False) -> Iterator[Path]:
         return  # missing or unreadable: nothing to walk, same as an empty glob
 
 
+def _count_notes(root: Path) -> tuple[int, int]:
+    """(notes, bytes) across every namespace, by walking. The cost NOTES_FILE exists to
+    avoid, kept because it is also what re-establishes the truth.
+
+    `sized` here and not on the per-namespace cap scan: this runs on the reaper's timer and
+    on the rebuild path, where one stat per note is affordable, and it is what lets the byte
+    gauge stop being a per-request walk, and it is the same pass `_ns_totals` makes for one
+    namespace, so a per-namespace count costs its bytes for free too.
+    """
+    total = 0
+    size = 0
+    try:
+        with os.scandir(root / "notes") as namespaces:
+            for ns in namespaces:
+                if ns.is_dir():
+                    count, ns_bytes = _scan(Path(ns.path), ".txt", sized=True)
+                    total += count
+                    size += ns_bytes
+    except FileNotFoundError:
+        pass
+    return total, size
+
+
+def _write_note_count(root: Path, total: int, size: int) -> None:
+    """Replace the totals atomically. Raises rather than swallowing: a caller that cannot
+    record a create must not go on to make one, or the cap it just checked means nothing.
+
+    Both numbers in one file, so one atomic replace keeps them describing the same store —
+    two files could be read either side of a reap and report a count and a byte total that
+    never coexisted. The format gained a second field, so a file written by an older build
+    parses as untrusted and rebuilds by walking: a slow first read, never a wrong one.
+    """
+    path = root / NOTES_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f"{path.name}.tmp"
+    tmp.write_text(f"{total} {size}", encoding="utf-8")
+    os.replace(tmp, path)  # atomic: readers never see a half-written file
+
+
+def _ns_totals(d: Path) -> tuple[int, int]:
+    """(notes, bytes) in ONE namespace, by walking. The rebuild behind a per-namespace
+    count file, where `_count_notes`' whole-store walk would be absurdly more than asked."""
+    return _scan(d, ".txt", sized=True)
+
+
+def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
+    """(notes, bytes) without walking — or by walking, when the file cannot be trusted.
+
+    The same file in two places, because the two caps have the same shape: `d` is the store
+    root for the global count and one namespace directory for that namespace's own, and
+    `rebuild` is the walk that re-establishes whichever was asked for.
+
+    Read without the lock, like `counters`: replacement is atomic, so a reader sees the old
+    bytes or the new ones. The rebuild is best effort; if it cannot be persisted the caller
+    still gets the counted truth and the next create counts again. That is the old cost,
+    which is the point — this degrades to what it replaced.
+
+    A zero is never persisted, and that is load-bearing rather than an optimization:
+    `_write_note_count` creates the directory it writes into, so persisting the zero a
+    *refused* create counts would leave behind the very namespace directory the refusal is
+    supposed not to create (see the rejection test). An empty namespace is also the cheapest
+    possible walk, so there is nothing to cache.
+    """
+    try:
+        count, size = (d / NOTES_FILE).read_text(encoding="utf-8").split()
+        if int(count) >= 0 and int(size) >= 0:
+            return int(count), int(size)
+    except (OSError, ValueError):
+        pass
+    totals = rebuild(d)
+    try:
+        if totals[0]:
+            _write_note_count(d, *totals)
+    except OSError:
+        pass
+    return totals
+
+
+def _note_count(root: Path, rebuild=_count_notes) -> int:
+    """The count half, which is the half the cap is enforced against."""
+    return _note_totals(root, rebuild)[0]
+
+
+def _count_new_note(root: Path, ns_dir: Path, size: int, delta: int) -> None:
+    """Move both note counts by `delta` — +1 to reserve a create, -1 to give it back.
+
+    Takes the file's own lock as well as the create gate: the gate orders note creates
+    against each other, this orders the read-modify-write against a concurrent rebuild. One
+    lock for both counts, because both are written here and nowhere else on this path, so
+    the second costs a write and no more waiting.
+
+    `size` keeps the byte gauge current on the path that actually moves it in bulk — a
+    flood is creates. Overwrites deliberately do not update it: they never change the
+    count, so they never take this gate, and adding a lock to the overwrite path to keep a
+    display gauge exact is the trade `note_stats` explains not making. Their drift is
+    corrected by the next reap, like everything else here.
+    """
+    with _locked(root / NOTES_FILE):
+        count, used = _note_totals(root)
+        _write_note_count(root, max(0, count + delta), max(0, used + size * delta))
+        ns_count, ns_used = _note_totals(ns_dir, _ns_totals)
+        _write_note_count(ns_dir, max(0, ns_count + delta), max(0, ns_used + size * delta))
+
+
 def _at_capacity(cap: int, what: str) -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
@@ -1000,15 +1224,6 @@ def _at_capacity(cap: int, what: str) -> StoreError:
         f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
         "(a room still on its first message goes after 24 hours)."
     )
-
-
-def _check_capacity(path: Path, suffix: str, cap: int, what: str) -> None:
-    """Fail closed when a *new* file would exceed the cap. Existing ones always proceed,
-    so a full namespace never silences agents already using it."""
-    if path.exists():
-        return
-    if _scan(path.parent, suffix)[0] >= cap:
-        raise _at_capacity(cap, what)
 
 
 def room_bytes_used(root: Path) -> int:
@@ -1039,11 +1254,12 @@ def _check_room_capacity(path: Path) -> None:
     below, which has enforced a local cap and a global one side by side since notes got a
     global cap, so there is one pattern here rather than two.
 
-    The byte pass is a second walk of a directory `_check_capacity` just walked. It is
-    worth it: room *creation* is the rare, rate-limited, already-gated path — appends to a
-    room that exists never reach here at all (`path.exists()` returns above, and again in
-    `_create_gate`) — and the alternative is a running total on disk that every reap,
-    compaction and append would have to keep honest.
+    This still walks, where both note caps have stopped. It is worth it here and was not
+    there: room *creation* is the rare, rate-limited, already-gated path — appends to a room
+    that exists never reach here at all (`path.exists()` returns above, and again in
+    `_create_gate`) — and the byte budget has to be exact, so the alternative is a running
+    total on disk that every reap, compaction and append would have to keep honest. A note
+    create is the path a flood actually runs at, and the count it needs is a count.
 
     Only new rooms are refused. A room that exists keeps accepting writes past the budget,
     the same way it does past the count: compaction already holds each one under
@@ -1066,19 +1282,16 @@ def _check_room_capacity(path: Path) -> None:
         )
 
 
-def _check_note_capacity(root: Path, path: Path) -> None:
-    if path.exists():
-        return
-    _check_capacity(path, ".txt", MAX_NOTES_PER_NS, "note")
-    total = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    total += _scan(Path(ns.path), ".txt")[0]
-    except FileNotFoundError:
-        pass
-    if total >= MAX_NOTES_TOTAL:
+def _check_note_total(root: Path, rebuild=_count_notes) -> None:
+    """The global half of the note cap: one file read, no directory walk at all.
+
+    Split out so it can run *before* the create gate as well as inside it. A store that is
+    already full refuses every create, and refusing them behind the shared gate means each
+    one queues for a lock only to be told no — at precisely the moment the queue is
+    longest. This sheds them for the price of a read. The check inside the gate is still
+    the authoritative one; this is a fast no, never a yes.
+    """
+    if _note_count(root, rebuild) >= MAX_NOTES_TOTAL:
         raise StoreError(
             f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
             "be a new one). A fresh namespace buys nothing — the cap is global. Overwrite "
@@ -1087,8 +1300,26 @@ def _check_note_capacity(root: Path, path: Path) -> None:
         )
 
 
+def _check_note_capacity(root: Path, path: Path) -> None:
+    """Both note caps, neither of which walks any more. Existing notes always proceed, so a
+    full namespace never silences agents already using it.
+
+    The per-namespace half used to scan the caller's own namespace on every create — O(that
+    namespace), which read as cheap next to the global walk it sat beside and was not. A
+    namespace holds a note and a sidecar lock per key, so the `did` namespace at 10,240
+    notes was ~20,000 directory entries read to answer one comparison, on every write, while
+    the writes were themselves growing it. `CHAT_MAX_NOTES_PER_NS` made that worse by
+    exactly the factor it raises: the cap is what the directory is allowed to grow to.
+    """
+    if path.exists():
+        return
+    if _note_totals(path.parent, _ns_totals)[0] >= MAX_NOTES_PER_NS:
+        raise _at_capacity(MAX_NOTES_PER_NS, "note")
+    _check_note_total(root)
+
+
 @contextmanager
-def _create_gate(gate: Path, path: Path, check):
+def _create_gate(gate: Path, path: Path, check, counted=None):
     """Serialise *creation* so a cap counted across files is exact, not merely likely.
 
     A per-file lock cannot enforce a cap over other files: two concurrent creates of
@@ -1096,13 +1327,43 @@ def _create_gate(gate: Path, path: Path, check):
     the cap is overshot by up to one write per in-flight request. Counting and creating
     under one shared gate makes it hard. Writes to a file that already exists never take
     the gate, so steady-state traffic stays as parallel as before.
+
+    `counted` is a reservation, so it takes a sign: the count moves before the write and
+    moves back if the write does not happen. Both halves are needed and neither is the
+    crash window the ordering below is about.
+
+      - The body can refuse *after* the gate has counted. `?if=<value>` against a key that
+        does not exist reaches its CAS check inside the body and raises, so a caller
+        repeating one against fresh keys used to add a note to the totals every time while
+        creating none — cheap for them, since a refusal writes nothing, and enough to walk
+        a namespace to MAX_NOTES_PER_NS and lock it out until the next reap.
+      - The file can be created by somebody else *while we wait for the gate*. The waiter
+        then holds the gate over an overwrite, not a create, so it must not count either —
+        hence the second `path.exists()`, which is not the one above it: that one runs
+        before the wait, this one after.
     """
     if path.exists():
         yield
         return
     with _locked(gate):
+        if path.exists():  # created while we waited: this is an overwrite now, not a create
+            yield
+            return
         check()  # authoritative: nothing else can create between this count and the write
-        yield
+        if counted is not None:
+            # Before the write, not after: a crash in between leaves the count one too
+            # high, which refuses a create that was allowed. The other order leaves it one
+            # too low, which allows one that should have been refused.
+            counted(1)
+        try:
+            yield
+        finally:
+            # Exact rather than merely fail-closed: a reservation nothing was written
+            # against is given back. Keyed on the file rather than on whether the body
+            # raised, because "was a note created" is the question, and the file is the
+            # only thing that answers it.
+            if counted is not None and not path.exists():
+                counted(-1)
 
 
 def append(
@@ -1168,8 +1429,22 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     path = room_path(root, room)
     if not path.exists():
         return None
+    # Reject on bytes before parsing. This is a predicate scan, not a tail read: when the DID
+    # has not posted recently, every record in the budget is parsed only to be discarded, and
+    # that is most signed writes on a busy room. A false positive — the DID quoted in message
+    # text — falls through to the parse, which is the only thing that tells `from` from a
+    # mention. No false negatives, on one precondition: the DID is in the line as itself.
+    # Both encoders this store has ever written rooms with put it there literally, which
+    # test_json_backend.py pins byte-for-byte. A foreign writer that escaped it as \uXXXX
+    # would be parsed correctly and skipped here, narrowing the replay window for that record
+    # to nothing; test_store.py states that boundary. Testing for the escape as well costs a
+    # second scan of every line — 2.1 ms -> 3.7 ms against a 4.1 ms baseline, i.e. most of
+    # what this buys — to cover files this store did not write, so it stays out of the loop.
+    did_b = did.encode()
     with path.open("rb") as f:
         for raw in reverse_lines(f):
+            if did_b not in raw:
+                continue
             rec = _parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
                 return rec["nonce"]
@@ -1236,7 +1511,7 @@ def _write_record(
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
         rec["seq"] = last_seq(root, room) + 1
-        line = json.dumps(rec, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+        line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
         # unparseable line, so the *next* message would be lost too — the torn record must
@@ -1329,9 +1604,23 @@ def note_set(
     path = note_path(root, ns, key)
     value = clean_text(value, MAX_VALUE_CHARS)
     _reap(root)
-    _check_note_capacity(root, path)  # before the gate: no sidecar, no namespace dir on reject
+    # The global half only, and only for a create. This used to be the whole check, which
+    # meant every create scanned its namespace twice — once here and once as the gate's
+    # own check — to buy a property the gate already has: its check runs in `__enter__`,
+    # strictly before `_locked(path)` is entered, so a refusal never leaves a sidecar lock
+    # or a namespace directory behind either way. What this call is actually worth is
+    # shedding a full store's worth of refusals without queueing for the gate first.
+    # A missing cache must not rebuild here: publishing outside the gate can erase a
+    # reservation. Windows also skips the read because an open target can deny os.replace.
+    if not path.exists() and os.name != "nt":
+        _check_note_total(root, lambda _: (0, 0))
     with (
-        _create_gate(root / ".notes-create", path, lambda: _check_note_capacity(root, path)),
+        _create_gate(
+            root / ".notes-create",
+            path,
+            lambda: _check_note_capacity(root, path),
+            lambda d: _count_new_note(root, path.parent, len(value.encode("utf-8")), d),
+        ),
         _locked(path),
     ):
         if expect_absent or expect is not None:
@@ -1375,27 +1664,35 @@ def note_stats(root: Path) -> dict:
     unenumerable, so this returns a count and a byte total: enough to watch the capacity
     that bounds the disk, useless for discovering anyone's notes.
 
-    Bounded by MAX_NOTES_TOTAL, so the walk is O(MAX_NOTES_TOTAL) at worst — and at the
-    current cap that is 40960 entries, every one of which needs a stat for its size. It is
-    the most expensive thing /rooms does by an order of magnitude, which is why app.py
-    serves that view from a short-lived cache rather than walking here per request.
+    Two file reads, not a walk. This used to scan every namespace and stat every note on
+    each call: 124 ms at the old 40960 cap, 480 ms at 163840 (tmpfs; a real disk is worse),
+    which made it far and away the most expensive thing /rooms did. app.py caches it, but
+    that cache keys on the notes_written counter, so a note flood invalidated it on every
+    write — the walk ran per request exactly when the store was least able to afford it,
+    and raising the cap to 32 * MAX_ROOMS would have made that 4x worse.
+
+    So both numbers now come from the totals the create path and the reaper already
+    maintain (see NOTES_FILE), and the cost stopped scaling with the store at all.
+
+    `total` is the same number the cap is enforced against, which is a second reason to
+    read it here: the gauge and the refusal can no longer disagree, where a walk and a
+    cached count could. `bytes` is the looser of the two — creates keep it current and a
+    reap re-establishes it, so an overwrite that changes a note's length leaves it stale
+    for at most REAP_EVERY. That is the same trade room bytes make (see USAGE_FILE), and
+    it is the right one here because nothing enforces this number: MAX_NOTES_TOTAL is a
+    count cap, so the byte total is a gauge an operator reads, never a bound a write is
+    refused against. Exactness would cost a lock on the note-write path to sharpen a
+    display figure.
     """
-    d = root / "notes"
-    total = 0
-    size = 0
-    try:
-        with os.scandir(d) as namespaces:
-            for ns in namespaces:
-                if not ns.is_dir():
-                    continue
-                count, ns_bytes = _scan(Path(ns.path), ".txt", sized=True)
-                total += count
-                size += ns_bytes
-    except FileNotFoundError:
-        pass
-    return {"total": total, "bytes": size, "capacity": MAX_NOTES_TOTAL}
+    total, size = _note_totals(root)
+    # Both caps: the global one a write is refused against, and what one namespace may
+    # hold — published because CHAT_MAX_NOTES_PER_NS makes the second per-deployment, and
+    # an operator who raised it has nowhere else to read back what the service took.
+    caps = {"capacity": MAX_NOTES_TOTAL, "capacity_per_namespace": MAX_NOTES_PER_NS}
+    return {"total": total, "bytes": size, **caps}
 
 
 def list_notes(root: Path, ns: str) -> list[str]:
     d = root / "notes" / valid_name(ns)
-    return sorted(p.stem for p in d.glob("*.txt") if _listable(p.stem)) if d.is_dir() else []
+    keep = _listable.__wrapped__  # not the cache: see _listable
+    return sorted(p.stem for p in d.glob("*.txt") if keep(p.stem)) if d.is_dir() else []

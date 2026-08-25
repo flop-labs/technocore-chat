@@ -1,48 +1,48 @@
 {
-  "core_total": 1902,
+  "core_total": 2015,
   "caps": {
-    "core/app.py": 941,
-    "core/config.py": 51,
+    "core/app.py": 977,
+    "core/config.py": 57,
     "core/didkey.py": 57,
-    "core/limit.py": 110,
-    "core/store.py": 743,
-    "core_total": 1902
+    "core/limit.py": 132,
+    "core/store.py": 792,
+    "core_total": 2015
   },
   "files": {
     "core/app.py": {
-      "raw_lines": 1650,
-      "code_lines": 941,
-      "comment_lines": 218,
-      "tokens_per_line": 7.81
+      "raw_lines": 1735,
+      "code_lines": 977,
+      "comment_lines": 239,
+      "tokens_per_line": 7.89
     },
     "core/config.py": {
-      "raw_lines": 170,
-      "code_lines": 51,
-      "comment_lines": 69,
-      "tokens_per_line": 11.65
+      "raw_lines": 242,
+      "code_lines": 57,
+      "comment_lines": 133,
+      "tokens_per_line": 12.4
     },
     "core/didkey.py": {
-      "raw_lines": 120,
+      "raw_lines": 135,
       "code_lines": 57,
-      "comment_lines": 16,
-      "tokens_per_line": 8.11
+      "comment_lines": 31,
+      "tokens_per_line": 7.96
     },
     "core/limit.py": {
-      "raw_lines": 262,
-      "code_lines": 110,
-      "comment_lines": 43,
-      "tokens_per_line": 8.78
+      "raw_lines": 318,
+      "code_lines": 132,
+      "comment_lines": 60,
+      "tokens_per_line": 8.63
     },
     "core/store.py": {
-      "raw_lines": 1401,
-      "code_lines": 743,
-      "comment_lines": 253,
-      "tokens_per_line": 7.21
+      "raw_lines": 1696,
+      "code_lines": 792,
+      "comment_lines": 381,
+      "tokens_per_line": 7.26
     },
     "extra/manifest.py": {
-      "raw_lines": 1582,
-      "code_lines": 1163,
-      "comment_lines": 113,
+      "raw_lines": 1589,
+      "code_lines": 1165,
+      "comment_lines": 117,
       "tokens_per_line": 3.87
     }
   }

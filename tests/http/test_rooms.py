@@ -252,7 +252,12 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
-        "notes": {"total": 0, "bytes": 0, "capacity": store.MAX_NOTES_TOTAL},
+        "notes": {
+            "total": 0,
+            "bytes": 0,
+            "capacity": store.MAX_NOTES_TOTAL,
+            "capacity_per_namespace": store.MAX_NOTES_PER_NS,
+        },
         # Present on an empty store too: it describes which keys of a rooms[] entry are
         # caller-chosen, which is true of the shape whether or not any room exists yet.
         "untrusted": {"fields": ["room", "topic"], "note": app.LISTING_BANNER},
@@ -353,16 +358,48 @@ def test_rooms_metrics_never_scan_past_the_window_per_room(client, tmp_path, mon
     assert all(r["window"] <= 10 for r in view["rooms"])
 
 
+def test_one_reply_is_one_cache_entry_however_the_limit_was_spelled(client, monkeypatch):
+    """`?limit=` is caller-supplied and was the cache key raw, while the walk it keys clamps
+    to MAX_LIMIT. So ?limit=200, ?limit=1000000 and ?limit=1000001 are one reply and were
+    three entries — a caller could walk every room on every request by incrementing a number,
+    at one read from its bucket, and evict everyone else's view out of a 64-entry cache on
+    the way past. The walk is the most expensive read on the service; the cache in front of
+    it only works if the key is the thing that shapes the answer.
+    """
+    import app
+    import store
+
+    client.get("/r/alpha/say/bot/hi")
+    walks = 0
+    real = store.room_stats
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    app._rooms_cache.clear()
+    monkeypatch.setattr(store, "room_stats", counting)
+    bodies = [client.get(f"/rooms?limit={n}").text for n in (200, 1000000, 1000001, 0, 1)]
+    assert walks == 2, f"two distinct replies (>=200 and 1), {walks} walks"
+    assert bodies[0] == bodies[1] == bodies[2], "clamped to MAX_LIMIT, so one reply"
+    assert bodies[3] == bodies[4], "0 and 1 both floor to one room"
+
+
 def test_rooms_reports_note_usage_without_naming_namespaces(client):
     import store
 
     client.get("/kv/p-secretns/k/set/hello")
     body = client.get("/rooms").text
     assert f"notes 1 of {store.MAX_NOTES_TOTAL}" in body
+    # The per-namespace cap is published beside the global one because it is a knob
+    # (CHAT_MAX_NOTES_PER_NS) — a caller can no longer read it off the room cap.
+    assert f"{store.MAX_NOTES_PER_NS} per namespace" in body
     assert "p-secretns" not in body  # aggregate only: namespaces stay unenumerable
     stats = client.get("/rooms?format=json").json()["notes"]
     assert stats["total"] == 1 and stats["bytes"] == 5
     assert stats["capacity"] == store.MAX_NOTES_TOTAL
+    assert stats["capacity_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
 def test_new_public_rooms_are_announced(client):
@@ -840,9 +877,10 @@ def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path,
 
 
 def test_note_capacity_walk_is_cached_and_a_note_write_invalidates_it(client, monkeypatch):
-    """The note walk is the expensive half of /rooms (~41k stats at the cap) and changes
-    only when a note is written or reaped, so it lives behind its own generation-stamped
-    cache: reused across /rooms requests, dropped the moment a note handler writes."""
+    """The note gauge under /rooms changes only when a note is written or reaped, so it
+    lives behind its own generation-stamped cache: reused across /rooms requests, dropped
+    the moment a note handler writes. (It used to be a per-note walk; it is two file reads
+    now — the cache still matters for cross-worker stamp visibility.)"""
     import app as app_module
     import config
 
