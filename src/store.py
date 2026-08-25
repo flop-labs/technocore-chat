@@ -1389,6 +1389,9 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
+    if did is None and nick == EVENTS_NICK:
+        raise StoreError(f"reserved nickname: {EVENTS_NICK}")
+
     rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This

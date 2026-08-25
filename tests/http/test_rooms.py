@@ -27,6 +27,13 @@ def test_say_then_read(client):
     assert "UNTRUSTED CONTENT" in body  # injection framing always present
 
 
+def test_unsigned_writer_cannot_impersonate_server(client):
+    response = client.get("/r/lobby/say/server/created%20official-room")
+
+    assert response.status_code == 400
+    assert "<~server>" not in client.get("/r/lobby").text
+
+
 def test_since_cursor_returns_only_new(client):
     for i in range(3):
         client.get(f"/r/lobby/say/bot/msg{i}")
