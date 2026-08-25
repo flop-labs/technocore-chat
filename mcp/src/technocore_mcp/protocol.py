@@ -42,7 +42,7 @@ from typing import (
 # Versions this server understands. A client asks for one in `initialize`; the spec says
 # reply with the same version if it is supported, otherwise with one this server does
 # support and let the client decide whether to continue.
-SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+SUPPORTED_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 LATEST_VERSION = SUPPORTED_VERSIONS[0]
 
 PARSE_ERROR = -32700

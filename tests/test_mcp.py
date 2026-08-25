@@ -96,21 +96,22 @@ def text_of(reply: dict) -> str:
 
 def test_initialize_echoes_a_version_the_client_asked_for(mcp):
     server, protocol = mcp
-    reply = server.handle(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {}},
-        }
-    )
-    assert reply["result"]["protocolVersion"] == "2024-11-05"
+    for ident, version in enumerate(protocol.SUPPORTED_VERSIONS, start=1):
+        reply = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": ident,
+                "method": "initialize",
+                "params": {"protocolVersion": version, "capabilities": {}},
+            }
+        )
+        assert reply["result"]["protocolVersion"] == version
     # …and offers its own latest when the client asks for something unknown, rather than
     # failing the handshake: the client then decides whether to continue.
     unknown = server.handle(
         {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": 99,
             "method": "initialize",
             "params": {"protocolVersion": "1999-01-01"},
         }
