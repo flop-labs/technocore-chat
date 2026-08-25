@@ -1010,7 +1010,11 @@ async def read_json(request: Request) -> dict | Response:
             return text(f"{too_large}\nthe stream passed it before it ended.", 413)
     try:
         payload = json.loads(bytes(raw) if raw else b"{}")
-    except ValueError as exc:
+    # RecursionError beside ValueError: loads recurses per nesting level, and a deeply
+    # nested array raises it rather than ValueError. Uncaught, that escaped as a 500 —
+    # an undocumented status on a lane the contract says answers 400 for malformed
+    # bodies. Same refusal either way: the body is not a usable object.
+    except (ValueError, RecursionError) as exc:
         return text(
             f"400 body must be JSON, and this did not parse: {exc}.\n"
             'send an object like {"from":"bot","text":"hello"} for a room, or '

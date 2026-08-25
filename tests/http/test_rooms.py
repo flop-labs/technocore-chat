@@ -902,3 +902,13 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
     with config.override(EDGE_CACHE_SECONDS=0):
         assert client.get("/rooms").headers["cache-control"] == "no-store"
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
+
+
+def test_a_deeply_nested_body_is_a_400_not_a_500(client):
+    """json.loads recurses per nesting level, so a deeply nested array raises
+    RecursionError — which is not a ValueError, and escaped read_json's handler as a 500.
+    The contract documents 400 for malformed bodies on this lane; the refusal now matches
+    at every depth.
+    """
+    deep = b"[" * 20_000 + b"]" * 20_000
+    assert client.post("/r/nested", content=deep).status_code == 400
