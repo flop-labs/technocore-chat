@@ -338,6 +338,46 @@ def test_a_rewalked_entry_is_the_newest_and_the_oldest_is_what_leaves(client, mo
         assert list(app_module._rooms_cache) == [2, 4], "the oldest walk is what leaves"
 
 
+def test_rooms_survives_a_window_memo_hit_evicted_before_promotion(client, tmp_path, monkeypatch):
+    """A full window memo can evict a valid hit before this request promotes it.
+
+    The memo holds 512 of up to 5120 rooms. Once full, another /rooms refresh can insert
+    a newly active room after this one reads a hit but before it calls move_to_end. The
+    lost LRU promotion is harmless; its KeyError reaching the caller as a 500 is not.
+
+    Evicting on get is the deterministic form of that exact interleaving. Assert through
+    the HTTP status a caller sees, and assert the hook fired so this cannot pass while
+    proving nothing.
+    """
+    from collections import OrderedDict
+
+    from starlette.testclient import TestClient
+
+    import app as app_module
+    import config
+    import store
+
+    store._window_memo.clear()
+    with config.override(ROOMS_CACHE_SECONDS=0):
+        client.get("/r/cache-hit/say/bot/hello")
+        assert client.get("/rooms?limit=2").status_code == 200
+
+        fired = []
+
+        class EvictHit(OrderedDict):
+            def get(self, key, default=None):
+                hit = super().get(key, default)
+                if hit is not None and not fired:
+                    fired.append(key)
+                    super().pop(key)
+                return hit
+
+        monkeypatch.setattr(store, "_window_memo", EvictHit(store._window_memo))
+        caller = TestClient(app_module.app, raise_server_exceptions=False)
+        assert caller.get("/rooms?limit=2").status_code == 200
+        assert fired, "no memo hit was evicted — this test proved nothing"
+
+
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     import store
 

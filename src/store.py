@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -928,10 +928,10 @@ _window_memo: OrderedDict[tuple, tuple] = OrderedDict()
 
 
 def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]:
-    key = (str(root), name)
-    hit = _window_memo.get(key)
+    hit = _window_memo.get(key := (str(root), name))
     if hit and hit[0] == stamp:
-        _window_memo.move_to_end(key)
+        with suppress(KeyError):
+            _window_memo.move_to_end(key)
         return hit[1]
     view = room_window(root, name)
     _window_memo[key] = (stamp, view)
