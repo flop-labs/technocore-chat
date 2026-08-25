@@ -25,6 +25,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -373,6 +374,16 @@ class StoreLifecycle(RuleBasedStateMachine):
         expected_notes = {key for key in NOTES if self._note_verdict(key) == "gone"}
         kept_notes = {key for key in self.notes if self._note_verdict(key) == "kept"}
 
+        # The events log is exempt from the stillborn rule and not from the idle one. It is
+        # not in ROOMS (the server writes it on each public-room creation, the model does
+        # not), so read its age off disk: a pass must not reap it while it is inside its idle
+        # window, however few records it holds.
+        events = store.room_path(self.root, store.EVENTS_ROOM)
+        events_young = (
+            events.exists()
+            and time.time() - events.stat().st_mtime < store.IDLE_SECONDS - GUARD_SECONDS
+        )
+
         (self.root / ".reaped").unlink(missing_ok=True)
         store._reap(self.root)
 
@@ -384,6 +395,9 @@ class StoreLifecycle(RuleBasedStateMachine):
             assert store.note_get(self.root, *key) is None, f"note {key} outlived its idle rule"
         for key in kept_notes:
             assert store.note_get(self.root, *key) == self.notes[key], f"note {key} was reaped"
+
+        if events_young:
+            assert events.exists(), "the discovery log was reaped inside its idle window"
 
         self._reap_model()
         self._resync()

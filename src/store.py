@@ -1226,7 +1226,19 @@ def _reap(root: Path) -> None:
             try:
                 if _guards_a_live_room(root, base, entry, now):
                     continue
-                if not _reapable(entry.path, now, stillborn_rule):
+                # The events log is exempt from the stillborn rule, not the idle one. It sits
+                # in rooms/ and holds one line while quiet, so the 24h rule would reap it after
+                # a single day with no new public room; the next write anywhere restarts it at
+                # seq 1, and a monitor holding a since= cursor then reads an empty view whose
+                # first_seq is null, so the "truncation is never silent" check cannot fire. It
+                # is server-written and takes no client writes, exactly the "nothing to wait
+                # for" shape that already exempts notes. The 7-day idle rule still applies.
+                # Compared on entry.name, not a Path: this runs on every entry, where _walk
+                # hands back the scandir name so pathlib stays off the hot path. Bound once
+                # and reused at the recheck below — it is the same entry, so the exemption is
+                # the same, and _reapable still re-stats by path there.
+                stillborn_here = stillborn_rule and entry.name != EVENTS_ROOM + suffix
+                if not _reapable(entry.path, now, stillborn_here):
                     continue
                 # The Path is built here and not in the walk: everything above this line
                 # works on the entry scandir already had, and a live pass reaches this
@@ -1239,7 +1251,7 @@ def _reap(root: Path) -> None:
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 # It re-stats by path, never through the entry — see _reapable.
                 with _locked(p):
-                    reason = _reapable(p, now, stillborn_rule)
+                    reason = _reapable(p, now, stillborn_here)
                     if reason:
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
