@@ -16,8 +16,21 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-26
+
+PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
+corrections. No route, response shape, cap or default moves — an upgraded instance serves the
+same bytes on every endpoint.
+
 ### Fixed
 
+- **A signed write no longer JSON-parses every record it is about to discard.** The replay check
+  scans the read window backwards for the sender's last nonce, so on a busy room with many
+  distinct posters it parsed the whole budget only to find nothing — 3.9 ms per signed write on a
+  1.5 MiB, 8,255-record room. Candidate lines are now selected on bytes before parsing: 2.2 ms in
+  that case, unchanged when the sender posted recently, and 5.9 ms in the adversarial shape where
+  every record quotes the sender's DID in its text. Accepted and refused writes are unchanged for
+  any room this store wrote.
 - **Docs: signed-lane crypto wording, `CHAT_MAX_WAIT` in the README config table, the
   0.9.2 changelog compare links, and stale “note walk” prose after the O(1) gauge.**
   Verification has been PyNaCl since 0.9.0; the README still said `cryptography` backed that
@@ -669,7 +682,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3
 [0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
 [0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
 [0.9.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.0
