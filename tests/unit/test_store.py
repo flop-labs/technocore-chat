@@ -186,6 +186,34 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_full_legacy_did_namespace_points_new_fingerprints_at_shards(tmp_path, monkeypatch):
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    existing = "aaaaaaaaaaaaaaaa"
+    store.note_set(tmp_path, "did", existing, "old")
+    store.note_set(tmp_path, "did", existing, "updated")
+    assert store.note_get(tmp_path, "did", existing) == "updated"
+
+    new = "0123456789abcdef"
+    with pytest.raises(store.StoreError) as sharded:
+        store.note_set(tmp_path, "did", new, "v")
+    with pytest.raises(store.StoreError) as generic_did:
+        store.note_set(tmp_path, "did", "gggggggggggggggg", "v")
+
+    store.note_set(tmp_path, "other", "only", "v")
+    with pytest.raises(store.StoreError) as generic_other:
+        store.note_set(tmp_path, "other", new, "v")
+
+    generic = str(generic_other.value)
+    assert str(generic_did.value) == generic
+    assert str(sharded.value) == (
+        generic
+        + " Publish at /kv/did-01/23456789abcdef instead "
+        + "— the same fingerprint, sharded."
+    )
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the
