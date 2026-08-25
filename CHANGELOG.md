@@ -16,6 +16,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`GET /rooms` no longer returns 500 when a write clears the cache between the trim
+  measuring it and evicting from it.** The bound is applied by reading the size and then
+  calling `popitem`, and a writer's `_rooms_cache.clear()` (see `take`) landing between the
+  two left nothing to pop. The eviction now stops instead of raising. Same payload, same
+  cache bound.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

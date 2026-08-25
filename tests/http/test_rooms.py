@@ -137,6 +137,37 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         assert list(app_module._rooms_cache) == [2, 3]
 
 
+def test_rooms_trim_survives_a_cache_clear_after_it_measured(client, monkeypatch):
+    """`take` clears this cache on every write, from another thread, at a moment the
+    refresh does not choose. The trim reads the size and then evicts in a second step, so
+    a clear landing between them leaves `popitem` with nothing to pop — and its `KeyError`
+    reaches the caller as a 500 on the most polled read on the service.
+
+    Asserted through the status a caller sees. The mapping clears itself the instant its
+    size is taken, which is that interleaving and nothing else: no other step is disturbed.
+    """
+    from collections import OrderedDict
+
+    from starlette.testclient import TestClient
+
+    import app as app_module
+    import config
+
+    class ClearAfterLen(OrderedDict):
+        def __len__(self):
+            measured = super().__len__()
+            super().clear()
+            return measured
+
+    # The default TestClient re-raises, which would report this as a KeyError rather than
+    # as the 500 a real caller receives.
+    caller = TestClient(app_module.app, raise_server_exceptions=False)
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 0)
+        monkeypatch.setattr(app_module, "_rooms_cache", ClearAfterLen())
+        assert caller.get("/rooms?limit=5").status_code == 200
+
+
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     import store
 

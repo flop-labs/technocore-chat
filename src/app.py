@@ -664,7 +664,10 @@ def _rooms_view(limit: int) -> dict:
         _rooms_cache[limit] = (stamp, now, view)
         _rooms_cache.move_to_end(limit)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
-            _rooms_cache.popitem(last=False)
+            try:
+                _rooms_cache.popitem(last=False)
+            except KeyError:  # a write cleared it between the measurement and the eviction
+                break
     return view
 
 
