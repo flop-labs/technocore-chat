@@ -15,6 +15,8 @@ signature moved. Adding a route or a response field is MINOR. The `text/plain` l
 of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
+### Changed
+- README: the signed-note-write API row now links to the worked room-claim example in `src/patterns.md`.
 
 ## [0.9.0] - 2026-08-25
 
