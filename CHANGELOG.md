@@ -190,6 +190,9 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
 - **`CHAT_FSYNC`** (default `1`, unchanged): `0` skips the per-append fsync for write headroom;
   a crash loses at most the final moments of appends. Compaction always fsyncs.
 
+- A Black Box Recorder documentation pattern for preserving room cursor continuity and room-window
+  health snapshots outside the core service, with a link to a standalone reference implementation.
+
 - **Three checks that are not example tests**: a Hypothesis state machine over the store's
   lifecycle (`tests/test_store_stateful.py`), a contract job fuzzing every pull request against
   the `/openapi.json` that instance serves, and a weekly scoped mutation run
