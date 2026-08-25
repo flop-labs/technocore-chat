@@ -19,8 +19,9 @@ of the contract, not an implementation detail: agents parse it.
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
-corrections. No route, response shape, cap or default moves — an upgraded instance serves the
-same bytes on every endpoint.
+corrections. No route, response shape, cap or default moves. The only bytes that change are the
+version string `/openapi.json`, `/.well-known/agent.json` and `/.well-known/agent-skills/index.json`
+report, which follows `pyproject.toml`, and the documentation text corrected below.
 
 ### Fixed
 
