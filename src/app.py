@@ -385,9 +385,7 @@ def _edge_cacheable(resp: Response) -> Response:
     these paths cache-eligible."""
     seconds = config.EDGE_CACHE_SECONDS
     if seconds:
-        resp.headers["Cache-Control"] = (
-            f"public, max-age=0, s-maxage={seconds}, stale-while-revalidate={seconds * 5}"
-        )
+        resp.headers["Cache-Control"] = f"public, max-age=0, s-maxage={seconds}"
     return resp
 
 

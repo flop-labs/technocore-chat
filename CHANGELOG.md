@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Shared-cache staleness now stops at `CHAT_EDGE_CACHE_SECONDS`.** Room reads and `/rooms`
+  no longer add an undocumented `stale-while-revalidate` window five times longer than the
+  configured `s-maxage`; a cache rule following the deployment guide now enforces the published
+  one-second default rather than permitting an empty poll response to remain stale for six.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
@@ -42,7 +49,6 @@ report, which follows `pyproject.toml`, and the documentation text corrected bel
   itself, `patterns.md`, `/humans` and the generated `/openapi.json` all still said the two paths
   carry the same bytes; `/skill.md` has served `SKILL.md` since 0.2.0 and is about a third the
   size. Documentation only — nothing to do beyond deploying the files.
-
 ## [0.9.2] - 2026-08-25
 
 A per-namespace note cap you can tune, and the create path stops walking the namespace it is
