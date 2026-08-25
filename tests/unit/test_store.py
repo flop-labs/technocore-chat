@@ -58,6 +58,42 @@ def test_compaction_bounds_file_and_keeps_seq(tmp_path, monkeypatch):
     assert view["last_seq"] == 200 and view["first_seq"] > 1  # gap is observable
 
 
+def test_through_lookup_retrieves_retained_target_beyond_the_tail(tmp_path):
+    """#152: a permalink target older than the newest-50 tail is still retrievable.
+
+    A tail read's first_seq is the oldest record of THAT response, not the ring's
+    retained floor — so a target beyond the tail must be asked for precisely with
+    the inclusive `through` bound instead of being labelled evicted.
+    """
+    import store
+
+    for n in range(1, 61):
+        store.append(tmp_path, "proof", "bot", f"msg {n}")
+    tail = store.read_messages(tmp_path, "proof", limit=50, since=9)
+    assert tail["first_seq"] == 11  # seq 10 is retained but outside the newest-50 window
+    assert all(m["seq"] > 10 for m in tail["messages"])
+    hit = store.read_messages(tmp_path, "proof", limit=1, since=9, through=10)
+    assert [m["seq"] for m in hit["messages"]] == [10]
+    assert hit["first_seq"] == 10 and hit["last_seq"] == 10
+
+
+def test_through_lookup_stays_honest_after_compaction(tmp_path, monkeypatch):
+    """#152: a compacted-away target reports a miss; a retained one still resolves."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", 4096)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 2048)
+    for _ in range(200):
+        store.append(tmp_path, "big", "bot", "x" * 100)
+    view = store.read_messages(tmp_path, "big", limit=50)
+    assert view["first_seq"] > 1  # seq 1 was compacted away
+    miss = store.read_messages(tmp_path, "big", limit=1, since=0, through=1)
+    assert miss["messages"] == []  # dropped target: honest miss, no false hit
+    retained = view["first_seq"]
+    hit = store.read_messages(tmp_path, "big", limit=1, since=retained - 1, through=retained)
+    assert [m["seq"] for m in hit["messages"]] == [retained]
+
+
 def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
     import store
 

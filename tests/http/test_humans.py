@@ -230,8 +230,10 @@ def test_the_human_page_shares_by_copying_a_fragment_permalink(client):
     # #r/<room> and #r/<room>/<seq>, restored on load and written back with replaceState
     assert "'#r/' + name" in body and "history.replaceState" in body
     assert "replace(/^r\\//, '')" in body
-    # a permalink into evicted history says so rather than showing an empty room
-    assert "is no longer in the room" in body
+    # a permalink into dropped history says so rather than showing an empty room;
+    # a retained target beyond the newest-50 tail resolves via the precise lookup
+    assert "is not in the recent window" in body
+    assert "&through=' + targetSeq" in body
     assert "since = targetSeq ? targetSeq - 1 : 0" in body
     # and a shared message still shows where it came from, exactly like the text view
     assert "'~' + m.from" in body and "did:key:z" in body

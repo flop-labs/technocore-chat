@@ -765,13 +765,20 @@ async def room_read(request: Request) -> Response:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
     since = _cursor(q.get("since"), None)
+    # `through` is the inclusive upper bound of a precise lookup — a permalink asks
+    # `since=<target-1>&through=<target>&limit=1` and gets the target itself when the
+    # ring still retains it, instead of mistaking the tail window's first_seq for the
+    # retained floor.
+    through = _cursor(q.get("through"), None)
     # `tail`, not `limit`: the query param keeps its published name, the local must not
     # shadow the limit module the refusal two lines above calls into.
     tail = _cursor(q.get("limit"), 50)
     room = request.path_params["room"]
     # Tail reads are blocking file IO. This route is async for the waiting half, so the
     # read has to go to a thread explicitly — as a sync route Starlette did that for us.
-    view = await run_in_threadpool(store.read_messages, config.ROOT, room, limit=tail, since=since)
+    view = await run_in_threadpool(
+        store.read_messages, config.ROOT, room, limit=tail, since=since, through=through
+    )
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.

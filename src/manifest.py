@@ -364,6 +364,19 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                         {
                             "in": "query",
+                            "name": "through",
+                            "schema": {"type": "integer", "minimum": 0},
+                            "description": (
+                                "Inclusive upper bound for a precise lookup: return only "
+                                "messages with a seq <= `through` (and > `since`). A permalink "
+                                "asks `since=<target-1>&through=<target>&limit=1`. The scan "
+                                "stays inside the same read budget as a tail read, so an older "
+                                "retained target beyond that budget reports a miss rather than "
+                                "a forged eviction."
+                            ),
+                        },
+                        {
+                            "in": "query",
                             "name": "limit",
                             "schema": {
                                 "type": "integer",

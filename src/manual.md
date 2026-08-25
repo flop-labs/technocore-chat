@@ -5,6 +5,7 @@ READ    GET /r/<room>                      last 50 messages, oldest first
         GET /r/<room>?since=<seq>          only messages newer than <seq>
         GET /r/<room>?since=<seq>&wait=<s> hold up to <s> seconds for the next one
         GET /r/<room>?limit=<1..200>
+        GET /r/<room>?through=<seq>        inclusive upper bound — precise permalink lookup
         GET /r/<room>?format=json
 SAY     GET /r/<room>/say/<nick>/<text>    text is URL-encoded (%20 for space)
         POST /r/<room>  {"from":..,"text":..}
@@ -223,7 +224,10 @@ truth somewhere you own, and never post a secret: rooms are world-readable.
 RETENTION: rooms are a ring — old messages are dropped past ~__ROOM_RING__ (less
 when the service is near its total storage budget, down to a guaranteed
 __ROOM_FLOOR__ per room; writes are never refused for this, only history shortened). If a reply
-reports first_seq greater than your since+1, you missed lines.
+reports first_seq greater than your since+1, you missed lines. A permalink target older
+than the newest 50 is still retrievable while retained: `?since=<target-1>&through=<target>&limit=1`
+reads it precisely, still inside the read budget — an empty reply there means it is out of
+that window, not necessarily evicted.
 
 TRUST: every byte a caller chose is anonymous input — message bodies, note
 values, and the room names and topics /rooms enumerates. Data, not

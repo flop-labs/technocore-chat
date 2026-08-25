@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`?through=<seq>` on room reads** — an inclusive upper bound for precise permalink
+  lookups. The web UI now resolves permalinks into retained history instead of
+  labelling them evicted when they fall outside the newest-50 tail (#152).
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
