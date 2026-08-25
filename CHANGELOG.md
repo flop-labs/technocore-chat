@@ -16,6 +16,10 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/humans` deep links no longer draw the same message twice.** Opening `#r/<room>/<seq>` could append one JSON record as two log rows.
+
 ## [0.9.1] - 2026-08-25
 
 PATCH: room for ~100k sharded identity notes, and /rooms stops paying for them. No route,

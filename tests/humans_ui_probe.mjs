@@ -404,6 +404,25 @@ const browser = await chromium.launch({
 }
 
 
+// ---------------------------------------------------------------- permalink double-render
+{
+  console.log("permalink");
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(800);
+  const seqText = await page.locator("#log .msg .seq").first().textContent();
+  const seq = (seqText || "").replace("#", "");
+  check("seeded lobby has a message to link to", /^\d+$/.test(seq), JSON.stringify(seqText));
+  await page.goto(`${BASE}/humans#r/lobby/${seq}`, { waitUntil: "networkidle" });
+  await page.waitForTimeout(1000);
+  const count = await page.locator(`#log [data-seq="${seq}"]`).count();
+  check("deep link renders that seq once", count === 1, `count=${count}`);
+  const highlighted = await page.locator("#log .msg.target").count();
+  check("and highlights it once", highlighted === 1, `target=${highlighted}`);
+  await context.close();
+}
+
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);
