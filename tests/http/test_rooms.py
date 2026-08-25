@@ -212,6 +212,78 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         assert list(app_module._rooms_cache) == [2, 3]
 
 
+def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkeypatch):
+    """The clock is the backstop when the stamp lies.
+
+    `store._bump` is best effort on purpose — an unwritable `.counters` must not fail a
+    write that already landed — so a bump can go missing and a create then moves no stamp.
+    A hit needs the stamp to match *and* the entry to be inside the window, so the cost of
+    that is one window, not a listing that is wrong until the next structural write.
+    """
+    import config
+    import store
+
+    monkeypatch.setattr(store, "_bump", lambda *a, **k: None)  # every counter now lies
+    window = 0.25
+    with config.override(ROOMS_CACHE_SECONDS=window):
+        client.get("/r/first/say/bot/hi")
+        client.get("/rooms")  # populates the cache
+        client.get("/r/second/say/bot/hi")
+        assert "second" not in client.get("/rooms").text, "the cost: the stamp did not move"
+        time.sleep(window)
+        assert "second" in client.get("/rooms").text, "the clock must expire it regardless"
+
+
+def test_a_cached_view_is_never_served_under_a_different_root(client, tmp_path):
+    """The entries are keyed by `limit` alone, so ROOT is in the stamp — exactly as it is in
+    the note gauge's. Production never moves ROOT, but a reconfigured reload and this very
+    fixture do, and a view walked under one store must not be answered from another.
+    """
+    import config
+
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        client.get("/r/first/say/bot/hi")
+        assert "first" in client.get("/rooms").text  # populates the cache
+
+        other = tmp_path / "elsewhere"
+        with config.override(ROOT=other):
+            client.get("/r/other/say/bot/hi")
+            body = client.get("/rooms").text
+            # `/r/first`, not `first`: the head line ends "newest first"
+            assert "/r/other" in body and "/r/first" not in body
+
+        assert "/r/first" in client.get("/rooms").text  # and the first root still answers
+
+
+def test_a_rewalked_entry_is_the_newest_and_the_oldest_is_what_leaves(client, monkeypatch):
+    """The eviction path, which entries outliving a write made reachable: a caller cycling
+    `?limit=` keeps the cache full, so the evictor now runs while other requests are still
+    walking. Re-walking an existing key is a pop and an insert rather than a write and a
+    `move_to_end` — the key can be evicted between the two, where `move_to_end` raises and
+    `pop` does not — and the entry it leaves behind is the newest, not the next to go.
+
+    Ordering is by last walk, not by last *hit*: a request served from the cache does not
+    reinsert, so a cycling caller can still push a hot `limit` out. Bounded (the key space
+    is one reply per clamped limit) and unchanged by this — noted so the next reader knows
+    it is the policy and not an oversight.
+    """
+    import app as app_module
+    import config
+
+    client.get("/r/first/say/bot/hi")
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
+        app_module._rooms_cache.clear()
+        for limit in (1, 2, 3):
+            client.get(f"/rooms?limit={limit}")
+        assert list(app_module._rooms_cache) == [2, 3]
+        client.get("/r/second/say/bot/hi")  # structural: every entry is now stale
+        client.get("/rooms?limit=2")  # so this one is re-walked, and lands at the end
+        assert list(app_module._rooms_cache) == [3, 2]
+        client.get("/rooms?limit=4")
+        assert list(app_module._rooms_cache) == [2, 4], "the oldest walk is what leaves"
+
+
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     import store
 

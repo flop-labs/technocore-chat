@@ -625,9 +625,17 @@ def _rooms_stamp() -> tuple:
     split for an endpoint whose job is showing what is active rather than reporting a
     message count, and CHAT_ROOMS_CACHE_SECONDS=0 remains the escape hatch for a caller
     that needs a message reflected on the very next request.
+
+    The clock is also the backstop under a lying stamp. `_bump` is best effort by design —
+    an unwritable .counters must never fail a write that already landed — so a bump can go
+    missing, and a hit needs the stamp to match AND the entry to be inside the window. A
+    lost bump therefore costs at most one window, never a permanently stale listing.
     """
     counted = store.counters(config.ROOT)
-    return tuple(counted[key] for key in ROOMS_STAMP_KEYS)
+    # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
+    # `limit` alone, so nothing else would stop a view walked under one root being served
+    # under another. Production never moves it; a test fixture and a reconfigured reload do.
+    return (config.ROOT, *(counted[key] for key in ROOMS_STAMP_KEYS))
 
 
 # One entry — the note gauge does not depend on `limit`. Stamped on ROOT and the on-disk
@@ -686,8 +694,14 @@ def _rooms_view(limit: int) -> dict:
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
     if config.ROOMS_CACHE_SECONDS > 0:
+        # pop-then-insert, not move_to_end: assigning an existing key leaves the entry
+        # where it already was, which may be the front, and a concurrent evictor's popitem
+        # takes it from there — turning the move_to_end that used to follow into a
+        # KeyError. Reachable now that entries outlive a write: a caller cycling ?limit=
+        # keeps the cache full, so the evictor runs while another request is re-walking,
+        # and /rooms is sync, so two of them overlap in Starlette's threadpool.
+        _rooms_cache.pop(limit, None)
         _rooms_cache[limit] = (stamp, now, view)
-        _rooms_cache.move_to_end(limit)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
             _rooms_cache.popitem(last=False)
     return view
