@@ -98,16 +98,26 @@ source_paths = ["src"]
 only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
-# asserted against, and app.py reads SKILL.md at import.
-also_copy = ["SKILL.md", "docker", "mcp"]
+# asserted against, and app.py reads SKILL.md at import. mutmut brings pyproject.toml,
+# uv.lock and tests/ itself; everything else the suite opens by path is listed here, and a
+# missing entry costs the whole run rather than one test — the mutants never get judged.
+also_copy = ["README.md", "SKILL.md", "docker", "mcp", "scripts"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
 # suite the monolith did, and test_mcp.py stays excluded for the reason above.
+#
+# test_store_doc.py is excluded for a different reason, and not by oversight: it asserts
+# that docs/store.md still matches what scripts/gen_store_doc.py renders from src/store.py.
+# In the copy, store.py *is* the mutant source — every function appears once per mutant, as
+# x__at_capacity__mutmut_1 and its siblings — so the regenerated page can never equal the
+# committed one, whatever the mutant did. It is a drift check on the repository, which CI
+# runs on every pull request, not a statement about behaviour that a mutant could falsify.
 pytest_add_cli_args_test_selection = [
     "tests/http",
     "tests/unit",
     "tests/test_store_stateful.py",
+    "--ignore=tests/unit/test_store_doc.py",
 ]
 
 # Not an installable package: src/ is copied into the image and imported by path.

@@ -33,8 +33,11 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen --group mutation
 
-      # mutmut runs the suite in a copy of the project, so it has to pass there first.
-      # Failing here is a missing entry in `also_copy`, not a mutation finding.
+      # The suite against the real tree. This cannot catch a missing `also_copy` entry — it
+      # runs here, not in mutants/ — so failing here is an ordinary broken test. mutmut makes
+      # that check itself, as the clean-tests pass inside the copy; what it reports there is
+      # "failed to collect stats", with no mutant judged. test_mutation_harness.py is what
+      # names the missing path on a pull request instead of a week later.
       - name: Baseline
         run: uv run python -m pytest tests -q
 

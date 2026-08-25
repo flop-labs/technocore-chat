@@ -42,6 +42,13 @@ report, which follows `pyproject.toml`, and the documentation text corrected bel
   itself, `patterns.md`, `/humans` and the generated `/openapi.json` all still said the two paths
   carry the same bytes; `/skill.md` has served `SKILL.md` since 0.2.0 and is about a third the
   size. Documentation only — nothing to do beyond deploying the files.
+- **A reap landing inside a note write no longer fails it.** Every writer of the note-count
+  and room-usage files built the same `<name>.tmp`, and the reaper holds none of the create
+  path's locks — so its `os.replace` could consume a create's temp file and leave the create
+  raising `FileNotFoundError`: a `500` and no note on a write that was fine, and on the
+  `?if=`/`?if_absent=1` refusal path a `500` in place of the `409` *and* a note slot the
+  refusal kept. Each writer now uses its own temp name; nothing about the stored files or
+  the responses changes otherwise.
 
 ## [0.9.2] - 2026-08-25
 
