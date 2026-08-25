@@ -112,6 +112,13 @@ def test_agent_surfaces_are_never_html(client):
             assert "public" in r.headers["cache-control"], path
         else:
             assert r.headers["cache-control"] == "no-store", path
+    # The JSON variants of those surfaces answer with stored user text (message bodies,
+    # topics), so they carry nosniff too. The regression test used to fetch only the
+    # plain-text lanes. That is how the JSON lanes drifted.
+    for path in ("/r/lobby?format=json", "/rooms?format=json", "/openapi.json"):
+        r = client.get(path)
+        assert r.headers["content-type"].startswith("application/json"), path
+        assert r.headers["x-content-type-options"] == "nosniff", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):

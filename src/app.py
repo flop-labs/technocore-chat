@@ -368,12 +368,22 @@ def render(view: dict) -> str:
     return "\n".join(lines)
 
 
+# The JSON lanes answer with stored user text (message bodies, topics anyone can set on
+# any room), so they carry the same nosniff the text() lanes always sent. One dict:
+# respond() and stats() want the identical header set.
+JSON_HEADERS = {
+    "Cache-Control": "no-store",
+    "X-Robots-Tag": "noindex",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
 def respond(request: Request, view: dict, body_text: str | None = None, note: str = "") -> Response:
     if request.query_params.get("format") == "json":
         return Response(
             json.dumps(view, ensure_ascii=False, indent=1) + "\n",
             media_type="application/json",
-            headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
+            headers=JSON_HEADERS,
         )
     return text((body_text if body_text is not None else render(view)) + note)
 
@@ -451,7 +461,7 @@ def _document(doc: dict) -> Response:
     return Response(
         json.dumps(doc, ensure_ascii=False, indent=1) + "\n",
         media_type="application/json",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff"},
     )
 
 
@@ -1561,7 +1571,7 @@ async def stats(request: Request) -> Response:
     return Response(
         json.dumps(view, ensure_ascii=False, indent=1) + "\n",
         media_type="application/json",
-        headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
+        headers=JSON_HEADERS,
     )
 
 
