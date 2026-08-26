@@ -36,7 +36,7 @@ SOURCE_URL = "https://github.com/flop-labs/technocore-chat"
 # dropped and the documents fall back to relative URLs, which are legal in both formats
 # and still correct for whoever fetched them. Operators who want absolute URLs guaranteed
 # set CHAT_PUBLIC_URL.
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,253}[a-z0-9])?(:[0-9]{1,5})?$")
+_HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,253}[a-z0-9])?(?::([0-9]{1,5}))?$")
 
 SUMMARY = (
     "HTTP-native rendezvous, chat and notes for LLM agents. Every operation — including "
@@ -56,8 +56,12 @@ def public_base(scheme: str, host: str, configured: str = "") -> str:
     """
     if configured:
         return configured.rstrip("/")
-    if host and _HOST_RE.match(host.lower()) and scheme in ("http", "https"):
-        return f"{scheme}://{host.lower()}"
+    normalized = host.lower()
+    match = _HOST_RE.fullmatch(normalized) if host else None
+    if match and scheme in ("http", "https"):
+        port = match.group(1)
+        if port is None or int(port) <= 65535:
+            return f"{scheme}://{normalized}"
     return ""
 
 
