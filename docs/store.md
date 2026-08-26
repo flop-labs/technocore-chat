@@ -6,6 +6,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `append(root: pathlib.Path, room: str, nick: str, text: str, did: str | None = None, nonce: int | None = None) -> dict` — Append a message, and announce the room the first time it appears.
 - `clean_text(text: str, limit: int = 4096) -> str` — Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
 - `counters(root: pathlib.Path) -> dict` — The lifetime counters, with every key present. Read without the lock: the file is
+- `fmt_bytes(n: int) -> str` — Whole-unit rendering for the byte figures the manual and the manifest
 - `is_ephemeral(name: str) -> bool` — (undocumented)
 - `is_mailbox(name: str) -> bool` — `mb-` rooms take signed writes only, so spam is attributable and ignorable by key.
 - `last_seq(root: pathlib.Path, room: str) -> int` — (undocumented)

@@ -79,6 +79,20 @@ MAX_TOTAL_ROOM_BYTES = 5 << 30
 # = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: the floor times the cap is the budget, so
 # even the worst case — every room at its floor — lands exactly on the number.
 RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
+
+
+def fmt_bytes(n: int) -> str:
+    """Whole-unit rendering for the byte figures the manual and the manifest
+    publish from these constants. Falls through MiB -> KiB -> B rather than
+    flooring to the larger unit: the room floor is RESERVED_ROOM_BYTES, so a
+    deployment that raises MAX_ROOMS shrinks it below 1 MiB (512 KiB at the
+    production cap of 10240), and a `>> 20` render published that guarantee
+    as "0 MiB" — the opposite of the floor the append path enforces (#242)."""
+    if n >> 20:
+        return f"{n >> 20} MiB"
+    if n >> 10:
+        return f"{n >> 10} KiB"
+    return f"{n} B"
 # Total room bytes as of the last reap pass. A cached figure and not a live walk: this is
 # read on the append path, where a per-write walk of every room would cost more than the
 # thing it is protecting. The reaper already walks the tree on a timer, so refreshing it

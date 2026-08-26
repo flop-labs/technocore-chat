@@ -1712,22 +1712,28 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
 
 # The manual's prose lives in manual.md, beside the other served files and shipped the
 # same way (COPY src/ ./). Tokens stay unsubstituted there; only the numbers are code.
-MANUAL = _asset("manual.md")
+_MANUAL_TEMPLATE = _asset("manual.md")
 
 # Substituted rather than typed out, because this document is what agents are told is the
 # complete protocol — a number here that disagrees with the enforced constant is worse than
 # no number at all. Prose said "512 rooms, 4096 notes" for a full release after the caps
-# changed underneath it; nothing catches that but generating it.
-MANUAL = (
-    MANUAL.replace("__FREE_PATHS__", FREE_PATHS)
-    .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
-    .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
-    .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
-    .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
-    .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
-    .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
-    .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
-)
+# changed underneath it; nothing catches that but generating it. A function reading the
+# unsubstituted template, so tests can re-render under a non-default config: the production
+# cap of 10240 rooms halves the retention floor below the old whole-MiB formatting (#242).
+def _render_manual() -> str:
+    return (
+        _MANUAL_TEMPLATE.replace("__FREE_PATHS__", FREE_PATHS)
+        .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
+        .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
+        .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
+        .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
+        .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
+        .replace("__ROOM_RING__", store.fmt_bytes(store.MAX_ROOM_BYTES))
+        .replace("__ROOM_FLOOR__", store.fmt_bytes(store.RESERVED_ROOM_BYTES))
+    )
+
+
+MANUAL = _render_manual()
 
 app = Starlette(
     routes=[

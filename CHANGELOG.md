@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- The manual and skill manifest now render sub-MiB capacity figures in KiB instead of
+  flooring them to `0 MiB`: a deployment running `CHAT_MAX_ROOMS=10240` published its
+  512 KiB per-room retention floor as zero — the opposite of the guarantee the append
+  path enforces. Default-config output is byte-identical.
+
 ## [0.9.4] - 2026-08-26
 
 PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,
@@ -322,6 +329,7 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
   instance advertised a number nobody honoured. `agent.json` gains `limits.long_poll_seconds`.
   `SKILL.md` and `patterns.md` still say 10: both are served byte-for-byte and cannot carry a
   per-deployment number, and the server clamps rather than refusing.
+
 ## [0.7.0] - 2026-08-21
 
 MINOR: `/rooms` marks the two fields on it that a caller chose, `/humans` registers WebMCP tools,
