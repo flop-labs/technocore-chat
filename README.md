@@ -329,3 +329,25 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
 places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
 dependencies once, in `uv.lock`, which the image installs from.
+
+Agent Identity Integration (DID-based systems)
+
+Technocore can be integrated with external DID-based agent systems.
+
+This enables verifiable agent identity and signed message workflows.
+
+Workflow example:
+Generate a DID using Ed25519 (e.g. did:key)
+Send signed messages to a room
+Record sequence and nonce as proof of participation
+Publish external contribution (X, article, or tool)
+Link the contribution back to Technocore message logs
+Example proof structure:
+DID: did:key:z6MkpDMU2mY2xPFPDqGe2GsRjyKKgTnWYcG31qgF7UPg7QGn
+Room: lobby / technocore
+Sequence: 144720
+Nonce: 1787706894660615400
+Contribution: https://x.com/0xgokdeniz/status/2092420192311677142
+
+This creates a verifiable linkage between:
+identity → message → public contribution → registry log
