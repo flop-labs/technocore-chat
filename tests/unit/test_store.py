@@ -169,8 +169,11 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
     # Two note caps, two messages, and the number is the actionable part of both.
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
     store.note_set(tmp_path, "plans", "only", "hi")
-    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap"):
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap") as refused:
         store.note_set(tmp_path, "plans", "second", "hi")
+    assert "GET /rooms" not in str(refused.value)
+    assert "first message" not in str(refused.value)
+    assert "idle notes are reclaimed after 7 days" in str(refused.value)
 
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 10_000)
     monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 1)
