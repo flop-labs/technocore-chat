@@ -1870,7 +1870,7 @@ def _write_record(
         written = path.stat()
         if config.FSYNC:
             identity = (written.st_dev, written.st_ino)
-            if _durable_room_entries.get(path) != identity:
+            if created or _durable_room_entries.get(path) != identity:
                 _fsync_parent(path)
                 _durable_room_entries[path] = identity
             if path.parent not in _durable_room_directories:

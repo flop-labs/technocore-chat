@@ -1067,6 +1067,28 @@ def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer
     assert synced == [path, path.parent]
 
 
+def test_recreated_room_bypasses_a_stale_reused_inode_cache(tmp_path, monkeypatch):
+    """A peer may reap a room while this worker remembers its inode. If the filesystem
+    reuses that inode for the recreated file, creation itself must still force a sync."""
+    import store
+
+    path = store.room_path(tmp_path, "p-recreated")
+
+    class ReusedInodeCache(dict):
+        def get(self, key, default=None):
+            stat = key.stat()
+            return stat.st_dev, stat.st_ino
+
+    synced = []
+    monkeypatch.setattr(store, "_durable_room_entries", ReusedInodeCache())
+    monkeypatch.setattr(store, "_durable_room_directories", {path.parent})
+    monkeypatch.setattr(store, "_fsync_parent", synced.append)
+
+    store.append(tmp_path, "p-recreated", "bot", "new inode, old identity")
+
+    assert synced == [path]
+
+
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
     """A write changes one room's (mtime_ns, size), so the overview re-reads that room's
     tail and reuses every other window from the memo — O(changed), not O(shown)."""
