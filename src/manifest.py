@@ -1379,7 +1379,8 @@ def config_document(version: str) -> dict:
             "rooms_cache_seconds": "seconds one /rooms walk is shared for; 0 disables",
             "note_stats_cache_seconds": "seconds the note-capacity gauge is reused for; 0 disables",
             "edge_cache_seconds": "s-maxage on /rooms and plain room reads; 0 means no-store",
-            "static_cache_seconds": "s-maxage on the documents; 0 means no-store",
+            "static_cache_seconds": "s-maxage on the text documents named in the README; "
+            "0 means no-store. JSON discovery documents use a fixed one-hour max-age",
         },
         "withheld": _WITHHELD,
         "note": (

@@ -154,6 +154,17 @@ def test_it_is_never_rate_limited_and_stays_indexable(client):
     assert response.headers["cache-control"] == "public, max-age=3600"
 
 
+def test_static_cache_unit_does_not_claim_the_json_documents(client):
+    """CHAT_STATIC_CACHE_SECONDS only drives the edge-cache header on text documents.
+
+    /config and the JSON discovery documents use a separate fixed one-hour browser cache,
+    so the setting's published unit must not tell an operator that this knob moves them.
+    """
+    unit = client.get("/config").json()["units"]["static_cache_seconds"]
+    assert "text documents" in unit
+    assert "fixed one-hour max-age" in unit
+
+
 def test_a_published_setting_is_a_number_json_can_carry(client):
     """Publishing a knob makes its finiteness a contract.
 
