@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -186,6 +187,7 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     }
     root = tmp_path / "shared"
     root.mkdir()
+    (root / ".reaped").touch()
 
     workers = [
         subprocess.Popen(
@@ -208,6 +210,75 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
     # …and the file agrees with the disk, or the next process starts from a wrong number.
     assert store._note_count(root) == cap
+
+
+def test_concurrent_count_rewrites_use_independent_temporary_files(tmp_path, monkeypatch) -> None:
+    """A rebuild racing a locked create must not consume the create's temp file."""
+    import store
+
+    entered = threading.Barrier(2)
+    original_replace = os.replace
+
+    def synchronized_replace(source, destination):
+        if str(source).endswith(".tmp"):
+            entered.wait(timeout=10)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", synchronized_replace)
+    errors = []
+
+    def rewrite(total):
+        try:
+            store._write_note_count(tmp_path, total, total * 10)
+        except BaseException as exc:  # report worker failures in the main test thread
+            errors.append(exc)
+
+    workers = [threading.Thread(target=rewrite, args=(total,)) for total in (1, 2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    assert (tmp_path / store.NOTES_FILE).read_text() in {"1 10", "2 20"}
+
+
+def test_count_rewrite_cleans_up_temporary_file_after_replace_failure(
+    tmp_path, monkeypatch
+) -> None:
+    """A failed replacement must not leave unbounded per-writer files behind."""
+    import store
+
+    def fail_replace(source, destination):
+        raise PermissionError("destination is temporarily busy")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    with pytest.raises(PermissionError):
+        store._write_note_count(tmp_path, 1, 10)
+
+    assert list(tmp_path.glob(f"{store.NOTES_FILE}.*.tmp")) == []
+
+
+def test_count_rewrite_retries_a_busy_destination(tmp_path, monkeypatch) -> None:
+    """A transient Windows destination lock is retried before the write is abandoned."""
+    import store
+
+    attempts = 0
+    original_replace = os.replace
+
+    def flaky_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("destination is temporarily busy")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    store._write_note_count(tmp_path, 1, 10)
+
+    assert attempts == 3
+    assert (tmp_path / store.NOTES_FILE).read_text() == "1 10"
 
 
 def test_a_refused_write_counts_nothing(tmp_path) -> None:

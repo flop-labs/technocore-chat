@@ -1144,9 +1144,20 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     """
     path = root / NOTES_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
+    # `path` is a distinct live object in each call; the PID makes its id process-scoped.
+    tmp = path.parent / f"{path.name}.{os.getpid()}.{id(path)}.tmp"
     tmp.write_text(f"{total} {size}", encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    try:
+        for attempt in range(3):
+            try:
+                os.replace(tmp, path)  # atomic: readers never see a half-written file
+                break
+            except PermissionError:
+                if attempt == 2:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _ns_totals(d: Path) -> tuple[int, int]:
