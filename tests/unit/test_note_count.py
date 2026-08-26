@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -120,6 +121,39 @@ def test_the_count_survives_a_lost_file_by_walking(tmp_path) -> None:
     assert int(stored) == 6
 
 
+def test_a_read_outside_the_gate_never_persists_what_it_rebuilt(tmp_path) -> None:
+    """Every write of a count file happens under `.notes-create`. Reading is safe
+    unserialised — the replace is atomic — but *persisting* what a read rebuilt is not.
+
+    The rebuild is a snapshot of a walk. A create writes its `+1` reservation against the
+    same file at a moment the walk cannot see, so a snapshot installed afterwards lands
+    *below* the notes on disk, and a low count admits writes past MAX_NOTES_TOTAL until the
+    next reap rewrites it. `_check_note_total` runs before the gate and `note_stats` takes no
+    lock at all, so neither may persist; `_check_note_capacity` runs inside the gate and
+    still does, which is what keeps a per-namespace count to one rebuild per reap interval.
+
+    The cost is walking again on the next read, which is the cost this file exists to avoid
+    and exactly what it degrades to. The next create re-establishes it — from under the gate,
+    against a figure nothing can have moved underneath.
+    """
+    import store
+
+    _seed(tmp_path, 3)
+    (tmp_path / store.NOTES_FILE).unlink()
+
+    assert store._note_count(tmp_path) == 3, "the walked figure is still the truth"
+    assert not (tmp_path / store.NOTES_FILE).exists(), (
+        "a read outside the gate must not install the snapshot it just walked"
+    )
+    assert store.note_stats(tmp_path)["total"] == 3, "the gauge reads it the same way"
+    assert not (tmp_path / store.NOTES_FILE).exists(), "and persists it no more than the check"
+
+    store.note_set(tmp_path, "ns-new", "k", "v")
+    assert (tmp_path / store.NOTES_FILE).read_text().split()[0] == "4", (
+        "the serialised writer re-establishes it, at the figure the disk actually holds"
+    )
+
+
 def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
     """Drift is bounded by one reap interval rather than by hope. Writing a deliberately
     wrong count and running a reap must restore the truth — this is what keeps a lost
@@ -133,6 +167,56 @@ def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(store, "REAP_EVERY", 0)  # due now, rather than in five minutes
     store._reap(tmp_path)
     assert store._note_count(tmp_path) == 3
+
+
+def test_a_second_writer_cannot_consume_the_first_writers_staging_file(
+    tmp_path, monkeypatch
+) -> None:
+    """The count is staged under a name unique to its writer, not one named for its
+    destination. Every process writing this file used to stage through the same
+    `.notes-count.tmp`, so a second writer finishing inside the first's window renamed the
+    file the first was about to rename — and the first got `FileNotFoundError` on a path
+    that plainly existed, out of `_count_new_note`, which deliberately does not swallow it.
+    A note create failed because something else recorded one at the same moment.
+
+    Driven deterministically rather than by racing processes: the second write is run from
+    inside `os.replace`, which is the exact window four workers hit by luck. The concurrent
+    cap test below covers the same bug and only fails about half the time, which is not a
+    regression pin.
+    """
+    import store
+
+    real_replace = os.replace
+    raced = []
+
+    def replace_with_a_racing_writer(src, dst):
+        if not raced:  # the nested write re-enters here; let only the outer one race
+            raced.append(str(src))
+            store._write_note_count(tmp_path, 7, 70)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", replace_with_a_racing_writer)
+    store._write_note_count(tmp_path, 3, 30)
+
+    assert raced, "premise: the racing write ran inside the first writer's window"
+    assert store._note_totals(tmp_path) == (3, 30), "the later replace wins, and neither errors"
+    # …and nothing is left behind. A stray in a namespace directory outlives the notes it
+    # sat beside and the reaper's rmdir — which only removes an *empty* namespace — then
+    # never reclaims it, so unique staging names must still clean up after themselves.
+    assert not list(tmp_path.glob("*.tmp")), "staging files must not outlive the write"
+
+    # And the same holds when the replace itself fails, which is the branch that actually
+    # keeps a stray off the disk. A staging file left in a *namespace* directory outlives
+    # every note beside it: the reaper's rmdir only removes an empty namespace, so the
+    # directory the stray sits in is never reclaimed again.
+    def failing_replace(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(store.os, "replace", failing_replace)
+    with pytest.raises(OSError):
+        store._write_note_count(tmp_path, 9, 90)
+    assert not list(tmp_path.glob("*.tmp")), "a failed write must not strand its staging file"
+    assert store._note_totals(tmp_path) == (3, 30), "and must leave the old totals alone"
 
 
 # --------------------------------------------------------------------------- the cap
@@ -437,6 +521,113 @@ def test_the_cached_count_survives_reap_and_create_interleaving(tmp_path, monkey
         # must agree with the increments — a reap is not allowed to lose a concurrent create.
         assert store._note_count(tmp_path) == expected, f"after reap {round_}"
         assert store._count_notes(tmp_path)[0] == expected, "and it must match the disk"
+
+
+def test_a_reap_cannot_lose_a_create_that_has_counted_but_not_written(
+    tmp_path, monkeypatch
+) -> None:
+    """The concurrent half of the test above, and the one that breached the cap.
+
+    A create writes its `+1` reservation and its note at two different moments. Both are
+    inside `.notes-create`, but `_reap` used to rewrite the count from a walk while holding
+    nothing — so a pass landing between the two saw the reservation's note not yet on disk,
+    wrote the lower figure, and the count came out one short of the store. A short count
+    admits a note the cap should refuse, which is how MAX_NOTES_TOTAL ended up holding
+    `cap + 1`.
+
+    Driven from inside the note write, so the reap really does land in the window rather
+    than being timed to. Bounded joins throughout: once the reap is ordered behind the gate
+    it *cannot* finish until the create does, so a test that waits for it unconditionally
+    would hang instead of failing.
+    """
+    import store
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # every pass is due, including this one
+    store.note_set(tmp_path, "ns", "first", "v")
+
+    real_replace = store._replace
+    reaper = []
+
+    def replace_the_note_but_race_a_reap_first(path, data, fsync=False):
+        # Only the note itself: `.notes-count` has no suffix, so the count writes this reap
+        # and this create both make re-enter here and pass straight through.
+        if path.suffix == ".txt" and not reaper:
+            reaper.append(threading.Thread(target=store._reap, args=(tmp_path,)))
+            reaper[0].start()
+            reaper[0].join(1.0)  # unfixed it finishes here and clobbers; fixed it is blocked
+        return real_replace(path, data, fsync)
+
+    monkeypatch.setattr(store, "_replace", replace_the_note_but_race_a_reap_first)
+    store.note_set(tmp_path, "ns", "second", "v")
+
+    assert reaper, "premise: the reap ran inside the create's reservation window"
+    reaper[0].join(10)  # outside the gate, so the blocked pass can now finish its write
+    assert not reaper[0].is_alive(), "the reap never completed"
+    assert store._count_notes(tmp_path)[0] == 2, "premise: both notes are on disk"
+    assert store._note_count(tmp_path) == 2, "a reap must not drop a reservation in flight"
+
+
+def test_a_reap_cannot_remove_a_namespace_a_create_is_entering(tmp_path, monkeypatch) -> None:
+    """`_locked` makes the namespace directory one `mkdir` before it creates the sidecar lock
+    inside it, and in that instant the directory holds nothing the rmdir below would refuse.
+    A reap landing there removed the directory out from under a create that had just made it,
+    and the create died on the `open`.
+
+    On APFS that surfaced as `OSError: [Errno 22] Invalid argument`, which is what made it
+    hard to read. EINVAL is what the filesystem returns for *creating* a file in a directory
+    being removed; a directory already gone gives the ENOENT you would expect, which is what
+    this test produces because it removes the directory outright. Only the errno is the
+    platform's, so what is asserted is that the create survives, not which error it avoided.
+
+    The interleaving is built rather than waited for, and both sides are handshakes so that
+    neither outcome depends on who is quicker. The reap gives the create gate back after its
+    count walk and takes it again for the rmdir, so the create is started from inside the
+    lock sweep — between the two — and parked between the mkdir and the open until the reap
+    says it is done. Unfixed, the reap finishes the rmdir and releases it into a directory
+    that is gone. Fixed, the reap blocks on the gate the create holds, the park times out,
+    and the create completes; the bounded wait is what keeps that from being a deadlock.
+    """
+    import store
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # every pass is due
+    store.note_set(tmp_path, "kept", "k", "v")  # a namespace with a note: rmdir must refuse
+
+    at_the_window, reap_done = threading.Event(), threading.Event()
+    creator, died = [], []
+    real_open, real_walk = open, store._walk
+
+    def open_the_sidecar_lock_but_park_in_the_window(path, *a, **kw):
+        if str(path).endswith(f"fresh{os.sep}k.txt.lock"):
+            at_the_window.set()
+            reap_done.wait(1.0)  # unfixed the reap gets here; fixed it is stuck on the gate
+        return real_open(path, *a, **kw)
+
+    def create():
+        try:
+            store.note_set(tmp_path, "fresh", "k", "v")
+        except BaseException as exc:  # noqa: BLE001 — recorded for the assertion, not hidden
+            died.append(exc)
+
+    def walk_but_let_a_create_into_the_window_first(d, suffix, nested=False):
+        # The sweep of orphan note locks: the count walk is done and its gate given back,
+        # and the rmdir is next. The only point in the pass where this race is reachable.
+        if suffix == ".txt.lock" and not creator:
+            creator.append(threading.Thread(target=create))
+            creator[0].start()
+            at_the_window.wait(5)
+        return real_walk(d, suffix, nested)
+
+    monkeypatch.setattr(store, "open", open_the_sidecar_lock_but_park_in_the_window, raising=False)
+    monkeypatch.setattr(store, "_walk", walk_but_let_a_create_into_the_window_first)
+    store._reap(tmp_path)
+    reap_done.set()
+
+    assert creator, "premise: the create was started inside the reap"
+    assert at_the_window.is_set(), "premise: it reached the mkdir/open window"
+    creator[0].join(10)
+    assert not died, f"the reap killed a create it raced: {died!r}"
+    assert store.note_get(tmp_path, "fresh", "k") == "v", "the create it raced must survive"
+    assert store.note_get(tmp_path, "kept", "k") == "v", "and so must the namespace beside it"
 
 
 def test_a_stale_cache_over_admits_by_at_most_the_drift_a_reap_clears(

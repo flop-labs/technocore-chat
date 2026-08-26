@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import time
 import unicodedata
 from collections import OrderedDict
@@ -115,17 +116,22 @@ USAGE_FILE = ".usage"
 # deletes (there is no delete route — the manual says so), so between reaps the note count
 # only grows, and the single grower is the create path that writes this file. `_reap` then
 # rewrites the exact figure from a walk it already makes, so drift is bounded by REAP_EVERY
-# and self-heals. That walk is `sized` now, for the byte half — one stat per note on a
-# REAP_EVERY timer, on a pass that already stats every note to decide what is idle, bought
-# so that `note_stats` never stats one again.
+# and self-heals. That rewrite takes `.notes-create` too — being the only deleter makes the
+# walk exact against *deletions* and nothing else; a create counted but not yet written is
+# invisible to it, so the creates have to be held still for the figure to be true.
+#
+# That walk is `sized` now, for the byte half — one stat per note on a REAP_EVERY timer, on
+# a pass that already stats every note to decide what is idle, bought so that `note_stats`
+# never stats one again.
 #
 # Fail-closed three ways. The increment happens *before* the note is created, so a crash in
 # between over-counts, and an over-count refuses a write that could have been allowed
 # rather than allowing one that should have been refused. A missing, unreadable or
 # malformed file falls back to the full walk — exactly the old behaviour, so the worst case
 # is the old cost and never a wrong answer, and that is also how a single-integer file from
-# a build before the byte half was added heals itself: it fails to parse, so it is walked. And it is read under `.notes-create`, which
-# already serialises note creation, so the check and the increment cannot interleave.
+# a build before the byte half was added heals itself: it fails to parse, so it is walked.
+# And it is read under `.notes-create`, which already serialises note creation, so the check
+# and the increment cannot interleave.
 #
 # What it does not survive: an unclean shutdown under CHAT_FSYNC=0 can lose the last write,
 # leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
@@ -432,6 +438,49 @@ def _locked(target: Path):
             platform_lock.release(lf)
 
 
+def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
+    """Put `data` at `path` atomically, staging through a name no other writer can hold.
+
+    `os.replace` is the atomic half, and it was always here; the staging name was the half
+    that was not. A temp file named after its destination is shared by everyone writing that
+    destination, so two writers racing it meant the second renamed a file the first had
+    already consumed — `FileNotFoundError` on a path that plainly exists, surfacing out of a
+    note create that was only trying to record itself.
+
+    Unique per *writer* rather than per process: sync handlers overlap in the thread pool, so
+    a pid alone still collides inside one worker.
+
+    Uniqueness rather than a lock, because the writers that meet here are deliberately
+    unlocked — `_note_totals` persists a rebuild without one and `_reap` rewrites the count
+    from its walk — and serialising them would need a single lock spanning every count file
+    in the store, on the read path the count file exists to keep cheap.
+
+    Every non-append write in the core comes through here — counters, both note counts, the
+    usage gauge, the snapshot ring, a note's own value, and a compacted room. Only the last
+    needs `fsync`: a room that loses its compaction has lost its whole retained ring, which
+    is why CHAT_FSYNC trades away an append's fsync and never that one. Everything else is
+    a figure the next reap rewrites anyway.
+
+    mkstemp opens 0600; the writes this replaces went through `write_text` and `open("wb")`
+    and landed 0644 under the default umask, so the mode is restored explicitly rather than
+    quietly narrowed under anything else that reads the store — rooms included, now that a
+    compacted `*.jsonl` is staged here too.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.chmod(tmp, 0o644)
+            f.write(data)
+            if fsync:  # compaction only: see the knob, which never applied to this one
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
+        raise
+
+
 def _now() -> str:
     """UTC to the microsecond.
 
@@ -476,9 +525,7 @@ def _bump(root: Path, **deltas: int) -> None:
             current = counters(root)
             for key, delta in deltas.items():
                 current[key] = current.get(key, 0) + delta
-            tmp = path.parent / f"{path.name}.tmp"
-            tmp.write_bytes(orjson.dumps(current))
-            os.replace(tmp, path)  # atomic: readers never see a half-written file
+            _replace(path, orjson.dumps(current))
     except OSError:
         pass
 
@@ -894,6 +941,93 @@ def _guards_a_live_room(root: Path, path: Path, now: float) -> bool:
         return False  # no room left to guard
 
 
+def _reconcile_note_count(root: Path) -> None:
+    """Rewrite the note count from a walk, under the create gate. Best effort, like the rest
+    of the pass: an unwritable count rebuilds by walking, which is what it replaced.
+
+    Runs after the deletions, so the figure reflects the disk as it now is — and the gate is
+    what makes that "as it now is" true rather than nearly true. A create writes its `+1`
+    reservation and its note at two different moments, both inside `.notes-create`, and a
+    walk landing between them sees neither the note nor any reason to expect one. It then
+    rewrites the count *low*, and a low count admits a note the cap should refuse. Being the
+    only deleter makes the walk exact against deletions and nothing else; the creates have to
+    be standing still too, and this gate is the only thing that holds them.
+
+    `_replace` settles which writer may stage a file. This settles which one wins.
+
+    The cost is the walk: ~450 ms at a completely full store and linear in occupancy below
+    that, on a pass that already costs half a second. `_reap` is throttled to once per
+    REAP_EVERY per process and every write path calls it — `note_set` before it knows whether
+    it has a create or an overwrite, `_write_record` on every room message — so the pass that
+    crosses the interval pays this wherever it arrives from, and a note create arriving while
+    it runs waits on the gate. Bought because a cap that can be breached is not a cap.
+    """
+    try:
+        with _locked(root / ".notes-create"):
+            _write_note_count(root, *_count_notes(root))
+    except OSError:
+        pass
+
+
+def _sweep_orphan_locks(root: Path, now: float) -> None:
+    """Unlink sidecar locks whose data file is gone and that have been idle as long as any
+    reaped room. `now` is the caller's, so every reapability decision in one pass is made
+    against one instant rather than a clock that moves through it.
+
+    Sidecar locks are deliberately *not* removed with their data file: unlinking one a writer
+    holds splits the lock domain, and the next writer locks a fresh inode. Sweeping the
+    orphans instead keeps directory entries bounded while never touching the lock of a room
+    anyone still writes to. Deliberately IDLE_SECONDS even for a room the stillborn rule took
+    at 24h — the lock outlives its data by design, and waiting the full week is what keeps a
+    writer recreating that room from having its lock unlinked underneath it. The drift is
+    bounded by the room cap: at most a week of churn in empty files.
+    """
+    for sub, nested, suffix in (("rooms", False, ".jsonl.lock"), ("notes", True, ".txt.lock")):
+        for p in _walk(root / sub, suffix, nested):
+            try:
+                if p.with_suffix("").exists() or now - p.stat().st_mtime <= IDLE_SECONDS:
+                    continue
+                p.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+
+def _drop_emptied_namespaces(root: Path) -> None:
+    """Drop each per-namespace count, and then the namespace itself if that leaves it empty.
+
+    Runs after `_sweep_orphan_locks`, which is what puts a namespace back to notes and locks
+    only and so lets the rmdir here reach an emptied one.
+
+    The counts go unconditionally. This pass is the only thing that deletes notes, so it is
+    also the only thing those counts can be wrong about — dropping them means a count file
+    never outlives a deletion, and the next create in that namespace pays one scan to rebuild
+    it and none after. Re-establishing each figure from the walk would work too and is
+    strictly more code to be wrong in; an unlink cannot be off by one.
+
+    Under the create gate, for a nearer reason than the count's. A create makes its namespace
+    directory inside `_locked`, one `mkdir` before the `open` that creates the sidecar lock in
+    it, and the directory is still empty in between — precisely what this rmdir looks for.
+    Removing it in that gap does not merely lose a race, it fails the create: creating a file
+    in a directory being removed is EINVAL on APFS, measured here and needing O_CREAT to
+    reproduce at all, where a directory merely *gone* gives the ENOENT POSIX specifies — the
+    errno this was expected to be and never was. Either way the note write dies on a path it
+    had just made.
+
+    Per namespace rather than once around the loop: a create only ever needs the directory it
+    is entering to stand still, so holding the gate across all 32 of them at the cap would
+    queue creates behind namespaces they have nothing to do with. Inside the `try` for the
+    reason this whole tail is best effort — `_reap` runs on the request path, and a pass that
+    cannot take the gate must skip a cleanup, never fail the create that triggered it.
+    """
+    for d in (root / "notes").glob("*"):
+        try:
+            with _locked(root / ".notes-create"):
+                (d / NOTES_FILE).unlink(missing_ok=True)
+                d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
+        except OSError:
+            continue
+
+
 def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
@@ -945,46 +1079,12 @@ def _reap(root: Path) -> None:
     # bought because the alternative is walking it on every append instead.
     try:
         used = _scan(root / "rooms", ".jsonl", sized=True)[1]
-        usage_tmp = root / f"{USAGE_FILE}.tmp"
-        usage_tmp.write_text(str(used), encoding="utf-8")
-        os.replace(usage_tmp, root / USAGE_FILE)
+        _replace(root / USAGE_FILE, str(used).encode())
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
-    # Deletions are done and this is the only thing that deletes, so the walk below is
-    # exact as of now — which is what bounds the create path's drift to one reap interval.
-    try:
-        _write_note_count(root, *_count_notes(root))
-    except OSError:
-        pass  # an unwritable count rebuilds by walking, which is what it replaced
-    # Sidecar locks are deliberately *not* removed with their data file: unlinking one a
-    # writer holds splits the lock domain (the next writer locks a fresh inode). Instead
-    # sweep the orphans — a lock with no data file, idle as long as any reaped room — so
-    # directory entries stay bounded and the lock of a room anyone still writes to is
-    # never touched. Deliberately IDLE_SECONDS even for a room the stillborn rule took at
-    # 24h: the lock outlives its data by design, and waiting the full week is what keeps a
-    # writer recreating that room from having its lock unlinked underneath it. The drift is
-    # bounded by the room cap — at most a week of churn in empty files.
-    for sub, nested, suffix in (("rooms", False, ".jsonl.lock"), ("notes", True, ".txt.lock")):
-        for p in _walk(root / sub, suffix, nested):
-            try:
-                if p.with_suffix("").exists() or now - p.stat().st_mtime <= IDLE_SECONDS:
-                    continue
-                p.unlink(missing_ok=True)
-            except OSError:
-                continue
-    # Every per-namespace count goes with them, unconditionally. This pass is the only
-    # thing that deletes notes, so it is also the only thing those counts can be wrong
-    # about — dropping them here means a count file never outlives a deletion, and the next
-    # create in that namespace pays one scan to rebuild it and none after. Re-establishing
-    # each figure from the walk above would work too and is strictly more code to be wrong
-    # in; an unlink cannot be off by one. It also puts the directory back to notes and locks
-    # only, which is what makes the rmdir below reach an emptied namespace.
-    for d in (root / "notes").glob("*"):
-        try:
-            (d / NOTES_FILE).unlink(missing_ok=True)
-            d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
-        except OSError:
-            continue
+    _reconcile_note_count(root)
+    _sweep_orphan_locks(root, now)
+    _drop_emptied_namespaces(root)
 
 
 def snapshots(root: Path) -> list[dict]:
@@ -1044,9 +1144,7 @@ def _snapshot(root: Path) -> None:
                 pass
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
-            tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
-            os.replace(tmp, marker)
+            _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
     except OSError:
         pass
 
@@ -1142,11 +1240,7 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     never coexisted. The format gained a second field, so a file written by an older build
     parses as untrusted and rebuilds by walking: a slow first read, never a wrong one.
     """
-    path = root / NOTES_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(f"{total} {size}", encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    _replace(root / NOTES_FILE, f"{total} {size}".encode())
 
 
 def _ns_totals(d: Path) -> tuple[int, int]:
@@ -1155,7 +1249,7 @@ def _ns_totals(d: Path) -> tuple[int, int]:
     return _scan(d, ".txt", sized=True)
 
 
-def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
+def _note_totals(d: Path, rebuild=_count_notes, persist: bool = False) -> tuple[int, int]:
     """(notes, bytes) without walking — or by walking, when the file cannot be trusted.
 
     The same file in two places, because the two caps have the same shape: `d` is the store
@@ -1163,9 +1257,14 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     `rebuild` is the walk that re-establishes whichever was asked for.
 
     Read without the lock, like `counters`: replacement is atomic, so a reader sees the old
-    bytes or the new ones. The rebuild is best effort; if it cannot be persisted the caller
-    still gets the counted truth and the next create counts again. That is the old cost,
-    which is the point — this degrades to what it replaced.
+    bytes or the new ones. Reading is safe unserialised; *persisting* what the read rebuilt
+    is not, so `persist` is off by default and only `_check_note_capacity` turns it on —
+    that one runs inside `.notes-create`, and every other write of a count file is under the
+    same gate. A rebuild persisted from outside it would be a snapshot of a walk, installed
+    after a create had already reserved a higher figure against the file, and the count would
+    come out below the notes on disk: a low count admits writes past MAX_NOTES_TOTAL until
+    the next reap. Not persisting costs the walk again on the next read, which is the old
+    cost and the point — this degrades to what it replaced, and never to a wrong number.
 
     A zero is never persisted, and that is load-bearing rather than an optimization:
     `_write_note_count` creates the directory it writes into, so persisting the zero a
@@ -1180,11 +1279,11 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     except (OSError, ValueError):
         pass
     totals = rebuild(d)
-    try:
-        if totals[0]:
+    if persist and totals[0]:
+        try:
             _write_note_count(d, *totals)
-    except OSError:
-        pass
+        except OSError:
+            pass
     return totals
 
 
@@ -1313,7 +1412,7 @@ def _check_note_capacity(root: Path, path: Path) -> None:
     """
     if path.exists():
         return
-    if _note_totals(path.parent, _ns_totals)[0] >= MAX_NOTES_PER_NS:
+    if _note_totals(path.parent, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     _check_note_total(root)
 
@@ -1569,14 +1668,9 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
                     break
             kept.append(line)
     kept.reverse()
-    tmp = path.with_suffix(".jsonl.tmp")
-    with tmp.open("wb") as f:
-        # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing,
-        # and join would leave a stray newline behind instead of an empty file.
-        f.write(b"".join(line + b"\n" for line in kept))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and
+    # join would leave a stray newline behind instead of an empty file.
+    _replace(path, b"".join(line + b"\n" for line in kept), fsync=True)
     config._dbg(2, "compact", room=path.name, kept=len(kept), bytes=total)
 
 
@@ -1631,9 +1725,7 @@ def note_set(
             if expect is not None and current != expect:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(value, encoding="utf-8")
-        os.replace(tmp, path)
+        _replace(path, value.encode("utf-8"))
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
     _bump(root, notes_written=1)

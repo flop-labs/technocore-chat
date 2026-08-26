@@ -16,6 +16,45 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-26
+
+PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,
+response shape or cap moves and no default changes value, but two costs a deployer can observe do:
+`/rooms` now serves everything except the structural counters up to `CHAT_ROOMS_CACHE_SECONDS`
+(default 3) stale, and the reap's note-count walk now runs under the create gate. The walk is not
+new — whichever write crosses the interval has always paid it, ~450 ms at a completely full store
+and linear in occupancy below that, at most once per 300s per process, and a room message or a
+note overwrite triggers it exactly as a create does. The gate is what is new: a note create
+arriving while that walk runs now waits for it.
+
+### Changed
+
+- **`/rooms` no longer re-walks every room on every message.** Its cache was validated against a
+  stamp that included the global `messages` counter, so one message anywhere invalidated every
+  listing — at ~24 messages/second the 3s window was never reached and the hit rate was 0. The
+  stamp now covers only the structural counters, and the write path no longer clears the cache.
+  What a deployer gets: a room that was created, reaped or re-topiced still appears or disappears
+  on the very next request, from any worker, while the rest of the walk — `idle_seconds`,
+  `last_seq`, the recency order, the engagement aggregates and the per-room and total `bytes` —
+  can be up to `CHAT_ROOMS_CACHE_SECONDS` (default 3) stale — on top
+  of the `CHAT_EDGE_CACHE_SECONDS` the CDN already serves. Set `CHAT_ROOMS_CACHE_SECONDS=0` if you
+  need a message reflected on the very next listing.
+
+### Fixed
+
+- **Concurrent note creates no longer fail on a path that plainly exists.** Every process staged
+  its count file through one shared temporary name, so a second writer could rename the file the
+  first was about to rename and the first raised `FileNotFoundError`; separately, a reap could
+  remove a namespace underneath a create and kill it (`EINVAL` on APFS). Staging is now unique per
+  writer, and the namespace cleanup takes the create gate — a cleanup that cannot take it is
+  skipped rather than failing a create.
+- **The global note cap no longer admits a note past itself.** The reaper rewrote the note count
+  from a walk while holding nothing, and a count rebuilt after a missing or malformed file was
+  persisted by callers holding nothing either, so either could install a figure below the notes on
+  disk and admit writes past the cap until the next reap. Every write of a count file now happens
+  under the create gate, at the cost noted above; a rebuilt count is no longer persisted by an
+  unlocked reader, so a missing count file costs one more walk instead of a wrong number.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation
@@ -683,7 +722,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4
 [0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3
 [0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
 [0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
