@@ -955,10 +955,12 @@ def _reconcile_note_count(root: Path) -> None:
 
     `_replace` settles which writer may stage a file. This settles which one wins.
 
-    The cost is the walk, and it is paid by new-note creates alone: an overwrite never takes
-    this gate, and no room path takes it at all. ~450 ms at a completely full store and
-    linear in occupancy below that, once per REAP_EVERY per process, on a pass that already
-    costs half a second. Bought because a cap that can be breached is not a cap.
+    The cost is the walk: ~450 ms at a completely full store and linear in occupancy below
+    that, on a pass that already costs half a second. `_reap` is throttled to once per
+    REAP_EVERY per process and every write path calls it — `note_set` before it knows whether
+    it has a create or an overwrite, `_write_record` on every room message — so the pass that
+    crosses the interval pays this wherever it arrives from, and a note create arriving while
+    it runs waits on the gate. Bought because a cap that can be breached is not a cap.
     """
     try:
         with _locked(root / ".notes-create"):
