@@ -47,8 +47,11 @@ exactly as before. Carries `/interop.md`, added since 0.9.5, as its one new rout
 - **`Vary: Accept` on the four documents that negotiate markdown** (`/skill.md`, `/patterns.md`,
   `/interop.md`, `/auth.md`), and the markdown answer itself stays `no-store`, so a shared cache
   can only ever hold the plain representation. `/` and `/llms.txt` never negotiate and carry no
-  `Vary`. Nothing a client sees changes; a CDN keyed only on URL can no longer serve one caller's
-  content-type label to the next.
+  `Vary`. **Deployer note:** a cache rule covering these four must honour `Vary` or key on
+  `Accept`. Where it does not, the first plain request warms the edge and a later
+  `Accept: text/markdown` is served from it as `text/plain` for up to one window — identical
+  bytes under the wrong label, and not something the origin can prevent, since that request never
+  reaches it. `CHAT_STATIC_CACHE_SECONDS=0`, or leaving the four out of the rule, avoids it.
 - `/` and `/llms.txt` now share one handler. They always returned the same bytes; this is what
   paid for the new route, so the core shrank by three code-lines rather than growing.
 

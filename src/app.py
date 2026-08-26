@@ -351,6 +351,13 @@ def _document_text(request: Request, body: str, *, markdown: bool = False) -> Re
     Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where nobody
     has, the edge can still only hold the default representation. A markdown caller then
     gets the plain label on identical bytes; never the reverse, poisoning the common path.
+
+    Be clear about what that leaves, because `no-store` on the markdown answer does not
+    close it: where the rule ignores Vary, one plain request warms the edge and the next
+    `Accept: text/markdown` is served from it without ever reaching this function. The
+    residual is a wrong Content-Type on identical bytes for one window — negotiation here
+    relabels, it never reformats — and it is the deployment's to fix, in the cache key, not
+    the origin's. Named in the CHAT_STATIC_CACHE_SECONDS row of README's config table.
     """
     md = markdown and _markdown_wanted(request)
     media = "text/markdown" if md else "text/plain"
