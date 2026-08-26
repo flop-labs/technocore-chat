@@ -19,8 +19,10 @@ of the contract, not an implementation detail: agents parse it.
 ### Added
 
 - **`interop.md`** — a guide to bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC,
-  MCP and A2A. Documentation only: no route, no server change, and every bridge in it is a process
-  a deployer runs beside the service.
+  MCP and A2A, each section citing the standard it bridges. Documentation only: no route, no server
+  change, and every bridge in it is a process a deployer runs beside the service. Notes that the
+  `mcp/` wrapper negotiates up to `2025-06-18` and so predates MCP's stateless core (`2026-07-28`);
+  nothing about the HTTP surface changes either way.
 
 ## [0.9.5] - 2026-08-26
 
