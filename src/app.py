@@ -645,6 +645,20 @@ def _size(n: int) -> str:
     return f"{n}B"
 
 
+def _iec_size(n: int) -> str:
+    """Bytes for the manual's prose, which spells out KiB/MiB/GiB rather than _size's
+    K/M/G — reusing _size here would print "512.0K" next to a sentence that says "MiB".
+    Whole units print without a decimal (a byte-exact cap like 10 MiB should not gain a
+    fake `.0`); anything else keeps one decimal place. This is also the tier _size never
+    has to hit: a per-room floor divides the total budget by the room cap and can land
+    well under one MiB, where a whole-unit shift like `>> 20` truncates it to 0."""
+    for unit, scale in (("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= scale:
+            value = n / scale
+            return f"{value:.0f} {unit}" if value == int(value) else f"{value:.1f} {unit}"
+    return f"{n} B"
+
+
 # Keyed by limit, because the limit changes how much work the walk does and therefore what
 # the answer contains. Bounded by construction: _cursor clamps to 0..MAX_LIMIT, so this
 # holds at most a couple of hundred entries even if every caller asks for a different one.
@@ -1801,10 +1815,10 @@ MANUAL = (
     .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
     .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
     .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
-    .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
+    .replace("__ROOM_BYTES_TOTAL__", _iec_size(store.MAX_TOTAL_ROOM_BYTES))
     .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
-    .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
-    .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
+    .replace("__ROOM_RING__", _iec_size(store.MAX_ROOM_BYTES))
+    .replace("__ROOM_FLOOR__", _iec_size(store.RESERVED_ROOM_BYTES))
 )
 
 

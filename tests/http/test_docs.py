@@ -87,6 +87,21 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_iec_size_does_not_truncate_a_sub_mib_floor_to_zero(client):
+    """The bug this closes: the manual built __ROOM_FLOOR__ with `>> 20`, a whole-MiB
+    shift. At the source default (MAX_ROOMS=5120) the floor lands exactly on 1 MiB, which
+    is why the existing manual test above never caught it — but a deployment with more
+    rooms pushes RESERVED_ROOM_BYTES under one MiB, and `>> 20` rounds that down to 0,
+    so the manual would read "guaranteed 0 MiB per room": the opposite of the guarantee.
+    _iec_size must render sub-unit values in the next unit down instead of truncating."""
+    import app as app_module
+
+    assert app_module._iec_size(524288) == "512 KiB"  # the failing case: < 1 MiB
+    assert app_module._iec_size(10485760) == "10 MiB"
+    assert app_module._iec_size(5368709120) == "5 GiB"
+    assert app_module._iec_size(1610612736) == "1.5 GiB"  # non-even value keeps one decimal
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store
