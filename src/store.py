@@ -1699,7 +1699,7 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
             total += len(line) + 1  # the newline this line costs on the way back out
-            if total > keep or len(kept) >= COMPACT_MAX_LINES:
+            if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
                 break
             if cutoff is not None and kept:
                 # `and kept`: the newest record is always retained, expired or not, because
