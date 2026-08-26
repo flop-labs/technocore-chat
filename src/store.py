@@ -610,6 +610,16 @@ def _fsync_parent(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_ancestors(path: Path) -> None:
+    """Persist a visible directory chain up to its existing filesystem mount."""
+    while path != path.parent:
+        parent = path.parent
+        if path.stat().st_dev != parent.stat().st_dev:
+            break
+        _fsync_parent(path)
+        path = parent
+
+
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     """Put `data` at `path` atomically, staging through a name no other writer can hold.
 
@@ -1870,6 +1880,7 @@ def _write_record(
             _fsync_parent(path)
             if path.parent not in _durable_room_directories:
                 _fsync_parent(path.parent)
+                _fsync_ancestors(path.parent.parent)
                 _durable_room_directories.add(path.parent)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:

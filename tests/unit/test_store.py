@@ -1022,18 +1022,19 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
         real(fd)
 
     monkeypatch.setattr(store.os, "fsync", counted)
+    monkeypatch.setattr(store, "_fsync_ancestors", lambda root: events.append("ancestors"))
 
     store.append(tmp_path, "lobby", "bot", "durable")
     # The first room creates rooms/ too: persist the file in rooms/, then rooms/ in root.
     # Its /r/events announcement reuses that directory and needs only the first pair.
-    assert calls == ["file", "rooms", "root", "file", "rooms"]
+    assert events == ["file", "rooms", "root", "ancestors", "file", "rooms"]
 
     store.append(tmp_path, "lobby", "bot", "still durable")
-    assert calls == ["file", "rooms", "root", "file", "rooms", "file", "rooms"]
+    assert events[-2:] == ["file", "rooms"]
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 7  # the append skipped both syncs
+        assert len(calls) == 7  # the append skipped both syncs and the ancestor repair
         store.append(tmp_path, "p-fast-new", "bot", "fast creation")
         assert len(calls) == 7  # a newly created room skips the directory syncs too
         events.clear()
@@ -1049,6 +1050,24 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
         assert events == ["file", "replace", "rooms"]
 
 
+def test_root_ancestor_sync_reaches_but_does_not_cross_the_mount(tmp_path, monkeypatch):
+    """A visible root left by an interrupted writer needs every same-filesystem parent;
+    a mount point itself was provisioned earlier and is the durable boundary."""
+    import store
+
+    expected = []
+    path = tmp_path
+    while path != path.parent and path.stat().st_dev == path.parent.stat().st_dev:
+        expected.append(path)
+        path = path.parent
+    synced = []
+    monkeypatch.setattr(store, "_fsync_parent", synced.append)
+
+    store._fsync_ancestors(tmp_path)
+
+    assert synced == expected
+
+
 def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer(
     tmp_path, monkeypatch
 ):
@@ -1061,6 +1080,7 @@ def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer
     path.touch()
     synced = []
     monkeypatch.setattr(store, "_fsync_parent", synced.append)
+    monkeypatch.setattr(store, "_fsync_ancestors", lambda _root: None)
 
     store.append(tmp_path, "p-interrupted", "bot", "repair it")
 
