@@ -10,7 +10,6 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import tempfile
@@ -27,6 +26,7 @@ import orjson
 
 import config
 import didkey
+import platform_lock
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -437,12 +437,12 @@ def _locked(target: Path):
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        platform_lock.acquire(lf)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            platform_lock.release(lf)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -477,7 +477,7 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o644)
+            os.chmod(tmp, 0o644)
             f.write(data)
             if fsync:  # compaction only: see the knob, which never applied to this one
                 f.flush()
@@ -1294,9 +1294,9 @@ def _note_totals(d: Path, rebuild=_count_notes, persist: bool = False) -> tuple[
     return totals
 
 
-def _note_count(root: Path) -> int:
+def _note_count(root: Path, rebuild=_count_notes) -> int:
     """The count half, which is the half the cap is enforced against."""
-    return _note_totals(root)[0]
+    return _note_totals(root, rebuild)[0]
 
 
 def _count_new_note(root: Path, ns_dir: Path, size: int, delta: int) -> None:
@@ -1388,7 +1388,7 @@ def _check_room_capacity(path: Path) -> None:
         )
 
 
-def _check_note_total(root: Path) -> None:
+def _check_note_total(root: Path, rebuild=_count_notes) -> None:
     """The global half of the note cap: one file read, no directory walk at all.
 
     Split out so it can run *before* the create gate as well as inside it. A store that is
@@ -1397,7 +1397,7 @@ def _check_note_total(root: Path) -> None:
     longest. This sheds them for the price of a read. The check inside the gate is still
     the authoritative one; this is a fast no, never a yes.
     """
-    if _note_count(root) >= MAX_NOTES_TOTAL:
+    if _note_count(root, rebuild) >= MAX_NOTES_TOTAL:
         raise StoreError(
             f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
             "be a new one). A fresh namespace buys nothing — the cap is global. Overwrite "
@@ -1711,8 +1711,10 @@ def note_set(
     # strictly before `_locked(path)` is entered, so a refusal never leaves a sidecar lock
     # or a namespace directory behind either way. What this call is actually worth is
     # shedding a full store's worth of refusals without queueing for the gate first.
-    if not path.exists():
-        _check_note_total(root)
+    # A missing cache must not rebuild here: publishing outside the gate can erase a
+    # reservation. Windows also skips the read because an open target can deny os.replace.
+    if not path.exists() and os.name != "nt":
+        _check_note_total(root, lambda _: (0, 0))
     with (
         _create_gate(
             root / ".notes-create",
