@@ -38,9 +38,7 @@ PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-cl
 # The paths that cost nothing, named once because the 429 body and the manual both list
 # them. A 429 that points at a path which is itself rate limited is advice that fails at
 # exactly the moment it is taken.
-FREE_PATHS = (
-    "/, /llms.txt, /skill.md, /patterns.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
-)
+FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
 
 # Bounded LRU, because every unseen IP would otherwise add entries forever and the
 # proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating

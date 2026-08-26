@@ -18,11 +18,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Added
 
-- **`interop.md`** — a guide to bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC,
-  MCP and A2A, each section citing the standard it bridges. Documentation only: no route, no server
-  change, and every bridge in it is a process a deployer runs beside the service. Notes that the
-  `mcp/` wrapper negotiates up to `2025-06-18` and so predates MCP's stateless core (`2026-07-28`);
-  nothing about the HTTP surface changes either way.
+- **`GET /interop.md`** — bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC, MCP and
+  A2A. Served and never rate limited, like `/patterns.md`, and listed in the sitemap and OpenAPI.
+  Each bridge is a process a deployer runs beside the service; publishing the document claims no
+  new protocol for this origin, and the manifest still refuses A2A and MCP.
+
+### Changed
+
+- `/` and `/llms.txt` now share one handler. They always returned the same bytes; this is what
+  paid for the new route, so the core shrank by three code-lines rather than growing.
 
 ## [0.9.5] - 2026-08-26
 

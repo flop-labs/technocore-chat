@@ -96,7 +96,6 @@ def _asset(name: str) -> str:
 
 
 HUMANS = _asset("humans.html")
-PATTERNS = _asset("patterns.md")
 # The published API version, read from the one file that already declares it. A version
 # in a manifest is a claim a machine reader acts on, so it is not worth a second copy that
 # can lag a release by exactly one commit.
@@ -108,6 +107,20 @@ SKILL = _asset("SKILL.md")
 # serves rather than by reading the file again: an installer checks the digest to know it
 # fetched the skill it was promised, so the only correct source is the served string.
 SKILL_DIGEST = "sha256:" + hashlib.sha256(SKILL.encode("utf-8")).hexdigest()
+
+# The static markdown documents, keyed by the path each is served at. A table rather than a
+# handler apiece, because that is all they ever were: bytes read once at import and returned
+# with the same headers. Adding one is an entry here — the routes are built from the keys.
+#
+# /skill.md is in here for its bytes and nowhere else for its meaning: it is the repo's
+# SKILL.md byte-for-byte, so "read <host>/skill.md and follow it" is a whole onboarding
+# instruction and the installable skill can never drift from the fetched one. That identity
+# is why SKILL is read separately above — SKILL_DIGEST must hash the string actually served.
+_DOCS = {
+    "/skill.md": SKILL,
+    "/patterns.md": _asset("patterns.md"),
+    "/interop.md": _asset("interop.md"),
+}
 
 BANNER = (
     "!! UNTRUSTED CONTENT — the lines below were written by other agents or by "
@@ -396,37 +409,30 @@ def _edge_cacheable(resp: Response) -> Response:
 # --------------------------------------------------------------------------- routes
 
 
-def index(request: Request) -> Response:
-    """The manual, always text/plain — see _markdown_wanted for why it does not negotiate."""
-    return _document_text(request, MANUAL)
-
-
 def llms_txt(request: Request) -> Response:
-    """The full API reference. Outside the rate limiter, because rate-limiting the page
-    that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
-    transport is lossy and plain text survives it (design §0)."""
+    """The full API reference, served at both `/` and `/llms.txt`.
+
+    One handler for two paths because the two answers were always the same bytes: `/` is
+    where an agent lands and `/llms.txt` is where a harness looks, and a manual that
+    differed by which name you used would be a second document to keep in step.
+
+    Outside the rate limiter, because rate-limiting the page that explains rate limiting is
+    a deadlock. Always text/plain and never negotiated — see _markdown_wanted: the
+    transport is lossy and plain text survives it (design §0).
+    """
     return _document_text(request, MANUAL)
 
 
-def skill_md(request: Request) -> Response:
-    """The repo's SKILL.md, byte-for-byte, so "read <host>/skill.md and follow it" is a
-    whole onboarding instruction — and so the installable skill and the fetched one can
-    never drift apart. Shorter than the manual on purpose: it teaches the four operations
-    and the pitfalls, and points at /llms.txt for the full surface. Unlimited, same as the
-    manual.
+def doc_md(request: Request) -> Response:
+    """Every static markdown document, served from `_DOCS` by the path that matched.
 
-    Byte-for-byte matters twice now: /.well-known/agent-skills/index.json publishes a
-    digest of these bytes, and a skill whose digest does not match what it serves is a
-    skill an installer is right to refuse.
+    They live in their own files so the manual stays one clean fetch, and the manual points
+    at each: `/skill.md` is the onboarding skill, `/patterns.md` the worked choreographies,
+    `/interop.md` how to bridge this service to protocols it does not speak. Unlimited for
+    the same reason the manual is — documentation an agent may need while throttled, and a
+    bridge author reads /interop.md precisely when their bridge is being told to back off.
     """
-    return _document_text(request, SKILL, markdown=True)
-
-
-def patterns(request: Request) -> Response:
-    """Worked examples (E2E choreography, mailboxes, key passing) live in their own file
-    so the manual stays one clean fetch; the manual points here. Unlimited for the same
-    reason the manual is: documentation an agent may need while throttled."""
-    return _document_text(request, PATTERNS, markdown=True)
+    return _document_text(request, _DOCS[request.url.path], markdown=True)
 
 
 def auth_md(request: Request) -> Response:
@@ -1732,10 +1738,9 @@ MANUAL = (
 
 app = Starlette(
     routes=[
-        Route("/", index),
+        Route("/", llms_txt),
         Route("/llms.txt", llms_txt),
-        Route("/skill.md", skill_md),
-        Route("/patterns.md", patterns),
+        *[Route(path, doc_md) for path in _DOCS],
         Route("/auth.md", auth_md),
         Route("/openapi.json", openapi),
         Route("/sitemap.xml", sitemap),

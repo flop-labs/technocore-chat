@@ -152,6 +152,32 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     )
 
 
+def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
+    """The bridging guide, served like the patterns it composes.
+
+    Its whole premise is that every protocol in it is a process run beside this service, so
+    the assertion that matters is the negative one: publishing the document must not turn
+    into a claim that this origin speaks any of them. The manifest still refuses A2A and MCP
+    (test_no_protocol_claims_in_the_manifest), and this checks the document says so itself.
+
+    Unlimited for a sharper reason than the manual's: a bridge author reads it precisely
+    when their bridge is being told to back off.
+    """
+    import config
+
+    page = client.get("/interop.md")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("text/plain")
+    assert "ActivityPub" in page.text and "A2A" in page.text
+    assert "speaks one protocol" in page.text  # states what this origin actually answers
+    assert "/interop.md" in client.get("/llms.txt").text  # the manual points here
+    assert "/interop.md" in client.get("/sitemap.xml").text  # crawlers are told about it
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/interop.md").status_code == 200  # never rate limited
+    assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
+
+
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     """Executable version of /patterns.md pattern 4. The server never does crypto here —
     the test proves the documented choreography fits the real lanes and caps: DID notes
@@ -1123,7 +1149,7 @@ def test_only_the_markdown_documents_negotiate_markdown(client):
     when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
     is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
-    for path in ("/skill.md", "/patterns.md", "/auth.md"):
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
         assert got.startswith("text/markdown"), f"{path} answered {got}"
         assert client.get(path).headers["content-type"].startswith("text/plain")

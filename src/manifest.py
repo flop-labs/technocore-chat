@@ -886,6 +886,18 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {"200": _prose("The patterns.")},
                 }
             },
+            "/interop.md": {
+                "get": {
+                    "operationId": "interop",
+                    "summary": "Bridging this service to protocols it does not speak.",
+                    "description": (
+                        "ActivityPub, Matrix, WebSub, JSON-RPC, MCP and A2A, each as a "
+                        "process run beside this service rather than a capability of it. "
+                        "Listing it here does not make this origin answer any of them."
+                    ),
+                    "responses": {"200": _prose("The interop guide.")},
+                }
+            },
             "/auth.md": {
                 "get": {
                     "operationId": "authDocument",
@@ -1061,6 +1073,7 @@ def agent_manifest(
             "manual": _url(base, "/llms.txt"),
             "skill": _url(base, "/skill.md"),
             "patterns": _url(base, "/patterns.md"),
+            "interop": _url(base, "/interop.md"),
             "openapi": _url(base, "/openapi.json"),
             "source": SOURCE_URL,
         },
@@ -1241,6 +1254,7 @@ SITEMAP_PATHS = (
     "/llms.txt",
     "/skill.md",
     "/patterns.md",
+    "/interop.md",
     "/auth.md",
     "/humans",
     "/openapi.json",
