@@ -159,37 +159,47 @@ def test_the_migration_never_replaces_a_sidecar_lock(tmp_path):
     check and CAS are all serialised by.
 
     Asserted on the inode rather than on existence, because that is the failure: a lock that
-    a live writer holds must never stop being the lock at its own path.
+    a live writer holds must never stop being the lock at its own path. Held here for the
+    length of the call so the premise does not also depend on nobody else — namely the orphan
+    sweep, which is free to reclaim an *unheld* migration leftover in this very same pass
+    (see the test below) — getting to it first.
     """
+    import fcntl
+
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
+    legacy_lock = legacy.with_suffix(".jsonl.lock")
+    held = open(legacy_lock, "a+b")
+    fcntl.flock(held, fcntl.LOCK_EX)  # a writer already inside this exact inode
+    try:
+        before_ino = legacy_lock.stat().st_ino
+        store.append(tmp_path, "old", "alice", "two")
+        fresh = store.room_path(tmp_path, "old").with_suffix(".jsonl.lock")
+
+        assert legacy_lock.exists(), "the sweep must not touch a lock somebody holds"
+        assert legacy_lock.stat().st_ino == before_ino, "no inode was replaced"
+        assert fresh.exists(), "…and the moved data got its own, freshly created lock"
+        assert fresh.stat().st_ino != before_ino
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+
+
+def test_the_sweeper_reclaims_the_lock_the_migration_left(tmp_path):
+    """Which is what makes leaving it free rather than a leak: nothing can be holding a lock
+    the migration left behind (`_migrate` never touches it), so the orphan sweep reclaims it
+    the moment it looks — the same pass that did the migration, not a week later. See #302:
+    a lock's mtime is its creation time and nothing else, so an age-based grace before that
+    fix never actually protected this lock; it only delayed cleaning it up."""
     import store
 
     legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
     legacy_lock = legacy.with_suffix(".jsonl.lock")
 
-    store.append(tmp_path, "old", "alice", "two")
-    fresh = store.room_path(tmp_path, "old").with_suffix(".jsonl.lock")
+    store.append(tmp_path, "old", "alice", "two")  # migrates the data, then reaps and sweeps
 
-    assert legacy_lock.exists(), "the old sidecar is left for the orphan sweeper"
-    assert fresh.exists(), "…and the moved data got its own, freshly created"
-    assert fresh.stat().st_ino != legacy_lock.stat().st_ino, "no inode was replaced"
-
-
-def test_the_sweeper_reclaims_the_lock_the_migration_left(tmp_path, monkeypatch):
-    """Which is what makes leaving it free rather than a leak: the orphan sweep already
-    exists for a lock whose data file is gone, and a migrated-away file is exactly that."""
-    import store
-
-    legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
-    legacy_lock = legacy.with_suffix(".jsonl.lock")
-    store.append(tmp_path, "old", "alice", "two")
-    assert legacy_lock.exists(), "premise: the migration left it"
-
-    old = time.time() - store.IDLE_SECONDS - 60
-    os.utime(legacy_lock, (old, old))
-    monkeypatch.setattr(store, "REAP_EVERY", 0)
-    store._reap(tmp_path)
-
-    assert not legacy_lock.exists(), "an idle lock with no data file must be swept"
+    assert not legacy_lock.exists(), "an unheld lock with no data file must be swept promptly"
     assert store.read_messages(tmp_path, "old", limit=5)["messages"][-1]["text"] == "two"
 
 

@@ -478,8 +478,9 @@ def _migrate(legacy: Path, sharded: Path) -> None:
     ever called on a path `_resolve` handed out, and `_resolve` hands out the legacy path only
     while the file is still there — so the lock a live writer holds is always the one beside
     the file it is writing. `_sweep_orphan_locks` already exists for precisely this shape (a
-    lock whose data file is gone) and reclaims it once it has been idle as long as any reaped
-    room.
+    lock whose data file is gone) and reclaims it as soon as the next pass finds nobody holds
+    it, which for a migration stray — guaranteed unheld the moment it is created — is the very
+    next one.
 
     The reaper is the one caller that can hold a legacy lock, because it locks what its walk
     found rather than what a resolver returned. It only ever unlinks, and it re-stats by path
@@ -576,16 +577,34 @@ def _prune(d: Path | str) -> bool:
 @contextmanager
 def _locked(target: Path):
     """Exclusive lock held on a sidecar file, so compaction can replace the data
-    file inode without writers holding a lock on the orphan."""
+    file inode without writers holding a lock on the orphan.
+
+    Re-validated after acquiring: `_sweep_orphan_locks` can unlink the sidecar between
+    this call's `open()` and its `flock()`, in which case the fd flocks fine — nothing
+    else holds *that* inode — while the path it was opened from now names a different
+    one, or none. A lock on an inode nobody can find again protects nobody. Comparing
+    the fd's inode against a fresh `stat()` of the path catches exactly that gap, and
+    retrying against whatever is there now is what makes "holds the lock" mean "holds
+    the current file" rather than "held some file, once."
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
-    with open(lock, "a+b") as lf:
+    while True:
+        lf = open(lock, "a+b")
         fcntl.flock(lf, fcntl.LOCK_EX)
-        config._dbg(2, "flock", path=target.name)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+        try:  # FileNotFoundError here is a mismatch too: nothing to retry against yet
+            if os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino:
+                break
+        except FileNotFoundError:
+            pass
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+    config._dbg(2, "flock", path=target.name)
+    try:
+        yield
+    finally:
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -1125,18 +1144,25 @@ def _reconcile_note_count(root: Path) -> None:
         pass
 
 
-def _sweep_orphan_locks(root: Path, now: float) -> None:
-    """Unlink sidecar locks whose data file is gone and that have been idle as long as any
-    reaped room. `now` is the caller's, so every reapability decision in one pass is made
-    against one instant rather than a clock that moves through it.
+def _sweep_orphan_locks(root: Path) -> None:
+    """Unlink sidecar locks whose data file is gone and that nobody currently holds.
 
     Sidecar locks are deliberately *not* removed with their data file: unlinking one a writer
     holds splits the lock domain, and the next writer locks a fresh inode. Sweeping the
     orphans instead keeps directory entries bounded while never touching the lock of a room
-    anyone still writes to. Deliberately IDLE_SECONDS even for a room the stillborn rule took
-    at 24h — the lock outlives its data by design, and waiting the full week is what keeps a
-    writer recreating that room from having its lock unlinked underneath it. The drift is
-    bounded by the room cap: at most a week of churn in empty files.
+    anyone still writes to.
+
+    "Anyone still writes to" used to be approximated by the lock's own mtime, on the theory
+    that a room the reaper just took would keep its lock around for a further IDLE_SECONDS —
+    long enough for a writer recreating it to be safe. That grace never happened: `_locked`
+    never writes to the sidecar it opens, so a lock's mtime is its creation time and nothing
+    else, which makes it no newer than the data file it guards. By the time a room is idle
+    enough to reap, its lock already reads as idle too, so the old check swept it in the very
+    same pass — the exact moment a writer racing the reaper (issue #302) might be mid-`_locked`
+    on it. Testing the actual property — is this lock currently held — instead of a proxy for
+    it is both simpler and correct: a non-blocking flock either finds the sidecar free, in
+    which case it is safe to remove regardless of age, or finds a holder and leaves it alone
+    regardless of age.
     """
     for sub, suffix in (("rooms", ".jsonl.lock"), ("notes", ".txt.lock")):
         for entry in _walk(root / sub, suffix):
@@ -1146,15 +1172,14 @@ def _sweep_orphan_locks(root: Path, now: float) -> None:
                 # µs per lock as it was, 3.6 µs now, over 12,079 room locks. os.access asks
                 # about the real uid rather than the effective one — this image runs as one
                 # non-root uid so the two agree, and nothing here is setuid.
-                #
-                # Deliberately not the dir_fd form: os.stat(name, dir_fd=) measures 96.6 ms
-                # against os.stat(path)'s 94.6 ms over the same tree, so threading a
-                # directory fd out of the walk would buy a rounding error and cost an fd
-                # lifetime per namespace. The Path was the expense, not the syscall.
                 data = entry.path[: -len(".lock")]
-                if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
+                if os.access(data, os.F_OK):
                     continue
-                os.unlink(entry.path)
+                with open(entry.path, "a+b") as lf:
+                    # BlockingIOError (a holder right now) is an OSError: the except below
+                    # skips it exactly like any other race, whatever the lock's age.
+                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    os.unlink(entry.path)
             except OSError:
                 continue
 
@@ -1258,7 +1283,7 @@ def _reap(root: Path) -> None:
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
     _reconcile_note_count(root)
-    _sweep_orphan_locks(root, now)
+    _sweep_orphan_locks(root)
     _drop_emptied_namespaces(root)
     # Room buckets, once their locks have gone with the sweep above. Under the create gate for
     # the reason `_drop_emptied_namespaces` spells out: `_locked` makes a room's bucket one

@@ -319,6 +319,9 @@ def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
 
 
 def test_orphan_locks_are_swept(tmp_path):
+    """Nobody holds the lock here, so it is swept the moment its data is gone — the same pass
+    that reaps the room, not a later one. The test below this one covers the case that
+    actually needs a second pass: a lock somebody is using at the instant the sweep runs."""
     import store
 
     store.append(tmp_path, "gone", "bot", "hi")
@@ -328,10 +331,8 @@ def test_orphan_locks_are_swept(tmp_path):
     for p in (path, lock):
         _age(p, store.IDLE_SECONDS + 60)
     _arm_reaper(tmp_path)
-    store.append(tmp_path, "other", "bot", "hi")  # reaps the data file, keeps its lock
-    assert not path.exists()
-    _arm_reaper(tmp_path)
-    store.append(tmp_path, "other", "bot", "again")  # next pass sweeps the orphan lock
+    store.append(tmp_path, "other", "bot", "hi")  # reaps the data file and, nobody holding
+    assert not path.exists()  # its lock, sweeps that too, in this same pass
     assert not lock.exists()
 
 
@@ -374,6 +375,115 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     _reap_now(tmp_path)
 
     assert path.exists() and lock.exists()
+
+
+def test_a_held_lock_survives_the_same_pass_that_reaps_its_data(tmp_path):
+    """Regression test for #302: the sweep used to decide "orphan" from the lock's mtime,
+    which is its creation time and nothing else (`_locked` never writes to the sidecar it
+    opens). Since a lock is created no later than its data, that made the lock at least as
+    idle as the data by the time either was reapable — so the "wait a week" grace the old
+    docstring promised never actually happened, and a lock could be swept in the exact same
+    pass that reaped its data. That is precisely the pass in which a second writer racing
+    the reaper may already be holding it (issue body, steps 1-6): stripping the lock out
+    from under a live holder strands its inode, and the next `_locked()` on that path grants
+    a fresh one immediately — two writers inside the room at once.
+
+    Simulate the live holder directly, without threads: a `flock` held by this process on a
+    second fd blocks a third fd's non-blocking attempt exactly as it would across processes.
+    """
+    import fcntl
+
+    import store
+
+    store.append(tmp_path, "race", "bot", "hi")
+    path = store.room_path(tmp_path, "race")
+    lock = path.with_suffix(".jsonl.lock")
+    for p in (path, lock):
+        _age(p, store.IDLE_SECONDS + 60)  # both look orphaned by the old, mtime-only check
+
+    holder = open(lock, "a+b")
+    fcntl.flock(holder, fcntl.LOCK_EX)  # a writer mid-append, holding the sidecar right now
+    try:
+        path.unlink()  # stand in for the reap pass's own delete, which has just completed
+        store._sweep_orphan_locks(tmp_path)
+        assert lock.exists(), "the sweep unlinked a lock somebody currently holds"
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_locked_retries_when_its_sidecar_is_replaced_out_from_under_it(tmp_path, monkeypatch):
+    """Regression test for #302's second half: `_locked` opens the sidecar, then flocks it —
+    two syscalls, not one. If a sweep unlinks the sidecar and a recreate lands in that gap,
+    the fd from `open()` still flocks fine (nothing else holds *that*, now-detached, inode),
+    but the path no longer names it — the caller would believe it holds the room's lock while
+    every other `_locked(path)` call locks a different, unrelated inode, and two callers end
+    up inside the critical section together.
+
+    Force the gap with a single swap on the first `open()` of this lock, then prove `_locked`
+    actually holds the *current* inode by trying to flock it again, non-blocking, from
+    outside: that must fail while `_locked`'s `with` block is still open.
+    """
+    import store
+
+    path = tmp_path / "rooms" / "swap.jsonl"
+    path.parent.mkdir(parents=True)
+    lock = path.with_suffix(".jsonl.lock")
+
+    real_open = open
+    swapped = []
+
+    def open_then_swap(file, mode, *args, **kwargs):
+        fh = real_open(file, mode, *args, **kwargs)
+        if str(file) == str(lock) and not swapped:
+            swapped.append(True)
+            # A sweep unlinking the sidecar and a second writer recreating it, both
+            # landing between this open() and _locked's flock() call.
+            os.unlink(lock)
+            real_open(lock, "a+b").close()
+        return fh
+
+    monkeypatch.setattr(store, "open", open_then_swap, raising=False)
+
+    import fcntl
+
+    with store._locked(path):
+        assert swapped, "the race never happened -- this test proved nothing"
+        probe = real_open(lock, "a+b")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            probe.close()
+
+
+def test_locked_retries_when_its_sidecar_is_gone_and_not_yet_recreated(tmp_path, monkeypatch):
+    """The narrower sibling of the test above: the sweep has unlinked the sidecar but nobody
+    has recreated it yet at the moment `_locked` rechecks. `os.stat(lock)` then raises
+    `FileNotFoundError` rather than naming a mismatched inode — a different code path to the
+    same conclusion, "retry", and one a naive `try/except` around only the fstat call would
+    miss."""
+    import store
+
+    path = tmp_path / "rooms" / "vanish.jsonl"
+    path.parent.mkdir(parents=True)
+    lock = path.with_suffix(".jsonl.lock")
+
+    real_open = open
+    swapped = []
+
+    def open_then_vanish(file, mode, *args, **kwargs):
+        fh = real_open(file, mode, *args, **kwargs)
+        if str(file) == str(lock) and not swapped:
+            swapped.append(True)
+            os.unlink(lock)  # a sweep landing here, nobody having recreated it yet
+        return fh
+
+    monkeypatch.setattr(store, "open", open_then_vanish, raising=False)
+
+    with store._locked(path):
+        assert swapped, "the race never happened -- this test proved nothing"
+        assert lock.exists(), "_locked must have recreated the sidecar on retry"
 
 
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
