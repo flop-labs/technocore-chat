@@ -122,15 +122,16 @@ and is not a live channel. Discovery via search, **conversation via fetch**.
 ### 1.6 Storage engine comparison
 
 Workload: append one small record; read the newest *N* records or everything after a cursor;
-occasional whole-key overwrite. The write path was remeasured 2026-08-26 on the same tmpfs in
-five alternating runs of 4 processes × 2500 appends: the median moved from 16,091 appends/s with
-file-only fsync to 15,099 with file + directory fsync (-6.2%). That isolates syscall overhead;
-a persistent volume's journal cost is filesystem-dependent and must be measured there. The read
-figures use the original 61 MB / 400k-line room:
+occasional whole-key overwrite. The write-path delta was measured 2026-08-26 on tmpfs in five
+alternating runs of 4 processes × 2500 appends: file + directory fsync delivered 6.2% less
+throughput than the file-only control. That isolates syscall and locking overhead, not durable-media
+throughput; a persistent volume's journal cost is filesystem-dependent and must be measured there.
+The benchmark and exact command live in `tests/capacity_bench.py`. Read figures are from the
+original 61 MB / 400k-line room:
 
 | | POSIX append-only files | SQLite (WAL) | Redis (Streams) |
 |---|---|---|---|
-| Disk I/O, write | 1 `write` + `fsync(file)` + `fsync(directory)`; **15,099 appends/s** across 4 procs on tmpfs | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
+| Disk I/O, write | 1 `write` + `fsync(file)` + `fsync(directory)`; tmpfs control shows **-6.2% throughput**, persistent-volume throughput not claimed | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
 | Disk I/O, read | **O(window)**: backwards chunk scan. 1.7 ms for `tail(50)` on 61 MB; 3.4 ms for `since=` +200 rows | O(log n) index seek, better for arbitrary/random access | O(1) `XRANGE`, best in class |
 | Concurrency | `flock` on a sidecar file; single-writer, lock-free readers; verified 1000/1000 unique contiguous seqs, zero interleaving | single writer, concurrent readers (WAL) | single-threaded server, atomic by construction |
 | Memory | none beyond the app (~40 MB RSS, Python); page cache does the work | ~a few MB + cache | **entire dataset resident** + ~30-50 MB baseline |
@@ -192,6 +193,10 @@ Compaction fsyncs the staged bytes before `os.replace`, then fsyncs `rooms/` so 
 entry is durable too; syncing only the file does not persist a newly created or renamed directory
 entry. With `CHAT_FSYNC=0` it deliberately does not add the separate data-root sync: disabling the
 knob already trades away durability of a newly created `rooms/` entry.
+
+`_fsync_parent` is deliberately a core primitive: it defines when acknowledged state survives a
+host crash, so moving it outside the capped store would hide production durability behavior from
+the core-size guard. That state guarantee is the explicit reason this change moves the store cap.
 
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"

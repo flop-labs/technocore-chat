@@ -144,7 +144,9 @@ reap. test_app.py pins that as a regression test with a fake slow store.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import multiprocessing as mp
 import os
 import shutil
 import statistics
@@ -153,6 +155,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -160,6 +163,57 @@ import didkey  # noqa: E402
 import store  # noqa: E402
 
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def _append_batch(args: tuple[Path, int, int]) -> None:
+    root, worker, count = args
+    for i in range(count):
+        store._write_record(root, "p-fsync-bench", f"w{worker}", f"message-{i}")
+
+
+def _skip_parent_fsync(_path: Path) -> None:
+    pass
+
+
+def _append_rate(count: int, directory_sync: bool) -> float:
+    root = Path(tempfile.mkdtemp(prefix="technocore-fsync-bench-"))
+    sync_context = (
+        contextlib.nullcontext()
+        if directory_sync
+        else mock.patch.object(store, "_fsync_parent", _skip_parent_fsync)
+    )
+    try:
+        with sync_context:
+            (root / ".reaped").touch()
+            store._write_record(root, "p-fsync-bench", "warm", "warm")
+            start = time.perf_counter()
+            with mp.get_context("fork").Pool(4) as pool:
+                pool.map(_append_batch, ((root, worker, count) for worker in range(4)))
+            elapsed = time.perf_counter() - start
+            assert store.last_seq(root, "p-fsync-bench") == 4 * count + 1
+            return 4 * count / elapsed
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def fsync_append_bench(count: int, rounds: int = 5) -> None:
+    """Paired current-vs-file-only write cost; alternate order so host drift cancels.
+
+    Measured 2026-08-26 with
+      TMPDIR=/dev/shm python tests/capacity_bench.py --fsync-only --fsync-append-count 2500
+    across five alternating rounds: median 16,091 appends/s file-only and 15,099 with the
+    directory sync (-6.2%). tmpfs isolates syscall/locking overhead; it is deliberately not
+    presented as durable-volume throughput, which must be measured on the deployment volume.
+    """
+    samples = {False: [], True: []}
+    for round_number in range(rounds):
+        order = (False, True) if round_number % 2 == 0 else (True, False)
+        for directory_sync in order:
+            samples[directory_sync].append(_append_rate(count, directory_sync))
+    before, after = (statistics.median(samples[value]) for value in (False, True))
+    print(f"file-only fsync median          {before:,.0f} appends/s")
+    print(f"file + directory fsync median  {after:,.0f} appends/s")
+    print(f"throughput delta                {(after / before - 1) * 100:+.1f}%")
 
 
 def bench(label: str, fn, rounds: int = 5, setup=None) -> None:
@@ -471,7 +525,15 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, help="also measure a server already on this port")
     parser.add_argument("--room", default="r0", help="an EXISTING room for --port to write to")
+    parser.add_argument("--fsync-only", action="store_true", help="run only the paired fsync bench")
+    parser.add_argument(
+        "--fsync-append-count", type=int, default=2500, help="appends per worker in fsync bench"
+    )
     args = parser.parse_args()
+
+    if args.fsync_only:
+        fsync_append_bench(args.fsync_append_count)
+        return
 
     root = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="capacity-bench-"))
     print(

@@ -1866,14 +1866,13 @@ def _write_record(
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
-        written = path.stat()
         if config.FSYNC:
             _fsync_parent(path)
             if path.parent not in _durable_room_directories:
                 _fsync_parent(path.parent)
                 _durable_room_directories.add(path.parent)
         limit = _ring_limit(root)
-        if written.st_size > limit:
+        if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     return rec, created
 
