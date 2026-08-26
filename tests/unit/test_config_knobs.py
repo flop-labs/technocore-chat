@@ -102,9 +102,7 @@ def test_the_floors_hold() -> None:
     floored = boot(CHAT_MAX_WAITERS_TOTAL="-1", CHAT_MAX_WAITERS_PER_IP="-1")
     assert floored["config.MAX_WAITERS_TOTAL"] == 0
     assert floored["config.MAX_WAITERS_PER_IP"] == 0
-    cache_floored = boot(
-        CHAT_ROOMS_CACHE_SECONDS="-1", CHAT_NOTE_STATS_CACHE_SECONDS="-1"
-    )
+    cache_floored = boot(CHAT_ROOMS_CACHE_SECONDS="-1", CHAT_NOTE_STATS_CACHE_SECONDS="-1")
     assert cache_floored["config.ROOMS_CACHE_SECONDS"] == 0.0
     assert cache_floored["config.NOTE_STATS_CACHE_SECONDS"] == 0.0
     # MAX_NOTES_PER_NS floors at MAX_ROOMS rather than at a literal, and that floor is an
