@@ -2107,6 +2107,16 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
     if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
+        # If the full did namespace is at capacity, point 16-hex-key callers at the sharded path.
+        ns = ns_dir.name
+        key = path.stem
+        if ns == "did" and re.fullmatch(r"[0-9a-f]{16}", key):
+            raise StoreError(
+                f"note limit reached ({MAX_NOTES_PER_NS} is the cap for the did namespace, "
+                f"and this would be a new one). Publish at /kv/did-{key[:2]}/{key[2:]} instead "
+                f"\u2014 the same fingerprint, sharded. Existing notes still accept writes, and "
+                f"idle notes are reclaimed after 7 days."
+            )
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     if _note_count(root) >= MAX_NOTES_TOTAL:
         raise StoreError(
