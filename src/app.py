@@ -619,9 +619,11 @@ def _rooms_stamp() -> tuple:
 
     So the split is structural-exact, recency-bounded. A room appearing (rooms_created),
     a room disappearing (reaped_idle, reaped_stillborn) and a topic change — a topic is an
-    ordinary note, hence notes_written — are still reflected at once, from any worker.
-    `idle_seconds`, `last_seq`, the recency order and the engagement aggregates now lag by
-    up to ROOMS_CACHE_SECONDS: the clock is their bound, not the stamp. That is the right
+    ordinary note, hence notes_written — are still reflected at once, from any worker, and
+    so is `total`. Everything else the walk measures now lags by up to ROOMS_CACHE_SECONDS,
+    with the clock as its bound rather than the stamp: `idle_seconds`, `last_seq`, the
+    recency order, the engagement aggregates, and the byte figures — an append moves a
+    room's size as surely as its recency, and both come off the one stat. That is the right
     split for an endpoint whose job is showing what is active rather than reporting a
     message count, and CHAT_ROOMS_CACHE_SECONDS=0 remains the escape hatch for a caller
     that needs a message reflected on the very next request.

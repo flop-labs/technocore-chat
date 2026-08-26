@@ -112,14 +112,22 @@ def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, t
         # So does a topic. A topic is an ordinary note, so it moves notes_written.
         client.get("/kv/topic/first/set/what%20first%20is%20for")
         assert "what first is for" in client.get("/rooms").text
+        before = client.get("/rooms?format=json").json()  # the walk the next reads reuse
 
         # A message in an existing room moves it up the recency order and bumps its seq —
         # and that, deliberately, is served stale. `messages` is one global lifetime
         # counter, so stamping it made one message anywhere invalidate every listing and
         # the cache never hit at all (see _rooms_stamp).
         client.get("/r/first/say/bot/again")
-        by_name = {r["room"]: r for r in client.get("/rooms?format=json").json()["rooms"]}
+        view = client.get("/rooms?format=json").json()
+        by_name = {r["room"]: r for r in view["rooms"]}
         assert by_name["first"]["last_seq"] == 1, "recency comes from the cache, not the walk"
+        # The byte figures come off the same stat as the recency, so they lag with it — the
+        # contract is what the walk measured, not a mix of fresh and stale fields.
+        was = {r["room"]: r for r in before["rooms"]}
+        assert by_name["first"]["bytes"] == was["first"]["bytes"]
+        assert view["bytes"] == before["bytes"]
+        assert view["total"] == before["total"], "`total` is structural, so it stays exact"
 
         # A reap is structural again: the room is gone from the very next listing.
         _age(store.room_path(tmp_path, "second"), store.IDLE_SECONDS + 60)

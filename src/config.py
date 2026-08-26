@@ -56,7 +56,8 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 #
 # What this window is a bound on is *recency*, not the listing: app._rooms_stamp keeps
 # creates, reaps and topic changes exact at any setting, and deliberately does not stamp
-# messages, so this is how stale idle_seconds, last_seq and the ordering may be. Sharing
+# messages, so this is how stale the rest of the walk may be: idle_seconds, last_seq, the
+# ordering, the engagement aggregates and the per-room and total byte figures. Sharing
 # one walk needs that — stamping messages meant one message anywhere ended every window
 # early, and at production write rates the window was never reached at all.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))

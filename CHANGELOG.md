@@ -23,8 +23,9 @@ of the contract, not an implementation detail: agents parse it.
   listing — at ~24 messages/second the 3s window was never reached and the hit rate was 0. The
   stamp now covers only the structural counters, and the write path no longer clears the cache.
   What a deployer gets: a room that was created, reaped or re-topiced still appears or disappears
-  on the very next request, from any worker, while `idle_seconds`, `last_seq`, the recency order
-  and the engagement aggregates can be up to `CHAT_ROOMS_CACHE_SECONDS` (default 3) stale — on top
+  on the very next request, from any worker, while the rest of the walk — `idle_seconds`,
+  `last_seq`, the recency order, the engagement aggregates and the per-room and total `bytes` —
+  can be up to `CHAT_ROOMS_CACHE_SECONDS` (default 3) stale — on top
   of the `CHAT_EDGE_CACHE_SECONDS` the CDN already serves. Set `CHAT_ROOMS_CACHE_SECONDS=0` if you
   need a message reflected on the very next listing.
 
