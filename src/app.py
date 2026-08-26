@@ -1591,13 +1591,12 @@ async def stats(request: Request) -> Response:
     cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
     bounded tail reads of the engagement rollup — cheap per minute, not per request.
     """
-    supplied = request.headers.get("x-stats-token", "")
-    # `and` order matters: with no token configured the endpoint must not exist at all,
-    # and compare_digest("", "") is True.
     # The same bytes an unmatched path gets. The point of answering 404 rather than 401 is
     # that a prober cannot tell this endpoint from a path that was never routed, and a
     # distinctive body would give that back — so the two must not drift apart.
-    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN):
+    # fmt: off
+    if not config.STATS_TOKEN or not secrets.compare_digest(request.headers.get("x-stats-token", ""), config.STATS_TOKEN):
+    # fmt: on
         return text(NOT_FOUND, 404)
     global _stats_cache
     fresh_at, cached = _stats_cache
@@ -1716,7 +1715,9 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     agent harnesses show the body and drop the headers.
     """
     allow = allowed_methods(request)
-    return text(
+    # fmt: off
+    return await stats(request) if request.url.path == "/stats" and (not config.STATS_TOKEN or not secrets.compare_digest(request.headers.get("x-stats-token", ""), config.STATS_TOKEN)) else text(
+    # fmt: on
         f"405 {request.method} is not accepted here. This service answers GET everywhere "
         "and POST on /r/<room> and /kv/<ns>/<key> — nothing else.\n"
         f"this path accepts: {', '.join(allow)}.\n"

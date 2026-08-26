@@ -48,6 +48,8 @@ def stats_client(tmp_path, monkeypatch):
 def test_stats_does_not_exist_without_a_token(client):
     """Unconfigured means absent, not open: growth numbers are never public by default."""
     assert client.get("/stats").status_code == 404
+    for method in ("POST", "PUT", "PATCH", "OPTIONS", "DELETE"):
+        assert client.request(method, "/stats").status_code == 404
 
 
 def test_the_stats_404_is_byte_identical_to_a_path_that_was_never_routed(stats_client):
@@ -68,6 +70,26 @@ def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     assert stats_client.get("/stats").status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def test_stats_405_is_hidden_without_the_token(stats_client):
+    """The hidden endpoint must not leak through method dispatch.
+
+    The handler already answers the same 404 as an unmatched path for GET without a valid
+    token. Unsupported methods used to miss the handler entirely and reach the global 405,
+    which revealed that /stats exists by advertising `Allow: GET, HEAD`.
+    """
+    for method in ("POST", "PUT", "PATCH", "OPTIONS", "DELETE"):
+        missing = stats_client.request(method, "/definitely-not-a-route")
+        for headers in ({}, {"X-Stats-Token": "wrong"}):
+            probe = stats_client.request(method, "/stats", headers=headers)
+            assert probe.status_code == missing.status_code == 404
+            assert probe.text == missing.text
+            assert "allow" not in probe.headers
+
+    authorized = stats_client.put("/stats", headers={"X-Stats-Token": "s3cret"})
+    assert authorized.status_code == 405
+    assert authorized.headers["allow"] == "GET, HEAD"
 
 
 def test_stats_counts_every_room_class_and_names_none_of_them(stats_client):
