@@ -20,10 +20,16 @@ Two representation decisions worth stating, because they are the difference betw
 file that ports and one that only works in Python:
 
   - **Text is carried as code points, not as a JSON string.** The sweep's whole job is
-    characters that cannot survive a round trip: a lone surrogate (`Cs`) has no UTF-8
-    encoding at all, so a JSON string literally cannot hold one. Every case therefore
-    carries `in_cp`/`out_cp` — arrays of integers — as the authoritative form, plus a
-    lossy `in_display` for human reading. A client reconstructs from the code points.
+    characters that are awkward to carry as text, and one of them cannot be carried at all:
+    a lone surrogate (`Cs`) has no UTF-8 encoding, so `json.dumps(..., ensure_ascii=False)`
+    followed by a UTF-8 encode raises `UnicodeEncodeError: surrogates not allowed`. JSON's
+    grammar itself is not the obstacle — `"\\ud800"` is a legal escape, this file is written
+    with `ensure_ascii=True`, and both `json.loads` and JS `JSON.parse` recover the lone
+    surrogate exactly. The reason `in_cp`/`out_cp` are authoritative is therefore narrower
+    than "JSON cannot hold it": a consumer that re-encodes the parsed string to UTF-8, or
+    whose JSON library normalises unpaired surrogates to U+FFFD, silently gets a different
+    character — and the point of a conformance vector is to not depend on that. Every case
+    carries integer arrays as the authoritative form plus a lossy `in_display` for reading.
 
   - **The Unicode version is recorded.** The sweep is `unicodedata.category(c) in
     ("Cc","Cf","Cs","Co","Zl","Zp")`, so its result is a function of the Unicode tables the
@@ -168,8 +174,10 @@ SWEEP_CASES = [
     _case(
         "lone-surrogate-Cs",
         "a\ud800b",
-        "an unpaired surrogate is Cs -> space. Note it has no UTF-8 encoding, so this input "
-        "cannot appear in a JSON string at all — which is why in_cp is authoritative",
+        "an unpaired surrogate is Cs -> space. It has no UTF-8 encoding, so it survives here "
+        "only as the escape \\ud800 (this file is ensure_ascii=True); read in_cp rather than "
+        "in_display, because a consumer that re-encodes to UTF-8 or maps unpaired surrogates "
+        "to U+FFFD would otherwise test a different character than the one meant",
     ),
     _case(
         "nbsp-Zs-KEPT",

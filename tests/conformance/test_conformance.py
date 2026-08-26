@@ -65,7 +65,8 @@ def _generator():
 def _text(code_points):
     """Rebuild a case's text from code points. The vectors carry integers rather than JSON
     strings because the swept set includes Cs, and a lone surrogate has no UTF-8 encoding —
-    so `"a\\ud800b"` cannot be transported as a JSON string at all."""
+    `"a\\ud800b"` survives in the file only as an escape, and a consumer that re-encodes it to
+    UTF-8 or folds it to U+FFFD would test a different character."""
     return "".join(chr(c) for c in code_points)
 
 
