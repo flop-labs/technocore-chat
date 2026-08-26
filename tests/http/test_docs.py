@@ -87,19 +87,54 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
-def test_iec_size_does_not_truncate_a_sub_mib_floor_to_zero(client):
-    """The bug this closes: the manual built __ROOM_FLOOR__ with `>> 20`, a whole-MiB
-    shift. At the source default (MAX_ROOMS=5120) the floor lands exactly on 1 MiB, which
-    is why the existing manual test above never caught it — but a deployment with more
-    rooms pushes RESERVED_ROOM_BYTES under one MiB, and `>> 20` rounds that down to 0,
-    so the manual would read "guaranteed 0 MiB per room": the opposite of the guarantee.
-    _iec_size must render sub-unit values in the next unit down instead of truncating."""
-    import app as app_module
+def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client):
+    """The reported bug, through the surface that reported it (#242).
 
-    assert app_module._iec_size(524288) == "512 KiB"  # the failing case: < 1 MiB
-    assert app_module._iec_size(10485760) == "10 MiB"
-    assert app_module._iec_size(5368709120) == "5 GiB"
-    assert app_module._iec_size(1610612736) == "1.5 GiB"  # non-even value keeps one decimal
+    RESERVED_ROOM_BYTES is the budget divided by MAX_ROOMS, so it is the one published
+    figure an operator can move: CHAT_MAX_ROOMS=10240 halves it to 512 KiB, and the old
+    `>> 20` render published that as "0 MiB" — a floor of zero reads as no floor at all,
+    the opposite of what the append path enforces. At the source default the floor lands
+    exactly on 1 MiB, which is why the manual test above never caught it.
+    """
+    import app as app_module
+    import store
+
+    assert "0 MiB per room" not in app_module._render_manual()  # the default is not broken
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(store, "MAX_ROOMS", 10240)
+        monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", store.MAX_TOTAL_ROOM_BYTES // 10240)
+        raised = app_module._render_manual()
+    finally:
+        monkeypatch.undo()
+
+    assert "512 KiB per room" in raised
+    assert "0 MiB per room" not in raised
+    assert app_module._render_manual() == app_module.MANUAL  # and it renders back the same
+
+
+def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
+    """Two ways a whole-unit shift misreports a guarantee, and the rule for each.
+
+    Falling under the unit is the reported one: `524288 >> 20` is 0. Truncating *within*
+    the unit is the quieter one — at CHAT_MAX_ROOMS=3000 the floor is 1.7 MiB and `>> 20`
+    still says "1 MiB". Rounding would fix the second and break the guarantee, since
+    1.969 MiB stated as "2.0 MiB" promises more than the store enforces, so this floors.
+    """
+    import manifest
+    import store
+
+    assert manifest.fmt_bytes(524288) == "512 KiB"  # the reported case: under the unit
+    assert manifest.fmt_bytes(1789569) == "1.7 MiB"  # the quiet case: 5 GiB // 3000
+    assert manifest.fmt_bytes(2064548) == "1.9 MiB"  # 1.969 MiB — floored, never "2.0 MiB"
+
+    # Defaults are byte-identical to the shift they replace, so no published text moves.
+    assert manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES) == "5 GiB"
+    assert manifest.fmt_bytes(store.MAX_ROOM_BYTES) == "10 MiB"
+    assert manifest.fmt_bytes(1 << 20) == "1 MiB"  # the floor at the default 5120 rooms
+    assert manifest.fmt_bytes((1 << 20) + 1) == "1 MiB"  # a whole unit gains no fake ".0"
+    assert manifest.fmt_bytes(512) == "512 B" and manifest.fmt_bytes(0) == "0 B"
 
 
 def test_the_room_budget_is_published_where_agents_look(client):
