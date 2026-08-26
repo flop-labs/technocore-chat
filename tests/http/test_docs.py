@@ -87,6 +87,24 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_can_state_a_retention_floor_smaller_than_a_whole_mib(client):
+    """The bug this closes (#242): __ROOM_FLOOR__ rendered through `>> 20`, which floors
+    to whole MiB. The floor is the one derived number in the manual (budget // rooms), and
+    the production config (CHAT_MAX_ROOMS=10240) puts it at 512 KiB — below that
+    granularity — so the live manual printed "down to a guaranteed 0 MiB per room": the
+    opposite of the guarantee store.py enforces and test_store pins. At the source-default
+    5120 rooms the floor is exactly 1 MiB, so no default-config assertion could catch it;
+    this pins the formatter's sub-MiB behaviour directly instead."""
+    import app as app_module
+    import store
+
+    manual = client.get("/llms.txt").text
+    assert f"guaranteed\n{app_module._size(store.RESERVED_ROOM_BYTES)} per room" in manual
+    # The production shape: a sub-MiB floor states its size rather than vanishing.
+    assert app_module._size((5 << 30) // 10240) == "512.0K"
+    assert "guaranteed\n0" not in manual
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store

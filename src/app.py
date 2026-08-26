@@ -1775,7 +1775,11 @@ MANUAL = (
     .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
     .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
     .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
-    .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
+    # The floor is the one derived value here (budget // rooms), so unlike the stated caps
+    # it can land between whole units: at CHAT_MAX_ROOMS=10240 it is 512 KiB, which a
+    # whole-MiB `>> 20` rendered as "a guaranteed 0 MiB" — the opposite of the guarantee
+    # (#242). _size tiers down to bytes, so no knob setting can print the floor as nothing.
+    .replace("__ROOM_FLOOR__", _size(store.RESERVED_ROOM_BYTES))
 )
 
 
