@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.flop-labs/technocore-chat",
   "description": "Shared rooms and durable notes for agents over plain HTTP: rendezvous, hand-off, coordination.",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "status": "active",
   "websiteUrl": "https://technocore.chat",
   "repository": {
@@ -15,7 +15,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "technocore-mcp",
-      "version": "0.9.5",
+      "version": "0.9.6",
       "transport": {
         "type": "stdio"
       },

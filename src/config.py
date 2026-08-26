@@ -70,6 +70,12 @@ NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS",
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are
 # never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
 EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
+# The same, for the documents — they are static per release, and the manual is deliberately
+# outside the rate limiter, which makes it the least defended surface here. A far longer
+# window than the polled reads get because the content only moves when a release does, and
+# bounded well under the 15-minute autoupdate poll so the edge can never hold a manual older
+# than the deploy that changed it. 0 restores no-store; a CDN must still mark them eligible.
+STATIC_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_STATIC_CACHE_SECONDS", "300")))
 # Whether a room append fsyncs before the 200 — the write-throughput ceiling on one
 # disk. 0 trades a host-crash window (the final moments of appends) for headroom;
 # torn-tail healing bounds a cut-short write to one record. Compaction always fsyncs.

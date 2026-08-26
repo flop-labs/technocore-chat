@@ -101,17 +101,15 @@ def test_the_room_budget_is_published_where_agents_look(client):
 
 
 def test_agent_surfaces_are_never_html(client):
+    # Cache-Control is deliberately not asserted here: it is per path and it is covered
+    # path by path in the four edge-cache tests at the end of this file. This one is about
+    # the HTML exception not spreading (docs/design.md §8), and mixing the two is what
+    # turned a widened cache rule into an edit to a test named for XSS.
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        # The two polled reads are edge-cacheable for a second (see app._edge_cacheable);
-        # every other agent surface stays no-store.
-        if path in ("/r/lobby", "/rooms"):
-            assert "public" in r.headers["cache-control"], path
-        else:
-            assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
@@ -1184,3 +1182,96 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+# The documents are static per release and deliberately outside the rate limiter, which
+# makes them both the cheapest thing to cache and the least defended thing not to. These
+# four tests are the fence around that: what may be held at the edge, what may never be,
+# and the exact string, so a later refactor of the shared helper cannot widen it silently.
+
+
+def test_the_static_documents_are_edge_cacheable_and_the_header_is_exact(client):
+    """Every document a crawler or an agent fetches per release, cacheable by the CDN in
+    front. `max-age=0` is what keeps this invisible to callers — they still revalidate on
+    every request; only the shared cache is allowed to hold a copy, which is the whole
+    point on the paths that have no rate limiter in front of them.
+
+    The exact string is pinned once rather than for each path: it is one helper, and the
+    value is a contract with the CDN, not an implementation detail.
+    """
+    static = "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    assert client.get("/").headers["cache-control"] == static
+
+    documents = ("/", "/llms.txt", "/skill.md", "/patterns.md", "/interop.md", "/auth.md")
+    for path in (*documents, "/robots.txt", "/.well-known/security.txt"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc, path
+        assert "no-store" not in cc, path
+
+
+def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
+    """The three that would each be a real defect if held at the edge.
+
+    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
+    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
+    rollback probe reads — a cached `ok` would let a broken release pass its own health
+    gate. /stats is token-gated and counts one worker's requests.
+    """
+    import config
+
+    for path in ("/humans", "/healthz"):
+        assert client.get(path).headers["cache-control"] == "no-store", path
+
+    # With no token configured /stats is a 404, so the gated response has to be provoked
+    # or this asserts no-store on a path that was never routed.
+    with config.override(STATS_TOKEN="t", STATS_CACHE_SECONDS=0):
+        r = client.get("/stats", headers={"x-stats-token": "t"})
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-store"
+
+
+def test_a_write_and_a_refusal_are_never_edge_cacheable(client):
+    """Writes in this protocol are GETs, so a cacheable header on one is a silently
+    swallowed write — the caller gets a 200 that never reached the store. A cached 429 is
+    the same defect pointed the other way: one caller's exhausted budget, served to
+    everyone until it expires.
+    """
+    import config
+
+    assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
+
+    with config.override(RATE_WRITE=2):
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(4)]
+        assert 429 in codes, codes
+        refused = client.get("/r/lobby/say/bot/again")
+        assert refused.status_code == 429
+        assert refused.headers["cache-control"] == "no-store"
+
+
+def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(client):
+    """The half of edge-caching the documents needed that the polled reads never did.
+
+    /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
+    labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
+    ignored Accept would hand one caller's label to the next. / and /llms.txt never
+    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+
+    And the markdown answer itself stays no-store, which is belt-and-braces on top of
+    Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
+    nobody has, the edge can still only ever hold the default representation.
+    """
+    import config
+
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
+        assert client.get(path).headers["vary"] == "Accept", path
+        negotiated = client.get(path, headers={"Accept": "text/markdown"})
+        assert negotiated.headers["content-type"].startswith("text/markdown"), path
+        assert negotiated.headers["cache-control"] == "no-store", path
+
+    for path in ("/", "/llms.txt"):
+        assert "vary" not in client.get(path).headers, path
+
+    # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
+    with config.override(STATIC_CACHE_SECONDS=0):
+        for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
+            assert client.get(path).headers["cache-control"] == "no-store", path

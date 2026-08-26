@@ -340,11 +340,24 @@ def _markdown_wanted(request: Request) -> bool:
 
 
 def _document_text(request: Request, body: str, *, markdown: bool = False) -> Response:
-    """A public document: indexable, and carrying the RFC 8288 pointers to the rest."""
-    media = "text/markdown" if markdown and _markdown_wanted(request) else "text/plain"
-    response = text(body, index=True, media_type=media)
+    """A public document: indexable, edge-cacheable, and carrying the RFC 8288 pointers.
+
+    Two names because they are two questions: `markdown` is whether this *route* negotiates,
+    `md` whether this *response* came out as markdown. A negotiating route says `Vary:
+    Accept` however it answered, or a shared cache hands one caller's label to the next; /
+    and /llms.txt never negotiate, so Vary there would only fragment the busiest cache key.
+
+    Only the plain answer is marked cacheable, which is belt-and-braces on top of Vary —
+    Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where nobody
+    has, the edge can still only hold the default representation. A markdown caller then
+    gets the plain label on identical bytes; never the reverse, poisoning the common path.
+    """
+    md = markdown and _markdown_wanted(request)
+    media = "text/markdown" if md else "text/plain"
+    vary = {"Vary": "Accept"} if markdown else None
+    response = text(body, index=True, media_type=media, extra_headers=vary)
     response.headers["Link"] = manifest.link_header(_base_url(request))
-    return response
+    return response if md else _static_cacheable(response)
 
 
 def who(name: str) -> str:
@@ -393,17 +406,35 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
     return text((body_text if body_text is not None else render(view)) + note)
 
 
-def _edge_cacheable(resp: Response) -> Response:
-    """Mark a world-readable read as briefly shareable by the CDN in front. Only /rooms
-    and plain room reads pass here — never a long-poll (one caller's cursor) or a reply
-    carrying a budget footer (one caller's pacing). The CDN still needs a rule marking
-    these paths cache-eligible."""
-    seconds = config.EDGE_CACHE_SECONDS
-    if seconds:
+def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
+    """Mark a world-readable read as shareable by the CDN in front, for `secs` (`swr` is
+    stale-while-revalidate, and defaults to the 5x the polled reads have always used).
+
+    The default window is the polled-read one: /rooms and plain room reads pass here, never
+    a long-poll (one caller's cursor) or a reply carrying a budget footer (one caller's
+    pacing). The documents come through _static_cacheable below — same header, longer
+    window. The CDN still needs a rule marking these paths cache-eligible.
+
+    `max-age=0` is the load-bearing half: every caller still revalidates, so nothing a
+    client observes changes, and only the shared cache may hold a copy.
+    """
+    secs = config.EDGE_CACHE_SECONDS if secs is None else secs
+    if secs:
         resp.headers["Cache-Control"] = (
-            f"public, max-age=0, s-maxage={seconds}, stale-while-revalidate={seconds * 5}"
+            f"public, max-age=0, s-maxage={secs}, stale-while-revalidate={swr or secs * 5}"
         )
     return resp
+
+
+def _static_cacheable(resp: Response) -> Response:
+    """A document: static per release, so the edge may hold it far longer than a room read.
+
+    `stale-while-revalidate` is a flat 60 rather than the 5x the polled reads use. 5x300 is
+    30 minutes of worst-case edge staleness, which is *past* the 15-minute autoupdate poll —
+    the manual could then outlive the deploy that changed it, which is the one thing this
+    window exists to prevent. 60 caps the total at 360s, comfortably under the poll.
+    """
+    return _edge_cacheable(resp, config.STATIC_CACHE_SECONDS, 60)
 
 
 # --------------------------------------------------------------------------- routes
@@ -1507,21 +1538,25 @@ def robots(request: Request) -> Response:
 
     Generated per request rather than held as a constant because the Sitemap directive
     takes an absolute URL, which is only known once the origin is.
+
+    Edge-cacheable like the documents it points at, and the one path here a CDN treats as
+    cache-eligible without a rule — so this is the one that starts hitting on the header
+    alone. It does not negotiate, so no Vary.
     """
-    return text(manifest.robots_txt(_base_url(request)), index=True)
+    return _static_cacheable(text(manifest.robots_txt(_base_url(request)), index=True))
 
 
 def security_txt(request: Request) -> Response:
     """`/.well-known/security.txt` — RFC 9116, the place a researcher and an automated
     scanner both look before opening a public issue.
 
-    Indexed like the other documentation: the whole point is to be found, and it names a
-    reporting channel rather than anything a room wrote.
+    Indexed and edge-cacheable like the other documentation: the whole point is to be found,
+    and it names a reporting channel rather than anything a room wrote. Cached on the same
+    terms as /robots.txt — the asymmetry of caching one and not its sibling would read as an
+    oversight, and a scanner fetching both is exactly the traffic this is for.
     """
-    return text(
-        manifest.security_txt(_base_url(request), config.SECURITY_CONTACT),
-        index=True,
-    )
+    body = manifest.security_txt(_base_url(request), config.SECURITY_CONTACT)
+    return _static_cacheable(text(body, index=True))
 
 
 def healthz(request: Request) -> Response:

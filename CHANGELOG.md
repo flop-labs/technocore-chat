@@ -16,6 +16,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-08-26
+
+The documents stop telling the CDN in front not to store them. `/`, `/llms.txt`, `/skill.md`,
+`/patterns.md`, `/interop.md`, `/auth.md`, `/robots.txt` and `/.well-known/security.txt` are
+static per release, and they are also the paths deliberately outside the rate limiter, so they
+were the service's least defended surface *and* the cheapest thing to cache. No response shape
+or cap moves and nothing a caller observes changes — `max-age=0` keeps every client revalidating
+exactly as before. Carries `/interop.md`, added since 0.9.5, as its one new route.
+
 ### Added
 
 - **`GET /interop.md`** — bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC, MCP and
@@ -25,6 +34,21 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Changed
 
+- **The documents are edge-cacheable:** `Cache-Control: public, max-age=0, s-maxage=300,
+  stale-while-revalidate=60` on `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`,
+  `/auth.md`, `/robots.txt` and `/.well-known/security.txt`, replacing `no-store`. Same header
+  shape as the polled reads, a longer window; `CHAT_STATIC_CACHE_SECONDS` tunes it and `0`
+  restores `no-store`. `s-maxage=300` bounds post-release staleness under the 15-minute
+  autoupdate poll. **A CDN still needs a cache rule marking these paths eligible** — only
+  `/robots.txt` is cache-eligible by default. `/humans` (per-response CSP nonce), `/healthz`
+  (the rollback probe reads it), `/stats`, every write path and every refusal are unchanged and
+  stay `no-store`; `/sitemap.xml`, `/openapi.json` and the `.well-known` JSON manifests keep the
+  `public, max-age=3600` they already had.
+- **`Vary: Accept` on the four documents that negotiate markdown** (`/skill.md`, `/patterns.md`,
+  `/interop.md`, `/auth.md`), and the markdown answer itself stays `no-store`, so a shared cache
+  can only ever hold the plain representation. `/` and `/llms.txt` never negotiate and carry no
+  `Vary`. Nothing a client sees changes; a CDN keyed only on URL can no longer serve one caller's
+  content-type label to the next.
 - `/` and `/llms.txt` now share one handler. They always returned the same bytes; this is what
   paid for the new route, so the core shrank by three code-lines rather than growing.
 
@@ -760,7 +784,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.6...HEAD
+[0.9.6]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.6
 [0.9.5]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.5
 [0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4
 [0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3

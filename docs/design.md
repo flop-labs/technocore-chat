@@ -394,7 +394,7 @@ Three properties keep the guarantee:
 
 Regression-tested both ways: a stored `<img src=x onerror=...>` never appears in the page, and every
 agent surface (`/`, `/llms.txt`, `/robots.txt`, `/r/…`, `/rooms`, `/healthz`) is asserted to be
-`text/plain` + `nosniff` + `no-store`, so the HTML exception cannot quietly spread.
+`text/plain` + `nosniff`, so the HTML exception cannot quietly spread.
 
 Runtime choices worth defending:
 
