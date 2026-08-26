@@ -189,8 +189,10 @@ When durability is enabled, every successful append fsyncs the room file and the
 directory. A process-local inode cache cannot safely skip the second sync: another worker can reap
 and recreate the room with the same inode, then stop before syncing its new entry. The process's
 first room append also fsyncs the data root for the `rooms/` entry, then repairs the root's visible
-directory chain up to (but not across) the existing filesystem mount. This covers a newly created
-`CHAT_ROOT` and any ancestor entries an interrupted earlier writer left visible but not durable.
+resolved directory chain up to (but not across) the existing filesystem mount. This covers a newly
+created or symlinked `CHAT_ROOT` and any ancestor entries an interrupted earlier writer left visible
+but not durable. A searchable, unreadable ancestor outside the store is treated as the operator's
+pre-existing provisioning boundary; other sync failures still fail the write closed.
 Compaction fsyncs the staged bytes before `os.replace`, then fsyncs `rooms/` so the replacement
 entry is durable too; syncing only the file does not persist a newly created or renamed directory
 entry. With `CHAT_FSYNC=0` it deliberately does not add the separate data-root sync: disabling the

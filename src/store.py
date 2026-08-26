@@ -611,12 +611,16 @@ def _fsync_parent(path: Path) -> None:
 
 
 def _fsync_ancestors(path: Path) -> None:
-    """Persist a visible directory chain up to its existing filesystem mount."""
+    """Persist a visible directory chain up to its mount or provisioning boundary."""
+    path = path.resolve()
     while path != path.parent:
         parent = path.parent
         if path.stat().st_dev != parent.stat().st_dev:
             break
-        _fsync_parent(path)
+        try:
+            _fsync_parent(path)
+        except PermissionError:
+            break  # a searchable pre-existing ancestor is the operator's boundary
         path = parent
 
 

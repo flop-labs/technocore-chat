@@ -1051,21 +1051,65 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
 
 
 def test_root_ancestor_sync_reaches_but_does_not_cross_the_mount(tmp_path, monkeypatch):
-    """A visible root left by an interrupted writer needs every same-filesystem parent;
-    a mount point itself was provisioned earlier and is the durable boundary."""
+    """The device boundary is stubbed: this must not pass merely because /tmp and /
+    happen to share a device on the CI host."""
     import store
 
-    expected = []
-    path = tmp_path
-    while path != path.parent and path.stat().st_dev == path.parent.stat().st_dev:
-        expected.append(path)
-        path = path.parent
+    path = tmp_path.resolve()
+    boundary = path.parent
+    across_mount = boundary.parent
+    real_stat = type(path).stat
+
+    def mounted_stat(self):
+        stat = real_stat(self)
+        if self == across_mount:
+            return type("Stat", (), {"st_dev": stat.st_dev + 1})()
+        return stat
+
+    synced = []
+    monkeypatch.setattr(type(path), "stat", mounted_stat)
+    monkeypatch.setattr(store, "_fsync_parent", synced.append)
+
+    store._fsync_ancestors(path)
+
+    assert synced == [path]
+
+
+def test_root_ancestor_sync_resolves_symlinked_roots(tmp_path, monkeypatch):
+    """Walk the real volume hierarchy, not the lexical parent of CHAT_ROOT's symlink."""
+    import store
+
+    target = tmp_path / "volume" / "chat"
+    target.mkdir(parents=True)
+    link = tmp_path / "data"
+    link.symlink_to(target, target_is_directory=True)
     synced = []
     monkeypatch.setattr(store, "_fsync_parent", synced.append)
 
-    store._fsync_ancestors(tmp_path)
+    store._fsync_ancestors(link)
 
-    assert synced == expected
+    assert synced[0] == target.resolve() and link not in synced
+
+
+def test_root_ancestor_sync_stops_at_an_unreadable_provisioning_boundary(tmp_path, monkeypatch):
+    """A 0711 ancestor outside the store must not turn an acknowledged write into a 500;
+    EIO and every other sync failure still propagate."""
+    import store
+
+    path = tmp_path.resolve()
+    blocked = path.parent
+    attempted = []
+
+    def permission_boundary(directory):
+        attempted.append(directory)
+        if directory == blocked:
+            raise PermissionError("pre-existing ancestor is searchable, not readable")
+
+    monkeypatch.setattr(store, "_fsync_parent", permission_boundary)
+
+    store._fsync_ancestors(path)
+
+    assert attempted == [path, blocked]
 
 
 def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer(
