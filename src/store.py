@@ -595,10 +595,7 @@ def _fsync_parent(path: Path) -> None:
     survive a crash. `O_DIRECTORY` is absent on Windows; this store is currently POSIX-only
     (`fcntl`), so a future native port will need its platform's directory-handle primitive.
     """
-    directory_flag = getattr(os, "O_DIRECTORY", None)
-    if directory_flag is None:
-        return
-    fd = os.open(path.parent, os.O_RDONLY | directory_flag)
+    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
     finally:

@@ -1028,9 +1028,12 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     # Its /r/events announcement reuses that directory and needs only the first pair.
     assert calls == ["file", "rooms", "root", "file", "rooms"]
 
+    store.append(tmp_path, "lobby", "bot", "still durable")
+    assert calls == ["file", "rooms", "root", "file", "rooms", "file"]
+
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 5  # the append skipped both syncs
+        assert len(calls) == 6  # the append skipped both syncs
         events.clear()
         real_replace = store.os.replace
 
