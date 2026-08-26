@@ -87,6 +87,10 @@ must be signed by the same did:key being stored, proving the claimant holds that
 The allow-list nonce must be greater than the claim nonce: room-owners and room-allow
 share /kv/room-nonce/d-jobs as their replay counter.
 
+To revoke everyone you replace the list, you do not clear it: an empty value is
+refused by the sweep and a non-did:key entry is refused as junk, so write the
+owner's own key as the whole list.
+
 Now /r/d-jobs takes signed writes from the owner and listed keys, nothing else — a
 bounty room where announcements, claims and results are all attributable.
 

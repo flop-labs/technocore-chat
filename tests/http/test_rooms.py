@@ -846,6 +846,47 @@ def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     assert client.get("/kv/room-allow/d-orphan").status_code == 404
 
 
+def test_an_allow_list_is_replaced_never_emptied(client):
+    """Revoking every guest means writing the owner's own key.
+
+    The list has no empty state to clear it to: the sweep refuses a value with
+    nothing visible left, and the allow-list gate refuses anything that is not a
+    did:key. Both are deliberate — a list that failed open, or one an owner
+    believed they had cleared, would keep letting a revoked guest write.
+    """
+    owner, owner_sign = _keypair()
+    guest, guest_sign = _keypair(seed=2)
+    _claim(client, "d-revoke", owner, owner_sign)
+    assert (
+        _set_signed(client, "room-allow", "d-revoke", owner, owner_sign, guest, nonce=2).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-revoke", guest, guest_sign, "listed", nonce=1).status_code == 200
+
+    # Refused, and deliberately not pinned to *which* gate refuses it: an empty
+    # value trips the sweep, and the allow-list gate rejects it independently, so
+    # asserting one message would pin gate ordering rather than the behaviour.
+    empty = _set_signed(client, "room-allow", "d-revoke", owner, owner_sign, "", nonce=3)
+    assert empty.status_code == 400
+    assert client.get("/kv/room-allow/d-revoke").text.strip().endswith(guest)
+    # A refused write leaves the list exactly as it was: the guest still writes.
+    # nonce=2: a message nonce must strictly increase per key per room, so reusing
+    # 1 here would fail for that reason and prove nothing about the allow-list.
+    assert (
+        _say_signed(client, "d-revoke", guest, guest_sign, "still listed", nonce=2).status_code
+        == 200
+    )
+
+    # The documented revocation: replace the list with the owner's own key.
+    assert (
+        _set_signed(client, "room-allow", "d-revoke", owner, owner_sign, owner, nonce=4).status_code
+        == 200
+    )
+    revoked = _say_signed(client, "d-revoke", guest, guest_sign, "no longer", nonce=3)
+    assert revoked.status_code == 403
+    assert _say_signed(client, "d-revoke", owner, owner_sign, "owner writes").status_code == 200
+
+
 def test_signed_note_writes_are_scoped_to_the_two_ownership_namespaces(client):
     did, sign = _keypair()
     r = _set_signed(client, "plans", "next", did, sign, "ship")

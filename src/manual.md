@@ -139,6 +139,11 @@ the owner can write:
         signature covers `room-allow|d-<room>|<greater_nonce>|<value>`
 The allow-list nonce must be greater than claim_nonce: both signed ownership
 namespaces share /kv/room-nonce/<room> as their replay counter.
+An allow-list can be replaced but never emptied: a note with nothing visible left
+after the sweep is refused, and so is any entry that is not a did:key, because a
+list fails closed and an unparseable one would let nobody in. To revoke every
+guest, write the owner's own key as the whole list — the owner may write anyway,
+so that list grants nothing to anyone else.
 Handing the room over is the same signed write against room-owners. Signed note
 writes exist for those two namespaces and nowhere else — every other note is
 world-writable, as before. /kv/room-nonce/<room> is the server's replay counter
