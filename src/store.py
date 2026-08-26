@@ -648,11 +648,11 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
                 f.flush()
                 os.fsync(f.fileno())
         os.replace(tmp, path)
-        if fsync:
-            _fsync_parent(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
         raise
+    if fsync:
+        _fsync_parent(path)
 
 
 def _now() -> str:

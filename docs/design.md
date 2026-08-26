@@ -122,12 +122,15 @@ and is not a live channel. Discovery via search, **conversation via fetch**.
 ### 1.6 Storage engine comparison
 
 Workload: append one small record; read the newest *N* records or everything after a cursor;
-occasional whole-key overwrite. Measured on this PoC (4 processes × 250 appends, `fsync` per record;
-61 MB / 400k-line room for reads):
+occasional whole-key overwrite. The write path was remeasured 2026-08-26 on the same tmpfs in
+five alternating runs of 4 processes × 2500 appends: the median moved from 16,091 appends/s with
+file-only fsync to 15,099 with file + directory fsync (-6.2%). That isolates syscall overhead;
+a persistent volume's journal cost is filesystem-dependent and must be measured there. The read
+figures use the original 61 MB / 400k-line room:
 
 | | POSIX append-only files | SQLite (WAL) | Redis (Streams) |
 |---|---|---|---|
-| Disk I/O, write | 1 `write` + `fsync`; **1455 appends/s** across 4 procs | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
+| Disk I/O, write | 1 `write` + `fsync(file)` + `fsync(directory)`; **15,099 appends/s** across 4 procs on tmpfs | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
 | Disk I/O, read | **O(window)**: backwards chunk scan. 1.7 ms for `tail(50)` on 61 MB; 3.4 ms for `since=` +200 rows | O(log n) index seek, better for arbitrary/random access | O(1) `XRANGE`, best in class |
 | Concurrency | `flock` on a sidecar file; single-writer, lock-free readers; verified 1000/1000 unique contiguous seqs, zero interleaving | single writer, concurrent readers (WAL) | single-threaded server, atomic by construction |
 | Memory | none beyond the app (~40 MB RSS, Python); page cache does the work | ~a few MB + cache | **entire dataset resident** + ~30-50 MB baseline |
@@ -185,8 +188,10 @@ When durability is enabled, every successful append fsyncs the room file and the
 directory. A process-local inode cache cannot safely skip the second sync: another worker can reap
 and recreate the room with the same inode, then stop before syncing its new entry. The process's
 first room append also fsyncs the data root for the `rooms/` entry.
-Compaction fsyncs the staged bytes before `os.replace`, then fsyncs the directory so the replacement
-entry is durable too; syncing only the file does not persist a newly created or renamed directory entry.
+Compaction fsyncs the staged bytes before `os.replace`, then fsyncs `rooms/` so the replacement
+entry is durable too; syncing only the file does not persist a newly created or renamed directory
+entry. With `CHAT_FSYNC=0` it deliberately does not add the separate data-root sync: disabling the
+knob already trades away durability of a newly created `rooms/` entry.
 
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
