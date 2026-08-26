@@ -16,6 +16,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A concurrent reap could crash an in-flight note create with an uncaught `FileNotFoundError`
+  instead of a clean response.** The global note-count file's replace used one fixed tmp name for
+  every writer, so a reap's unlocked rewrite could delete the tmp file a locked create was about
+  to publish. The tmp name is now unique per writer (its pid); the accepted best-effort count
+  drift between a reap and a concurrent create is unchanged.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

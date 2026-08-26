@@ -186,6 +186,14 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     }
     root = tmp_path / "shared"
     root.mkdir()
+    # Stamp the reap marker before racing, same reasoning as
+    # test_racers_on_one_key_count_one_note: on a fresh store several workers pass the reap
+    # throttle before the marker exists, and a reap rebuilds the global count from a walk
+    # without the count lock, so an in-flight reap can shave the published count by one
+    # against these very workers. That drift is real, bounded by REAP_EVERY and
+    # self-healing (see _write_note_count and _count_new_note) — it is not what "binds
+    # exactly" is about here, and no reap is due on a store this fresh.
+    (root / ".reaped").touch()
 
     workers = [
         subprocess.Popen(

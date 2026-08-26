@@ -1141,10 +1141,17 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     two files could be read either side of a reap and report a count and a byte total that
     never coexisted. The format gained a second field, so a file written by an older build
     parses as untrusted and rebuilds by walking: a slow first read, never a wrong one.
+
+    The tmp name carries this writer's pid: not every caller takes the count lock (a
+    reap's post-deletion rewrite and a rebuild-on-read both write unlocked, on purpose —
+    see their own docstrings), so a fixed tmp name let an unlocked writer's os.replace
+    consume a locked writer's tmp file out from under it, turning a legitimate, cap-checked
+    create into an uncaught FileNotFoundError instead of the accepted count drift both
+    unlocked paths already tolerate.
     """
     path = root / NOTES_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
+    tmp = path.parent / f"{path.name}.{os.getpid()}.tmp"
     tmp.write_text(f"{total} {size}", encoding="utf-8")
     os.replace(tmp, path)  # atomic: readers never see a half-written file
 
