@@ -181,6 +181,10 @@ Implementation (`store.py:_compact`): under the room lock, read the newest `KEEP
 backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cost is one rewrite per
 `MAX_ROOM_BYTES` of traffic — at 10 MiB with a half-ring keep budget that is one ~5 MiB rewrite per ~10 MiB written.
 
+When durability is enabled, a first append fsyncs the new room file and then its containing directory.
+Compaction fsyncs the staged bytes before `os.replace`, then fsyncs the directory so the replacement
+entry is durable too; syncing only the file does not persist a newly created or renamed directory entry.
+
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
 applies to money/state/gate paths; this is neither, but the observable-gap contract costs nothing.)

@@ -998,30 +998,48 @@ def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path)
 def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     """CHAT_FSYNC=0 trades the per-message fsync for write headroom: a host crash can lose
     the final moments of appends, and torn-tail healing already prices a cut-short write at
-    one record. Compaction is not part of the trade — os.replace of a file whose bytes never
-    reached disk can lose the room's whole retained ring, so it pays the fsync either way."""
+    one record. A durable creation needs the file and its directory entry; compaction needs
+    the staged file, rename and directory entry, and is not part of the trade."""
     import config
     import store
 
     real = os.fsync
     calls = []
+    events = []
 
     def counted(fd):
-        calls.append(fd)
+        synced = os.fstat(fd)
+        rooms = (tmp_path / "rooms").stat() if (tmp_path / "rooms").exists() else None
+        kind = (
+            "directory"
+            if rooms and (synced.st_dev, synced.st_ino) == (rooms.st_dev, rooms.st_ino)
+            else "file"
+        )
+        calls.append(kind)
+        events.append(kind)
         real(fd)
 
     monkeypatch.setattr(store.os, "fsync", counted)
 
     store.append(tmp_path, "lobby", "bot", "durable")
-    # Two, not one: creating the room also appends its announcement to /r/events, and
-    # both records are on disk before the caller's 200.
-    assert len(calls) == 2
+    # Creating the room also creates /r/events. Each first append syncs its file and then
+    # the containing directory entry before the caller's 200.
+    assert calls == ["file", "directory", "file", "directory"]
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 2  # the append skipped it
+        assert len(calls) == 4  # the append skipped both syncs
+        events.clear()
+        real_replace = store.os.replace
+
+        def replaced(src, dst):
+            result = real_replace(src, dst)
+            events.append("replace")
+            return result
+
+        monkeypatch.setattr(store.os, "replace", replaced)
         store._compact(store.room_path(tmp_path, "lobby"))
-        assert len(calls) == 3  # the rewrite did not
+        assert events == ["file", "replace", "directory"]
 
 
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):

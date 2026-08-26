@@ -588,14 +588,31 @@ def _locked(target: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+def _fsync_parent(path: Path) -> None:
+    """Persist creation or replacement of `path`, not only the bytes in its inode.
+
+    Linux fsync(2) requires an explicit sync of the containing directory for its entry to
+    survive a crash. `O_DIRECTORY` is absent on Windows; this store is currently POSIX-only
+    (`fcntl`), so a future native port will need its platform's directory-handle primitive.
+    """
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    fd = os.open(path.parent, os.O_RDONLY | directory_flag)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     """Put `data` at `path` atomically, staging through a name no other writer can hold.
 
-    `os.replace` is the atomic half, and it was always here; the staging name was the half
-    that was not. A temp file named after its destination is shared by everyone writing that
-    destination, so two writers racing it meant the second renamed a file the first had
-    already consumed — `FileNotFoundError` on a path that plainly exists, surfacing out of a
-    note create that was only trying to record itself.
+    `os.replace` is the atomic half, and it was always here; when `fsync` is requested,
+    syncing the parent after that rename is the durable half. The staging name was the half
+    that was not unique. A temp file named after its destination is shared by everyone
+    writing that destination, so two writers racing it meant the second renamed a file the
+    first had already consumed — `FileNotFoundError` on a path that plainly exists.
 
     Unique per *writer* rather than per process: sync handlers overlap in the thread pool, so
     a pid alone still collides inside one worker.
@@ -626,6 +643,8 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
                 f.flush()
                 os.fsync(f.fileno())
         os.replace(tmp, path)
+        if fsync:
+            _fsync_parent(path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
         raise
@@ -1841,6 +1860,8 @@ def _write_record(
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
+        if created and config.FSYNC:
+            _fsync_parent(path)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
