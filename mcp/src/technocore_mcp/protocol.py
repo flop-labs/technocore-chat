@@ -29,6 +29,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    NamedTuple,
     NotRequired,
     TextIO,
     TypedDict,
@@ -152,12 +153,20 @@ _CHECKS: dict[str, Callable[[Any], bool]] = {
 }
 
 
+class Bounds(NamedTuple):
+    """Inclusive numeric bounds carried by ``Annotated`` into JSON Schema."""
+
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+
+
 def fragment(annotation: Any) -> dict[str, Any]:
     """One parameter's JSON Schema, from its annotation.
 
-    `Annotated[int, "..."]` carries the description the model reads; `Literal[...]` becomes
-    an `enum`; and the `None` arm of `X | None` is dropped, because "may be left out" is
-    said by the parameter having a default and lands in `required`, not in `type`.
+    `Annotated[int, "...", Bounds(...)]` carries the description and numeric limits the
+    client reads; `Literal[...]` becomes an `enum`; and the `None` arm of `X | None` is
+    dropped, because "may be left out" is said by the parameter having a default and lands
+    in `required`, not in `type`.
 
     Anything with no mapping raises at import, where a wrong schema is a broken build
     rather than a tool that advertises one contract and enforces another.
@@ -169,6 +178,11 @@ def fragment(annotation: Any) -> dict[str, Any]:
         for note in notes:
             if isinstance(note, str):
                 described["description"] = note
+            elif isinstance(note, Bounds):
+                if note.minimum is not None:
+                    described["minimum"] = note.minimum
+                if note.maximum is not None:
+                    described["maximum"] = note.maximum
         return described
     if origin is Union or origin is types.UnionType:
         arms = [arm for arm in get_args(annotation) if arm is not type(None)]
@@ -247,6 +261,10 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
         if "enum" in expected and value not in expected["enum"]:
             allowed = ", ".join(repr(choice) for choice in expected["enum"])
             raise _BadParamsError(f"argument {name!r} must be one of: {allowed}")
+        if "minimum" in expected and value < expected["minimum"]:
+            raise _BadParamsError(f"argument {name!r} must be >= {expected['minimum']}")
+        if "maximum" in expected and value > expected["maximum"]:
+            raise _BadParamsError(f"argument {name!r} must be <= {expected['maximum']}")
         checked[name] = value
     return checked
 

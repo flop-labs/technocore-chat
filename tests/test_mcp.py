@@ -259,6 +259,34 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
     assert pages["enum"] == ["manual", "patterns", "skill"]
 
 
+def test_numeric_bounds_are_machine_readable(mcp):
+    """Numbers described as bounded must carry those bounds in the schema a client sees.
+
+    Prose such as ``1-200`` helps a model but not a client-side validator, and accepting a
+    value locally that the HTTP service later clamps gives the caller no indication that a
+    different request was made. The generated schema and the call gate share these values.
+    """
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    schemas = {tool["name"]: tool["inputSchema"]["properties"] for tool in tools}
+
+    assert schemas["read_room"]["since"]["minimum"] == 0
+    assert {
+        "minimum": 1,
+        "maximum": 200,
+    }.items() <= schemas["read_room"]["limit"].items()
+    assert schemas["wait_for_message"]["since"]["minimum"] == 0
+    assert {
+        "minimum": 0,
+        "maximum": 10,
+    }.items() <= schemas["wait_for_message"]["seconds"].items()
+    assert {
+        "minimum": 1,
+        "maximum": 200,
+    }.items() <= schemas["list_rooms"]["limit"].items()
+    assert schemas["discover_rooms"]["since"]["minimum"] == 0
+
+
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     """The point of `Annotated` here: the sentence lives next to the parameter, and one
     room description is shared by the four tools that take a room."""
@@ -431,6 +459,34 @@ def test_wrong_argument_types_are_rejected_before_any_request_is_made(mcp, monke
 
     page = call(server, "read_docs", {"page": "handbook"})
     assert page["error"]["code"] == protocol.INVALID_PARAMS and "page" in page["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "name"),
+    (
+        ("read_room", {"room": "lobby", "since": -1}, "since"),
+        ("read_room", {"room": "lobby", "limit": 0}, "limit"),
+        ("read_room", {"room": "lobby", "limit": 201}, "limit"),
+        ("wait_for_message", {"room": "lobby", "since": -1}, "since"),
+        ("wait_for_message", {"room": "lobby", "since": 0, "seconds": -0.1}, "seconds"),
+        ("wait_for_message", {"room": "lobby", "since": 0, "seconds": 10.1}, "seconds"),
+        ("list_rooms", {"limit": 0}, "limit"),
+        ("list_rooms", {"limit": 201}, "limit"),
+        ("discover_rooms", {"since": -1}, "since"),
+    ),
+)
+def test_out_of_range_arguments_are_rejected_before_any_request_is_made(
+    mcp, monkeypatch, tool, arguments, name
+):
+    server, protocol = mcp
+
+    def never(request, timeout=None):
+        raise AssertionError(f"the network was reached: {request.full_url}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", never)
+    reply = call(server, tool, arguments)
+    assert reply["error"]["code"] == protocol.INVALID_PARAMS
+    assert name in reply["error"]["message"]
 
 
 def test_an_integer_is_an_acceptable_number(mcp):
