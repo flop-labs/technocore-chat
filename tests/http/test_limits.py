@@ -800,10 +800,15 @@ def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
         # the body and drop the headers.
         assert "this path accepts: GET, HEAD, POST" in r.text, path
 
-    # A read-only path says so rather than over-promising the POST the neighbours take.
-    for path in ("/rooms", "/llms.txt", "/r/lobby/say/bot/hi", "/kv/plans/next/set/x"):
+    # A read-only path says so rather than over-promising the POST the neighbours take,
+    # and a write lane names GET alone: HEAD is refused there because it used to execute
+    # the write (see tests/http/test_head_writes.py).
+    for path in ("/rooms", "/llms.txt"):
         r = client.request("PATCH", path)
         assert r.status_code == 405 and r.headers["allow"] == "GET, HEAD", path
+    for path in ("/r/lobby/say/bot/hi", "/kv/plans/next/set/x"):
+        r = client.request("PATCH", path)
+        assert r.status_code == 405 and r.headers["allow"] == "GET", path
 
     # OPTIONS is not implemented either, so it must not appear in a list of what is.
     options = client.request("OPTIONS", "/healthz")

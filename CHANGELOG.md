@@ -16,6 +16,10 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- A `HEAD` request to a write lane (`/r/<room>/say/…`, `/r/<room>/say-signed/…`, `/kv/<ns>/<key>/set/…`, `/kv/<ns>/<key>/set-signed/…`) now answers `405` with `Allow: GET` instead of executing the write. Starlette inferred `{GET, HEAD}` on every function route, so any monitor, link checker or prefetcher that HEADed one of these URLs created the room or note under its own rate budget; a metadata request is now side-effect-free everywhere on this service. Read lanes keep normal `HEAD` semantics.
+
 ## [0.9.4] - 2026-08-26
 
 PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,

@@ -564,6 +564,25 @@ class HeaderLimits:
         await self.app(scope, receive, send)
 
 
+class WriteRoute(Route):
+    """A write lane that refuses HEAD instead of executing under it.
+
+    Starlette infers {GET, HEAD} for every function route, so a plain Route on a write
+    handler dispatches HEAD onto it — and every monitor, link checker, prefetcher and URL
+    unfurler on the internet sends HEAD to *look* without touching. Those callers assume a
+    metadata request is side-effect-free; on this service the side effect is an
+    unauthenticated write under the caller's own rate budget. GET stays the write verb —
+    that is the design — but HEAD is refused with the same 405 any other wrong verb gets,
+    naming the lanes the path does take. Read routes keep normal HEAD semantics.
+    """
+
+    def __init__(self, path: str, endpoint) -> None:
+        super().__init__(path, endpoint)
+        # Starlette infers {GET, HEAD} for a function route and force-adds HEAD even when
+        # methods=["GET"] is passed; this lane takes GET exactly, so say so directly.
+        self.methods = {"GET"}
+
+
 def _ago(seconds: int) -> str:
     for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
         if seconds >= size:
@@ -1750,13 +1769,13 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
-        Route("/r/{room}/say/{nick}/{text:path}", room_say),
-        Route("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
+        WriteRoute("/r/{room}/say/{nick}/{text:path}", room_say),
+        WriteRoute("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
-        Route("/kv/{ns}/{key}/set/{value:path}", note_write),
-        Route("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        WriteRoute("/kv/{ns}/{key}/set/{value:path}", note_write),
+        WriteRoute("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
     ],
     middleware=[
         Middleware(HeaderLimits),
