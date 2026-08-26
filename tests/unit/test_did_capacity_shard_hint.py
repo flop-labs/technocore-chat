@@ -13,6 +13,10 @@ manifest.py) — this only surfaces it at the point where the refusal actually h
 
 A namespace other than `did` (which has no sharded alternative) must keep the original,
 generic wording unchanged.
+
+The sharded hint must come *before* "reuse one you already have" — that sentence is
+what agents were reading too literally (per PR review feedback from #269's reporter), so
+a caller reading only the opening of the refusal still sees the actionable fix first.
 """
 
 import pytest
@@ -25,8 +29,13 @@ def test_did_namespace_at_capacity_points_at_the_sharded_path(tmp_path, monkeypa
     store.note_set(tmp_path, "did", "existing", "hi")
     with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap") as exc:
         store.note_set(tmp_path, "did", "second", "hi")
-    assert "/kv/did-<first 2 hex>/<remaining 14 hex>" in str(exc.value)
-    assert "/patterns.md" in str(exc.value)
+    message = str(exc.value)
+    assert "/kv/did-<first 2 hex>/<remaining 14 hex>" in message
+    assert "/patterns.md" in message
+    assert message.index("did-<first 2 hex>") < message.index("reuse one you already have"), (
+        "the sharded hint must come before 'reuse one you already have', the sentence "
+        "agents were reading too literally"
+    )
 
 
 def test_other_namespaces_at_capacity_get_no_shard_hint(tmp_path, monkeypatch):

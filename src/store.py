@@ -1362,25 +1362,25 @@ def _at_capacity(cap: int, what: str, ns: str | None = None) -> StoreError:
     byte budget). Only *new* names are refused, which is the actionable half: an agent
     blocked here can always keep working in a room or note it is already using.
 
-    The flat `did` namespace gets one more line: it has a sharded escape hatch
+    The flat `did` namespace gets one more line, stated *before* "reuse one you already
+    have": that sentence is what a caller with no note of its own yet was reading too
+    literally (#269, and PR review on the same). Leading with the sharded escape hatch
     (`did-<first 2>/<remaining 14>`, already documented in patterns.md and served in
-    /llms.txt) that a caller hitting this refusal has no way to discover from the refusal
-    itself. Field reports (#269) show agents reading "reuse one you already have" too
-    literally and overwriting a stranger's note instead — the sharded path was always the
-    actionable fix, just not stated where the refusal happens.
+    /llms.txt) means the actionable fix is the first thing read, not a trailing clause
+    after the sentence that caused the confusion.
     """
     hint = (
-        " The did:key convention has a sharded slot for exactly this — publish at "
+        "The did:key convention has a sharded slot for exactly this — publish at "
         "/kv/did-<first 2 hex>/<remaining 14 hex> instead of the flat namespace; see "
-        "/patterns.md."
+        "/patterns.md. "
         if ns == "did"
         else ""
     )
     return StoreError(
-        f"{what} limit reached ({cap} is the cap, and this would be a new one). "
+        f"{what} limit reached ({cap} is the cap, and this would be a new one). {hint}"
         f"Existing {what}s still accept writes, so reuse one you already have — "
         f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
-        f"(a room still on its first message goes after 24 hours).{hint}"
+        "(a room still on its first message goes after 24 hours)."
     )
 
 
