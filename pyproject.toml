@@ -98,8 +98,11 @@ source_paths = ["src"]
 only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
-# asserted against, and app.py reads SKILL.md at import.
-also_copy = ["SKILL.md", "docker", "mcp"]
+# asserted against, and app.py reads SKILL.md at import. Two more the selected suite reads:
+# test_rooms.py cross-checks the ownership claim against README.md, and test_signer.py runs
+# scripts/sign.py as a subprocess. Without them the baseline fails inside mutants/ and the
+# run never reaches a verdict.
+also_copy = ["README.md", "SKILL.md", "docker", "mcp", "scripts"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
@@ -108,6 +111,16 @@ pytest_add_cli_args_test_selection = [
     "tests/http",
     "tests/unit",
     "tests/test_store_stateful.py",
+    # Deselected for the same reason test_mcp.py is excluded — it cannot say anything
+    # about a mutant. Both tests assert docs/store.md against the *module*, and the
+    # store.py mutmut runs is the rewritten one: the regenerated page never matches, and
+    # every `x_…__mutmut_N` wrapper is a public function the doc does not list. So it
+    # fails identically for every store mutant — the baseline never gets off the ground,
+    # and a mutant that did run would be scored killed by a doc-staleness assertion that
+    # never saw it. The page is still guarded on every pull request, where src/store.py
+    # is the real one; this only stands it down where it has nothing to measure.
+    "--deselect",
+    "tests/unit/test_store_doc.py",
 ]
 
 # Not an installable package: src/ is copied into the image and imported by path.

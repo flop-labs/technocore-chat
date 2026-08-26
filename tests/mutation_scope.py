@@ -116,10 +116,24 @@ def report() -> int:
     checked = stats["killed"] + stats["survived"]
     score = (100 * stats["killed"] / checked) if checked else 0.0
     broken = {name: stats[name] for name in BROKEN if stats.get(name)}
+    # Mutants generated and none of them judged: the runner died before the first verdict,
+    # which every counter in BROKEN reports as zero. Without this the run renders as a
+    # clean sweep and exits 0, and the workflow promises the opposite — "exits non-zero
+    # only when the harness broke — mutants generated and never judged". The usual cause
+    # is the selected suite failing inside `mutants/`, over a path the tests read from the
+    # repo root that `also_copy` does not carry.
+    if stats.get("total") and not checked:
+        broken["never_judged"] = stats["total"]
     survivors = _survivors()
 
     # Rendered first because it can add to `broken`, then spliced in below it.
-    if not stats["survived"]:
+    if not checked:
+        body = [
+            "No mutant was judged, so this run says nothing about the suite — read it as "
+            "a broken harness, never as a clean sweep.",
+            "",
+        ]
+    elif not stats["survived"]:
         body = ["Nothing survived: every mutant in scope was caught by a test.", ""]
     elif survivors is None:
         broken["survivors_unreadable"] = stats["survived"]
