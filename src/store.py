@@ -1247,7 +1247,7 @@ def _ns_totals(d: Path) -> tuple[int, int]:
     return _scan(d, ".txt", sized=True)
 
 
-def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
+def _note_totals(d: Path, rebuild=_count_notes, persist: bool = False) -> tuple[int, int]:
     """(notes, bytes) without walking — or by walking, when the file cannot be trusted.
 
     The same file in two places, because the two caps have the same shape: `d` is the store
@@ -1255,9 +1255,14 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     `rebuild` is the walk that re-establishes whichever was asked for.
 
     Read without the lock, like `counters`: replacement is atomic, so a reader sees the old
-    bytes or the new ones. The rebuild is best effort; if it cannot be persisted the caller
-    still gets the counted truth and the next create counts again. That is the old cost,
-    which is the point — this degrades to what it replaced.
+    bytes or the new ones. Reading is safe unserialised; *persisting* what the read rebuilt
+    is not, so `persist` is off by default and only `_check_note_capacity` turns it on —
+    that one runs inside `.notes-create`, and every other write of a count file is under the
+    same gate. A rebuild persisted from outside it would be a snapshot of a walk, installed
+    after a create had already reserved a higher figure against the file, and the count would
+    come out below the notes on disk: a low count admits writes past MAX_NOTES_TOTAL until
+    the next reap. Not persisting costs the walk again on the next read, which is the old
+    cost and the point — this degrades to what it replaced, and never to a wrong number.
 
     A zero is never persisted, and that is load-bearing rather than an optimization:
     `_write_note_count` creates the directory it writes into, so persisting the zero a
@@ -1272,11 +1277,11 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     except (OSError, ValueError):
         pass
     totals = rebuild(d)
-    try:
-        if totals[0]:
+    if persist and totals[0]:
+        try:
             _write_note_count(d, *totals)
-    except OSError:
-        pass
+        except OSError:
+            pass
     return totals
 
 
@@ -1405,7 +1410,7 @@ def _check_note_capacity(root: Path, path: Path) -> None:
     """
     if path.exists():
         return
-    if _note_totals(path.parent, _ns_totals)[0] >= MAX_NOTES_PER_NS:
+    if _note_totals(path.parent, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     _check_note_total(root)
 

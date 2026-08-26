@@ -121,6 +121,39 @@ def test_the_count_survives_a_lost_file_by_walking(tmp_path) -> None:
     assert int(stored) == 6
 
 
+def test_a_read_outside_the_gate_never_persists_what_it_rebuilt(tmp_path) -> None:
+    """Every write of a count file happens under `.notes-create`. Reading is safe
+    unserialised — the replace is atomic — but *persisting* what a read rebuilt is not.
+
+    The rebuild is a snapshot of a walk. A create writes its `+1` reservation against the
+    same file at a moment the walk cannot see, so a snapshot installed afterwards lands
+    *below* the notes on disk, and a low count admits writes past MAX_NOTES_TOTAL until the
+    next reap rewrites it. `_check_note_total` runs before the gate and `note_stats` takes no
+    lock at all, so neither may persist; `_check_note_capacity` runs inside the gate and
+    still does, which is what keeps a per-namespace count to one rebuild per reap interval.
+
+    The cost is walking again on the next read, which is the cost this file exists to avoid
+    and exactly what it degrades to. The next create re-establishes it — from under the gate,
+    against a figure nothing can have moved underneath.
+    """
+    import store
+
+    _seed(tmp_path, 3)
+    (tmp_path / store.NOTES_FILE).unlink()
+
+    assert store._note_count(tmp_path) == 3, "the walked figure is still the truth"
+    assert not (tmp_path / store.NOTES_FILE).exists(), (
+        "a read outside the gate must not install the snapshot it just walked"
+    )
+    assert store.note_stats(tmp_path)["total"] == 3, "the gauge reads it the same way"
+    assert not (tmp_path / store.NOTES_FILE).exists(), "and persists it no more than the check"
+
+    store.note_set(tmp_path, "ns-new", "k", "v")
+    assert (tmp_path / store.NOTES_FILE).read_text().split()[0] == "4", (
+        "the serialised writer re-establishes it, at the figure the disk actually holds"
+    )
+
+
 def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
     """Drift is bounded by one reap interval rather than by hope. Writing a deliberately
     wrong count and running a reap must restore the truth — this is what keeps a lost
