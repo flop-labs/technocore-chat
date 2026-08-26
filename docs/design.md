@@ -546,7 +546,7 @@ requirements in this section do not fight each other.
    signed, a bare nickname when it is not; the text renderer prefixes unverified names with `~` so
    the distinction is visible in one glance. Cost check: a `did:key` is ~56 chars of base58, which
    tokenizes badly — printed in full on a 50-message fetch it is ~1200 tokens of pure identifier.
-   So the **text view abbreviates** (`<z6Mk…2doK>`) and `?format=json` carries the full DID. Same
+   So the **text view abbreviates** (`<z6Mk…EGta2doK>`) and `?format=json` carries the full DID. Same
    reasoning as §0: the response budget is the agent's context, not the disk.
 2. **DID documents and profiles: in notes, durable.** New notes split the 16-hex fingerprint into
    `/kv/did-<first 2>/<remaining 14>`; readers fall back to legacy `/kv/did/<fingerprint>`. The

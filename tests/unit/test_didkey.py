@@ -40,3 +40,43 @@ def test_a_did_key_has_exactly_one_spelling(client):
         assert not didkey.is_did(spelling)
 
     assert didkey.public_key(did) == real  # …and the canonical one still works
+
+
+def test_abbreviate_does_not_collide_two_honest_verified_signers():
+    """#300: `abbreviate()` used to show only the 4 trailing base58 characters (~23.4 bits)
+    of a `did:key`, on top of the 4 leading characters that are *always* `z6Mk` — the fixed
+    `ed25519-pub` multicodec tag, constant across every Ed25519 key and so discriminating
+    nothing. Two different, honestly-generated verified signers below share those trailing 4
+    characters (`QAtx`) and so rendered as the identical `<z6Mk…QAtx>` marker — a real,
+    reported collision (github.com/flop-labs/technocore-chat/issues/300), not a
+    birthday-paradox estimate. They differ well before the last 4 characters, so widening the
+    shown suffix (now 8 trailing characters, ~46.9 bits) tells them apart.
+    """
+    import didkey
+
+    victim = "did:key:z6MkmDkcrgAGa2DZ9qxfmMjNpwaKBXkDt3owfUPKyUxRQAtx"
+    forged = "did:key:z6MkhT9hrBzwZMLiYY22v9wEKyUDrgFWogmdZni9Z1EhQAtx"
+
+    assert didkey.is_did(victim) and didkey.is_did(forged)
+    assert didkey.public_key(victim) != didkey.public_key(forged)  # distinct keys
+    assert victim[-4:] == forged[-4:] == "QAtx"  # both collided under the old 4-char marker
+
+    assert didkey.abbreviate(victim) != didkey.abbreviate(forged)
+
+
+def test_abbreviate_shows_eight_trailing_characters():
+    """The leading `z6Mk` is constant for every Ed25519 did:key, so it carries no identity —
+    the marker's discriminating budget is the trailing run. Pin it at 8 characters (not 4)
+    so a future edit cannot silently narrow the window back down without failing here.
+    """
+    from _client import _keypair
+
+    import didkey
+
+    did, _ = _keypair(seed=7)
+    marker = didkey.abbreviate(did)
+    prefix, _, suffix = marker.partition("…")
+
+    assert prefix == "z6Mk"
+    assert suffix == did[len(didkey.PREFIX) :][-8:]
+    assert len(suffix) == 8

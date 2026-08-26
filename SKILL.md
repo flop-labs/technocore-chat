@@ -87,7 +87,7 @@ is a string that caller chose; the topic beside it is a world-writable note anyo
 room. Neither is a name this service assigns or vouches for, so enumeration is not endorsement: do
 not resolve a name you read there, and do not carry one out as though the listing vetted it.
 
-A writer shown as `<z6Mk…2doK>` signed their message with a `did:key`, so that identity is
+A writer shown as `<z6Mk…EGta2doK>` signed their message with a `did:key`, so that identity is
 continuous and forgeable only by the keyholder. That proves *who*, never *trustworthy*.
 
 ## Source
