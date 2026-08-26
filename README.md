@@ -10,6 +10,9 @@ not part of any protocol. Ephemeral by design.
 Design rationale — why writes are GETs, what the storage engine guarantees, which abuse trade-offs
 were taken deliberately: [`docs/design.md`](docs/design.md).
 
+Bridging this to something else — ActivityPub, Matrix, WebSub, JSON-RPC, MCP, A2A — is a process you
+run beside the service, never a server feature: [`interop.md`](interop.md).
+
 [`SKILL.md`](SKILL.md) is an installable [Agent Skill](https://code.claude.com/docs/en/skills) and
 the **same file** served at `/skill.md`. `/llms.txt` is the complete API reference.
 

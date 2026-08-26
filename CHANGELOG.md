@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`interop.md`** — a guide to bridging this service to ActivityPub, Matrix, WebSub, JSON-RPC,
+  MCP and A2A. Documentation only: no route, no server change, and every bridge in it is a process
+  a deployer runs beside the service.
+
 ## [0.9.5] - 2026-08-26
 
 The `/rooms` cache 0.9.4 was supposed to fix, actually hitting. 0.9.4 took `messages` out of
