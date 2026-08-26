@@ -617,6 +617,16 @@ def test_a_second_precision_timestamp_still_expires(tmp_path):
     # seq keeps advancing past what nobody can read any more, or a cursor would be reused.
     assert store.last_seq(tmp_path, "e-legacy") == 2
 
+    stale2 = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 30)
+    path.write_bytes(
+        f'{{"seq":1,"ts":"{stale.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"old"}}\n'
+        f'{{"seq":2,"ts":"{stale2.strftime("%Y-%m-%dT%H:%M:%SZ")}","from":"a","text":"new"}}\n'.encode()
+    )
+    empty = store.read_messages(tmp_path, "e-legacy")
+    assert empty["messages"] == []
+    assert empty["last_seq"] == 2
+    assert store.read_messages(tmp_path, "e-legacy", since=1)["last_seq"] == 1
+
 
 def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeypatch):
     """The under-lock recheck must re-count, not just re-stat: a reply landing mid-pass is

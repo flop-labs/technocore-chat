@@ -617,13 +617,15 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
                 if len(out) >= limit:
                     break
     out.reverse()
+    # fmt: off
     return {
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": out[-1]["seq"] if out else (since if since is not None else last_seq(root, room)),
         "messages": out,
     }
+    # fmt: on
 
 
 def last_seq(root: Path, room: str) -> int:
