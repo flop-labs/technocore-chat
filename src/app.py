@@ -1289,11 +1289,16 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     Two forms, because one cannot express both: `if_absent` means "only if nothing is
     there" (create), `if=<text>` means "only if it still holds exactly this" (replace).
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
-    the separate flag rather than a sentinel.
+    the separate flag rather than a sentinel. Sending both is refused rather than one of
+    them being picked silently: there is no correct pick, and dropping either half would
+    tell the caller a condition held when it was never actually checked.
     """
-    if source.get("if_absent") not in (None, "", False, "0", "false"):
-        return None, True
+    absent = source.get("if_absent") not in (None, "", False, "0", "false")
     expect = source.get("if")
+    if absent and expect is not None:
+        raise StoreError("if and if_absent cannot both apply: send one, not both.")
+    if absent:
+        return None, True
     return (str(expect) if expect is not None else None), False
 
 

@@ -127,6 +127,27 @@ def test_if_absent_creates_exactly_once(client):
     assert "agent-a" in client.get("/kv/coord/claim").text
 
 
+def test_if_and_if_absent_together_is_refused_not_silently_picked(client):
+    # #290: if_absent used to win unconditionally, so an if= that could never hold
+    # (nothing is there yet) was dropped without a word and the write went through.
+    r = client.get("/kv/coord/both/set/v?if=impossible&if_absent=1")
+    assert r.status_code == 400
+    assert "if" in r.text and "if_absent" in r.text
+    assert client.get("/kv/coord/both").status_code == 404  # nothing was written
+
+    # Same collision once the note exists, from the other direction: if_absent cannot
+    # hold, if= could — both used to still resolve to whichever branch ran first.
+    client.get("/kv/coord/both2/set/v")
+    r = client.get("/kv/coord/both2/set/w?if=v&if_absent=1")
+    assert r.status_code == 400
+    assert "v" in client.get("/kv/coord/both2").text  # unchanged
+
+    # Same on the POST lane.
+    r = client.post("/kv/coord/both3", json={"value": "v", "if": "x", "if_absent": True})
+    assert r.status_code == 400
+    assert client.get("/kv/coord/both3").status_code == 404
+
+
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
     # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
