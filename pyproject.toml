@@ -114,3 +114,4 @@ pytest_add_cli_args_test_selection = [
 # Without this, uv tries to build a wheel and fails.
 [tool.uv]
 package = false
+required-version = ">=0.9"
