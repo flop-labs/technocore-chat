@@ -495,6 +495,17 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "text",
                             "required": True,
                             "schema": _TEXT_SCHEMA,
+                            "description": (
+                                "URL-encoded message body, same single-line sweep as the "
+                                "unsigned lane. This lane has far less real budget before "
+                                "the URL length limit bites: "
+                                f"{_DID_LENGTH + didkey.SIG_CHARS + 19 + 3} bytes go to "
+                                "did/sig/nonce and their path separators before text even "
+                                "starts, against roughly 49 for the unsigned lane's nick. "
+                                f"{store.MAX_TEXT_CHARS} is the declared cap either way, but "
+                                "a long non-Latin message that fits the unsigned lane's URL "
+                                "may not fit this one -- use POST for those."
+                            ),
                         },
                     ],
                     "responses": {
