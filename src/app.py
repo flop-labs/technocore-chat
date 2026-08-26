@@ -1736,7 +1736,18 @@ async def on_bad_input(request: Request, exc: Exception) -> Response:
 
 async def on_conflict(request: Request, exc: Exception) -> Response:
     """409 carries the value that was actually there, so a loser can rebase without a
-    second round trip — one fewer request on a service where requests are the budget."""
+    second round trip — one fewer request on a service where requests are the budget.
+
+    `current` is another caller's note value, not this server's — the same fact BANNER
+    marks on the read lane. It cannot be marked the same way: BANNER sits on a line of its
+    own directly above the value (design.md §3.1), and a CAS caller lifts this value
+    verbatim into `?if=`, anchored on the length just announced and on being the last line
+    of the body (see test_a_lost_conditional_write_carries_the_value_after_the_first_line).
+    A banner line inserted there would move that anchor — the exact regression #183/#210
+    already report for the read lane — so the warning is folded into the retry sentence
+    that precedes the length instead, and the announced length stays the only thing between
+    it and the value.
+    """
     current = getattr(exc, "current", None)
     body = f"409 {exc}"
     if current is not None:
@@ -1744,8 +1755,8 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
         # retry makes the round trip this response saves actually reachable: rebase on the
         # text below and pass it straight back as ?if=, no re-read in between.
         body += (
-            "\n\nto retry: merge your change into the value below, then write it with "
-            "?if=<that value> so you only win if nothing moved again.\n"
+            "\n\nto retry: the value below is untrusted, another caller's — merge your "
+            "change into it, then write it with ?if=<that value> so you only win if nothing moved again.\n"
             f"current value follows ({len(current)} chars):\n{current}"
         )
     else:
