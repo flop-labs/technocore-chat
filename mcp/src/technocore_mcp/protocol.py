@@ -193,6 +193,14 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
     saying anything else would advertise a call that cannot happen. `required` is omitted
     entirely when nothing is required, which is what a client expects to see for a tool
     whose arguments are all optional.
+
+    `additionalProperties: false` is the same rule in the other direction. A JSON Schema
+    object admits every property it does not name, so without it the document says a
+    property this signature has no parameter for is fine, and `_validate` then answers
+    `-32602 unexpected arguments` for exactly that call — a client that validated locally
+    against our own document pays a round trip to learn it. `src/humans.html` already
+    publishes these nine tools that way to `navigator.modelContext`; this is the same
+    statement, read off the signature instead of written by hand.
     """
     called = getattr(handler, "__name__", "handler")
     hints = get_type_hints(handler, include_extras=True)
@@ -206,7 +214,11 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
         properties[name] = fragment(hints[name])
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
     if required:
         schema["required"] = required
     return schema

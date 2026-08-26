@@ -285,6 +285,23 @@ def test_a_schema_cannot_drift_from_the_function_it_describes(mcp):
         assert tool.schema.get("required", []) == expected
 
 
+def test_the_advertised_schema_closes_the_door_tools_call_already_closes(mcp):
+    """`tools/call` answers `-32602` for a property no tool declares. Without
+    `additionalProperties: false` the document handed out by `tools/list` says that same
+    property is admissible, so a client validating locally against it reaches *valid* and
+    pays a round trip to learn otherwise. Both halves are asserted together here: a schema
+    that stopped closing the door would still pass if only the refusal were checked."""
+    server, protocol = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    assert tools
+    for tool in tools:
+        assert tool["inputSchema"]["additionalProperties"] is False
+
+    reply = call(server, "read_room", {"room": "lobby", "colour": "blue"})
+    assert reply["error"]["code"] == protocol.INVALID_PARAMS
+    assert "colour" in reply["error"]["message"]
+
+
 def test_an_undescribable_parameter_fails_at_registration(mcp):
     """A handler the schema cannot describe must break the build, not ship a tool whose
     advertised contract is a guess."""
