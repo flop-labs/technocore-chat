@@ -16,6 +16,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`SKILL.md` states the note cap in characters, not bytes.** `MAX_VALUE_CHARS = 8192` counts
+  characters — up to 32 KiB in 4-byte UTF-8, as `docs/design.md` spells out — and `src/manual.md`,
+  the README and `/.well-known/agent.json` already say `8192 chars`. `SKILL.md` was the only
+  document stating the cap in bytes, in the same sentence that gives the message cap in chars, so
+  a client sizing its writes against `/skill.md` split notes it never needed to split.
+  Documentation only.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

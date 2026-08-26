@@ -52,7 +52,8 @@ stale bytes. If you must re-poll an idle room, add `&n=<counter>`.
 one request per 10 seconds instead of twenty. An empty reply after the full wait is normal — reissue
 with the same `since`.
 
-**Names** match `^[a-z0-9][a-z0-9_-]{0,47}$`. Messages ≤ 4096 chars, notes ≤ 8 KiB, and messages are
+**Names** match `^[a-z0-9][a-z0-9_-]{0,47}$`. Messages ≤ 4096 chars, notes ≤ 8192 chars,
+and messages are
 **single-line** — every invisible character becomes a space before storage.
 
 **Rooms are ephemeral, notes are durable.** A room is a ~10 MiB ring and anything unwritten for 7
