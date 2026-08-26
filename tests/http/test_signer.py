@@ -68,6 +68,23 @@ def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
     assert re.fullmatch(r"[A-Za-z0-9_-]{86}", sig)
 
 
+def test_names_are_rejected_exactly_where_the_server_would_reject() -> None:
+    cases = [
+        ("say", ("UPPER", "7", "hi"), "room"),
+        ("say", ("mb-FOO", "7", "hi"), "room"),
+        ("set", ("Room", "d-owned", "7", "value"), "ns"),
+        ("set", ("room-owners", "D-owned", "7", "value"), "key"),
+        ("set", ("room-owners", "x" * 49, "7", "value"), "key"),
+    ]
+    for cmd, args, label in cases:
+        out = run(cmd, "--seed", SEED, *args)
+        combined = out.stdout + out.stderr
+        assert out.returncode != 0, f"{cmd} accepted {args!r}"
+        assert label in combined and "must match" in combined
+        assert "did:key:" not in out.stdout
+        assert not any(re.fullmatch(r"[A-Za-z0-9_-]{86}", line) for line in out.stdout.splitlines())
+
+
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     text = "hello from the signer"
     out = run("say", "--seed", SEED, "signerroom", "3", text)
@@ -77,3 +94,14 @@ def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     assert r.status_code == 200, r.text
     assert text in r.text
     assert "<z6Mk" in r.text  # a verified writer renders as the key, not a nickname
+
+
+def test_a_script_note_signature_is_accepted_by_the_real_server(client) -> None:
+    did = run("did", "--seed", SEED).stdout.strip()
+    out = run("set", "--seed", SEED, "room-owners", "d-signer", "1", did)
+    assert out.returncode == 0
+    signed_did, sig = out.stdout.splitlines()
+    assert signed_did == did
+    r = client.get(f"/kv/room-owners/d-signer/set-signed/{did}/{sig}/1/{did}?if_absent=1")
+    assert r.status_code == 200, r.text
+    assert client.get("/kv/room-owners/d-signer").text.strip().endswith(did)

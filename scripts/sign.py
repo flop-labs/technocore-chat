@@ -42,6 +42,10 @@ signature — ready for:
 
 Nonces are yours to choose (1-19 digits) and must count up per key per room;
 a millisecond clock works, and so does a plain counter.
+
+The room, namespace and key arguments must match the same public name grammar
+the server enforces: lowercase ASCII, digits, underscore and hyphen, beginning
+with a lowercase ASCII letter or digit, up to 48 characters.
 """
 
 from __future__ import annotations
@@ -64,6 +68,7 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # replaces with a space. Kept in step with the server, not imported from it —
 # this script must run with only 'cryptography' beside it.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
 
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
@@ -88,6 +93,13 @@ def swept(text: str, limit: int) -> str:
             f"{len(cleaned)} characters after the sweep, over the {limit}-character cap — split it"
         )
     return cleaned
+
+
+def name(value: str, label: str) -> str:
+    """A server-storable room/ns/key name, checked before signing."""
+    if not NAME_RE.fullmatch(value):
+        raise SystemExit(f"{label} must match ^[a-z0-9][a-z0-9_-]{{0,47}}$, got {value!r}")
+    return value
 
 
 def multibase(raw: bytes) -> str:
@@ -175,9 +187,12 @@ def main() -> None:
     if not re.fullmatch(r"[0-9]{1,19}", args.nonce):
         raise SystemExit(f"nonce must be 1-19 ASCII digits, got {args.nonce!r}")
     if args.cmd == "say":
-        canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
+        canonical = f"{name(args.room, 'room')}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:
-        canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
+        canonical = (
+            f"{name(args.ns, 'ns')}|{name(args.key, 'key')}|"
+            f"{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
+        )
     key, _ = load_key(seed)
     print(did_of(key))
     print(signature(key, canonical))
