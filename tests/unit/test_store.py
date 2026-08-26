@@ -1029,13 +1029,13 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     assert calls == ["file", "rooms", "root", "file", "rooms"]
 
     store.append(tmp_path, "lobby", "bot", "still durable")
-    assert calls == ["file", "rooms", "root", "file", "rooms", "file"]
+    assert calls == ["file", "rooms", "root", "file", "rooms", "file", "rooms"]
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 6  # the append skipped both syncs
+        assert len(calls) == 7  # the append skipped both syncs
         store.append(tmp_path, "p-fast-new", "bot", "fast creation")
-        assert len(calls) == 6  # a newly created room skips the directory syncs too
+        assert len(calls) == 7  # a newly created room skips the directory syncs too
         events.clear()
         real_replace = store.os.replace
 
@@ -1067,24 +1067,17 @@ def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer
     assert synced == [path, path.parent]
 
 
-def test_recreated_room_bypasses_a_stale_reused_inode_cache(tmp_path, monkeypatch):
-    """A peer may reap a room while this worker remembers its inode. If the filesystem
-    reuses that inode for the recreated file, creation itself must still force a sync."""
+def test_an_existing_room_append_always_repairs_its_directory_entry(tmp_path, monkeypatch):
+    """A peer may reap and recreate a room with the same inode, then die before its sync.
+    This worker cannot distinguish that from its old file, so every durable append repairs."""
     import store
 
-    path = store.room_path(tmp_path, "p-recreated")
-
-    class ReusedInodeCache(dict):
-        def get(self, key, default=None):
-            stat = key.stat()
-            return stat.st_dev, stat.st_ino
-
+    path = store.room_path(tmp_path, "p-existing")
+    store.append(tmp_path, "p-existing", "bot", "first")
     synced = []
-    monkeypatch.setattr(store, "_durable_room_entries", ReusedInodeCache())
-    monkeypatch.setattr(store, "_durable_room_directories", {path.parent})
     monkeypatch.setattr(store, "_fsync_parent", synced.append)
 
-    store.append(tmp_path, "p-recreated", "bot", "new inode, old identity")
+    store.append(tmp_path, "p-existing", "bot", "repair regardless")
 
     assert synced == [path]
 

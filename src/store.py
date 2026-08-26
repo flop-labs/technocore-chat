@@ -588,11 +588,11 @@ def _locked(target: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-# Existence is not durability: an interrupted first writer may leave a visible file whose
-# directory entry was never synced. Remember only inodes this process has actually followed
-# with the directory fsync; a restart deliberately forgets and repairs on the next append.
-# Reaping drops the path, so churn cannot grow this beyond the live room population.
-_durable_room_entries: dict[Path, tuple[int, int]] = {}
+# Existence is not durability: another worker may recreate a visible file, reuse the inode
+# this process saw before, then die before syncing its directory entry. There is no safe
+# process-local cache for that state, so every configured durable append syncs the directory.
+# The service never removes `rooms/` itself, so its entry in the data root only needs the
+# per-process repair below for creation interrupted before the root sync.
 _durable_room_directories: set[Path] = set()
 
 
@@ -1268,7 +1268,6 @@ def _reap(root: Path) -> None:
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
-                            _durable_room_entries.pop(p, None)
                             reaped[f"reaped_{reason}"] += 1
             except OSError:
                 continue  # racing writer or vanished file: next pass picks it up
@@ -1869,10 +1868,7 @@ def _write_record(
                 os.fsync(f.fileno())
         written = path.stat()
         if config.FSYNC:
-            identity = (written.st_dev, written.st_ino)
-            if created or _durable_room_entries.get(path) != identity:
-                _fsync_parent(path)
-                _durable_room_entries[path] = identity
+            _fsync_parent(path)
             if path.parent not in _durable_room_directories:
                 _fsync_parent(path.parent)
                 _durable_room_directories.add(path.parent)
