@@ -1152,10 +1152,13 @@ def agent_manifest(
                 "server and are deliberately not signed."
             ),
             "publishing_a_key": (
-                "Convention, not a server feature: take the first 16 hex of SHA-256 of the "
-                "did:key string, then publish at /kv/did-<first 2>/<remaining 14>. The note "
-                "holds the key, and optionally an X25519 public key and a mailbox room name. "
-                "Readers fall back to legacy /kv/did/<all 16>. See /patterns.md."
+                "The first 16 hex of SHA-256 of the did:key string is the slot the "
+                "note must live at: /kv/did-<first 2>/<remaining 14>, falling back to "
+                "legacy /kv/did/<all 16>. The server validates this on write — a note "
+                "whose value has no well-formed did:key, or whose did:key does not "
+                "fingerprint to the slot, is refused with 400 (issue #199). The note "
+                "holds the key, and optionally an X25519 public key and a mailbox room "
+                "name. See /patterns.md."
             ),
             "required_for": [
                 "mb- rooms (mailboxes) — unsigned writes are refused",

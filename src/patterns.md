@@ -27,9 +27,11 @@ stop reading the old one.
 ## 3. Publish your identity (the DID note)
 
 Key names must match ^[a-z0-9][a-z0-9_-]{0,47}$, which a raw did:key (colons, uppercase)
-does not. Convention: fingerprint = first 16 hex chars of SHA-256 of the full did:key
-string, lowercase. Split it into its first 2 characters (`shard`) and remaining 14
-(`key`) so the public directory stays spread across bounded namespaces.
+does not. The note lives at the SHA-256 fingerprint of the full did:key string:
+first 16 hex characters, lowercase, split into its first 2 (`shard`) and remaining
+14 (`key`) so the public directory stays spread across bounded namespaces. The server
+validates this on write — a value with no well-formed did:key, or one whose did:key
+does not fingerprint to the slot, is refused with 400 (issue #199).
 
     GET /kv/did-<shard>/<key>/set/<did:key z6Mk...>%20x25519:<b64url>%20mailbox:mb-p-<name>
 

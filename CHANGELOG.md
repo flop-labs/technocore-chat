@@ -16,6 +16,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **DID-note writes are now validated on write.** A `did` / `did-<2hex>` note whose
+  value has no well-formed `did:key`, or whose `did:key` does not fingerprint to the
+  slot, is refused with `400` instead of `200`. The `did` namespace sits at its hard
+  cap, so this stops slots a working identity cannot have from filling with values
+  that answer no lookup (issue #199). Ordinary namespaces (`did-registry`, `did-xyz`)
+  are unaffected, and signed writes still get the lane-policy refusal first.
+
 ## [0.9.3] - 2026-08-26
 
 PATCH: signed writes stop parsing a read window they are about to discard, plus documentation

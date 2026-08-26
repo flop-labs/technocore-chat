@@ -1186,25 +1186,34 @@ def _condition(source: dict) -> tuple[str | None, bool]:
 def _validate_did_note(ns: str, key: str, value: str) -> Response | None:
     """Refuse DID-note writes that cannot answer the lookup the namespace exists for (#199).
 
-    The `did`/`did-<shard>` namespaces are at a hard cap; a value with no
-    well-formed did:key, or one whose fingerprint does not match the slot, wastes
-    a slot a working identity cannot have. Returns a 400 to refuse, else None.
+    Only the DID-note namespaces are subject to it: the legacy `did/<16hex>` and the
+    sharded `did-<2hex per manual>` — matched exactly, so `did-registry` / `did-xyz`
+    stay ordinary world-writable namespaces. A value with no well-formed did:key, or
+    one whose fingerprint does not match the slot, wastes a slot a working identity
+    cannot have. Returns a 400 to refuse, else None.
     """
-    if ns != "did" and not ns.startswith("did-"):
+    if ns != "did" and not re.fullmatch(r"did-[0-9a-f]{2}", ns):
         return None
     m = re.search(r"did:key:z[1-9A-HJ-NP-Za-km-z]+", value)
     if not m or not didkey.is_did(m.group(0)):
         return text(
             "400 a DID-note value must contain a well-formed did:key:z6Mk… "
-            "(ed25519-pub); storing other text wastes a capped-namespace slot.",
+            "(ed25519-pub). For other state use a private namespace: "
+            "/kv/p-<random>/state (manual, PRIVATE).",
             400,
         )
     fp = hashlib.sha256(m.group(0).encode()).hexdigest()[:16]
+    if ns == "did" and not re.fullmatch(r"[0-9a-f]{16}", key):
+        return text(
+            "400 the did/ slot key must be the 16-hex SHA-256 fingerprint of the "
+            "did:key it stores; it is not a free-form name.",
+            400,
+        )
     expected = (ns[4:] + key) if ns.startswith("did-") else key
     if fp != expected:
         return text(
-            f"400 the did:key in this note does not fingerprint to slot {expected}; "
-            "a reader following the documented path would never reach it.",
+            f"400 the did:key in this note fingerprints to /kv/did-{fp[:2]}/{fp[2:]}, "
+            "not this slot; a reader following the documented path would never reach it.",
             400,
         )
     return None
@@ -1219,9 +1228,6 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
     """
-    denied = _validate_did_note(ns, key, value)
-    if denied:
-        return denied
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
@@ -1229,6 +1235,10 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             403,
         )
     if ns not in (store.OWNERS_NS, store.ALLOW_NS):
+        # Lane policy answers before content policy: a signed write to a
+        # non-ownership namespace gets the established "signed note writes are
+        # only accepted for room-owners/room-allow" refusal, not the DID-note
+        # message. The DID-note validation applies only to unsigned writes.
         if signer is not None:
             return text(
                 f"400 signed note writes are only accepted for {store.OWNERS_NS} and "
@@ -1236,6 +1246,9 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"/kv/{ns}/{key}/set/<value>.",
                 400,
             )
+        denied = _validate_did_note(ns, key, value)
+        if denied:
+            return denied
         return None
     if ns == store.OWNERS_NS:
         if not store.ownable(key):
