@@ -88,7 +88,8 @@ def _keypair(seed: int = 1):
 
 
 def _say_signed(client, room, did, sign, text, nonce=1):
-    """The canonical string is `room|nonce|text` over the *swept* text — what is stored."""
+    """The canonical string is `room|nonce|text` over the swept *and trimmed* text — what
+    is stored. `clean_text` does both; signing only the sweep is the 403 in test_docs."""
     import store
 
     body = store.clean_text(text)

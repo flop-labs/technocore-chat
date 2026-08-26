@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import _client
 import pytest
@@ -972,6 +973,33 @@ def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
     assert identity["algorithms"] == ["Ed25519"]
     assert "mb-" in " ".join(identity["required_for"])
     assert doc["documentation"]["patterns"].endswith("/patterns.md")
+
+
+def test_every_signing_surface_defines_the_signed_text_as_swept_and_trimmed(client):
+    """Publishing `<room>|<nonce>|<text>` settles the concatenation but not `<text>`, and
+    `clean_text` sweeps *and then trims*. A signer told only "the text after the
+    single-line sweep" therefore signs a different string than the server verifies, and
+    the failure is a bare 403 — the shape assertions above all still pass.
+
+    The bite is not limited to whitespace a caller typed: a trailing invisible character
+    sweeps to a space, and that space is then trimmed away, so the two readings diverge on
+    input that looks like it has no trailing whitespace at all.
+    """
+    import store
+
+    for path in ("/llms.txt", "/auth.md", "/openapi.json", "/.well-known/agent.json"):
+        served = client.get(path).text
+        assert "trim" in served.lower(), f"{path} defines the signed text without the trim"
+
+    did, sign = _keypair()
+    text = "hello\u200b"  # spelt out: a literal zero-width space is invisible in a diff
+    swept = "hello "  # what the sweep alone produces, which is all the prose described
+    assert store.clean_text(text) == "hello", "the trim is what makes these two differ"
+
+    quoted = quote(text, safe="")
+    sweep_only = client.get(f"/r/lobby/say-signed/{did}/{sign(f'lobby|1|{swept}')}/1/{quoted}")
+    assert sweep_only.status_code == 403, "signing the swept-but-untrimmed text must not verify"
+    assert _say_signed(client, "lobby", did, sign, text, nonce=2).status_code == 200
 
 
 def test_the_skill_points_at_the_lanes_it_does_not_teach(client):
