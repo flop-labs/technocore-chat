@@ -886,7 +886,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
 # --------------------------------------------------------------------------- writing
 
 
-def _stillborn(path: Path) -> bool:
+def _stillborn(path: Path | str) -> bool:
     """True if a room file holds no more than STILLBORN_MESSAGES records.
 
     Reads from the head and stops at the first record past the limit, so an answered room
@@ -895,7 +895,7 @@ def _stillborn(path: Path) -> bool:
     """
     seen = 0
     try:
-        with path.open("rb") as f:
+        with open(path, "rb") as f:
             for line in f:
                 if _parse(line) is None:
                     continue
@@ -907,15 +907,21 @@ def _stillborn(path: Path) -> bool:
     return True
 
 
-def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
+def _reapable(path: Path | str, now: float, stillborn_rule: bool) -> str | None:
     """Which threshold retires `path`, or None if neither does yet.
 
     Returns the reason rather than a bool so the caller can count the two rules apart:
     a wave of stillborn reaps means openers nobody answered, a wave of idle reaps means
     conversations that ended, and the digest is only useful if it can tell them apart.
     Both values are truthy, so `if not _reapable(...)` reads exactly as it did.
+
+    Takes a path and stats it, deliberately never an `os.DirEntry`. `_reap` calls this a
+    second time under the lock precisely to catch a writer that refreshed the file since the
+    first call, and `DirEntry.stat()` caches — handing one in would make that recheck return
+    the pre-lock answer and unlink a room somebody had just written to. Passing a path is
+    what makes the stale read unrepresentable rather than merely avoided.
     """
-    idle = now - path.stat().st_mtime
+    idle = now - os.stat(path).st_mtime
     if idle > IDLE_SECONDS:
         return "idle"
     if stillborn_rule and idle > STILLBORN_SECONDS and _stillborn(path):
@@ -932,16 +938,20 @@ def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
 ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
 
 
-def _guards_a_live_room(root: Path, path: Path, now: float) -> bool:
-    """True when `path` is a guard note whose room is still within its own idle window.
+def _guards_a_live_room(root: Path, entry: os.DirEntry[str], now: float) -> bool:
+    """True when `entry` is a guard note whose room is still within its own idle window.
 
     Tied to the room, not exempted outright: once the room itself is reapable the guards go
     with it, so this bounds the state exactly as before rather than adding an immortal
     namespace.
+
+    The two string steps replace `path.parent.name` and `path.stem` on a Path this no longer
+    builds. `rpartition` is `.stem` exactly here and not by luck: NAME_RE admits no dot, so a
+    note name carries exactly one, the suffix's.
     """
-    if path.parent.name not in ROOM_GUARD_NS:
+    if os.path.basename(os.path.dirname(entry.path)) not in ROOM_GUARD_NS:
         return False
-    room = room_path(root, path.stem)
+    room = room_path(root, entry.name.rpartition(".")[0])
     try:
         return now - room.stat().st_mtime <= IDLE_SECONDS
     except OSError:
@@ -990,11 +1000,22 @@ def _sweep_orphan_locks(root: Path, now: float) -> None:
     bounded by the room cap: at most a week of churn in empty files.
     """
     for sub, nested, suffix in (("rooms", False, ".jsonl.lock"), ("notes", True, ".txt.lock")):
-        for p in _walk(root / sub, suffix, nested):
+        for entry in _walk(root / sub, suffix, nested):
             try:
-                if p.with_suffix("").exists() or now - p.stat().st_mtime <= IDLE_SECONDS:
+                # Slicing `.lock` off the name is `Path.with_suffix("")` without the Path,
+                # and os.access is `.exists()` without the stat_result it throws away: 26.0
+                # µs per lock as it was, 3.6 µs now, over 12,079 room locks. os.access asks
+                # about the real uid rather than the effective one — this image runs as one
+                # non-root uid so the two agree, and nothing here is setuid.
+                #
+                # Deliberately not the dir_fd form: os.stat(name, dir_fd=) measures 96.6 ms
+                # against os.stat(path)'s 94.6 ms over the same tree, so threading a
+                # directory fd out of the walk would buy a rounding error and cost an fd
+                # lifetime per namespace. The Path was the expense, not the syscall.
+                data = entry.path[: -len(".lock")]
+                if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
-                p.unlink(missing_ok=True)
+                os.unlink(entry.path)
             except OSError:
                 continue
 
@@ -1060,16 +1081,22 @@ def _reap(root: Path) -> None:
         ("rooms", False, ".jsonl", True),
         ("notes", True, ".txt", False),
     ):
-        for p in _walk(root / sub, suffix, nested):
+        for entry in _walk(root / sub, suffix, nested):
             try:
-                if _guards_a_live_room(root, p, now):
+                if _guards_a_live_room(root, entry, now):
                     continue
-                if not _reapable(p, now, stillborn_rule):
+                if not _reapable(entry.path, now, stillborn_rule):
                     continue
+                # The Path is built here and not in the walk: everything above this line
+                # works on the entry scandir already had, and a live pass reaches this
+                # branch for 0 of ~207,000 files. Paying pathlib for the ones we delete
+                # costs nothing; paying it for the ones we keep was most of the pass.
+                p = Path(entry.path)
                 # Recheck under the lock: a writer may have refreshed the file since the
                 # stat above, and deleting a just-written room would lose live messages.
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
+                # It re-stats by path, never through the entry — see _reapable.
                 with _locked(p):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
@@ -1190,17 +1217,27 @@ def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
     return count, size
 
 
-def _walk(d: Path, suffix: str, nested: bool = False) -> Iterator[Path]:
+def _walk(d: Path | str, suffix: str, nested: bool = False) -> Iterator[os.DirEntry[str]]:
     """Every `*suffix` file directly in `d` (or one level down, when `nested`).
 
-    Same syscalls as the `rooms/*.jsonl` and `notes/*/*.txt` globs it replaces, and less
-    Python around them: measured back to back on one full store, the nested notes pass went
-    95 ms -> 66 ms and the flat rooms pass 11 ms -> 8 ms. Worth having because the reaper
-    makes four of these passes on the write path, but it is the smaller half of that cost —
-    the rest is one stat() per file in `_reapable`, which no walk can avoid.
+    Yields the `os.DirEntry` scandir already built rather than a Path made from it. On 3.12
+    pathlib is lazily normalised — the constructor stashes the string and the parse lands on
+    the first `__fspath__`, which is `.stat()` — so `Path(e.path).stat()` costs 19.4 µs
+    against the 7.7 µs of the syscall it wraps, and the overhead hides inside the stat rather
+    than in the constructor where a reader would look for it. Over one reap pass at the live
+    caps (10,240 rooms + ~207,000 notes) that was the difference between 13.5 s and 3.6 s.
 
-    Note the asymmetry with `_scan`, which is much faster still on the same directories:
-    it only ever counts and measures, so it never allocates a Path per entry. Use that one
+    Every `os.*` spelling of the stat is the same speed — `DirEntry.stat()`, `os.stat(path)`
+    and `os.stat(name, dir_fd=)` are within 2% of each other. Only Path is slow, so this is a
+    representation change, not a cleverer syscall. `bench/dir_walk.py` is the measurement.
+
+    `e.is_dir()` reads d_type from readdir and costs no syscall. Callers that need a Path
+    build one at the point of action, which for the reaper means the branch that actually
+    unlinks — a live pass finds 0 reapable files, so the old shape built ~207,000 Paths to
+    act on none of them.
+
+    Note the asymmetry with `_scan`, which is faster still on the same directories: it only
+    ever counts and measures, so it never needs the entry after the loop body. Use that one
     where a count is all you need.
     """
     try:
@@ -1208,9 +1245,9 @@ def _walk(d: Path, suffix: str, nested: bool = False) -> Iterator[Path]:
             for e in entries:
                 if nested:
                     if e.is_dir():
-                        yield from _walk(Path(e.path), suffix)
+                        yield from _walk(e.path, suffix)
                 elif e.name.endswith(suffix):
-                    yield Path(e.path)
+                    yield e
     except OSError:
         return  # missing or unreadable: nothing to walk, same as an empty glob
 

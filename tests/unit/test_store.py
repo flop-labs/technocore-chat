@@ -456,6 +456,32 @@ def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     assert path.exists()
 
 
+def test_reap_keeps_a_note_refreshed_after_the_stat(tmp_path, monkeypatch):
+    """The same recheck, on the nested half of the walk.
+
+    Rooms and notes are two passes of one loop over one `_walk`, and only the room pass was
+    covered. The trap this guards is that `os.DirEntry.stat()` caches: the reaper stats once
+    to decide a file is idle and again under the lock to catch a writer who got in between,
+    and a recheck reading the cached value silently returns the pre-lock answer. That is not
+    a slower reap, it is a deleted note somebody had just written — so it is pinned on both
+    branches rather than on whichever one happened to have a test.
+    """
+    import store
+
+    store.note_set(tmp_path, "plans", "k", "v")
+    path = store.note_path(tmp_path, "plans", "k")
+    _age(path, store.IDLE_SECONDS + 60)
+
+    def refresh(target):
+        if os.fspath(target) == os.fspath(path):  # only the note under test
+            os.utime(target, None)
+
+    _race_under_lock(monkeypatch, store, refresh)
+    _reap_now(tmp_path)
+    assert path.exists(), "a note refreshed between the walk and the lock must survive"
+    assert store.note_get(tmp_path, "plans", "k") == "v"
+
+
 def test_trusting_every_peer_would_hand_the_caller_its_own_rate_limit_identity():
     """What the flag above buys, demonstrated rather than asserted from memory: the same
     remote peer, the same header, the two trust settings. Pinning the failure mode means a
