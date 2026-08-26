@@ -142,6 +142,17 @@ def test_unconditional_write_still_overwrites(client):
     assert "two" in client.get("/kv/coord/plain").text
 
 
+@pytest.mark.parametrize("flag", ["False", "FALSE", "no", "off"])
+def test_if_absent_false_spellings_still_overwrite(client, flag):
+    client.get("/kv/coord/plain/set/one")
+    assert client.get(f"/kv/coord/plain/set/two?if_absent={flag}").status_code == 200
+    assert (
+        client.post("/kv/coord/plain", json={"value": "three", "if_absent": flag}).status_code
+        == 200
+    )
+    assert "three" in client.get("/kv/coord/plain").text
+
+
 def test_newlines_are_flattened_in_both_write_lanes(client):
     """llms.txt used to promise POST carried multi-line text. It never did."""
     client.post("/r/lobby", json={"from": "bot", "text": "line1\nline2\r\nline3"})

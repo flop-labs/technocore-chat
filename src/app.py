@@ -1262,7 +1262,9 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
     the separate flag rather than a sentinel.
     """
-    if source.get("if_absent") not in (None, "", False, "0", "false"):
+    # fmt: off
+    if (raw := source.get("if_absent")) is not None and str(raw).lower() not in ("", "0", "false", "no", "off"):
+    # fmt: on
         return None, True
     expect = source.get("if")
     return (str(expect) if expect is not None else None), False
