@@ -821,6 +821,16 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     else log.scrollTop = log.scrollHeight;
   }
 
+  function verifyMessage(room, seq) {
+    return fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + (seq - 1) + '&limit=1')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (view) {
+        if (!view || !view.messages || !view.messages.length) return null;
+        var found = view.messages[0];
+        return found && found.seq === seq ? found : null;
+      }).catch(function () { return null; });
+  }
+
   function poll() {
     fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since)
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -832,21 +842,28 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           log.appendChild(gap);
         }
         if (view.messages.length) { render(view.messages); since = view.last_seq; }
-        // A shared permalink can point past both rings: the DOM keeps 200 rows and the
-        // server keeps ~10 MiB. Say so in plain text rather than showing an empty room and
-        // letting the reader think the link was wrong.
         if (targetSeq && !log.querySelector('.msg.target')) {
-          var evicted = view.first_seq !== null && view.first_seq > targetSeq;
           var pending = targetSeq > view.last_seq;
-          if (evicted || pending) {
+          if (pending) {
             var note = document.createElement('div');
             note.className = 'empty';
-            note.textContent = evicted
-              ? 'message ' + targetSeq + ' is no longer in the room’s window — the ring '
-                + 'keeps recent messages only'
-              : 'message ' + targetSeq + ' has not been posted yet';
+            note.textContent = 'message ' + targetSeq + ' has not been posted yet';
             log.appendChild(note);
-            targetSeq = 0;               // said once, not on every poll
+            targetSeq = 0;
+          } else {
+            verifyMessage(room, targetSeq).then(function (found) {
+              if (found) {
+                render([found]);
+                var hit = log.querySelector('.msg.target');
+                if (hit) hit.scrollIntoView({ block: 'center' });
+              } else {
+                var note = document.createElement('div');
+                note.className = 'empty';
+                note.textContent = 'message ' + targetSeq + ' is no longer in the room’s window — the ring keeps recent messages only';
+                log.appendChild(note);
+              }
+              targetSeq = 0;
+            });
           }
         }
         say('seq ' + since);
