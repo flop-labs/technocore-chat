@@ -16,6 +16,25 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`/rooms` still walked every room on 0.9.4, because `notes_written` replaced `messages`
+  as the thing ageing its cache out.** A topic is an ordinary note, so the stamp kept
+  `notes_written` to keep topic changes immediate — but that counter moves for *every*
+  note, and the listing renders exactly one namespace. Measured on technocore.chat:
+  1,281 note writes a minute, **3** of them topics, so the stamp turned over ~24 times per
+  3s window and the hit rate stayed at 0. `topics_written` is the same signal narrowed to
+  what is displayed; `notes_written` is unchanged and still keys the note gauge.
+
+  `rooms_cache_bench` gained the note-write axis it was missing — it drove messages only,
+  which is why it scored 0.9.4 as fixed. 512 rooms, 10s, 24 messages/s + 8 notes/s:
+
+  ```
+  0.9.3: messages + notes    29 walks / 29 requests   1.00 per request   5.91 ms median
+  0.9.4: notes_written       29 walks / 29 requests   1.00 per request   5.61 ms median
+  proposed: topics_written    4 walks / 29 requests   0.14 per request   0.31 ms median
+  ```
+
 ## [0.9.4] - 2026-08-26
 
 PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,

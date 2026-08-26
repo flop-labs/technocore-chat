@@ -205,7 +205,14 @@ EVENTS_NICK = "server"
 # files. Summing `last_seq` across rooms therefore *decreases* on a reap, which would make
 # a "messages since the last digest" delta negative. These four only ever go up.
 COUNTERS_FILE = ".counters"
-COUNTER_KEYS = ("messages", "rooms_created", "reaped_idle", "reaped_stillborn", "notes_written")
+COUNTER_KEYS = (
+    "messages",
+    "rooms_created",
+    "reaped_idle",
+    "reaped_stillborn",
+    "notes_written",
+    "topics_written",
+)
 # Periodic aggregate samples, so growth over a window is answerable at all: the counters
 # above say what the totals are *now*, and nothing but a stored history says what they were
 # a day ago. Kept here rather than in the reader because the service is the only thing that
@@ -743,7 +750,7 @@ def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]
     return view
 
 
-# Topic previews, valid while notes_written holds (a topic set is a note write); reaper
+# Topic previews, valid while topics_written holds (bumped only by a `topic` note); reaper
 # deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py.
 _topics_memo: tuple = ((), 0.0, {})
 
@@ -788,7 +795,7 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     entries.sort(reverse=True)
     shown = []
     windows = []
-    topics_stamp = (counters(root)["notes_written"], str(root))
+    topics_stamp = (counters(root)["topics_written"], str(root))
     mono = time.monotonic()
     for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
         top, nicks = _cached_window(root, name, (mtime_ns, size))
@@ -1726,7 +1733,13 @@ def note_set(
         _replace(path, value.encode("utf-8"))
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
-    _bump(root, notes_written=1)
+    #
+    # topics_written is the same signal narrowed to what /rooms actually displays. A topic
+    # IS an ordinary note, so notes_written still counts it and the note gauge still keys
+    # on that — but the listing shows only this one namespace, and keying it on every note
+    # meant a `did` or `kv` write aged out the room walk. Measured on technocore.chat
+    # 2026-08-26: 1,281 note writes a minute, 3 of them topics.
+    _bump(root, notes_written=1, **({"topics_written": 1} if ns == TOPIC_NS else {}))
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 
 

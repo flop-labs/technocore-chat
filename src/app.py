@@ -592,7 +592,7 @@ MAX_ROOMS_CACHE = 64
 # /rooms is allowed to be stale about, so a counter added to the store later must be
 # considered here on purpose instead of silently joining a correctness-sensitive value.
 # `messages` is the one deliberately absent — see _rooms_stamp.
-ROOMS_STAMP_KEYS = ("rooms_created", "reaped_idle", "reaped_stillborn", "notes_written")
+ROOMS_STAMP_KEYS = ("rooms_created", "reaped_idle", "reaped_stillborn", "topics_written")
 
 
 def _rooms_stamp() -> tuple:
@@ -618,8 +618,9 @@ def _rooms_stamp() -> tuple:
     result up to EDGE_CACHE_SECONDS stale on top of it.
 
     So the split is structural-exact, recency-bounded. A room appearing (rooms_created),
-    a room disappearing (reaped_idle, reaped_stillborn) and a topic change — a topic is an
-    ordinary note, hence notes_written — are still reflected at once, from any worker, and
+    a room disappearing (reaped_idle, reaped_stillborn) and a topic change (topics_written,
+    bumped only by a write to the one namespace this listing shows) are still reflected at
+    once, from any worker, and
     so is `total`. Everything else the walk measures now lags by up to ROOMS_CACHE_SECONDS,
     with the clock as its bound rather than the stamp: `idle_seconds`, `last_seq`, the
     recency order, the engagement aggregates, and the byte figures — an append moves a

@@ -326,11 +326,14 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     import app
     import config
 
-    messages_per_sec, rooms_per_sec = 24.0, 2.85  # technocore.chat, 0.9.3, under live load
+    # technocore.chat under live load. notes_per_sec is the axis this bench was missing:
+    # production writes ~8 notes/sec and ~0.05 of them are topics, so a stamp that keys on
+    # notes_written turns over ~24x per 3s window even with `messages` already out of it.
+    messages_per_sec, rooms_per_sec, notes_per_sec = 24.0, 2.85, 8.0
     pool = min(512, _drain((root / "rooms").glob("r*.jsonl"))) or 1
 
     def run(label: str, keys: tuple) -> None:
-        walks, latencies, sent, served = 0, [], 0, 0
+        walks, latencies, sent, served, noted = 0, [], 0, 0, 0
         last: dict | None = None
         app._rooms_cache.clear()
         app.ROOMS_STAMP_KEYS = keys
@@ -339,6 +342,11 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
             if sent / messages_per_sec <= now:
                 store.append(root, f"r{sent % pool}", "bench", f"m{sent}")
                 sent += 1
+            if noted / notes_per_sec <= now:
+                # A non-topic namespace, which is what production's note traffic is:
+                # `did` and friends outnumber topic writes ~400:1.
+                store.note_set(root, "did", f"k{noted % 4096:04x}", f"v{noted}")
+                noted += 1
             if served / rooms_per_sec <= now:
                 at = time.perf_counter()
                 view = app._rooms_view(50)
@@ -372,8 +380,10 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
         # config.ROOT is bound at import, and this script imports store (hence config) long
         # before it knows where the store is. Without this both halves walk /data.
         with config.override(ROOT=root):
-            run("messages in the stamp", ("messages", *stamped))
-            run("structural stamp only", stamped)
+            structural = ("rooms_created", "reaped_idle", "reaped_stillborn")
+            run("0.9.3: messages + notes", ("messages", *structural, "notes_written"))
+            run("0.9.4: notes_written", (*structural, "notes_written"))
+            run("proposed: topics_written", (*structural, "topics_written"))
     finally:
         app.ROOMS_STAMP_KEYS = stamped
     print(

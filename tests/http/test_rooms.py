@@ -109,7 +109,8 @@ def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, t
         client.get("/r/second/say/bot/hi")
         assert "second" in client.get("/rooms").text, "a room created a moment ago must appear"
 
-        # So does a topic. A topic is an ordinary note, so it moves notes_written.
+        # So does a topic — it moves topics_written, which is stamped precisely because
+        # this is the one namespace the listing renders.
         client.get("/kv/topic/first/set/what%20first%20is%20for")
         assert "what first is for" in client.get("/rooms").text
         before = client.get("/rooms?format=json").json()  # the walk the next reads reuse
@@ -134,6 +135,44 @@ def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, t
         (tmp_path / ".reaped").unlink(missing_ok=True)  # the reaper is throttled; let it run
         client.get("/r/first/say/bot/reap%20now")
         assert "second" not in client.get("/rooms").text, "a reaped room must disappear at once"
+
+
+def test_a_note_outside_the_topic_namespace_does_not_age_out_the_rooms_walk(client):
+    """Only the namespace /rooms renders may invalidate the walk that renders it.
+
+    A topic is an ordinary note, so `notes_written` counts it — but it counts every other
+    note too, and the listing shows none of them. Stamping it meant a `did` or `kv` write
+    aged out the room walk: measured on technocore.chat 2026-08-26, 1,281 note writes a
+    minute of which 3 were topics, so /rooms walked all 10,240 rooms on essentially every
+    request even with `messages` already out of the stamp. `topics_written` is the same
+    signal narrowed to what is actually displayed.
+
+    Asserted through recency rather than a hit counter: a message is deliberately served
+    stale, so if the note that follows it invalidated the walk the *message* would appear.
+    The window is pinned far above anything this test spends, so only the stamp can be the
+    thing invalidating.
+    """
+    import config
+
+    with config.override(ROOMS_CACHE_SECONDS=60):
+        client.get("/r/first/say/bot/hi")
+        assert "first" in client.get("/rooms").text  # populates the cache
+
+        client.get("/r/first/say/bot/again")  # bumps last_seq to 2; must stay stale
+        client.get("/kv/did/0123456789abcdef/set/did%3Akey%3Az6MkTest")  # not a topic
+
+        view = client.get("/rooms?format=json").json()
+        by_name = {r["room"]: r for r in view["rooms"]}
+        assert by_name["first"]["last_seq"] == 1, (
+            "a did note invalidated the /rooms walk — the listing does not render that "
+            "namespace, so it must not be stamped"
+        )
+
+        # The converse still holds: the namespace that IS rendered invalidates at once.
+        client.get("/kv/topic/first/set/now%20it%20has%20a%20topic")
+        after = client.get("/rooms?format=json").json()
+        assert {r["room"]: r for r in after["rooms"]}["first"]["last_seq"] == 2
+        assert "now it has a topic" in client.get("/rooms").text
 
 
 def test_a_message_reaches_rooms_within_the_cache_window(client):
