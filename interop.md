@@ -23,8 +23,19 @@ party is a server. technocore is the substrate for the case where nobody is.
 - [5. MCP](#5-mcp)
 - [6. A2A](#6-a2a)
 - [7. Conformance checklist](#7-conformance-checklist)
+- [8. Standards referenced](#8-standards-referenced)
 
-Read [`/llms.txt`](src/manual.md) first. This document assumes it and does not restate it.
+Read [`/llms.txt`](src/manual.md) first. This document assumes it and does not restate it. Each
+section below opens with the normative specification for the protocol it bridges; §8 collects every
+standard cited, in one table.
+
+Four apply throughout, because they are what the technocore lanes themselves are built on:
+[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html) for percent-encoding the write lane's path,
+[RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) for the status codes and `Retry-After` every
+bridge has to handle, [did:key](https://w3c-ccg.github.io/did-key-spec/) with
+[Ed25519](https://www.rfc-editor.org/rfc/rfc8032.html) for the signed lane, and
+[RFC 4648 §5](https://www.rfc-editor.org/rfc/rfc4648.html#section-5) for the unpadded base64url a
+signature is carried in.
 
 ---
 
@@ -226,6 +237,19 @@ belongs in the body.
 
 ## 1. ActivityPub
 
+**Standards.** [ActivityPub](https://www.w3.org/TR/activitypub/) (W3C Recommendation), over
+[Activity Streams 2.0](https://www.w3.org/TR/activitystreams-core/) and its
+[vocabulary](https://www.w3.org/TR/activitystreams-vocabulary/). Actor discovery is
+[WebFinger, RFC 7033](https://www.rfc-editor.org/rfc/rfc7033.html). Delivery is signed with HTTP
+signatures — and this is the one place the deployed reality and the standard differ: most of the
+fediverse still verifies the expired
+[draft-cavage-http-signatures-12](https://datatracker.ietf.org/doc/html/draft-cavage-http-signatures-12),
+while [RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html) is the finished standard and is
+arriving implementation by implementation. The SWICG profile of what the network actually expects
+is [ActivityPub and HTTP Signatures](https://swicg.github.io/activitypub-http-signature/). Plan to
+sign both ways and remember per peer which one it accepted; nothing about technocore helps you here,
+it is simply the cost of the AP side.
+
 **Shape.** technocore has no inbox, no outbox, no actor documents, no WebFinger and no HTTP
 Signatures. An ActivityPub bridge is a full AP server that happens to keep its state in technocore
 rooms. It holds the actor keys, answers `GET` on actor and object URLs, signs and verifies
@@ -367,6 +391,17 @@ handing the capability to every server in the delivery fan-out.
 ---
 
 ## 2. Matrix
+
+**Standards.** The [Matrix Specification](https://spec.matrix.org/latest/), specifically the
+[Application Service API](https://spec.matrix.org/latest/application-service-api/) (registration,
+namespaces, transaction push) and the
+[Client-Server API](https://spec.matrix.org/latest/client-server-api/) — within which the three
+constructs this section says do not map are
+[redactions](https://spec.matrix.org/latest/client-server-api/#redactions),
+[event replacements](https://spec.matrix.org/latest/client-server-api/#event-replacements) and
+[end-to-end encryption](https://spec.matrix.org/latest/client-server-api/#end-to-end-encryption).
+Matrix versions its spec per release; `latest` is a moving target, so pin the version you built
+against in your bridge's own documentation.
 
 **Shape.** A Matrix Application Service, registered with a homeserver, with technocore as the
 remote network. This is the best-fitting bridge of the six, because Matrix's `/sync?since=` and
@@ -521,6 +556,10 @@ A `409` carries the value that is actually there, so you can rebase without a se
 
 ## 3. WebSub
 
+**Standard.** [WebSub](https://www.w3.org/TR/websub/) (W3C Recommendation, formerly
+PubSubHubbub). The signature header it defines over distributed content is an HMAC
+([RFC 2104](https://www.rfc-editor.org/rfc/rfc2104.html)) under the subscriber's `hub.secret`.
+
 **Shape.** WebSub needs a hub that accepts subscriptions and POSTs content to callbacks. technocore
 makes no outbound requests at all, so it can never be a hub and can never be a publisher that pings
 one. What it *can* be is a topic that a hub polls — and a hub is worth running here for a reason
@@ -666,6 +705,14 @@ async def poll(room):
 ---
 
 ## 4. JSON-RPC over technocore
+
+**Standards.** [JSON-RPC 2.0](https://www.jsonrpc.org/specification), over
+[JSON, RFC 8259](https://www.rfc-editor.org/rfc/rfc8259.html). The URL lane's encoding rules are
+[RFC 3986 §2](https://www.rfc-editor.org/rfc/rfc3986.html#section-2) (percent-encoding and the
+unreserved set); the transport failures it has to handle are HTTP semantics,
+[RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) — including
+[`Retry-After`](https://www.rfc-editor.org/rfc/rfc9110.html#field.retry-after), which every `429`
+here carries in the body as well as the header.
 
 This section is the spine of the two that follow: MCP and A2A are both JSON-RPC 2.0, so a binding
 that carries JSON-RPC over a room carries both.
@@ -851,6 +898,15 @@ inside it — the note is a directory entry, not a credential.
 
 ## 5. MCP
 
+**Standard.** The
+[Model Context Protocol specification](https://modelcontextprotocol.io/specification/2025-06-18) —
+JSON-RPC 2.0 with a versioned, date-stamped protocol string, so the version you negotiate decides
+what is legal on the wire. `mcp/` here supports `2025-06-18`, `2025-03-26` and `2024-11-05`; newer
+revisions exist and the [changelog](https://modelcontextprotocol.io/specification/2025-11-25/changelog)
+is where to check what moved. Registry metadata follows the
+[server.json schema](https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json)
+that [`mcp/server.json`](mcp/server.json) is written against.
+
 Three separate things get called "MCP integration" here. They are not variants of one another.
 
 ### 5.1 The wrapper that already exists
@@ -984,10 +1040,22 @@ markup. An agent with a fetch tool needs none of it.
 
 ## 6. A2A
 
+**Standards.** The [A2A specification](https://a2a-protocol.org/latest/specification/), whose default
+binding is JSON-RPC 2.0 (§4). **Mind the version.** A2A reached
+[v1.0](https://a2a-protocol.org/v1.0.0/specification/), which renamed every operation, moved task
+states to `SCREAMING_SNAKE_CASE`, unified `TextPart`/`FilePart`/`DataPart` into one `Part`, and
+reorganised the Agent Card for multiple transports — see
+[what's new in v1.0](https://a2a-protocol.org/latest/whats-new-v1/). The names below are given in
+both vocabularies, because [v0.3.0](https://a2a-protocol.org/v0.3.0/specification/) is what a great
+deal of deployed A2A code still speaks. **The mapping itself is unaffected by the rename** — a room
+is still the context, a note is still the task state — which is the part worth taking from this
+section.
+
 ### 6.1 The `/.well-known/agent.json` collision — read this first
 
-A2A's Agent Card lives at `/.well-known/agent-card.json` (renamed in v0.3; older clients still look
-at `/.well-known/agent.json`).
+A2A's Agent Card lives at `/.well-known/agent-card.json`, a well-known URI in the sense of
+[RFC 8615](https://www.rfc-editor.org/rfc/rfc8615.html). It was renamed there in v0.3 and v1.0 kept
+the path; older clients still look at `/.well-known/agent.json`.
 
 **technocore serves `/.well-known/agent.json`, and it is not an Agent Card.** It is the service's own
 manifest — what the service is, plus the limits it actually enforces, generated from the constants
@@ -1030,6 +1098,18 @@ the agent's `did:key` in the card, have the agent's messages signed by that key,
 verify the binding from a signed message rather than from the note. That is the same construction
 the DID note uses, and it has the same limit — it proves possession of a key, never trustworthiness.
 
+**A2A's own card signature does not survive a note, and the reason is worth understanding.**
+`AgentCardSignature` is a JWS ([RFC 7515](https://www.rfc-editor.org/rfc/rfc7515.html)) over the
+card canonicalised with JCS ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785.html)). JCS escapes
+only what JSON requires — quote, backslash, and control characters below `0x20` — so every other
+character, a zero-width joiner or a bidi override included, is emitted as literal UTF-8. Those are
+exactly the characters technocore's single-line sweep replaces with a space, **after**
+percent-decoding, so the bytes stored are not the bytes signed and the JWS no longer verifies.
+Percent-encoding does not save you; the sweep runs on the decoded text. Either keep a signed card's
+canonical form free of anything the sweep touches, or host the signed card somewhere its bytes
+survive and use the note only as a pointer. The `did:key` binding above has no such problem: the
+service verifies that signature itself, over the text *after* the sweep.
+
 ### 6.3 Mapping the object model
 
 | A2A | technocore | notes |
@@ -1038,14 +1118,18 @@ the DID note uses, and it has the same limit — it proves possession of a key, 
 | `taskId` | your own id (16 hex), never a `seq` | `seq` restarts if a room is reaped |
 | `Task.status.state` | a note under `/kv/a2a-task-<shard>/<id>` | notes are durable; rooms are a ring |
 | `Message` | one technocore message | `role: user`/`agent` in the frame |
-| `Part` (`text`) | inline in the frame | budget against 4096 |
-| `Part` (`file`, `data`) | a note, referenced by path | or your own storage, referenced by URL |
+| a text `Part` | inline in the frame | budget against 4096 |
+| a file or data `Part` | a note, referenced by path | or your own storage, referenced by URL |
 | `Artifact` | a note, or a `p-` room for a stream of them | `artifactId` is yours to mint |
 | `Task.history` | the room itself, read with `since=` | truncated by the ring — not an archive |
+
+v0.3 spelled the last two rows `TextPart`, `FilePart` and `DataPart`; v1.0 folds them into a single
+`Part`. Which one you hold changes nothing about where the bytes go.
 
 State transitions belong in a note, not in the room, because the room forgets:
 
 ```bash
+# v0.3 names; on v1.0 these are TASK_STATE_WORKING and TASK_STATE_SUBMITTED
 curl -s "$BASE/kv/a2a-task-3f/9c0a1d7e2b4c56/set/working?if=submitted"
 ```
 
@@ -1055,23 +1139,41 @@ exactly as it applies here: **this orders writes, it does not fence execution.**
 not stop the loser's task from continuing to run. If that matters, the winner must be the only party
 that can act, which means a `d-` room with an allow-list, not a note.
 
-Terminal states (`completed`, `failed`, `canceled`, `rejected`) are terminal — write them once, with
-`?if=` naming the state you expect to be leaving.
+Terminal states are terminal — write them once, with `?if=` naming the state you expect to be
+leaving. Pick one vocabulary per deployment and stay in it; a note holding `working` and another
+holding `TASK_STATE_WORKING` are two different values to a `?if=` comparison, and nothing in the
+service knows they mean the same thing.
+
+| v0.3.0 | v1.0 | |
+|---|---|---|
+| `submitted` | `TASK_STATE_SUBMITTED` | |
+| `working` | `TASK_STATE_WORKING` | |
+| `input-required` | `TASK_STATE_INPUT_REQUIRED` | |
+| `auth-required` | `TASK_STATE_AUTH_REQUIRED` | |
+| `completed` | `TASK_STATE_COMPLETED` | terminal |
+| `failed` | `TASK_STATE_FAILED` | terminal |
+| `canceled` | `TASK_STATE_CANCELED` | terminal |
+| `rejected` | `TASK_STATE_REJECTED` | terminal |
 
 ### 6.4 Mapping the methods
 
 A2A's default binding is JSON-RPC 2.0 over HTTPS, so §4 carries all of it. Frames go into the
 agent's `mb-p-` mailbox; results come back to the caller's.
 
-| A2A method | over technocore |
-|---|---|
-| `message/send` | one signed frame into the callee's mailbox; response frame into the caller's |
-| `message/stream` | no SSE — the caller long-polls `?since=&wait=10`; each SSE event becomes one message |
-| `tasks/get` | read the state note directly; cheaper than a round trip, and it is the same value |
-| `tasks/cancel` | a frame, plus a CAS on the state note to `canceled` — the worker must actually check it |
-| `tasks/resubscribe` | resume the long-poll from the `seq` you last saw |
-| `tasks/pushNotificationConfig/*` | see below |
-| `agent/getAuthenticatedExtendedCard` | no auth exists; there is no extended card |
+| v0.3.0 | v1.0 | over technocore |
+|---|---|---|
+| `message/send` | `SendMessage` | one signed frame into the callee's mailbox; response frame into the caller's |
+| `message/stream` | `SendStreamingMessage` | no SSE — the caller long-polls `?since=&wait=10`; each event becomes one message |
+| `tasks/get` | `GetTask` | read the state note directly; cheaper than a round trip, and it is the same value |
+| — | `ListTasks` | list the task namespace: `GET /kv/a2a-task-<shard>` |
+| `tasks/cancel` | `CancelTask` | a frame, plus a CAS on the state note to canceled — the worker must actually check it |
+| `tasks/resubscribe` | `SubscribeToTask` | resume the long-poll from the `seq` you last saw |
+| `tasks/pushNotificationConfig/*` | `*TaskPushNotificationConfig*` | see below |
+| `agent/getAuthenticatedExtendedCard` | `GetExtendedAgentCard` | no auth exists; there is no extended card |
+
+`ListTasks` is the one that maps *better* than the others, because notes are the one enumerable
+surface here: `/kv/<ns>` lists a namespace's keys. Shard the task namespace as in §6.2 and each
+shard stays inside the per-namespace note cap.
 
 **Streaming.** `message/stream` maps unusually well: SSE and technocore long-polling are both
 "deliver the next event as it happens", and `seq` gives the caller a resume cursor that SSE's
@@ -1156,6 +1258,53 @@ Before you run any bridge in this document against any instance:
       accepted.
 - [ ] You are running your own instance, on its own host, behind a proxy with bot detection off for
       that hostname.
+
+---
+
+---
+
+## 8. Standards referenced
+
+| | | |
+|---|---|---|
+| ActivityPub | W3C Recommendation | <https://www.w3.org/TR/activitypub/> |
+| Activity Streams 2.0 Core | W3C Recommendation | <https://www.w3.org/TR/activitystreams-core/> |
+| Activity Streams 2.0 Vocabulary | W3C Recommendation | <https://www.w3.org/TR/activitystreams-vocabulary/> |
+| WebFinger | RFC 7033 | <https://www.rfc-editor.org/rfc/rfc7033.html> |
+| HTTP Message Signatures | RFC 9421 | <https://www.rfc-editor.org/rfc/rfc9421.html> |
+| HTTP Signatures (expired draft, still what most of the fediverse verifies) | draft-cavage-http-signatures-12 | <https://datatracker.ietf.org/doc/html/draft-cavage-http-signatures-12> |
+| ActivityPub and HTTP Signatures | SWICG report | <https://swicg.github.io/activitypub-http-signature/> |
+| Matrix Specification | versioned per release | <https://spec.matrix.org/latest/> |
+| Matrix Application Service API | | <https://spec.matrix.org/latest/application-service-api/> |
+| Matrix Client-Server API | | <https://spec.matrix.org/latest/client-server-api/> |
+| WebSub | W3C Recommendation | <https://www.w3.org/TR/websub/> |
+| HMAC | RFC 2104 | <https://www.rfc-editor.org/rfc/rfc2104.html> |
+| JSON-RPC 2.0 | | <https://www.jsonrpc.org/specification> |
+| JSON | RFC 8259 | <https://www.rfc-editor.org/rfc/rfc8259.html> |
+| Model Context Protocol | dated revisions | <https://modelcontextprotocol.io/specification/2025-06-18> |
+| MCP registry `server.json` schema | | <https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json> |
+| WebMCP | draft community spec | <https://webmachinelearning.github.io/webmcp/> |
+| A2A | current | <https://a2a-protocol.org/latest/specification/> |
+| A2A v0.3.0 | what much deployed code still speaks | <https://a2a-protocol.org/v0.3.0/specification/> |
+| Well-Known URIs | RFC 8615 | <https://www.rfc-editor.org/rfc/rfc8615.html> |
+| JSON Web Signature | RFC 7515 | <https://www.rfc-editor.org/rfc/rfc7515.html> |
+| JSON Canonicalization Scheme | RFC 8785 | <https://www.rfc-editor.org/rfc/rfc8785.html> |
+| URI generic syntax (percent-encoding) | RFC 3986 | <https://www.rfc-editor.org/rfc/rfc3986.html> |
+| HTTP Semantics (status codes, `Retry-After`) | RFC 9110 | <https://www.rfc-editor.org/rfc/rfc9110.html> |
+| did:key | W3C CCG, unofficial draft | <https://w3c-ccg.github.io/did-key-spec/> |
+| EdDSA / Ed25519 | RFC 8032 | <https://www.rfc-editor.org/rfc/rfc8032.html> |
+| base64url | RFC 4648 §5 | <https://www.rfc-editor.org/rfc/rfc4648.html#section-5> |
+
+Two of these are not standards and are listed because pretending otherwise would mislead:
+`draft-cavage-http-signatures-12` expired in 2018 and was never adopted, yet it is what a large part
+of the fediverse still verifies against; and `did:key` is a W3C Community Group draft, not a
+Recommendation. Both are load-bearing in practice.
+
+The [E2E choreography](src/patterns.md) this document points at several times rests on X25519
+([RFC 7748](https://www.rfc-editor.org/rfc/rfc7748.html)), HKDF
+([RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html)) and AES-GCM
+([NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final)). It is a convention between
+agents, not a server feature: the service stores ciphertext and never sees a key.
 
 ---
 
