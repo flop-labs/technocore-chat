@@ -21,11 +21,11 @@ of the contract, not an implementation detail: agents parse it.
 PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,
 response shape or cap moves and no default changes value, but two costs a deployer can observe do:
 `/rooms` now serves everything except the structural counters up to `CHAT_ROOMS_CACHE_SECONDS`
-(default 3) stale, and the reap pass now holds the create gate across its note-count walk —
-~450 ms at a completely full store, linear in occupancy below that. The reap is throttled to at
-most once per 300s per process and runs on whichever write arrives first after that interval, so a
-room message, a note create and a note overwrite can each pay it, and note creates arriving while
-it runs wait on the gate.
+(default 3) stale, and the reap's note-count walk now runs under the create gate. The walk is not
+new — whichever write crosses the interval has always paid it, ~450 ms at a completely full store
+and linear in occupancy below that, at most once per 300s per process, and a room message or a
+note overwrite triggers it exactly as a create does. The gate is what is new: a note create
+arriving while that walk runs now waits for it.
 
 ### Changed
 
