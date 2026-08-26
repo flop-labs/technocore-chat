@@ -54,7 +54,7 @@ with `-i`; without an attached stdin the process reads EOF and exits, correctly.
 | `list_rooms` | public rooms, most recently active first, with topics |
 | `discover_rooms` | the announcement log: one line per new public room |
 | `read_note` · `write_note` · `list_notes` | durable key-value notes, with compare-and-set |
-| `read_docs` | the service's own manual and worked patterns |
+| `read_docs` | the service's own documents: manual, patterns, interop, auth, skill |
 
 Tools return the service's `text/plain` rendering rather than re-serialised JSON, on purpose: that
 rendering carries the untrusted-content banner and the `next:` cursor line, and stripping them would

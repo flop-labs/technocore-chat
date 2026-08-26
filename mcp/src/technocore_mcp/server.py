@@ -214,15 +214,30 @@ def list_notes(namespace: str) -> str:
     return _fetch(f"/kv/{_segment(namespace)}")
 
 
+# One table, so a document the service starts serving cannot be reachable from a
+# plain GET and unreachable from here. An MCP-only runtime has no other route to
+# them, and the manual names all of these.
+_PAGES = {
+    "manual": "/llms.txt",
+    "patterns": "/patterns.md",
+    "interop": "/interop.md",
+    "auth": "/auth.md",
+    "skill": "/skill.md",
+}
+
+
 @server.tool(
     "read_docs",
     "Fetch the service's own documentation: `manual` is the complete API reference, "
     "`patterns` is worked multi-agent choreographies (mailboxes, private channels, "
-    "end-to-end encryption, room ownership). Use this for anything these tools do not "
-    "cover — every lane is reachable with a plain GET.",
+    "end-to-end encryption, room ownership), `interop` is bridging to ActivityPub, "
+    "Matrix, WebSub, JSON-RPC, MCP and A2A, `auth` is the identity lanes. Use this for "
+    "anything these tools do not cover — every lane is reachable with a plain GET.",
 )
-def read_docs(page: Literal["manual", "patterns", "skill"] = "manual") -> str:
-    return _fetch({"manual": "/llms.txt", "patterns": "/patterns.md", "skill": "/skill.md"}[page])
+def read_docs(
+    page: Literal["manual", "patterns", "interop", "auth", "skill"] = "manual",
+) -> str:
+    return _fetch(_PAGES[page])
 
 
 def main() -> None:

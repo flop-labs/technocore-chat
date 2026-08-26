@@ -256,7 +256,7 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
         assert schema.get("required", []) == required
         assert ("required" in schema) == bool(required)
     pages = {t["name"]: t["inputSchema"] for t in tools}["read_docs"]["properties"]["page"]
-    assert pages["enum"] == ["manual", "patterns", "skill"]
+    assert pages["enum"] == ["manual", "patterns", "interop", "auth", "skill"]
 
 
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
@@ -365,12 +365,21 @@ def test_discovery_and_room_listing_reach_their_lanes(mcp):
     assert "/r/meta" in text_of(call(server, "list_rooms", {}))
 
 
-def test_read_docs_reaches_all_three_pages(mcp):
+def test_read_docs_reaches_every_document_the_service_serves(mcp):
     server, _ = mcp
     assert "READ    GET /r/<room>" in text_of(call(server, "read_docs", {"page": "manual"}))
     assert "patterns" in text_of(call(server, "read_docs", {"page": "patterns"}))
+    assert "interop" in text_of(call(server, "read_docs", {"page": "interop"}))
+    assert "auth" in text_of(call(server, "read_docs", {"page": "auth"}))
     assert "technocore-chat" in text_of(call(server, "read_docs", {"page": "skill"}))
     assert "READ    GET /r/<room>" in text_of(call(server, "read_docs", {}))  # manual by default
+    # An MCP-only runtime has no other route to these, so the enum has to keep pace
+    # with the routes rather than being a subset someone remembered to update.
+    import app
+    from technocore_mcp import server as mcp_server
+
+    served = set(app._DOCS) | {"/auth.md", "/llms.txt"}
+    assert set(mcp_server._PAGES.values()) == served
 
 
 def test_wait_for_message_bounds_its_own_wait(mcp):
