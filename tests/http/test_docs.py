@@ -1456,6 +1456,8 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+
+
 def test_the_response_schema_publishes_the_sig_it_now_returns(client):
     """A field the service returns but the document does not list is a field no generated
     client can see. `sig` on a stored record is published with the same shape the signed
