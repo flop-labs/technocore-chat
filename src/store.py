@@ -28,6 +28,7 @@ import orjson
 
 import config
 import didkey
+import durability
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -588,42 +589,6 @@ def _locked(target: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
-# Existence is not durability: another worker may recreate a visible file, reuse the inode
-# this process saw before, then die before syncing its directory entry. There is no safe
-# process-local cache for that state, so every configured durable append syncs the directory.
-# The service never removes `rooms/` itself, so its entry in the data root only needs the
-# per-process repair below for creation interrupted before the root sync.
-_durable_room_directories: set[Path] = set()
-
-
-def _fsync_parent(path: Path) -> None:
-    """Persist creation or replacement of `path`, not only the bytes in its inode.
-
-    Linux fsync(2) requires an explicit sync of the containing directory for its entry to
-    survive a crash. `O_DIRECTORY` is absent on Windows; this store is currently POSIX-only
-    (`fcntl`), so a future native port will need its platform's directory-handle primitive.
-    """
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_ancestors(path: Path) -> None:
-    """Persist a visible directory chain up to its mount or provisioning boundary."""
-    path = path.resolve()
-    while path != path.parent:
-        parent = path.parent
-        if path.stat().st_dev != parent.stat().st_dev:
-            break
-        try:
-            _fsync_parent(path)
-        except PermissionError:
-            break  # a searchable pre-existing ancestor is the operator's boundary
-        path = parent
-
-
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     """Put `data` at `path` atomically, staging through a name no other writer can hold.
 
@@ -666,7 +631,7 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
         Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
         raise
     if fsync:
-        _fsync_parent(path)
+        durability.fsync_parent(path)
 
 
 def _now() -> str:
@@ -1833,7 +1798,6 @@ def _write_record(
     # behind every other create, and a rotating room name flooding rejections should not
     # queue up behind them. The check inside the gate stays authoritative.
     _check_room_capacity(root, path)
-    room_directory_missing = not path.parent.exists()
     with (
         _create_gate(
             root / ".rooms-create",
@@ -1881,11 +1845,9 @@ def _write_record(
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
         if config.FSYNC:
-            _fsync_parent(path)
-            if path.parent not in _durable_room_directories:
-                _fsync_parent(path.parent)
-                _fsync_ancestors(path.parent.parent)
-                _durable_room_directories.add(path.parent)
+            # The record is committed before these entry syncs. A failure stays loud even
+            # though a client retry can duplicate it; claiming durability would be worse.
+            durability.sync_room_entry(root, path)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)

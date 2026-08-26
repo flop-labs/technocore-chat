@@ -160,6 +160,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import didkey  # noqa: E402
+import durability  # noqa: E402
 import store  # noqa: E402
 
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -171,16 +172,16 @@ def _append_batch(args: tuple[Path, int, int]) -> None:
         store._write_record(root, "p-fsync-bench", f"w{worker}", f"message-{i}")
 
 
-def _skip_parent_fsync(_path: Path) -> None:
-    pass
+def _skip_parent_fsync(_path: Path, **_kwargs) -> bool:
+    return True
 
 
-def _append_rate(count: int, directory_sync: bool) -> float:
+def _append_rate(count: int, directory_syncs: bool) -> float:
     root = Path(tempfile.mkdtemp(prefix="technocore-fsync-bench-"))
     sync_context = (
         contextlib.nullcontext()
-        if directory_sync
-        else mock.patch.object(store, "_fsync_parent", _skip_parent_fsync)
+        if directory_syncs
+        else mock.patch.object(durability, "fsync_parent", _skip_parent_fsync)
     )
     try:
         with sync_context:
@@ -199,21 +200,24 @@ def _append_rate(count: int, directory_sync: bool) -> float:
 def fsync_append_bench(count: int, rounds: int = 5) -> None:
     """Paired current-vs-file-only write cost; alternate order so host drift cancels.
 
-    Measured 2026-08-26 with
+    Measured 2026-08-28 on Linux 6.6.87.2-microsoft-standard-WSL2, an i9-14900KF,
+    and /dev/shm tmpfs, using the sharded room layout with
       TMPDIR=/dev/shm python tests/capacity_bench.py --fsync-only --fsync-append-count 2500
-    across five alternating rounds: median 16,091 appends/s file-only and 15,099 with the
-    directory sync (-6.2%). tmpfs isolates syscall/locking overhead; it is deliberately not
-    presented as durable-volume throughput, which must be measured on the deployment volume.
+    across five alternating rounds: median 6,607 appends/s file-only and 6,292 with the
+    two directory syncs (-4.8%). tmpfs isolates syscall/locking overhead; it is deliberately
+    not durable-volume throughput, which must be measured on the deployment volume.
     """
+    # Absolute rates are not comparable to the pre-sharding run: the code path and session
+    # both changed. Alternating the two arms here makes only their paired delta the claim.
     samples = {False: [], True: []}
     for round_number in range(rounds):
         order = (False, True) if round_number % 2 == 0 else (True, False)
-        for directory_sync in order:
-            samples[directory_sync].append(_append_rate(count, directory_sync))
+        for directory_syncs in order:
+            samples[directory_syncs].append(_append_rate(count, directory_syncs))
     before, after = (statistics.median(samples[value]) for value in (False, True))
-    print(f"file-only fsync median          {before:,.0f} appends/s")
-    print(f"file + directory fsync median  {after:,.0f} appends/s")
-    print(f"throughput delta                {(after / before - 1) * 100:+.1f}%")
+    print(f"file-only fsync median           {before:,.0f} appends/s")
+    print(f"file + 2 directory fsyncs median {after:,.0f} appends/s")
+    print(f"throughput delta                 {(after / before - 1) * 100:+.1f}%")
 
 
 def bench(label: str, fn, rounds: int = 5, setup=None) -> None:

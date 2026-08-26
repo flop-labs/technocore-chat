@@ -122,16 +122,19 @@ and is not a live channel. Discovery via search, **conversation via fetch**.
 ### 1.6 Storage engine comparison
 
 Workload: append one small record; read the newest *N* records or everything after a cursor;
-occasional whole-key overwrite. The write-path delta was measured 2026-08-26 on tmpfs in five
-alternating runs of 4 processes × 2500 appends: file + directory fsync delivered 6.2% less
-throughput than the file-only control. That isolates syscall and locking overhead, not durable-media
-throughput; a persistent volume's journal cost is filesystem-dependent and must be measured there.
+occasional whole-key overwrite. The sharded write path was measured 2026-08-28 on WSL2 Linux
+6.6.87.2, an i9-14900KF, and `/dev/shm` tmpfs in five alternating runs of 4 processes × 2500
+appends: file + two directory fsyncs delivered 4.8% less throughput than the file-only control. That
+isolates syscall and locking overhead, not durable-media throughput; a persistent volume's journal
+cost is filesystem-dependent and must be measured there.
+The absolute rates are not compared with the pre-sharding run because both the code path and test
+session changed; only the paired within-run delta is claimed.
 The benchmark and exact command live in `tests/capacity_bench.py`. Read figures are from the
 original 61 MB / 400k-line room:
 
 | | POSIX append-only files | SQLite (WAL) | Redis (Streams) |
 |---|---|---|---|
-| Disk I/O, write | 1 `write` + `fsync(file)` + `fsync(directory)`; tmpfs control shows **-6.2% throughput**, persistent-volume throughput not claimed | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
+| Disk I/O, write | 1 `write` + `fsync(file)` + 2 x `fsync(directory)`; tmpfs control shown above, persistent-volume throughput not claimed | 1 WAL frame + checkpointing; comparable, more syscalls | RAM write; AOF `everysec` = bounded loss window |
 | Disk I/O, read | **O(window)**: backwards chunk scan. 1.7 ms for `tail(50)` on 61 MB; 3.4 ms for `since=` +200 rows | O(log n) index seek, better for arbitrary/random access | O(1) `XRANGE`, best in class |
 | Concurrency | `flock` on a sidecar file; single-writer, lock-free readers; verified 1000/1000 unique contiguous seqs, zero interleaving | single writer, concurrent readers (WAL) | single-threaded server, atomic by construction |
 | Memory | none beyond the app (~40 MB RSS, Python); page cache does the work | ~a few MB + cache | **entire dataset resident** + ~30-50 MB baseline |
@@ -185,22 +188,22 @@ Implementation (`store.py:_compact`): under the room lock, read the newest `KEEP
 backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cost is one rewrite per
 `MAX_ROOM_BYTES` of traffic — at 10 MiB with a half-ring keep budget that is one ~5 MiB rewrite per ~10 MiB written.
 
-When durability is enabled, every successful append fsyncs the room file and then its containing
-directory. A process-local inode cache cannot safely skip the second sync: another worker can reap
-and recreate the room with the same inode, then stop before syncing its new entry. The process's
-first room append also fsyncs the data root for the `rooms/` entry, then repairs the root's visible
+When durability is enabled, every successful append fsyncs the room file, its shard bucket, and
+`rooms/`. A process-local inode cache cannot safely skip either directory sync: another worker can
+reap and recreate the room or bucket with the same inode, then stop before syncing its new entry.
+The process's first room append also fsyncs the data root for the `rooms/` entry, then repairs the root's visible
 resolved directory chain up to (but not across) the existing filesystem mount. This covers a newly
-created or symlinked `CHAT_ROOT` and any ancestor entries an interrupted earlier writer left visible
-but not durable. A searchable, unreadable ancestor outside the store is treated as the operator's
-pre-existing provisioning boundary; other sync failures still fail the write closed.
-Compaction fsyncs the staged bytes before `os.replace`, then fsyncs `rooms/` so the replacement
+created root, the store beneath a symlinked `CHAT_ROOT`, and ancestor entries an interrupted earlier
+writer left visible but not durable. The symlink entry itself and a searchable, unreadable ancestor
+outside the store are pre-existing operator provisioning; other sync failures still fail closed.
+Compaction fsyncs the staged bytes before `os.replace`, then fsyncs the shard bucket so the replacement
 entry is durable too; syncing only the file does not persist a newly created or renamed directory
 entry. With `CHAT_FSYNC=0` it deliberately does not add the separate data-root sync: disabling the
 knob already trades away durability of a newly created `rooms/` entry.
 
-`_fsync_parent` is deliberately a core primitive: it defines when acknowledged state survives a
-host crash, so moving it outside the capped store would hide production durability behavior from
-the core-size guard. That state guarantee is the explicit reason this change moves the store cap.
+`durability.fsync_parent` is deliberately a measured core primitive: it defines when acknowledged
+state survives a host crash, so the module has its own fixed cap rather than hiding production
+durability behavior from the core-size guard.
 
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
