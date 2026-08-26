@@ -53,6 +53,13 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # share one walk. Short, because the view's whole job is to be current: a few seconds is
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
+#
+# What this window is a bound on is *recency*, not the listing: app._rooms_stamp keeps
+# creates, reaps and topic changes exact at any setting, and deliberately does not stamp
+# messages, so this is how stale the rest of the walk may be: idle_seconds, last_seq, the
+# ordering, the engagement aggregates and the per-room and total byte figures. Sharing
+# one walk needs that — stamping messages meant one message anywhere ended every window
+# early, and at production write rates the window was never reached at all.
 ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
 # The note-capacity gauge and topic previews, reused across /rooms requests.
 # note_stats is two file reads now (not a per-note walk); stamped on the notes_written
