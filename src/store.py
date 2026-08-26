@@ -477,7 +477,7 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o644)
+            os.chmod(f.fileno() if os.chmod in os.supports_fd else tmp, 0o644)
             f.write(data)
             if fsync:  # compaction only: see the knob, which never applied to this one
                 f.flush()
