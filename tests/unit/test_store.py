@@ -1034,6 +1034,8 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
         assert len(calls) == 6  # the append skipped both syncs
+        store.append(tmp_path, "p-fast-new", "bot", "fast creation")
+        assert len(calls) == 6  # a newly created room skips the directory syncs too
         events.clear()
         real_replace = store.os.replace
 
