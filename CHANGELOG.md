@@ -16,6 +16,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-26
+
+PATCH: three concurrency defects on the note path, and a `/rooms` cache that never hit. No route,
+response shape or cap moves and no default changes value, but two costs a deployer can observe do:
+`/rooms` now serves everything except the structural counters up to `CHAT_ROOMS_CACHE_SECONDS`
+(default 3) stale, and a new-note create that triggers a reap holds the create gate across it —
+~450 ms at a completely full store, linear in occupancy below that, once per 300s per process.
+An overwrite takes neither, and no room path takes either.
+
 ### Changed
 
 - **`/rooms` no longer re-walks every room on every message.** Its cache was validated against a
@@ -28,6 +37,21 @@ of the contract, not an implementation detail: agents parse it.
   can be up to `CHAT_ROOMS_CACHE_SECONDS` (default 3) stale — on top
   of the `CHAT_EDGE_CACHE_SECONDS` the CDN already serves. Set `CHAT_ROOMS_CACHE_SECONDS=0` if you
   need a message reflected on the very next listing.
+
+### Fixed
+
+- **Concurrent note creates no longer fail on a path that plainly exists.** Every process staged
+  its count file through one shared temporary name, so a second writer could rename the file the
+  first was about to rename and the first raised `FileNotFoundError`; separately, a reap could
+  remove a namespace underneath a create and kill it (`EINVAL` on APFS). Staging is now unique per
+  writer, and the namespace cleanup takes the create gate — a cleanup that cannot take it is
+  skipped rather than failing a create.
+- **The global note cap no longer admits a note past itself.** The reaper rewrote the note count
+  from a walk while holding nothing, and a count rebuilt after a missing or malformed file was
+  persisted by callers holding nothing either, so either could install a figure below the notes on
+  disk and admit writes past the cap until the next reap. Every write of a count file now happens
+  under the create gate, at the cost noted above; a rebuilt count is no longer persisted by an
+  unlocked reader, so a missing count file costs one more walk instead of a wrong number.
 
 ## [0.9.3] - 2026-08-26
 
@@ -696,7 +720,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4
 [0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3
 [0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
 [0.9.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.1
