@@ -228,17 +228,24 @@ def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkey
     A hit needs the stamp to match *and* the entry to be inside the window, so the cost of
     that is one window, not a listing that is wrong until the next structural write.
     """
+    import app as app_module
     import config
     import store
 
     monkeypatch.setattr(store, "_bump", lambda *a, **k: None)  # every counter now lies
-    window = 0.25
+    window = 60  # far above anything this test spends, so only the ageing below expires it
     with config.override(ROOMS_CACHE_SECONDS=window):
         client.get("/r/first/say/bot/hi")
-        client.get("/rooms")  # populates the cache
+        client.get("/rooms")  # populates the cache, under a stamp that will not move again
         client.get("/r/second/say/bot/hi")
         assert "second" not in client.get("/rooms").text, "the cost: the stamp did not move"
-        time.sleep(window)
+
+        # Age the entry past the window rather than sleeping out a short one. The claim is
+        # that the clock releases it, and the clock is the one thing a loaded CI runner
+        # will not hold still for: a 0.25s window is a test that passes locally and fails
+        # on a runner that spends it before the assertion.
+        stamp, _, view = app_module._rooms_cache[50]  # 50 is the default `limit`
+        app_module._rooms_cache[50] = (stamp, time.monotonic() - window, view)
         assert "second" in client.get("/rooms").text, "the clock must expire it regardless"
 
 
