@@ -181,8 +181,10 @@ Implementation (`store.py:_compact`): under the room lock, read the newest `KEEP
 backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cost is one rewrite per
 `MAX_ROOM_BYTES` of traffic — at 10 MiB with a half-ring keep budget that is one ~5 MiB rewrite per ~10 MiB written.
 
-When durability is enabled, a first append fsyncs the new room file and then its containing directory;
-the first one also fsyncs the data root after creating the `rooms/` entry.
+When durability is enabled, the first successful append to each room inode per process fsyncs
+the room file and then its containing directory. This repairs an entry left visible but not
+durable by an interrupted first writer; inode replacement or room recreation triggers it again.
+The process's first room append also fsyncs the data root for the `rooms/` entry.
 Compaction fsyncs the staged bytes before `os.replace`, then fsyncs the directory so the replacement
 entry is durable too; syncing only the file does not persist a newly created or renamed directory entry.
 

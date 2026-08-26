@@ -588,6 +588,14 @@ def _locked(target: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+# Existence is not durability: an interrupted first writer may leave a visible file whose
+# directory entry was never synced. Remember only inodes this process has actually followed
+# with the directory fsync; a restart deliberately forgets and repairs on the next append.
+# Reaping drops the path, so churn cannot grow this beyond the live room population.
+_durable_room_entries: dict[Path, tuple[int, int]] = {}
+_durable_room_directories: set[Path] = set()
+
+
 def _fsync_parent(path: Path) -> None:
     """Persist creation or replacement of `path`, not only the bytes in its inode.
 
@@ -1260,6 +1268,7 @@ def _reap(root: Path) -> None:
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
+                            _durable_room_entries.pop(p, None)
                             reaped[f"reaped_{reason}"] += 1
             except OSError:
                 continue  # racing writer or vanished file: next pass picks it up
@@ -1858,12 +1867,17 @@ def _write_record(
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
-        if created and config.FSYNC:
-            _fsync_parent(path)
-            if room_directory_missing:
+        written = path.stat()
+        if config.FSYNC:
+            identity = (written.st_dev, written.st_ino)
+            if _durable_room_entries.get(path) != identity:
+                _fsync_parent(path)
+                _durable_room_entries[path] = identity
+            if path.parent not in _durable_room_directories:
                 _fsync_parent(path.parent)
+                _durable_room_directories.add(path.parent)
         limit = _ring_limit(root)
-        if path.stat().st_size > limit:
+        if written.st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     return rec, created
 

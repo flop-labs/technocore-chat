@@ -1047,6 +1047,24 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
         assert events == ["file", "replace", "rooms"]
 
 
+def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer(
+    tmp_path, monkeypatch
+):
+    """Existence is not durability: a killed writer can leave both paths visible without
+    ever syncing either directory. The next acknowledged append must repair that state."""
+    import store
+
+    path = store.room_path(tmp_path, "p-interrupted")
+    path.parent.mkdir(parents=True)
+    path.touch()
+    synced = []
+    monkeypatch.setattr(store, "_fsync_parent", synced.append)
+
+    store.append(tmp_path, "p-interrupted", "bot", "repair it")
+
+    assert synced == [path, path.parent]
+
+
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
     """A write changes one room's (mtime_ns, size), so the overview re-reads that room's
     tail and reuses every other window from the memo — O(changed), not O(shown)."""
