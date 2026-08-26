@@ -3,6 +3,7 @@
 import _client
 import pytest
 from _client import (
+    _claim,
     _keypair,
     _post_signed,
     _say_signed,
@@ -266,7 +267,23 @@ def test_head_never_executes_a_get_write_lane(client):
     signed = f"/r/head-signed/say-signed/{did}/{sign('head-signed|1|once')}/1/once"
     refused = client.head(signed)
     assert refused.status_code == 405 and refused.headers["allow"] == "GET"
-    assert client.get(signed).status_code == 200  # HEAD did not spend nonce 1
+    # Nothing was appended, so nothing raised the floor a message replay is judged against:
+    # that nonce is read back off the room's own records, not from a separate counter.
+    assert client.get("/r/head-signed?format=json").json()["count"] == 0
+    assert client.get(signed).status_code == 200  # so nonce 1 is still unspent
+
+    # The ownership lane burns a *server-written* counter shared by every signer, so a
+    # half-spent one would be visible to third parties and would strand the real writer's
+    # captured URL. The gate must refuse before the counter moves, not after.
+    owner, owner_sign = _keypair(seed=3)
+    room = "d-head-owned"
+    assert _claim(client, room, owner, owner_sign).status_code == 200  # burns nonce 1
+    allow = f"/kv/room-allow/{room}/set-signed/{owner}/{owner_sign(f'room-allow|{room}|2|{owner}')}/2/{owner}"
+    probe = client.head(allow)
+    assert probe.status_code == 405 and probe.headers["allow"] == "GET"
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")  # not 2
+    assert client.get(allow).status_code == 200  # the captured URL still spends
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
 
     assert client.head("/r/head-signed").status_code == 200  # read-shaped GET keeps HEAD
 

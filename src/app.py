@@ -34,7 +34,6 @@ import limit
 import manifest
 import store
 from store import StoreConflictError, StoreError
-from write_route import WriteRoute
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
 # module in src/ that reads it — and read here as config.<name> at call time, so
@@ -56,7 +55,8 @@ CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
 # tighter than Cloudflare's own 128 KiB ceiling and 32x tighter than what the parser
 # tolerated before. Erring tight here would break the human page for actual people, so
 # the headroom is deliberate — this is a memory bound, not an access control.
-MAX_HEADERS, MAX_HEADER_BYTES = 48, 8192
+MAX_HEADERS = 48
+MAX_HEADER_BYTES = 8192
 
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
 # client may pick. A conditional note may carry two 8192-character values (`value` and
@@ -1736,6 +1736,20 @@ MANUAL = (
     .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
 )
 
+
+def _get_write(path: str, endpoint) -> Route:
+    """A GET-shaped mutation, without the HEAD that Starlette gives every GET route.
+
+    Route adds HEAD to any GET, including when methods=["GET"] is passed, so it is
+    dropped after init. `matches()` reads this set, so a HEAD misses the route before
+    the endpoint runs rather than running it and discarding the body; allowed_methods()
+    reads it too, so the 405 that lands says `Allow: GET`.
+    """
+    route = Route(path, endpoint)
+    route.methods = {"GET"}
+    return route
+
+
 app = Starlette(
     routes=[
         Route("/", llms_txt),
@@ -1756,13 +1770,13 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
-        WriteRoute("/r/{room}/say/{nick}/{text:path}", room_say),
-        WriteRoute("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
+        _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
+        _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
-        WriteRoute("/kv/{ns}/{key}/set/{value:path}", note_write),
-        WriteRoute("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        _get_write("/kv/{ns}/{key}/set/{value:path}", note_write),
+        _get_write("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
     ],
     middleware=[
         Middleware(HeaderLimits),

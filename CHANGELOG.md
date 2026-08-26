@@ -28,13 +28,6 @@ of the contract, not an implementation detail: agents parse it.
 - `/` and `/llms.txt` now share one handler. They always returned the same bytes; this is what
   paid for the new route, so the core shrank by three code-lines rather than growing.
 
-### Fixed
-
-- **HEAD no longer executes the four GET-shaped write routes.** Starlette adds HEAD to
-  every GET route automatically; a metadata probe could therefore append a message, write
-  a note or spend a signed nonce while discarding the response body. Read-shaped GETs keep
-  HEAD, while write-shaped ones now answer 405 with `Allow: GET`.
-
 ## [0.9.5] - 2026-08-26
 
 The `/rooms` cache 0.9.4 was supposed to fix, actually hitting. 0.9.4 took `messages` out of

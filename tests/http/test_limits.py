@@ -806,8 +806,15 @@ def test_a_405_carries_allow_and_names_every_verb_the_path_takes(client):
         assert r.status_code == 405 and r.headers["allow"] == "GET, HEAD", path
 
     # GET-shaped mutations must not inherit Starlette's automatic HEAD: a link probe
-    # cannot perform a write while throwing the only useful response body away.
-    for path in ("/r/lobby/say/bot/hi", "/kv/plans/next/set/x"):
+    # cannot perform a write while throwing the only useful response body away. All four
+    # write lanes say the same thing — the signed two match on shape, so the credentials
+    # here are placeholders: the verb is refused before any endpoint reads them.
+    for path in (
+        "/r/lobby/say/bot/hi",
+        "/r/lobby/say-signed/did/sig/1/hi",
+        "/kv/plans/next/set/x",
+        "/kv/plans/next/set-signed/did/sig/1/x",
+    ):
         r = client.request("PATCH", path)
         assert r.status_code == 405 and r.headers["allow"] == "GET", path
 
