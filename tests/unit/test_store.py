@@ -186,6 +186,50 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_room_occupancy_is_counted_over_the_population_the_cap_refuses_on(tmp_path, monkeypatch):
+    """The overview's cap gauge has to count what `_check_room_capacity` counts.
+
+    `room_stats` drops unlisted rooms before it totals, because the listing beside that
+    total names what it counts and a `p-` name is a bearer credential. The cap does not:
+    it scans every `*.jsonl` in the directory. Printed against each other the pair claims
+    headroom on a store that is already refusing — technocore.chat served
+    `8627 of 10240` while a new room got `room limit reached`.
+
+    `service_stats` already states the rule this asserts ("the room totals here count
+    every room including unlisted ones: they are what bounds the disk and the room cap");
+    `room_stats` is the surface that had not caught up.
+
+    The assertion is an equality against the refusal itself rather than a fixed number:
+    whatever count makes the next room fail is the count the gauge has to print.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 4)
+    store.append(tmp_path, "open-one", "bot", "hi")  # the first write also announces /r/events
+    store.append(tmp_path, "p-alpha", "bot", "hi")
+    store.append(tmp_path, "p-beta", "bot", "hi")
+
+    view = store.room_stats(tmp_path)
+    assert view["total"] == 2, "the listing still names only what it may name"
+    assert view["occupied"] == 4, "the gauge counts the unlisted rooms the cap counts"
+
+    # The pair that was wrong: at the cap the next room is refused, and `total` alone
+    # would have reported two free slots to the caller that just got told there are none.
+    with pytest.raises(store.StoreError, match=r"room limit reached \(4 is the cap"):
+        store.append(tmp_path, "one-too-many", "bot", "hi")
+    assert view["occupied"] == view["capacity"] > view["total"]
+
+    # No reap has run here, so the byte half falls back to the listed sum rather than
+    # reporting an empty disk against a budget the store is spending.
+    assert view["bytes_occupied"] == view["bytes"] > 0
+
+    # Once a pass has written the real total, that is the figure: it spans every room,
+    # where `bytes` is the sum over the listed ones.
+    (tmp_path / store.USAGE_FILE).write_text(str(9 << 20))
+    refreshed = store.room_stats(tmp_path)
+    assert refreshed["bytes_occupied"] == 9 << 20 > refreshed["bytes"]
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the

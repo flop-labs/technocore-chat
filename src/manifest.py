@@ -800,8 +800,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "properties": {
                                     "rooms": {"type": "array", "items": {"type": "object"}},
                                     "total": {"type": "integer"},
+                                    "occupied": {"type": "integer"},
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
+                                    "bytes_occupied": {"type": "integer"},
                                     "notes": {"type": "object"},
                                     "engagement": {"type": "object"},
                                     "untrusted": {

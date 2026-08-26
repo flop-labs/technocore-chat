@@ -1118,8 +1118,16 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     the last one. See WINDOW_BYTES for the per-room worst-case bound.
     """
     now = time.time()
-    entries = []
+    entries, occupied = [], 0
     for e in _walk(root / "rooms", ".jsonl"):
+        # Counted before the listability filter, because this is the number the cap is
+        # checked against: `_check_room_capacity` scans the same tree for the same suffix
+        # and refuses at MAX_ROOMS without consulting `_listable`. Filtering here and not
+        # there is what made the head compare a listed count to an all-rooms cap. The walk
+        # is already here, so this adds an increment and no I/O — measured at +0.5 ms on a
+        # 23.5 ms `room_stats(limit=200)` over a full 5,120-room store, inside the harness's
+        # own run-to-run spread (tests/capacity_bench.py, n=7 interleaved, Welch t = 1.2).
+        occupied += 1
         name = e.name[: -len(".jsonl")]
         if not _listable(name):
             continue
@@ -1150,8 +1158,17 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     return {
         "rooms": shown,
         "total": len(entries),
+        # What the cap actually counts, so a reader can tell how close the next new room
+        # is to being refused. `total` stays the listed count — it is what the listing
+        # below shows, and changing its meaning would break every reader of it.
+        "occupied": occupied,
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
+        # The byte budget's own population, same reason. The reaper already writes this
+        # figure across every room (see USAGE_FILE); it drifts by at most one reap
+        # interval, which is the trade `note_stats` explains making for a display gauge.
+        # A zero means no pass has run yet, and then the listed sum is the best we have.
+        "bytes_occupied": room_bytes_used(root) or sum(e[1] for e in entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
