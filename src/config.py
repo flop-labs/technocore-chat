@@ -20,6 +20,23 @@ from pathlib import Path
 
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 
+
+def _finite_env(name: str, default: str) -> float:
+    """A finite float from the environment, or refuse to start.
+
+    `float()` accepts `inf` and `nan` where `int()` raises. Infinity makes a cache's
+    clock backstop never expire, while NaN silently disables every ordered comparison;
+    either turns an operator typo into behaviour that persists until restart. MAX_WAIT
+    also publishes its value in JSON, where non-finite constants are invalid RFC 8259.
+    Refusing import is the same loud failure every integer knob already gets.
+    """
+    raw = os.environ.get(name, default)
+    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
+
+
 # Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
 # configured by hand would turn every rate-limited route into a 500 rather than into the
 # refusal the operator presumably meant. There is no "disable" setting for the same reason
@@ -60,12 +77,12 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # ordering, the engagement aggregates and the per-room and total byte figures. Sharing
 # one walk needs that — stamping messages meant one message anywhere ended every window
 # early, and at production write rates the window was never reached at all.
-ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+ROOMS_CACHE_SECONDS = _finite_env("CHAT_ROOMS_CACHE_SECONDS", "3")
 # The note-capacity gauge and topic previews, reused across /rooms requests.
 # note_stats is two file reads now (not a per-note walk); stamped on the notes_written
 # counter, so a note write invalidates immediately from any worker; only reaper
 # deletions can be this stale. 0 disables.
-NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
+NOTE_STATS_CACHE_SECONDS = _finite_env("CHAT_NOTE_STATS_CACHE_SECONDS", "30")
 # s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are
 # never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
@@ -157,26 +174,6 @@ MAX_WAITERS_PER_IP = max(0, int(os.environ.get("CHAT_MAX_WAITERS_PER_IP", "4")))
 # both the process count and this figure from one place; passing --workers 3 instead leaves
 # this at 1 and /stats will say so honestly rather than guess.
 WORKERS = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
-
-
-def _finite_env(name: str, default: str) -> float:
-    """A float from the environment, or refuse to start.
-
-    Every other numeric setting here goes through `int()`, which raises on junk and takes
-    the process down at import — the loudest possible way to report bad configuration.
-    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
-    value is *published*. A non-finite ceiling reaches /openapi.json and
-    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
-    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
-    document: a browser, a Go or Rust client, a validating registry. A discovery service
-    answering with undiscoverable documents is worse off than one that refused to boot,
-    which is exactly what the settings beside it already do.
-    """
-    raw = os.environ.get(name, default)
-    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {raw!r}")
-    return value
 
 
 # Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will

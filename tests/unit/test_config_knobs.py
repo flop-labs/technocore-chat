@@ -36,6 +36,8 @@ PROBE = (
     "'config.MAX_WAITERS_PER_IP': config.MAX_WAITERS_PER_IP, "
     "'limit.MAX_WAITERS_PER_IP': limit.MAX_WAITERS_PER_IP, "
     "'app.MAX_WAITERS_PER_IP': app.MAX_WAITERS_PER_IP, "
+    "'config.ROOMS_CACHE_SECONDS': config.ROOMS_CACHE_SECONDS, "
+    "'config.NOTE_STATS_CACHE_SECONDS': config.NOTE_STATS_CACHE_SECONDS, "
     "'config.WORKERS': config.WORKERS}))"
 )
 
@@ -59,6 +61,8 @@ def test_the_new_knobs_default_to_the_values_they_replaced() -> None:
     assert values["config.MAX_NOTES_PER_NS"] == 5120  # = MAX_ROOMS, the number it replaced
     assert values["config.MAX_WAITERS_TOTAL"] == 64
     assert values["config.MAX_WAITERS_PER_IP"] == 4
+    assert values["config.ROOMS_CACHE_SECONDS"] == 3.0
+    assert values["config.NOTE_STATS_CACHE_SECONDS"] == 30.0
     assert values["config.WORKERS"] == 1  # no WEB_CONCURRENCY set
 
 
@@ -71,6 +75,8 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
         CHAT_MAX_NOTES_PER_NS="400",
         CHAT_MAX_WAITERS_TOTAL="7",
         CHAT_MAX_WAITERS_PER_IP="2",
+        CHAT_ROOMS_CACHE_SECONDS="1.5",
+        CHAT_NOTE_STATS_CACHE_SECONDS="2.25",
         WEB_CONCURRENCY="3",
     )
     assert values["config.MAX_ROOMS"] == values["store.MAX_ROOMS"] == 99
@@ -80,6 +86,8 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
     for module in ("config", "limit", "app"):
         assert values[f"{module}.MAX_WAITERS_TOTAL"] == 7
         assert values[f"{module}.MAX_WAITERS_PER_IP"] == 2
+    assert values["config.ROOMS_CACHE_SECONDS"] == 1.5
+    assert values["config.NOTE_STATS_CACHE_SECONDS"] == 2.25
     assert values["config.WORKERS"] == 3
 
 
@@ -145,3 +153,20 @@ def test_junk_refuses_to_boot() -> None:
     )
     assert run.returncode != 0, "app booted with a non-numeric CHAT_MAX_ROOMS"
     assert "ValueError" in run.stderr
+
+
+def test_cache_windows_refuse_non_finite_values() -> None:
+    """A cache window needs an ordering against the clock. Infinity makes the room view's
+    recency backstop immortal; NaN makes every comparison false. Both are valid inputs to
+    `float()`, so exercise the fresh interpreter that used to accept them silently."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    for name in ("CHAT_ROOMS_CACHE_SECONDS", "CHAT_NOTE_STATS_CACHE_SECONDS"):
+        for value in ("nan", "inf", "-inf"):
+            run = subprocess.run(
+                [sys.executable, "-c", PROBE],
+                capture_output=True,
+                text=True,
+                env={**clean, name: value},
+            )
+            assert run.returncode != 0, f"app booted with {name}={value}"
+            assert f"{name} must be a finite number" in run.stderr
