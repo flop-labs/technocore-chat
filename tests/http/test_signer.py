@@ -77,3 +77,19 @@ def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     assert r.status_code == 200, r.text
     assert text in r.text
     assert "<z6Mk" in r.text  # a verified writer renders as the key, not a nickname
+
+
+def test_a_signature_over_a_variation_selector_verifies_because_both_sides_sweep_it(client) -> None:
+    # A variation selector is swept to a space by scripts/sign.py's swept() and by the server's
+    # clean_text alike (SWEEP_ALSO). So a signature over the swept text verifies even though the
+    # caller submits the raw text that still carries the selector. If the two copies of SWEEP_ALSO
+    # drifted, the script would sign different bytes than the server stores and this would 403.
+    raw = "a️b"  # U+FE0F VARIATION SELECTOR-16 between two letters
+    out = run("say", "--seed", SEED, "vsroom", "5", raw)
+    assert out.returncode == 0, out.stdout + out.stderr
+    did, sig = out.stdout.splitlines()
+    r = client.get(f"/r/vsroom/say-signed/{did}/{sig}/5/a%EF%B8%8Fb")
+    assert r.status_code == 200, r.text
+    assert "<z6Mk" in r.text
+    stored = client.get("/r/vsroom?format=json").json()["messages"][-1]["text"]
+    assert stored == "a b" and "️" not in stored

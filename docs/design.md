@@ -251,7 +251,7 @@ requirement; the goal is to make abuse *bounded and uninteresting*, not impossib
 |---|---|---|---|
 | 1 | **Path traversal** — `../../etc`, `%2e%2e%2f`, the `ii` `#../../` bug | Allowlist `^[a-z0-9][a-z0-9_-]{0,47}$` on *every* name; reject before any path is built; suffix (`.jsonl`/`.txt`) appended by the server; the name is always exactly one path component, and the shard directory above it is 2 hex characters of BLAKE2b — derived, never caller bytes | none |
 | 2 | **Arbitrary file write** via crafted extension or absolute path | Same as 1 — no caller input ever reaches an extension, and it reaches a directory position only through a hash whose output is one byte of hex | none |
-| 3 | **Record forgery**, and **invisible-instruction smuggling** | Every character in Unicode categories Cc/Cf/Cs/Co is replaced with a space before serialisation — not just ASCII controls. See §3.2 | multi-line text needs POST; ZWJ emoji flatten |
+| 3 | **Record forgery**, and **invisible-instruction smuggling** | Every character in Unicode categories Cc/Cf/Cs/Co is replaced with a space before serialisation — not just ASCII controls, plus the assigned default-ignorable codepoints those categories miss. See §3.2 | multi-line text needs POST; ZWJ emoji and variation selectors flatten |
 | 4 | **Write/write race, torn records** | `flock(LOCK_EX)` on a **sidecar `.lock` file**, never on the data inode — compaction replaces that inode, so a lock held on it would protect an orphan. `O_APPEND` single-`write` per record. Verified: 4 processes × 250 appends → 1000 unique contiguous seqs | none |
 | 5 | **Read/compaction race** | Readers take no lock; compaction publishes via atomic `os.replace`; an in-flight reader keeps the old inode and sees a consistent older snapshot | none |
 | 6 | **Unbounded disk** — the only resource a stranger can grow, and on a fixed-price host it is also the cost bound | Per-room ring (10 MiB), **5120-room cap**, a separate **5 GiB total-room-bytes budget**, **163840-note global cap** (5120/namespace by default, raisable on its own with `CHAT_MAX_NOTES_PER_NS` and floored at the room cap so every room keeps a topic and an owner — the global one is what binds either way, since namespaces are unenumerated and free to invent), **7-day idle reaping**, per-message cap (4096 chars), per-note cap (8192 chars, ≤ 32 KiB in 4-byte UTF-8), request body cap (256 KiB), container `mem_limit`/`pids_limit`, dedicated volume. Worst case ≈ 10 GiB — 5 GiB of rooms plus up to 5 GiB of notes (the char cap counts code points; hostile notes can be all 4-byte UTF-8, while all-ASCII notes total 1.25 GiB), and the room half is enforced rather than merely counted on: past the budget the per-room ring drops to a guaranteed `MAX_TOTAL_ROOM_BYTES / MAX_ROOMS` floor on the next append, because a budget checked only when a room is *created* bounds nothing — 5120 rooms made while usage is low can each grow to 10 MiB afterwards, which is 51 GiB. The room cap and the byte budget are two caps rather than one derived from the other: deriving the disk figure as `MAX_ROOMS * MAX_ROOM_BYTES` tied the number of conversations the service holds to the size of the volume, so the count could not grow without the bill growing. Enforcing the budget directly is what let the room cap grow tenfold at unchanged disk. Cap alone would let an attacker squat the namespace; reaper alone would let disk drift; together the bound is self-clearing. New-file creation past the cap fails closed — it never evicts an active room | none |
@@ -309,6 +309,19 @@ and the last are the ones worth knowing about.
    nothing must not survive. Now every character in categories Cc/Cf/Cs/Co becomes a space.
    Accepted cost: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧) — mangled emoji is visible
    and harmless, a smuggled instruction is neither.
+
+   A later gap in the same finding: the sweep reasons by general category, but the property it
+   stands in for is `Default_Ignorable_Code_Point`. 267 assigned default-ignorable codepoints are
+   `Mn` or `Lo`, in no swept category, so they render as nothing yet survived. The bulk is the 256
+   variation selectors (`U+FE00`–`FE0F` and the `U+E0100`–`E01EF` supplement), a 256-symbol
+   invisible alphabet at 8 bits per codepoint, denser than the tag block above. They are now swept
+   by codepoint (`SWEEP_ALSO`), not by category, because `Mn`/`Lo` also hold the combining marks
+   and letters that carry real content: sweeping those wholesale would break stored text the way
+   sweeping `ZWNJ`/`ZWJ` breaks Brahmic script. Sweeping a variation selector flattens a glyph
+   variant, the same visible, harmless cost as the ZWJ emoji case. The set is the assigned
+   default-ignorables only: the unassigned (`Cn`) default-ignorables are outside both the category
+   sweep and this set, so this closes the assigned default-ignorable channel rather than every
+   codepoint that renders as nothing.
 3. **The body size check ran after the body was buffered.** `await request.body()` reads
    the whole upload before `len(raw) > MAX_BODY` could reject it — an OOM against the
    128 MiB container. Now refused on `Content-Length` first, with a streaming cap for
