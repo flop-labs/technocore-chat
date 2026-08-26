@@ -625,10 +625,11 @@ def _size(n: int) -> str:
     return f"{n}B"
 
 
-# Keyed by limit, because the limit changes how much work the walk does and therefore what
-# the answer contains. Bounded by construction: _cursor clamps to 0..MAX_LIMIT, so this
-# holds at most a couple of hundred entries even if every caller asks for a different one.
-_rooms_cache: OrderedDict[int, tuple[tuple, float, dict]] = OrderedDict()
+# Keyed by (limit, offset), because both change how much work the walk does and therefore
+# what the answer contains. `limit` is bounded to 0..MAX_LIMIT and `offset` to a finite
+# page space, and MAX_ROOMS_CACHE (LRU) caps the table anyway, so even a caller paging
+# through thousands of rooms cannot evict everyone else's view.
+_rooms_cache: OrderedDict[tuple[int, int], tuple[tuple, float, dict]] = OrderedDict()
 MAX_ROOMS_CACHE = 64
 
 
@@ -711,20 +712,22 @@ def _note_stats() -> dict:
     return view
 
 
-def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+def _rooms_view(limit: int, offset: int = 0) -> dict:
+    """The /rooms payload for one page, from cache when it is both fresh and still valid.
 
     Deliberately caching the *store walk* and not the rendered response: the text and JSON
     renderings differ, and the budget footer is per-caller, so a response cache would have
-    to key on both and would still be wrong for the footer.
+    to key on both and would still be wrong for the footer. Keyed on (limit, offset) so
+    each page the caller can ask for is one reply, not several walks.
     """
     now = time.monotonic()
     stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
+    key = (limit, offset)
     if config.ROOMS_CACHE_SECONDS > 0:
-        hit = _rooms_cache.get(limit)
+        hit = _rooms_cache.get(key)
         if hit and hit[0] == stamp and now - hit[1] < config.ROOMS_CACHE_SECONDS:
             return hit[2]
-    view = store.room_stats(config.ROOT, limit=limit)
+    view = store.room_stats(config.ROOT, limit=limit, offset=offset)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
@@ -746,9 +749,10 @@ def _rooms_view(limit: int) -> dict:
         # takes it from there — turning the move_to_end that used to follow into a
         # KeyError. Reachable now that entries outlive a write: a caller cycling ?limit=
         # keeps the cache full, so the evictor runs while another request is re-walking,
-        # and /rooms is sync, so two of them overlap in Starlette's threadpool.
-        _rooms_cache.pop(limit, None)
-        _rooms_cache[limit] = (stamp, now, view)
+        # and /rooms is sync, so two of them overlap in Starlette's threadpool. Key is
+        # (limit, offset) so every reachable page is one cached reply.
+        _rooms_cache.pop(key, None)
+        _rooms_cache[key] = (stamp, now, view)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
             _rooms_cache.popitem(last=False)
     return view
@@ -759,11 +763,15 @@ def rooms(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
-    # Clamped here rather than only inside room_stats, because this number is the cache
+    # Clamped here rather than only inside room_stats, because these numbers are the cache
     # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
-    # incrementing it walked every room on every request and evicted everyone else's view
-    # out of a 64-entry cache while doing it. Now the key space is the reply space.
-    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
+    # incrementing them walked every room on every request and evicted everyone else's view
+    # out of a 64-entry cache while doing it. Now the key space is the reply space. `tail`,
+    # not `limit`: the query param keeps its published name, the local must not shadow the
+    # limit module the refusal two lines above calls into.
+    tail = min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT)
+    offset = _cursor(q.get("offset"), 0) or 0
+    view = _rooms_view(tail, offset)
     n = view["notes"]
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.

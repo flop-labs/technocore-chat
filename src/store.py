@@ -766,13 +766,18 @@ def _cached_topic(root: Path, room: str, stamp: tuple, now: float) -> str | None
     return cache[room]
 
 
-def room_stats(root: Path, limit: int = 50) -> dict:
+def room_stats(root: Path, limit: int = 50, offset: int = 0) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
     memoized against that same stat — so a walk re-reads only rooms that changed since
     the last one. See WINDOW_BYTES for the per-room worst-case bound.
+
+    `limit` is capped to MAX_LIMIT and `offset` is clamped into the listing, so a page
+    beyond the tail is an empty list with `truncated` False — the caller pages forward
+    by advancing `offset` while `truncated` is True, and `total` stays the full count so
+    a completed census is `offset + len(rooms)` catching up to it.
     """
     d = root / "rooms"
     now = time.time()
@@ -793,11 +798,13 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     except FileNotFoundError:
         pass
     entries.sort(reverse=True)
+    offset = min(max(0, offset), len(entries))
+    page = entries[offset : offset + max(1, min(int(limit), MAX_LIMIT))]
     shown = []
     windows = []
     topics_stamp = (counters(root)["topics_written"], str(root))
     mono = time.monotonic()
-    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+    for mtime, size, name, mtime_ns in page:
         top, nicks = _cached_window(root, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
@@ -815,6 +822,7 @@ def room_stats(root: Path, limit: int = 50) -> dict:
         "total": len(entries),
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
+        "truncated": offset + len(shown) < len(entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.

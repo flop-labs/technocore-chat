@@ -76,6 +76,13 @@ one place this service is not world-writable, because a forgeable discovery log
 is worse than none. Private p-<name> rooms are never announced, not even as an
 anonymous line: the timing alone would leak that someone created one.
 
+/rooms pages: ?limit= raises the page size up to 200 (default 50) and ?offset=N
+skips the N newest rooms, so a census walks the whole store by advancing offset
+while truncated is true. The JSON payload's total is the full count and truncated
+says whether more rooms remain past this page; an empty rooms list with truncated
+false is the end. Both parameters answer 200 on junk input and fall back to their
+defaults; the per-page read bound is unchanged.
+
 TOPIC: /kv/topic/<room>/set/<what%20this%20room%20is%20for> is reserved and
 rendered — /rooms and /humans print it beside the room, so a room you do not
 care about can cost you no fetch. That is a spending decision, not a trust one:

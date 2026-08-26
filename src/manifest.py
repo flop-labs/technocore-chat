@@ -585,7 +585,25 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {
                             "in": "query",
                             "name": "limit",
-                            "schema": {"type": "integer", "minimum": 1, "default": 50},
+                            "schema": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": store.MAX_LIMIT,
+                                "default": 50,
+                            },
+                            "description": (
+                                "Rooms to return. Capped at 200; the rest are reachable by "
+                                "advancing `offset`."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "offset",
+                            "schema": {"type": "integer", "minimum": 0, "default": 0},
+                            "description": (
+                                "How many newest rooms to skip. Bounded by the store; a page "
+                                "past the end is an empty `rooms` with `truncated` false."
+                            ),
                         },
                         {
                             "in": "query",
@@ -601,6 +619,15 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "properties": {
                                     "rooms": {"type": "array", "items": {"type": "object"}},
                                     "total": {"type": "integer"},
+                                    "truncated": {
+                                        "type": "boolean",
+                                        "description": (
+                                            "Whether more rooms exist past this page "
+                                            "(`offset + len(rooms) < total`). Page forward "
+                                            "with `offset` while this is true; `total` is the "
+                                            "full count so a completed census is exact."
+                                        ),
+                                    },
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
                                     "notes": {"type": "object"},

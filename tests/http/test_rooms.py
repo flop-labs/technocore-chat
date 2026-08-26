@@ -256,7 +256,7 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
         for limit in (1, 2, 3):
             client.get(f"/rooms?limit={limit}")
-        assert list(app_module._rooms_cache) == [2, 3]
+        assert list(app_module._rooms_cache) == [(2, 0), (3, 0)]  # keyed on (limit, offset)
 
 
 def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkeypatch):
@@ -283,13 +283,15 @@ def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkey
         # that the clock releases it, and the clock is the one thing a loaded CI runner
         # will not hold still for: a 0.25s window is a test that passes locally and fails
         # on a runner that spends it before the assertion.
-        stamp, _, view = app_module._rooms_cache[50]  # 50 is the default `limit`
-        app_module._rooms_cache[50] = (stamp, time.monotonic() - window, view)
+        stamp, _, view = app_module._rooms_cache[
+            (50, 0)
+        ]  # (limit, offset); 50 is the default `limit`
+        app_module._rooms_cache[(50, 0)] = (stamp, time.monotonic() - window, view)
         assert "second" in client.get("/rooms").text, "the clock must expire it regardless"
 
 
 def test_a_cached_view_is_never_served_under_a_different_root(client, tmp_path):
-    """The entries are keyed by `limit` alone, so ROOT is in the stamp — exactly as it is in
+    """The entries are keyed by (limit, offset), and ROOT is in the stamp — exactly as it is in
     the note gauge's. Production never moves ROOT, but a reconfigured reload and this very
     fixture do, and a view walked under one store must not be answered from another.
     """
@@ -330,12 +332,12 @@ def test_a_rewalked_entry_is_the_newest_and_the_oldest_is_what_leaves(client, mo
         app_module._rooms_cache.clear()
         for limit in (1, 2, 3):
             client.get(f"/rooms?limit={limit}")
-        assert list(app_module._rooms_cache) == [2, 3]
+        assert list(app_module._rooms_cache) == [(2, 0), (3, 0)]
         client.get("/r/second/say/bot/hi")  # structural: every entry is now stale
         client.get("/rooms?limit=2")  # so this one is re-walked, and lands at the end
-        assert list(app_module._rooms_cache) == [3, 2]
+        assert list(app_module._rooms_cache) == [(3, 0), (2, 0)]
         client.get("/rooms?limit=4")
-        assert list(app_module._rooms_cache) == [2, 4], "the oldest walk is what leaves"
+        assert list(app_module._rooms_cache) == [(2, 0), (4, 0)], "the oldest walk is what leaves"
 
 
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
@@ -450,6 +452,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
+        "truncated": False,
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
@@ -487,6 +490,32 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
     # junk limits fall back rather than 500 (the _cursor rule, incl. Unicode digits)
     for bad in ("abc", "\u00b2", "-4", ""):
         assert client.get(f"/rooms?limit={bad}&format=json").status_code == 200
+
+
+def test_rooms_overview_pages_with_offset_and_reports_truncated(client):
+    for i in range(5):
+        client.get(f"/r/room{i}/say/bot/hi")
+    total = client.get("/rooms?format=json").json()["total"]  # 5 rooms + the events room
+    seen = []
+    offset = 0
+    while True:
+        view = client.get(f"/rooms?limit=2&offset={offset}&format=json").json()
+        assert view["total"] == total  # complete count on every page
+        names = [r["room"] for r in view["rooms"]]
+        # no page overlaps another and no room is invented by the offset slice
+        assert not (set(names) & set(seen))
+        seen += names
+        if not view["truncated"]:
+            assert offset + len(names) == total  # the census is exact when done
+            break
+        offset += len(view["rooms"])
+    assert sorted(seen) == ["events"] + sorted(f"room{i}" for i in range(5))
+    # a page past the end is an empty list, not an error, and truncated turns false
+    past = client.get(f"/rooms?limit=2&offset={total + 10}&format=json").json()
+    assert past["rooms"] == [] and past["truncated"] is False
+    # junk offsets fall back to 0 rather than 500, same _cursor rule as limit
+    for bad in ("abc", "\u00b2", "-4", ""):
+        assert client.get(f"/rooms?offset={bad}&format=json").status_code == 200
 
 
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
@@ -560,7 +589,7 @@ def test_rooms_metrics_never_scan_past_the_window_per_room(client, tmp_path, mon
 
 
 def test_one_reply_is_one_cache_entry_however_the_limit_was_spelled(client, monkeypatch):
-    """`?limit=` is caller-supplied and was the cache key raw, while the walk it keys clamps
+    """`?limit=` is caller-supplied and part of the cache key (with offset), the walk it keys clamps
     to MAX_LIMIT. So ?limit=200, ?limit=1000000 and ?limit=1000001 are one reply and were
     three entries — a caller could walk every room on every request by incrementing a number,
     at one read from its bucket, and evict everyone else's view out of a 64-entry cache on

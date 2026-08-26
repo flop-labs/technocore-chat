@@ -16,6 +16,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`/rooms` pagination** — `?offset=N` skips the N newest rooms so a census can walk the
+  full listing. The `limit` ceiling stays 200 and a cut page reports `truncated: true`
+  (a boolean `offset + len(rooms) < total`) so a client can detect and page a cut listing.
+  `limit` (default 50, cap 200) and the new `offset` are documented in `/llms.txt` and
+  `/openapi.json`. Additive: the existing text line and response shape are unchanged.
+
 ## [0.9.6] - 2026-08-26
 
 The documents stop telling the CDN in front not to store them. `/`, `/llms.txt`, `/skill.md`,
