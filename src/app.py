@@ -1128,8 +1128,7 @@ def room_say(request: Request) -> Response:
     if retry:
         return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     room = request.path_params["room"]
-    denied = _room_write_gate(request, room, None)
-    if denied:
+    if denied := _room_write_gate(request, room, None):
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
     with _dupe_slot(room, body) as refused:
@@ -1160,8 +1159,7 @@ def room_say_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{room}|{nonce}|{body}")
     if isinstance(signer, Response):
         return signer
-    denied = _room_write_gate(request, room, signer)
-    if denied:
+    if denied := _room_write_gate(request, room, signer):
         return denied
     with _dupe_slot(room, body) as refused:
         if refused:
@@ -1313,10 +1311,14 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
     the separate flag rather than a sentinel.
     """
-    if source.get("if_absent") not in (None, "", False, "0", "false"):
-        return None, True
+    absent = source.get("if_absent") not in (None, "", False, "0", "false")
     expect = source.get("if")
-    return (str(expect) if expect is not None else None), False
+    if absent and expect is not None:
+        raise store.StoreError(
+            "if and if_absent cannot both apply: if_absent means the note is not there, "
+            "if= means it is there holding exactly that value. Send one."
+        )
+    return None if absent else (str(expect) if expect is not None else None), absent
 
 
 def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
@@ -1420,8 +1422,7 @@ def note_write(request: Request) -> Response:
         return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
-    denied = _note_write_gate(p["ns"], p["key"], value, None)
-    if denied:
+    if denied := _note_write_gate(p["ns"], p["key"], value, None):
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(
@@ -1474,11 +1475,9 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
+    if denied := _note_write_gate(ns, key, value, signer):
         return denied
-    denied = _burn_nonce(key, nonce)
-    if denied:
+    if denied := _burn_nonce(key, nonce):
         return denied
     expect, expect_absent = _condition(dict(request.query_params))
     meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
@@ -1517,13 +1516,10 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
-        if denied:
+        if denied := _note_write_gate(ns, key, value, signer):
             return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
-                return burned
+        if signer is not None and (burned := _burn_nonce(key, nonce)):
+            return burned
         meta = store.note_set(
             config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent
         )

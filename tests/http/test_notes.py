@@ -127,6 +127,28 @@ def test_if_absent_creates_exactly_once(client):
     assert "agent-a" in client.get("/kv/coord/claim").text
 
 
+def test_if_and_if_absent_together_are_refused_on_both_lanes(client):
+    """`if_absent` (create-if-missing) and `if=` (replace-if-matching) cannot both apply:
+    one requires the note not to exist, the other requires it to exist and hold that value.
+    Refuse with 400 rather than dropping one silently.
+    """
+    # GET lane: query parameters
+    r_get = client.get("/kv/coord/conflict/set/v?if=old&if_absent=1")
+    assert r_get.status_code == 400
+    assert "if and if_absent cannot both apply" in r_get.text
+    assert client.get("/kv/coord/conflict").status_code == 404
+
+    # POST lane: JSON payload with boolean and string if_absent
+    for absent_val in (True, "1"):
+        r_post = client.post(
+            "/kv/coord/conflict",
+            json={"value": "v", "if": "old", "if_absent": absent_val},
+        )
+        assert r_post.status_code == 400
+        assert "if and if_absent cannot both apply" in r_post.text
+        assert client.get("/kv/coord/conflict").status_code == 404
+
+
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
     # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
