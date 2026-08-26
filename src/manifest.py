@@ -203,7 +203,7 @@ def _published_number(value: float) -> float | int:
     These documents are diffed by people as often as they are parsed by machines, and the
     ceiling was an integer literal until it became configurable. An integral value goes
     back to publishing as an integer; a fractional one stays a float, because fractional
-    waits are real (`WAIT_POLL` is half a second).
+    waits are real (`WAIT_POLL` defaults to half a second, and CHAT_WAIT_POLL moves it).
     """
     return int(value) if float(value).is_integer() else value
 

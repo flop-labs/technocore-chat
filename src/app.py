@@ -825,7 +825,7 @@ def rooms(request: Request) -> Response:
 # where the knob now lives) is aliased so tests that probe it keep calling app._finite_env.
 _finite_env = config._finite_env
 MAX_WAIT = config.MAX_WAIT
-WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
+WAIT_POLL = config.WAIT_POLL  # CHAT_WAIT_POLL; the useful ?wait= floor is this value
 
 
 def _waiter_slot(ip: str):
@@ -880,6 +880,15 @@ async def _await_messages(
     fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
     two tail reads a second per waiter, bounded by MAX_WAITERS_TOTAL — cheaper in total
     than the busy-polling it replaces, which is the entire point.
+
+    It is also what makes ?wait= work under --workers N, which is not obvious and has been
+    read as a bug more than once. The poll re-reads the room *file*, so a write from any
+    worker is seen by a waiter parked on every other one; there is no per-worker event
+    registry to be isolated, and none is needed. What the process boundary costs is
+    latency, not delivery — one WAIT_POLL at worst — and CHAT_WAIT_POLL is the dial for it.
+    A cross-process wakeup bus would buy the rest of that interval for a background task, a
+    lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
+    reader consumes each byte, so N-1 workers miss it).
     """
     with _waiter_slot(client_ip(request)) as granted:
         if not granted:

@@ -1141,3 +1141,51 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
     with config.override(EDGE_CACHE_SECONDS=0):
         assert client.get("/rooms").headers["cache-control"] == "no-store"
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
+
+
+def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
+    """`?wait=` carries across processes, which is what makes it work under `--workers N`.
+
+    The wait loop re-reads the room *file*, so the writer needs no shared memory with the
+    waiter — no event registry, no wakeup bus, nothing that a process boundary could
+    isolate. This spawns a real second interpreter against the same CHAT_ROOT and holds a
+    long-poll here while it writes, which is the arrangement uvicorn's workers are in.
+
+    Written down as a test because the absence of a `_waiters[room]` event table reads as
+    a missing feature: the report it guards against is "multi-worker long-polls never
+    wake", and they always did — the process boundary costs one CHAT_WAIT_POLL of latency
+    and nothing else.
+    """
+    import subprocess
+    import sys
+    import threading
+
+    src = str(Path(__file__).resolve().parents[2] / "src")
+    client.get("/r/xw/say/seed/first")
+    seq = client.get("/r/xw?format=json").json()["messages"][-1]["seq"]
+
+    other = (
+        f"import sys; sys.path.insert(0, {src!r}); "
+        "import config, store; from pathlib import Path; "
+        f"store.append(Path({str(tmp_path)!r}), 'xw', 'otherworker', 'from another process')"
+    )
+    done = threading.Event()
+
+    def write_from_another_process():
+        # Long enough that the waiter is parked in its sleep, short enough to stay well
+        # inside the wait budget below.
+        time.sleep(0.3)
+        run = subprocess.run([sys.executable, "-c", other], capture_output=True, text=True)
+        assert run.returncode == 0, run.stderr
+        done.set()
+
+    writer = threading.Thread(target=write_from_another_process)
+    writer.start()
+    try:
+        held = client.get(f"/r/xw?format=json&since={seq}&wait=5")
+    finally:
+        writer.join()
+    assert done.is_set()
+    messages = held.json()["messages"]
+    assert [m["text"] for m in messages] == ["from another process"]
+    assert messages[0]["from"] == "otherworker"

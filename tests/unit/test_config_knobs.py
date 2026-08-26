@@ -36,6 +36,7 @@ PROBE = (
     "'config.MAX_WAITERS_PER_IP': config.MAX_WAITERS_PER_IP, "
     "'limit.MAX_WAITERS_PER_IP': limit.MAX_WAITERS_PER_IP, "
     "'app.MAX_WAITERS_PER_IP': app.MAX_WAITERS_PER_IP, "
+    "'config.WAIT_POLL': config.WAIT_POLL, 'app.WAIT_POLL': app.WAIT_POLL, "
     "'config.WORKERS': config.WORKERS}))"
 )
 
@@ -145,3 +146,37 @@ def test_junk_refuses_to_boot() -> None:
     )
     assert run.returncode != 0, "app booted with a non-numeric CHAT_MAX_ROOMS"
     assert "ValueError" in run.stderr
+
+
+def test_the_poll_interval_is_a_knob_and_defaults_where_it_was_hardcoded() -> None:
+    """CHAT_WAIT_POLL was the literal 0.5 in app.py. It reaches `app`, which is the module
+    the wait loop sleeps on — a knob that stopped at `config` would parse and change
+    nothing, exactly like the waiter caps above."""
+    values = boot()
+    assert values["config.WAIT_POLL"] == values["app.WAIT_POLL"] == 0.5
+    moved = boot(CHAT_WAIT_POLL="0.05")
+    assert moved["config.WAIT_POLL"] == moved["app.WAIT_POLL"] == 0.05
+
+
+def test_the_poll_interval_floors_above_zero() -> None:
+    """Unlike the waiter caps, 0 is NOT a real setting here: it would drop the loop's sleep
+    to nothing and spin, burning a core and issuing unbounded tail reads per waiter. So it
+    floors at 0.01 rather than at 0 — a misconfiguration degrades to aggressive polling
+    instead of to a way of taking an instance down from the environment."""
+    for raw in ("0", "-1", "0.001"):
+        assert boot(CHAT_WAIT_POLL=raw)["config.WAIT_POLL"] == 0.01
+
+
+def test_junk_in_the_poll_interval_refuses_to_boot() -> None:
+    """It goes through `_finite_env` like CHAT_MAX_WAIT: `inf` is the case `float()` would
+    otherwise accept happily, and an infinite poll interval means a `?wait=` that sleeps
+    past its own deadline and never re-reads the room."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    for raw in ("soon", "inf", "nan"):
+        run = subprocess.run(
+            [sys.executable, "-c", PROBE],
+            capture_output=True,
+            text=True,
+            env={**clean, "CHAT_WAIT_POLL": raw},
+        )
+        assert run.returncode != 0, f"CHAT_WAIT_POLL={raw!r} booted"
