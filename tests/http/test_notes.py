@@ -396,3 +396,12 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_post_refuses_a_value_that_is_not_a_string(client):
+    """A null value used to be stored as the note `None`, an object as its Python repr."""
+    assert client.post("/kv/plans/n", json={"value": None}).status_code == 400
+    for sent in ({"a": 1}, [1], False, 0):
+        r = client.post("/kv/plans/n", json={"value": sent})
+        assert r.status_code == 400 and "value must be a JSON string" in r.text, sent
+    assert client.get("/kv/plans/n").status_code == 404

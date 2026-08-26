@@ -1130,6 +1130,23 @@ def room_say_signed(request: Request) -> Response:
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
 
+def _body_string(payload: dict, field: str) -> str | Response:
+    """A body field the schema types as a string: the string, "" when absent or JSON null,
+    a 400 for anything else. `str()` here stored a null `text` as the literal message
+    `None` and an object as its Python repr — a record nobody sent, indistinguishable to
+    every reader from one somebody did."""
+    value = payload.get(field)
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return text(
+        f"400 {field} must be a JSON string, not a {type(value).__name__} — "
+        f'e.g. {{"{field}":"..."}}.',
+        400,
+    )
+
+
 def _payload_credentials(payload: dict) -> tuple[str, str, str] | None:
     """did/sig/nonce out of a POST body, or None for an unsigned post."""
     did = str(payload.get("did", "")).strip()
@@ -1197,11 +1214,17 @@ async def room_post(request: Request) -> Response:
     if isinstance(payload, Response):
         return payload
     room = request.path_params["room"]
+    sent = _body_string(payload, "text")
+    if isinstance(sent, Response):
+        return sent
+    nick = _body_string(payload, "from")
+    if isinstance(nick, Response):
+        return nick
     credentials = _payload_credentials(payload)
     signer = None
     if credentials:
         did, sig, nonce = credentials
-        body = store.clean_text(str(payload.get("text", "")))
+        body = store.clean_text(sent)  # sweep first: the signature covers what is stored
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
@@ -1218,7 +1241,6 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
             key = _retry_key(request, room, nick, sent)
             replay = _already_written(request, key, room, left)
             if replay is not None:
@@ -1461,7 +1483,10 @@ async def note_post(request: Request) -> Response:
         return payload
     p = request.path_params
     ns, key = p["ns"], p["key"]
-    value = store.clean_text(str(payload.get("value", "")), store.MAX_VALUE_CHARS)
+    sent = _body_string(payload, "value")
+    if isinstance(sent, Response):
+        return sent
+    value = store.clean_text(sent, store.MAX_VALUE_CHARS)
     credentials = _payload_credentials(payload)
     signer = None
     if credentials:

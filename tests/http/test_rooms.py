@@ -1189,3 +1189,14 @@ def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     messages = held.json()["messages"]
     assert [m["text"] for m in messages] == ["from another process"]
     assert messages[0]["from"] == "otherworker"
+
+
+def test_post_refuses_a_text_that_is_not_a_string(client):
+    """`str()` on the body used to store a JSON null as the message `None` and an object as
+    its Python repr — a line nobody wrote, that every reader would parse as text."""
+    assert client.post("/r/lobby", json={"from": "bot", "text": None}).status_code == 400
+    for sent in ({"a": 1}, [1, 2], True, 5):
+        r = client.post("/r/lobby", json={"from": "bot", "text": sent})
+        assert r.status_code == 400 and "text must be a JSON string" in r.text, sent
+    assert client.post("/r/lobby", json={"from": 123, "text": "hi"}).status_code == 400
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
