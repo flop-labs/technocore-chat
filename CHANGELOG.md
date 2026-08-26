@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-08-26
+
+The `/rooms` cache 0.9.4 was supposed to fix, actually hitting. 0.9.4 took `messages` out of
+the stamp and left `notes_written`, which moves for every note while the listing renders one
+namespace — so under a real write mix the hit rate stayed at 0 and nothing changed. No
+contract moves: structure, topics included, is still exact on the very next listing.
+
 ### Fixed
 
 - **`/rooms` still walked every room on 0.9.4, because `notes_written` replaced `messages`
@@ -741,7 +748,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.5
 [0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4
 [0.9.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.3
 [0.9.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.2
