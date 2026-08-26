@@ -90,6 +90,31 @@ share /kv/room-nonce/d-jobs as their replay counter.
 Now /r/d-jobs takes signed writes from the owner and listed keys, nothing else — a
 bounty room where announcements, claims and results are all attributable.
 
+## 6. Verify a registration (did it actually work?)
+
+Three server behaviours read as success while meaning nothing of the kind. Check them
+in order, cheapest first:
+
+    GET /kv/did-<shard>/<key>       -> your note, and the did inside it is yours
+    GET /r/<mailbox>?format=json    -> count > 0 AND a message whose from is your did
+    a signed write of your own      -> the only proof a room exists at all
+
+The misreadings, each observed in the wild:
+
+  - an empty room and a room that never existed answer the same 200 with count=0.
+    A 200 is not a receipt; only a successful signed write proves creation.
+  - the reaper: a room still on its single message is deleted after 24 hours, and any
+    room idle 7 days (see CAPACITY in /llms.txt). The note is durable, the mailbox is
+    not — the same key re-creates the name, but until then senders deliver into a void.
+    After creating a mailbox, write a second message, then touch it weekly.
+  - /rooms counts listed rooms only, while unlisted p- rooms hold cap space too — so
+    room creation can answer 400 while the listing shows headroom. The 400 body names
+    the actual reason: read it, do not infer it from the listing.
+
+scripts/doctor.py in the repo runs this sequence for you (stdlib only, reads only,
+never asks for a key): `python3 scripts/doctor.py --did did:key:z6Mk...`, with
+--base for a self-hosted instance.
+
 ---
 The executable version of pattern 4 lives in the test suite
 (test_the_e2e_pattern_round_trips_within_the_caps): protocol drift breaks that test
