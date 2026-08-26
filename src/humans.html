@@ -674,21 +674,25 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (q) parts.push(shown + ' of ' + roomsView.rooms.length + ' loaded rooms match');
     else if (shown < roomsView.total) parts.push('showing ' + shown + ' of ' + roomsView.total + ' rooms');
     else parts.push(roomsView.total + ' rooms');
-    parts.push(roomsView.total + ' of ' + roomsView.capacity + ' room cap');
-    parts.push(size(roomsView.bytes) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
+    // `listed` for the same reason /rooms says it: unlisted rooms consume both caps and
+    // are in neither total, so each left-hand number is a floor and each cap is not.
+    parts.push(roomsView.total + ' listed of ' + roomsView.capacity + ' room cap');
+    parts.push(size(roomsView.bytes) + ' listed of a ' + size(roomsView.bytes_capacity) + ' budget');
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
     statsEl.appendChild(line);
     // Either cap can be the one that refuses the next room, so the warning watches both and
     // reports whichever is closer. Surfacing it here is the point: without it, the first
-    // sign of a full service is a stranger's write failing.
+    // sign of a full service is a stranger's write failing. Both ratios are computed from
+    // listed figures against caps that also count unlisted rooms, so this is a lower bound
+    // — the wording says so rather than implying the threshold is where it fired.
     var full = Math.max(roomsView.total / roomsView.capacity,
                         roomsView.bytes / roomsView.bytes_capacity);
     if (full >= 0.8) {
       var warn = document.createElement('span');
       warn.className = 'badge err';                 // the word carries it too, not the hue
-      warn.textContent = 'near capacity — ' + Math.round(full * 100) + '% full';
+      warn.textContent = 'near capacity — at least ' + Math.round(full * 100) + '% full';
       statsEl.appendChild(warn);
     }
   }

@@ -357,7 +357,37 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     assert view["total"] == 3 and view["capacity"] == store.MAX_ROOMS and view["bytes"] > 0
 
     body = client.get("/rooms").text
-    assert "3 of 3 rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+    assert "3 of 3 listed rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+
+
+def test_the_rooms_head_says_its_counts_are_listed_rooms_only(client):
+    """An unlisted room consumes both room caps and appears in neither figure, so the head
+    has to name what it is counting. Without `listed` the line reads as occupancy against
+    the cap beside it, and a caller forecasting from that ratio meets the 400 early —
+    here, at two thirds of a count the head reports as one third.
+
+    The divergence itself is deliberate and stays: a total that moved when someone opened
+    a `p-` room would announce it to anyone polling this line, which is exactly what
+    `/r/events` refuses to do by never announcing them.
+    """
+    client.get("/r/shown/say/bot/hi")
+    before = client.get("/rooms?format=json").json()
+    # `mb-` is left out on purpose: it takes signed writes only, and the class that makes
+    # a room unlisted here is `p-`, which these three all carry.
+    for name in ("p-aaa", "p-bbb", "e-p-ccc"):
+        assert client.get(f"/r/{name}/say/bot/hi").status_code == 200
+
+    after = client.get("/rooms?format=json").json()
+    # Three more rooms are on disk against the cap; the listing did not move for any of them.
+    assert after["total"] == before["total"]
+    assert after["bytes"] == before["bytes"]
+    assert [r["room"] for r in after["rooms"]] == [r["room"] for r in before["rooms"]]
+
+    head = client.get("/rooms").text.splitlines()[0]
+    assert f"{after['total']} listed rooms" in head
+    assert "listed of a" in head  # the byte figure is the same kind of floor
+    for name in ("p-aaa", "p-bbb", "e-p-ccc"):
+        assert name not in head
 
 
 def test_rooms_marks_the_caller_chosen_name_and_topic_as_untrusted(client):
