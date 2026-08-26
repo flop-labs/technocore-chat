@@ -1010,11 +1010,13 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     def counted(fd):
         synced = os.fstat(fd)
         rooms = (tmp_path / "rooms").stat() if (tmp_path / "rooms").exists() else None
-        kind = (
-            "directory"
-            if rooms and (synced.st_dev, synced.st_ino) == (rooms.st_dev, rooms.st_ino)
-            else "file"
-        )
+        identity = (synced.st_dev, synced.st_ino)
+        if rooms and identity == (rooms.st_dev, rooms.st_ino):
+            kind = "rooms"
+        elif identity == (tmp_path.stat().st_dev, tmp_path.stat().st_ino):
+            kind = "root"
+        else:
+            kind = "file"
         calls.append(kind)
         events.append(kind)
         real(fd)
@@ -1022,13 +1024,13 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     monkeypatch.setattr(store.os, "fsync", counted)
 
     store.append(tmp_path, "lobby", "bot", "durable")
-    # Creating the room also creates /r/events. Each first append syncs its file and then
-    # the containing directory entry before the caller's 200.
-    assert calls == ["file", "directory", "file", "directory"]
+    # The first room creates rooms/ too: persist the file in rooms/, then rooms/ in root.
+    # Its /r/events announcement reuses that directory and needs only the first pair.
+    assert calls == ["file", "rooms", "root", "file", "rooms"]
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 4  # the append skipped both syncs
+        assert len(calls) == 5  # the append skipped both syncs
         events.clear()
         real_replace = store.os.replace
 
@@ -1039,7 +1041,7 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
 
         monkeypatch.setattr(store.os, "replace", replaced)
         store._compact(store.room_path(tmp_path, "lobby"))
-        assert events == ["file", "replace", "directory"]
+        assert events == ["file", "replace", "rooms"]
 
 
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):

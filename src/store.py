@@ -1814,6 +1814,7 @@ def _write_record(
     # behind every other create, and a rotating room name flooding rejections should not
     # queue up behind them. The check inside the gate stays authoritative.
     _check_room_capacity(root, path)
+    room_directory_missing = not path.parent.exists()
     with (
         _create_gate(
             root / ".rooms-create",
@@ -1862,6 +1863,8 @@ def _write_record(
                 os.fsync(f.fileno())
         if created and config.FSYNC:
             _fsync_parent(path)
+            if room_directory_missing:
+                _fsync_parent(path.parent)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
