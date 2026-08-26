@@ -317,7 +317,7 @@
       "out_display": "a b",
       "raises_empty": false,
       "version_sensitive": false,
-      "note": "an unpaired surrogate is Cs -> space. Note it has no UTF-8 encoding, so this input cannot appear in a JSON string at all \u2014 which is why in_cp is authoritative"
+      "note": "an unpaired surrogate is Cs -> space. It has no UTF-8 encoding, so it survives here only as the escape \\ud800 (this file is ensure_ascii=True); read in_cp rather than in_display, because a consumer that re-encodes to UTF-8 or maps unpaired surrogates to U+FFFD would otherwise test a different character than the one meant"
     },
     {
       "name": "nbsp-Zs-KEPT",

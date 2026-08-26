@@ -76,7 +76,12 @@ has to decode them first.
 **Text is code points, not JSON strings.** Every case carries `in_cp` / `out_cp` — arrays of
 integers — as the authoritative form, with a lossy `in_display` for reading. This is not
 fastidiousness: the swept set includes `Cs`, and a lone surrogate has **no UTF-8 encoding**, so
-a JSON string cannot hold one. `String.fromCodePoint(...case.in_cp)` on the way in.
+`ensure_ascii=False` plus a UTF-8 write is impossible. The JSON *grammar* is fine with it —
+`"\ud800"` is a legal escape and this file is written `ensure_ascii=True`, so `json.loads` and
+`JSON.parse` both recover it — but a consumer that re-encodes the parsed string to UTF-8, or
+whose parser folds unpaired surrogates to `U+FFFD`, would test a different character than the
+one meant. Integers do not have that failure mode. `String.fromCodePoint(...case.in_cp)` on the
+way in.
 
 **The Unicode version is recorded.** The sweep is `unicodedata.category(c) in (six categories)`,
 so its answers come from the tables the *runtime* ships, not from this repo. `U+180E` was `Zs`

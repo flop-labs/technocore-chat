@@ -22,8 +22,10 @@
  * missing is skipped rather than failed.
  *
  * Why the vectors carry code points and not strings: the swept set includes `Cs`, and a lone
- * surrogate has no UTF-8 encoding, so it cannot appear in a JSON string at all. Every case
- * is rebuilt here with String.fromCodePoint(...case.in_cp).
+ * surrogate has no UTF-8 encoding. `JSON.parse` does recover `"\ud800"` — the escape is legal
+ * and the file is written ensure_ascii=True — but re-encoding that string to UTF-8, or a parser
+ * that folds unpaired surrogates to U+FFFD, would substitute a different character. Every case
+ * is rebuilt here with String.fromCodePoint(...case.in_cp), which cannot drift that way.
  */
 
 import { readFileSync } from "node:fs";
