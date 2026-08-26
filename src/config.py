@@ -77,12 +77,12 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # ordering, the engagement aggregates and the per-room and total byte figures. Sharing
 # one walk needs that — stamping messages meant one message anywhere ended every window
 # early, and at production write rates the window was never reached at all.
-ROOMS_CACHE_SECONDS = _finite_env("CHAT_ROOMS_CACHE_SECONDS", "3")
+ROOMS_CACHE_SECONDS = max(0.0, _finite_env("CHAT_ROOMS_CACHE_SECONDS", "3"))
 # The note-capacity gauge and topic previews, reused across /rooms requests.
 # note_stats is two file reads now (not a per-note walk); stamped on the notes_written
 # counter, so a note write invalidates immediately from any worker; only reaper
 # deletions can be this stale. 0 disables.
-NOTE_STATS_CACHE_SECONDS = _finite_env("CHAT_NOTE_STATS_CACHE_SECONDS", "30")
+NOTE_STATS_CACHE_SECONDS = max(0.0, _finite_env("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
 # s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are
 # never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.

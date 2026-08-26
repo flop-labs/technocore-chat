@@ -102,6 +102,11 @@ def test_the_floors_hold() -> None:
     floored = boot(CHAT_MAX_WAITERS_TOTAL="-1", CHAT_MAX_WAITERS_PER_IP="-1")
     assert floored["config.MAX_WAITERS_TOTAL"] == 0
     assert floored["config.MAX_WAITERS_PER_IP"] == 0
+    cache_floored = boot(
+        CHAT_ROOMS_CACHE_SECONDS="-1", CHAT_NOTE_STATS_CACHE_SECONDS="-1"
+    )
+    assert cache_floored["config.ROOMS_CACHE_SECONDS"] == 0.0
+    assert cache_floored["config.NOTE_STATS_CACHE_SECONDS"] == 0.0
     # MAX_NOTES_PER_NS floors at MAX_ROOMS rather than at a literal, and that floor is an
     # invariant and not a typo guard: the four reserved namespaces (topic, room-owners,
     # room-allow, room-nonce) hold one note per room each, so anything under MAX_ROOMS means
@@ -161,12 +166,13 @@ def test_cache_windows_refuse_non_finite_values() -> None:
     `float()`, so exercise the fresh interpreter that used to accept them silently."""
     clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
     for name in ("CHAT_ROOMS_CACHE_SECONDS", "CHAT_NOTE_STATS_CACHE_SECONDS"):
-        for value in ("nan", "inf", "-inf"):
-            run = subprocess.run(
-                [sys.executable, "-c", PROBE],
-                capture_output=True,
-                text=True,
-                env={**clean, name: value},
-            )
-            assert run.returncode != 0, f"app booted with {name}={value}"
-            assert f"{name} must be a finite number" in run.stderr
+        # One value per knob proves the wiring to `_finite_env`; its nan/-inf branches are
+        # already pinned directly in test_docs without another full Starlette import.
+        run = subprocess.run(
+            [sys.executable, "-c", PROBE],
+            capture_output=True,
+            text=True,
+            env={**clean, name: "inf"},
+        )
+        assert run.returncode != 0, f"app booted with {name}=inf"
+        assert f"{name} must be a finite number" in run.stderr
