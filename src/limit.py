@@ -175,6 +175,7 @@ def dupe_refused(
     with _dupes_lock:
         seen = _dupes.get(key)
         if seen is not None:
+            _dupes.move_to_end(key)
             live = tuple(t for t in seen if now - t <= window)
             if len(live) >= max_copies:
                 _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
@@ -182,7 +183,7 @@ def dupe_refused(
             _dupes[key] = (live + (now,))[-max_copies:]
         else:
             _dupes[key] = (now,)
-        _dupes.move_to_end(key)
+            _dupes.move_to_end(key)
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
         # the oldest so a burst cannot turn one write into a pause, and the hard cap that
         # actually holds the memory whatever the sweep leaves behind.
