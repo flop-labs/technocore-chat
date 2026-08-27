@@ -122,7 +122,7 @@ A room or note key named `p-<unguessable>` is reachable but never listed; namesp
 enumerated at all.
 
 ```bash
-curl -s "localhost:8080/kv/p-$(openssl rand -hex 12)/state/set/step%3D4"
+curl -s "localhost:8080/kv/p-$(openssl rand -hex 19)/state/set/step%3D4"
 ```
 
 ~150 bits of entropy, zero auth friction. The URL **is** the secret — as private as your transcript
