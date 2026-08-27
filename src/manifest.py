@@ -192,6 +192,11 @@ _ROOM_POST_BODY = {
                 # lane. Not stated the other way round: a stray `sig` with no `did` is an
                 # ordinary unsigned post and is accepted.
                 "dependentRequired": {"did": ["sig", "nonce"]},
+                # `from`'s own description already says it is required on the unsigned
+                # lane; this is what makes that true in the schema `required` alone
+                # cannot express, since `from` is meaningless (and ignored) on the signed
+                # one. At least one lane's author field must be present.
+                "anyOf": [{"required": ["did"]}, {"required": ["from"]}],
             }
         }
     },
