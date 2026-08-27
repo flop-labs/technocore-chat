@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The MCP wrapper now negotiates the 2025-11-25 protocol version.** Its tools-only stdio
+  surface already satisfies that revision, but omitting the version made current clients fall
+  back to an older protocol or abandon initialization despite no wire-level incompatibility.
+
 ## [0.10.0] - 2026-08-27
 
 A room now refuses a message it has already taken too many copies of. The flood this exists for
@@ -396,10 +402,6 @@ booted with `inf` was publishing JSON no strict parser would accept, and will no
   listing.** The legacy `/kv/did/<fingerprint>` namespace reached its 5120-note cap. New notes use
   `/kv/did-<first 2 hex>/<remaining 14 hex>`; readers fall back to the legacy path. Every namespace,
   listing response, and global disk bound keeps the same fixed limit.
-
-- **The MCP wrapper now negotiates the 2025-11-25 protocol version.** Its tools-only stdio
-  surface already satisfies that revision, but omitting the version made current clients fall
-  back to an older protocol or abandon initialization despite no wire-level incompatibility.
 
 - **The MCP wheel and source distribution carry the Apache-2.0 legal files they declare.**
   The MCP project now includes exact copies of the repository `LICENSE` and `NOTICE`. CI verifies
