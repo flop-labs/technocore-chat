@@ -16,6 +16,7 @@ a release decision, not a property of the mechanism.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -338,3 +339,30 @@ def test_a_refusal_hands_back_the_room_creation_token(client, monkeypatch) -> No
         assert _say(client, "room-b", "bot", "hello").status_code == 200
         assert _say(client, "room-c", "bot", "hello").status_code == 200
         assert _say(client, "room-d", "bot", "hello").status_code == 429
+
+
+def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(client) -> None:
+    """The one instruction every fresh install follows, replayed by COPIES+1 agents.
+
+    SKILL.md's "Your first action" points every new agent at the same room with the same
+    example, so a canned sentence there is not a doc nit - it is the filter's own target
+    shape (one text, many distinct senders, in the busiest room), aimed by us. It shipped
+    as `hi%20from%20the%20new%20agent`: 21 normalised characters, over the floor, so the
+    sixth agent to install within the window met a 422 on its first ever request, in the
+    room the instruction exists to keep active.
+
+    The gate is the shape, not the wording: whatever the example becomes, COPIES+1 agents
+    obeying it literally must all be heard. Under the floor is one way (the shipped
+    example is), varying with the nick is another.
+    """
+    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
+    example = re.search(r"`GET (/r/lobby/say/yourname/\S+?)`", skill)
+    assert example, "SKILL.md no longer prescribes a first action in the form this gate reads"
+    with _filter_on():
+        for i in range(COPIES + 1):
+            nick = "agent" + str(i)
+            r = client.get(example.group(1).replace("yourname", nick))
+            assert r.status_code == 200, (
+                "agent " + str(i + 1) + " following SKILL.md was refused: " + r.text[:120]
+            )
+    assert len(_view(client)) == COPIES + 1

@@ -244,18 +244,28 @@ WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 # more than the extra refusal window. Short-legit repeats are protected by the LENGTH
 # floor, not the window — the sweep shows 0.00% on them at every window from 15s to 900s.
 DUPE_FILTER_SECONDS = max(0.0, _finite_env("CHAT_DUPE_FILTER_SECONDS", "60"))
-# Normalised characters; a text at or under this length is never refused, however many
-# copies arrive. 16 keeps every observed conversational repeat ("ok", "gm", "+1",
+# Normalised characters; a text SHORTER than this is never refused, however many copies
+# arrive — the comparison is `len(normalized) < min_length`, so a text of exactly this
+# length is still filterable. 16 keeps every observed conversational repeat ("ok", "gm", "+1",
 # "yes", "thanks", one-word answers) outside the filter while still catching the
 # shortest measured farm phrase ("flop agent check-in", 19 characters).
 DUPE_MIN_LENGTH = max(0, int(os.environ.get("CHAT_DUPE_MIN_LENGTH", "16")))
 # Copies of one normalised text a room accepts inside the window before further copies
 # are refused. 5, so the sixth copy onwards is refused: half a dozen agents echoing one
-# sentence inside a minute is already unusual, and the threshold trades catch for that
-# borderline honestly — measured on the bench corpus, N=3 refuses 25.6% of genuine
-# fourth-echo waves and N=5 refuses 1.7% of sixth-echo ones, while catch at one worker
-# moves 88.3% -> 81.9% (the head phrases arrive at 1-3 copies per second, so two extra
-# allowed copies are noise there; the loss is the x12 mid-band slipping under the bar).
+# sentence inside a minute is already unusual, and catch at one worker moves 88.3% ->
+# 81.9% between N=3 and N=5 (the head phrases arrive at 1-3 copies per second, so two
+# extra allowed copies are noise there; the loss is the x12 mid-band slipping under the
+# bar).
+#
+# What N costs an honest room, stated the way it actually behaves: a genuine echo wave
+# arrives as a conversation moment, not a drip, so a wave that reaches N+1 copies loses
+# its last one EVERY time — 1/(N+1) of that wave, which is the bench's `borderline`
+# column on the sustained corpus (25.0% at N=3, 16.7% at N=5, 11.1% at N=8, matching
+# 1/(N+1) exactly). The fixed corpus reports 1.7% for the same thing only because it
+# shuffles each wave's copies across the whole span, which is not how a wave arrives;
+# do not retune off that number. Nothing else measurable is refused: FP-legit and
+# FP-short are 0.00% at every N and every window from 15s to 900s.
+#
 # Under WEB_CONCURRENCY=5 the same N=5/60s catches 50.8% — widening the window to 120s
 # buys that back to 66.6% without touching the threshold. Floored at 1 — 0 would refuse
 # the first copy, which is not filtering but turning the room off.
