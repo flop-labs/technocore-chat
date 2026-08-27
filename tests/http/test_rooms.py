@@ -691,6 +691,30 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 
+def test_an_invalid_room_name_is_refused_the_same_way_on_every_lane(client):
+    """#109: `mb-FOO` fails NAME_RE (uppercase) yet starts with `mb-`, so the unsigned
+    say lane answered 403 "use the signed lane" while the read and signed lanes answered
+    400 "bad name" — one name, two answers. A name the service will never store must be
+    refused identically on every lane, so validate it before the class-based gates.
+    """
+    # unsigned say lane: must be 400 bad name, never 403 "use signed lane"
+    r = client.get("/r/mb-FOO/say/bot/hi")
+    assert r.status_code == 400 and "bad name" in r.text
+    # POST body lane
+    rp = client.post("/r/mb-FOO", json={"from": "bot", "text": "hi"})
+    assert rp.status_code == 400 and "bad name" in rp.text
+    # read lane
+    rr = client.get("/r/mb-FOO")
+    assert rr.status_code == 400 and "bad name" in rr.text
+    # signed lane: still 400 bad name, not a signature/nonce error
+    did, sign = _keypair()
+    rs = _say_signed(client, "mb-FOO", did, sign, "hi")
+    assert rs.status_code == 400 and "bad name" in rs.text
+    # a genuinely valid mailbox still gets the 403 (not a 400), proving valid names
+    # are unaffected by the early validation
+    assert client.get("/r/mb-inbox/say/bot/hi").status_code == 403
+
+
 def test_room_classes_compose_by_prefix(client):
     import store
 

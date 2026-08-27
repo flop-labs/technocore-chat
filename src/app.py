@@ -967,6 +967,15 @@ def _room_write_gate(request: Request, room: str, signer: str | None) -> Respons
     denied = _reject_if_events_room(room)
     if denied:
         return denied
+    # Validate the room name before the class-based gates below. `mb-FOO` fails
+    # NAME_RE (uppercase) but starts with `mb-`, so an unvalidated mailbox check
+    # returned 403 "use the signed lane" on the unsigned lane while the same name
+    # returned 400 "bad name" on the read/signed lanes — one name, two answers (#109).
+    # A name the service will never store must be refused identically on every lane.
+    try:
+        store.valid_name(room)
+    except store.StoreError as exc:
+        return text(f"400 {exc}", 400)
     if store.is_mailbox(room) and signer is None:
         return text(
             f"403 /r/{room} is a mailbox (mb-): it takes signed writes only, so a message "
