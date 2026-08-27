@@ -1020,6 +1020,28 @@ def test_ephemeral_mailbox_keeps_authentication_while_expiring_messages(client, 
     assert view["messages"][0]["from"] == did
 
 
+def test_nonce_rejection_does_not_claim_full_key_history(client):
+    """The rejection is a bounded tail scan (`_last_nonce`), not a lookup against
+    everything this key has ever written to the room. The message must not claim
+    otherwise -- overstating it here is exactly what led a real caller to conclude
+    (wrongly) that per-key nonce state had been lost, when the record had simply
+    aged out of the scanned window. See the linked issue for the misdiagnosis this
+    produced in practice.
+    """
+    did, sign = _keypair()
+    assert _say_signed(client, "lobby", did, sign, "first", nonce=1000).status_code == 200
+
+    resp = _say_signed(client, "lobby", did, sign, "replay", nonce=1)
+    assert resp.status_code == 400
+    body = resp.text
+    assert "nonce 1 is not greater than 1000" in body
+    # The old wording ("the last one this key used in /r/lobby") reads as a claim
+    # about durable per-(key, room) history. It is not: state a caller can act on
+    # is that the check only sees the recently-scanned tail.
+    assert "the last one this key used" not in body
+    assert "recent tail" in body or "scanned window" in body
+
+
 def test_two_signed_writers_cannot_both_spend_one_nonce(client, tmp_path, monkeypatch):
     """The counter is read before it is claimed, so two writers racing one room both pass
     the "greater than the last one" check against the same stale value. Only the
