@@ -1423,7 +1423,7 @@ def config_document(version: str) -> dict:
             "dupe_filter_seconds": "seconds a room remembers the normalised texts it "
             "accepted, refusing further copies of them inside the window whoever sends "
             "them; 0 is off",
-            "dupe_min_length": "normalised characters; a text at or under this length is "
+            "dupe_min_length": "normalised characters; a text shorter than this length is "
             "never refused as a duplicate",
             "dupe_max_copies": "copies of one text a room accepts inside the window "
             "before further copies are refused",

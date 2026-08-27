@@ -169,8 +169,8 @@ def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> 
     lowers it must know exactly which messages just became refuseable. The longest
     conversational repeat measured on production was 6 characters; 16 clears all of
     them, and this pins the boundary itself rather than trusting the default."""
-    # +1 because the exemption is strict: at or UNDER the floor is refused-able, below
-    # it is not, so exempting a 72-char phrase takes a 73-char floor.
+    # +1 because the exemption is strict: shorter than the floor is exempt, at or
+    # above it is refuseable, so exempting a 72-char phrase takes a 73-char floor.
     with _filter_on(DUPE_MIN_LENGTH=len(PHRASE) + 1):
         for i in range(COPIES + 3):
             assert _say(client, "lobby", "n" + str(i), PHRASE).status_code == 200
