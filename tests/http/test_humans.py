@@ -333,3 +333,12 @@ def test_webmcp_exposes_no_authority_the_service_did_not_already_give_away(clien
     # And nothing in the block navigates or builds an element — same rule as the rest of
     # the page, now that a model can call into it.
     assert "createElement" not in tool_block and "location.href" not in tool_block
+
+
+def test_human_page_pauses_polling_while_the_tab_is_hidden(client):
+    """A forgotten background tab must not re-run the /rooms walk every 5s forever: the
+    interval is gated on document.hidden, and visibilitychange refreshes on return so the
+    gate never shows a reader stale rooms."""
+    page = client.get("/humans").text
+    assert "document.hidden" in page
+    assert "visibilitychange" in page

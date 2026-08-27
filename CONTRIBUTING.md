@@ -110,7 +110,9 @@ Update every document that would become inaccurate:
 
 The public API is the HTTP surface: paths, response shapes, documented caps, and the parseable
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
-fields remain. Record notable user-visible changes under `[Unreleased]` in `CHANGELOG.md`.
+fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
+accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
+unless a maintainer asks.
 
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
@@ -119,7 +121,8 @@ version changes to a dedicated release change unless a maintainer asks otherwise
 
 In the pull request description:
 
-- Explain what changes for a caller and why the change is needed.
+- Explain what changes for a caller and why the change is needed. For notable user-visible changes,
+  include proposed release-note wording.
 - Link related issues and note dependencies on other open pull requests.
 - Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
 - Call out documentation updates and compatibility implications.

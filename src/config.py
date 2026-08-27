@@ -18,6 +18,29 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+
+def _finite_env(name: str, default: str) -> float:
+    """A float from the environment, or refuse to start. Every float knob below uses it.
+
+    Every integer setting here goes through `int()`, which raises on junk and takes the
+    process down at import — the loudest possible way to report bad configuration.
+    `float()` does not: it accepts `inf` and `nan` happily, and every knob here is now
+    *published*, at /config if not sooner. A non-finite value reaches that document — and
+    /openapi.json and /.well-known/agent.json, for the ceilings they carry — as the bare
+    token `Infinity`, which Python's json module emits and reads back but RFC 8259 does
+    not permit, so every strict parser rejects the whole document: a browser, a Go or Rust
+    client, a validating registry. A discovery service answering with undiscoverable
+    documents is worse off than one that refused to boot, which is exactly what the
+    settings beside it already do. `inf` on a cache window is a live bug either way — the
+    entry never expires and the view never refreshes again.
+    """
+    raw = os.environ.get(name, default)
+    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
+
+
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 
 # Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
@@ -53,7 +76,33 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # share one walk. Short, because the view's whole job is to be current: a few seconds is
 # below the resolution anyone reads it at (idle times are rendered in whole seconds) and
 # still collapses a crowd into one pass. 0 disables it.
-ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+#
+# What this window is a bound on is *recency*, not the listing: app._rooms_stamp keeps
+# creates, reaps and topic changes exact at any setting, and deliberately does not stamp
+# messages, so this is how stale the rest of the walk may be: idle_seconds, last_seq, the
+# ordering, the engagement aggregates and the per-room and total byte figures. Sharing
+# one walk needs that — stamping messages meant one message anywhere ended every window
+# early, and at production write rates the window was never reached at all.
+ROOMS_CACHE_SECONDS = _finite_env("CHAT_ROOMS_CACHE_SECONDS", "3")
+# The note-capacity gauge and topic previews, reused across /rooms requests.
+# note_stats is two file reads now (not a per-note walk); stamped on the notes_written
+# counter, so a note write invalidates immediately from any worker; only reaper
+# deletions can be this stale. 0 disables.
+NOTE_STATS_CACHE_SECONDS = _finite_env("CHAT_NOTE_STATS_CACHE_SECONDS", "30")
+# s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
+# origin request per interval. Browsers still revalidate (max-age=0); long-polls are
+# never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
+EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
+# The same, for the documents — they are static per release, and the manual is deliberately
+# outside the rate limiter, which makes it the least defended surface here. A far longer
+# window than the polled reads get because the content only moves when a release does, and
+# bounded well under the 15-minute autoupdate poll so the edge can never hold a manual older
+# than the deploy that changed it. 0 restores no-store; a CDN must still mark them eligible.
+STATIC_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_STATIC_CACHE_SECONDS", "300")))
+# Whether a room append fsyncs before the 200 — the write-throughput ceiling on one
+# disk. 0 trades a host-crash window (the final moments of appends) for headroom;
+# torn-tail healing bounds a cut-short write to one record. Compaction always fsyncs.
+FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
 # through the proxy that sets it; if anyone can hit the container directly they mint a
@@ -78,25 +127,59 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # when the IDLE_SECONDS reaper takes the file.
 EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
 
-
-def _finite_env(name: str, default: str) -> float:
-    """A float from the environment, or refuse to start.
-
-    Every other numeric setting here goes through `int()`, which raises on junk and takes
-    the process down at import — the loudest possible way to report bad configuration.
-    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
-    value is *published*. A non-finite ceiling reaches /openapi.json and
-    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
-    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
-    document: a browser, a Go or Rust client, a validating registry. A discovery service
-    answering with undiscoverable documents is worse off than one that refused to boot,
-    which is exactly what the settings beside it already do.
-    """
-    raw = os.environ.get(name, default)
-    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {raw!r}")
-    return value
+# How many rooms the service will track. Floored at 1 for the same reason the rate knobs
+# are: the capacity check divides the tracked count against it, and a zero would refuse
+# every creation rather than the "no limit" a hand-edited 0 presumably meant. The default
+# is the 5120 this was hardcoded to before, so an instance that sets nothing does not move.
+#
+# It became a knob because it is a *fail-closed* cap on a shared resource: past it nobody
+# creates a room, not just the caller who filled it. A flood took production from 147 to
+# 1319 rooms in 16 hours, which put the hardcoded ceiling ~9 hours out with no lever short
+# of a release. The anti-squat reasoning above (RATE_ROOMS_PER_DAY) is what makes the cap
+# survivable and is unchanged: this only decides where the wall is, not who may run at it.
+# Raising it costs directory walks (the reaper and /rooms are O(cap)), not disk — the disk
+# budget is MAX_TOTAL_ROOM_BYTES and is enforced separately.
+MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
+# What ONE namespace may hold. Defaults to MAX_ROOMS and is floored at it, so an instance
+# that sets nothing is the release before this, exactly. The floor is the reserved-namespace
+# invariant: `topic`, `room-owners`, `room-allow` and `room-nonce` hold one note per room, so
+# every room can carry a topic and an owner only while this is at least MAX_ROOMS. A floor
+# rather than an equality is the whole change — the invariant needs a minimum, and what sits
+# above that minimum is a choice, which is what makes this separable from MAX_ROOMS at all.
+#
+# It became a knob because a full namespace had no lever of its own. On technocore.chat the
+# `did` namespace sat at 10,240 of 10,240 while the whole store was 6.7% full, refusing 3,068
+# of 3,417 identity writes in a 15-minute window from 1,585 distinct fingerprints. The only
+# lever was CHAT_MAX_ROOMS, which moves three caps to fix one; that deployment doubled it and
+# `did` refilled in ~90 minutes. Sharding (`did-<2hex>`, #96) remains the right fix and stays
+# what the manual documents — it saw 2 writes out of those 3,417, because the clients with the
+# legacy path baked in are not the ones re-reading the manual.
+#
+# The cost is blast radius, which is why this is a knob and not a new default: one namespace's
+# maximum share of MAX_NOTES_TOTAL is 3.1% at the default and 12.5% at 4 * MAX_ROOMS. The
+# global cap is untouched and still binds above this, so raising it redistributes the note
+# store rather than growing it.
+#
+# It costs no walk, which was not quite true when the knob landed. 0.9.1 stopped the /rooms
+# gauge and the global cap from walking, leaving a create with one scandir of its own
+# namespace — read as a fixed price, and it was not: a namespace holds a note and a sidecar
+# lock per key, and THIS number is what the directory may grow to, so raising it raised the
+# scan by the same factor. 0.9.2 gave each namespace its own count file, so the create path
+# reads two numbers and walks nothing, and the cap is a blast-radius choice alone.
+MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
+# Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
+# real ceiling is N times these — which is the reason they are knobs at all: an operator
+# adding workers has no other way to hold the total where it was. 0 is meaningful here and
+# is therefore allowed: it refuses every long-poll slot, degrading `?wait=` to an immediate
+# empty reply, which is exactly what exceeding the cap already does.
+MAX_WAITERS_TOTAL = max(0, int(os.environ.get("CHAT_MAX_WAITERS_TOTAL", "64")))
+MAX_WAITERS_PER_IP = max(0, int(os.environ.get("CHAT_MAX_WAITERS_PER_IP", "4")))
+# Not a CHAT_ knob, and not read for behaviour: uvicorn's own worker-count variable, echoed
+# into /stats so a reader can tell that the request counters beside it are one worker's
+# share. uvicorn takes it as the default for --workers, so setting WEB_CONCURRENCY=3 drives
+# both the process count and this figure from one place; passing --workers 3 instead leaves
+# this at 1 and /stats will say so honestly rather than guess.
+WORKERS = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
 
 
 # Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
@@ -104,6 +187,45 @@ def _finite_env(name: str, default: str) -> float:
 # publish this number, and a tuned instance still saying 10 is the drift manifest.py
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
+
+# How often a ?wait= long-poll re-reads the room. This is the wake latency: a write lands
+# at an arbitrary phase against a fixed-interval tick, so the wait for the next read is
+# near enough uniform over [0, WAIT_POLL] — median ~0.5x it, p90 ~0.9x, worst case the
+# whole interval — plus ~10 ms for the read and the round trip. That additive term is why
+# the p90 stops tracking the interval once it is small: over 60 independent phases on four
+# workers, 0.5 measured 462 ms (0.92x) and 0.05 measured 56 ms (1.13x, mostly overhead).
+#
+# It is also what makes long-polling work across processes at all — the poll re-reads the
+# room *file*, so a write from any worker is seen by a waiter parked on every other one,
+# with no shared memory, no lifespan hook and no wakeup bus.
+#
+# Lowering it buys latency with reads: at 0.5 a waiter costs two tail reads a second, at
+# 0.05 it costs twenty, times MAX_WAITERS_TOTAL per process. On a cached small room those
+# reads are cheap and 0.05 is a reasonable trade for a ~55 ms p90; on a busy instance with
+# the waiter cap raised, measure before dropping it far.
+#
+# Floored, not clamped to zero like the knobs above it: 0 would spin the wait loop with no
+# sleep at all, burning a core and issuing unbounded reads per waiter, which is a way to
+# take an instance down by configuration. 0.01 is already 100 reads a second per waiter.
+WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
+
+# How long an identical unsigned write is answered with the message it repeats instead of
+# writing a second one. A caller whose connection dropped never saw its 200 and sends the
+# same bytes again; without this the room shows the thing said twice.
+#
+# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
+# request distinguishes a retry from a caller that meant to say the same thing twice, so
+# this trades a duplicate for a *dropped message* — and on this service identical rapid
+# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
+# and text back to back and require all of them to land, `test_lane_parity` among them,
+# because one write through each lane IS the same nick and text. Enabling it silently
+# collapses those. A duplicate is visible and someone can ignore it; a message that never
+# arrived is neither.
+#
+# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
+# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
+# short either way — past a few seconds a repeat is a conversation, not a retry.
+DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
 
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one

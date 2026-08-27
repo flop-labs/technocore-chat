@@ -38,9 +38,7 @@ PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-cl
 # The paths that cost nothing, named once because the 429 body and the manual both list
 # them. A 429 that points at a path which is itself rate limited is advice that fails at
 # exactly the moment it is taken.
-FREE_PATHS = (
-    "/, /llms.txt, /skill.md, /patterns.md, /auth.md, /openapi.json, /.well-known/* and /healthz"
-)
+FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config, /.well-known/* and /healthz"
 
 # Bounded LRU, because every unseen IP would otherwise add entries forever and the
 # proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
@@ -64,6 +62,62 @@ _requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
 _proxy_evidence: dict[str, int] = {"proxied_requests": 0}
 _identities: set[str] = set()
 MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a diagnostic
+
+# Retry idempotency for the unsigned write lanes. Keyed by (client, room, nick, text
+# digest) -> the seq that write got, so a caller that repeats itself inside the window is
+# answered with the message it already wrote instead of writing a second one.
+#
+# Only the seq is kept, never the text: the reply re-reads the room anyway, so the record
+# is recovered from that view by seq. An entry is a small tuple, so the whole map at the
+# cap is a few hundred KB rather than the tens of MB caching 4096-character bodies would
+# be — the bound has to hold under exactly the flood that makes retries likely.
+#
+# Per process, like _buckets, and deliberately not shared: under `--workers N` a retry that
+# lands on another worker writes the duplicate. That is the accepted trade — the check
+# costs no lock and no disk, where making it exact would mean holding the room's flock
+# across a tail read on every write. A couple of duplicates beats every writer queueing.
+#
+# Never applied to the signed lane. A signed URL is single-use and the nonce already
+# refuses a replay; answering one with 200 and a seq would turn a security refusal into an
+# acknowledgement.
+MAX_RECENT_WRITES = 4096
+_recent: OrderedDict[tuple, tuple[int, float]] = OrderedDict()
+
+
+def recent_write(key: tuple, now: float, ttl: float) -> int | None:
+    """The seq an identical write got inside `ttl`, or None. Read-only: a hit does not
+    extend the window, so a caller retrying in a loop still stops being deduplicated `ttl`
+    after the write it is retrying, not `ttl` after it gives up."""
+    hit = _recent.get(key)
+    if hit is None:
+        return None
+    seq, at = hit
+    if now - at > ttl:
+        del _recent[key]
+        return None
+    return seq
+
+
+def remember_write(key: tuple, seq: int, now: float, ttl: float, cap: int) -> None:
+    """Record a write as the answer to its own retries.
+
+    Two bounds, because one is not enough under load. Entries go in in time order and are
+    never reordered, so the front is always the oldest and a short sweep from there drops
+    what has expired — capped per call, so a burst can never turn one write into a long
+    pause. The hard cap is what actually guarantees the bound: whatever the sweep leaves,
+    the oldest entries are evicted until the map fits. Evicting early only costs a
+    duplicate, which is the cheaper failure.
+    """
+    for _ in range(8):
+        if not _recent:
+            break
+        oldest = next(iter(_recent))
+        if now - _recent[oldest][1] <= ttl:
+            break
+        del _recent[oldest]
+    _recent[key] = (seq, now)
+    while len(_recent) > cap:
+        _recent.popitem(last=False)
 
 
 def client_ip(request: Request, ip_header: str = "") -> str:
@@ -232,8 +286,8 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
 # attack, so waiters are capped twice — per IP, and globally — and exceeding either
 # degrades to an immediate empty reply rather than an error. A caller that cannot get a
 # slot is exactly as well off as before long-polling existed.
-MAX_WAITERS_TOTAL = 64
-MAX_WAITERS_PER_IP = 4
+MAX_WAITERS_TOTAL = config.MAX_WAITERS_TOTAL
+MAX_WAITERS_PER_IP = config.MAX_WAITERS_PER_IP
 _waiters_by_ip: dict[str, int] = {}
 _waiters_total = 0
 

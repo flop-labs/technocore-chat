@@ -89,18 +89,27 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
 
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
+    import store
 
     limits = client.get("/.well-known/agent.json").json()["limits"]
     assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
+    # Both note caps, because either can be the refusal and only one of them used to be
+    # derivable: `notes_per_namespace` was MAX_ROOMS until CHAT_MAX_NOTES_PER_NS made it a
+    # per-deployment number, so a client that reads it off `rooms` now reads it wrong.
+    assert limits["notes"] == store.MAX_NOTES_TOTAL
+    assert limits["notes_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
 def test_agent_surfaces_are_never_html(client):
+    # Cache-Control is deliberately not asserted here: it is per path and it is covered
+    # path by path in the four edge-cache tests at the end of this file. This one is about
+    # the HTML exception not spreading (docs/design.md §8), and mixing the two is what
+    # turned a widened cache rule into an edit to a test named for XSS.
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
@@ -110,7 +119,7 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     assert client.get("/r/lobby").headers["x-robots-tag"] == "noindex"
 
 
-def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
+def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
     import config
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
@@ -139,6 +148,32 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     assert "/patterns.md" not in "".join(  # nothing disallows it for crawlers
         line for line in client.get("/robots.txt").text.splitlines() if "Disallow" in line
     )
+
+
+def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
+    """The bridging guide, served like the patterns it composes.
+
+    Its whole premise is that every protocol in it is a process run beside this service, so
+    the assertion that matters is the negative one: publishing the document must not turn
+    into a claim that this origin speaks any of them. The manifest still refuses A2A and MCP
+    (test_no_protocol_claims_in_the_manifest), and this checks the document says so itself.
+
+    Unlimited for a sharper reason than the manual's: a bridge author reads it precisely
+    when their bridge is being told to back off.
+    """
+    import config
+
+    page = client.get("/interop.md")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("text/plain")
+    assert "ActivityPub" in page.text and "A2A" in page.text
+    assert "speaks one protocol" in page.text  # states what this origin actually answers
+    assert "/interop.md" in client.get("/llms.txt").text  # the manual points here
+    assert "/interop.md" in client.get("/sitemap.xml").text  # crawlers are told about it
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/interop.md").status_code == 200  # never rate limited
+    assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
 
 
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
@@ -173,15 +208,16 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     did_a, _sign_a = _keypair(7)
     a_static = X25519PrivateKey.from_private_bytes(bytes([7]) * 32)
     fp = hashlib.sha256(did_a.encode()).hexdigest()[:16]
+    did_path = f"/kv/did-{fp[:2]}/{fp[2:]}"
     mailbox = "mb-p-inbox-of-a"
     note = f"{did_a} x25519:{b64(a_static.public_key().public_bytes_raw())} mailbox:{mailbox}"
-    assert client.post(f"/kv/did/{fp}", json={"value": note}).status_code == 200
+    assert client.post(did_path, json={"value": note}).status_code == 200
 
     # B (sender): reads the note, seals a room key to A with an ephemeral key.
     did_b, sign_b = _keypair(8)
     # The value is the last non-empty line: note reads open with the untrusted-content
     # banner, and a real reader has to skip it exactly like this.
-    fetched = [ln for ln in client.get(f"/kv/did/{fp}").text.splitlines() if ln.strip()][-1]
+    fetched = [ln for ln in client.get(did_path).text.splitlines() if ln.strip()][-1]
     b_x25519 = dict(f.split(":", 1) for f in fetched.split(" ")[1:])
     eph = X25519PrivateKey.from_private_bytes(bytes([8]) * 32)
     a_pub = X25519PrivateKey.from_private_bytes(bytes([7]) * 32).public_key()
@@ -332,8 +368,8 @@ def test_every_documented_response_declares_the_body_it_returns(client):
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
-    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
-    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
+    value is published. A non-finite ceiling reaches /openapi.json and
     /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
     but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
     service answering with undiscoverable documents is worse off than one that refused to
@@ -880,10 +916,12 @@ def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
 
 def test_the_manual_defines_every_convention_it_names(client):
     """A convention an agent cannot derive is a convention it will get wrong. The DID note
-    fingerprint is the one that bites: `/kv/did/<fingerprint>` is unusable without knowing
-    what the fingerprint is of, and a note key cannot hold a raw did:key."""
+    fingerprint is the one that bites: the sharded path is unusable without knowing what
+    the fingerprint is of and exactly where to split it."""
     manual = client.get("/llms.txt").text
-    assert "first 16 hex characters of the" in manual and "SHA-256" in manual
+    assert "first 16 lowercase hex characters of SHA-256" in manual
+    assert "/kv/did-<first 2>/<remaining 14>" in manual
+    assert "legacy /kv/did/<fingerprint>" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
     assert "newest 1 MiB" in manual
     assert "even if the message remains elsewhere in the larger room ring" in manual
@@ -1136,7 +1174,7 @@ def test_only_the_markdown_documents_negotiate_markdown(client):
     when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
     is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
-    for path in ("/skill.md", "/patterns.md", "/auth.md"):
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
         assert got.startswith("text/markdown"), f"{path} answered {got}"
         assert client.get(path).headers["content-type"].startswith("text/plain")
@@ -1171,3 +1209,96 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+# The documents are static per release and deliberately outside the rate limiter, which
+# makes them both the cheapest thing to cache and the least defended thing not to. These
+# four tests are the fence around that: what may be held at the edge, what may never be,
+# and the exact string, so a later refactor of the shared helper cannot widen it silently.
+
+
+def test_the_static_documents_are_edge_cacheable_and_the_header_is_exact(client):
+    """Every document a crawler or an agent fetches per release, cacheable by the CDN in
+    front. `max-age=0` is what keeps this invisible to callers — they still revalidate on
+    every request; only the shared cache is allowed to hold a copy, which is the whole
+    point on the paths that have no rate limiter in front of them.
+
+    The exact string is pinned once rather than for each path: it is one helper, and the
+    value is a contract with the CDN, not an implementation detail.
+    """
+    static = "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    assert client.get("/").headers["cache-control"] == static
+
+    documents = ("/", "/llms.txt", "/skill.md", "/patterns.md", "/interop.md", "/auth.md")
+    for path in (*documents, "/robots.txt", "/.well-known/security.txt"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc, path
+        assert "no-store" not in cc, path
+
+
+def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
+    """The three that would each be a real defect if held at the edge.
+
+    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
+    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
+    rollback probe reads — a cached `ok` would let a broken release pass its own health
+    gate. /stats is token-gated and counts one worker's requests.
+    """
+    import config
+
+    for path in ("/humans", "/healthz"):
+        assert client.get(path).headers["cache-control"] == "no-store", path
+
+    # With no token configured /stats is a 404, so the gated response has to be provoked
+    # or this asserts no-store on a path that was never routed.
+    with config.override(STATS_TOKEN="t", STATS_CACHE_SECONDS=0):
+        r = client.get("/stats", headers={"x-stats-token": "t"})
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-store"
+
+
+def test_a_write_and_a_refusal_are_never_edge_cacheable(client):
+    """Writes in this protocol are GETs, so a cacheable header on one is a silently
+    swallowed write — the caller gets a 200 that never reached the store. A cached 429 is
+    the same defect pointed the other way: one caller's exhausted budget, served to
+    everyone until it expires.
+    """
+    import config
+
+    assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
+
+    with config.override(RATE_WRITE=2):
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(4)]
+        assert 429 in codes, codes
+        refused = client.get("/r/lobby/say/bot/again")
+        assert refused.status_code == 429
+        assert refused.headers["cache-control"] == "no-store"
+
+
+def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(client):
+    """The half of edge-caching the documents needed that the polled reads never did.
+
+    /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
+    labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
+    ignored Accept would hand one caller's label to the next. / and /llms.txt never
+    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+
+    And the markdown answer itself stays no-store, which is belt-and-braces on top of
+    Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
+    nobody has, the edge can still only ever hold the default representation.
+    """
+    import config
+
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
+        assert client.get(path).headers["vary"] == "Accept", path
+        negotiated = client.get(path, headers={"Accept": "text/markdown"})
+        assert negotiated.headers["content-type"].startswith("text/markdown"), path
+        assert negotiated.headers["cache-control"] == "no-store", path
+
+    for path in ("/", "/llms.txt"):
+        assert "vary" not in client.get(path).headers, path
+
+    # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
+    with config.override(STATIC_CACHE_SECONDS=0):
+        for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
+            assert client.get(path).headers["cache-control"] == "no-store", path

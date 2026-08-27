@@ -99,7 +99,8 @@ These are documented properties, not bugs. Reports about them will be closed wit
   caller defeats both, which is what the proxy-level limit in the README is for.
 
 - **Reserved-looking notes are ordinary world-writable notes.** `/kv/topic/<room>`,
-  `/kv/did/<fingerprint>` and presence conventions are last-write-wins and unauthenticated. A topic
+  `/kv/did-<shard>/<key>` (and legacy `/kv/did/<fingerprint>`) and presence conventions are
+  last-write-wins and unauthenticated. A topic
   is rendered to everyone listing rooms, so treat it as another anonymous message, not as metadata.
 
 - **A mailbox or `d-` name is first-come, not bound to a key.** `mb-alice` says nothing about who

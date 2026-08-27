@@ -390,6 +390,44 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     # ------------------------------------------------------------------ invariants
 
+    @rule(
+        room=st.sampled_from(ROOMS),
+        note=st.sampled_from(NOTES),
+        pick_room=st.booleans(),
+    )
+    def unshard(self, room: str, note: tuple[str, str], pick_room: bool) -> None:
+        """Put a file back where a pre-sharding build kept it — flat in `rooms/`, or directly
+        in the namespace — so the next rule that touches that name has to migrate it.
+
+        The model deliberately does not move. Where a file sits is not one of the promises
+        this machine holds the store to, and that is the whole claim: `seq`, the surviving
+        history, a note's value and the reaper's clock all have to come through the move
+        untouched, in whatever order Hypothesis happens to reach it.
+
+        The sequence is what makes this worth a rule rather than an example. Migrating on read
+        while writing to the bucket forks a live room in two — old file keeps the history, new
+        file restarts at `seq` 1 — and no single-step test sees it, because each step alone
+        looks correct. `say`'s existing "seq jumped" assertion is what catches it, one step
+        later, and only if something put the file back first.
+
+        `os.replace` keeps mtime, so the ageing model stays true across the move. The sidecar
+        lock goes too: a real pre-sharding store has both flat, and moving one without the
+        other would test a state that never existed.
+        """
+        if pick_room:
+            sharded = store.room_path(self.root, room)
+            flat = self.root / "rooms" / f"{room}.jsonl"
+        else:
+            ns, key = note
+            sharded = store.note_path(self.root, ns, key)
+            flat = store._note_ns_dir(self.root, ns) / f"{key}.txt"
+        if not sharded.exists() or sharded == flat:
+            return
+        flat.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(sharded, flat)
+        if (lock := Path(f"{sharded}.lock")).exists():
+            os.replace(lock, Path(f"{flat}.lock"))
+
     @invariant()
     def notes_hold_what_was_written(self) -> None:
         for key, value in self.notes.items():
@@ -399,14 +437,14 @@ class StoreLifecycle(RuleBasedStateMachine):
     def no_room_exceeds_its_ring(self) -> None:
         """Under the ring, not merely at it: otherwise the next append re-triggers
         compaction and every write pays a full rewrite."""
-        for path in (self.root / "rooms").glob("*.jsonl"):
+        for path in (self.root / "rooms").rglob("*.jsonl"):
             assert path.stat().st_size <= store.MAX_ROOM_BYTES, f"{path.name} is over its ring"
 
     @invariant()
     def every_record_on_disk_is_one_record(self) -> None:
         """One JSON object per line: the read path is built on the line being the frame, so
         a fused line loses the record after it as well as itself."""
-        for path in (self.root / "rooms").glob("*.jsonl"):
+        for path in (self.root / "rooms").rglob("*.jsonl"):
             for raw in path.read_bytes().splitlines():
                 if raw.strip():
                     assert store._parse(raw) is not None, f"{path.name}: unparseable {raw[:60]!r}"
@@ -415,7 +453,7 @@ class StoreLifecycle(RuleBasedStateMachine):
     def lifetime_counters_only_go_up(self) -> None:
         """Nothing else in the store is monotonic — seq dies with its room, compaction
         drops lines, the reaper deletes files — so a "messages since" digest has only
-        these four."""
+        these five."""
         counters = store.counters(self.root)
         previous = getattr(self, "_counters", dict.fromkeys(store.COUNTER_KEYS, 0))
         for name in store.COUNTER_KEYS:
