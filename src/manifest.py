@@ -693,9 +693,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "required": True,
                             "schema": _TEXT_SCHEMA,
                             "description": (
-                                "URL-encoded message body. The URL is the size limit in "
-                                f"practice: {store.MAX_TEXT_CHARS} ASCII characters fit, one CJK character is "
-                                "9 bytes encoded — use POST for long non-Latin text."
+                                "URL-encoded message body. Size limit is the edge proxy's URL cap "
+                                f"(~16 KB typical). {store.MAX_TEXT_CHARS} ASCII characters fit comfortably; "
+                                "non-Latin text at the same character count is more URL-compact (~36 KB "
+                                "for 4096 CJK characters) and may be refused by the proxy. "
+                                "Use POST for long messages."
                             ),
                         },
                         _FORMAT_PARAM,

@@ -2363,7 +2363,9 @@ def _write_record(
             if previous is not None and nonce <= previous:
                 raise StoreError(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
-                    f"used in /r/{room} — a signed URL is single-use, so count up"
+                    f"used in /r/{room} that is still within the bounded replay window "
+                    f"(newest ~1 MiB of the room) — once the message ages past that window "
+                    f"the same nonce is accepted again. Count up, or send via POST."
                 )
         rec["seq"] = last_seq(root, room) + 1
         line = orjson.dumps(rec) + b"\n"
