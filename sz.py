@@ -23,6 +23,14 @@ when the baseline was raised to match; --caps prints the table against the caps.
 core label and core_total must have a cap — a missing entry is an error in the enforcing
 modes, not an exemption, so a file added to CORE_FILES cannot slip past the policy.
 
+The baseline's core_total is never stored: it is always the sum of the "files" rows
+beside it, so a second copy on disk could only drift from what it is summing, never add
+information. --check derives it from baseline["files"] the same way it derives the fresh
+one from the tree. --update-baseline also leaves a file's row exactly as it was on disk
+when that file's code_lines did not move, rather than rewriting every row from a fresh
+measure_all() every time: two PRs touching different core files then collide only on the
+rows they actually changed, not on rows measure_all() happened to re-walk unchanged.
+
 Counting rules: a triple-quoted string literal is one token starting at one line, so an
 embedded prose document (app.py's MANUAL) counts as ~1 code line by design — embedded
 docs are effectively extra, and extracting one into a file will barely move code-lines.
@@ -135,9 +143,21 @@ def main():
     # untouched, or --update-baseline would silently delete the ceiling it ratchets under.
     caps = baseline.get("caps", {})
     if args.update_baseline:
-        caps = caps or json.loads(BASELINE.read_text(encoding="utf-8")).get("caps", {})
+        old = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
+        caps = caps or old.get("caps", {})
+        old_files = old.get("files", {})
+        # Keep a file's previously-stored row byte-for-byte when its code_lines agrees
+        # with what is on disk, instead of the fresh measurement — see the docstring.
+        # The report printed below still walks the fresh `files`, only the write is
+        # stabilised, so this never hides what actually changed from the person running it.
+        stable_files = {
+            label: old_files[label]
+            if label in old_files and old_files[label]["code_lines"] == m["code_lines"]
+            else m
+            for label, m in files.items()
+        }
         BASELINE.write_text(
-            json.dumps({"core_total": core_total, "caps": caps, "files": files}, indent=2) + "\n",
+            json.dumps({"caps": caps, "files": stable_files}, indent=2) + "\n",
             encoding="utf-8",
         )
         print(f"baseline written: core code-lines = {core_total}")
@@ -209,9 +229,14 @@ def main():
             )
             print(f"core code-lines grew vs sz-baseline.json: {detail}", file=sys.stderr)
             return 1
-        if core_total > baseline["core_total"]:
+        # Derived, not read: see the docstring. Summed from the same baseline["files"]
+        # rows the per-file check above just walked, so this can never disagree with them.
+        baseline_total = sum(
+            v["code_lines"] for k, v in baseline["files"].items() if k.startswith("core/")
+        )
+        if core_total > baseline_total:
             print(
-                f"core total grew vs baseline: {baseline['core_total']} -> {core_total}"
+                f"core total grew vs baseline: {baseline_total} -> {core_total}"
                 f" (cap {caps['core_total']})",
                 file=sys.stderr,
             )
@@ -223,7 +248,7 @@ def main():
             )
             print(f"core code-lines past cap: {detail}", file=sys.stderr)
             return 1
-        print(f"check ok: core code-lines <= baseline ({baseline['core_total']})")
+        print(f"check ok: core code-lines <= baseline ({baseline_total})")
     return 0
 
 
