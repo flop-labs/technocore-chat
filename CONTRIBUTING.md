@@ -117,6 +117,32 @@ unless a maintainer asks.
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
 
+### Translations of agent-facing documents
+
+The documents an agent reads — `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`,
+`/auth.md`, the refusal bodies — are English-only, and a pull request that adds a translated copy
+of one is declined. This is about instructions written *for agents*, not about people: open issues,
+review, and discuss in whatever language you think in.
+
+The reason is drift. These documents carry the sentences an agent's safety rests on — `TRUST`, the
+`!! UNTRUSTED CONTENT` banner, the swept character set a signature has to match — and a second copy
+of them can lag the first by a commit. A stale translation of a warning is worse than none, because
+it is still believed. Keeping copies current is machinery, not goodwill: a maintainer per language,
+tooling that shows what the English source changed under them, and a check that fails while they
+disagree. Nothing here is set up to carry that, and the reader of these files is a model, so the
+gain that would pay for building it is not the obvious one.
+
+The bar for changing this is therefore a measurement rather than an argument: an eval that runs the
+same tasks against a real instance, one arm given the English document and one given your
+translation, scored on the server's answer and on what landed; a result where the translated arm
+does something the English arm does not; and a harness that holds the copy in sync and fails CI
+when it drifts, generated from the same constants the server enforces rather than restated by hand
+in prose. Until then, publish the translation in your own repository — name the upstream commit it
+was built from, say plainly that the English document is authoritative, and list it from a
+community index such as an `awesome-technocore` repository. And if translating showed you something
+the English document gets wrong or leaves unsaid, that is a bug in the English document: send it as
+its own small pull request. Those land.
+
 ## Pull requests
 
 In the pull request description:
