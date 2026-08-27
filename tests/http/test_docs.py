@@ -87,6 +87,80 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_names_every_category_the_sweep_actually_takes(client):
+    """The same drift the caps test guards, on the sweep (#171).
+
+    The prose said "C0/C1 controls, format characters, zero-width joiners, bidi overrides",
+    which is `Cc` plus part of `Cf`, while `INVISIBLE_CATEGORIES` also takes Cs, Co, Zl and
+    Zp. A reader who trusted it signed text the server had already altered, then met a 403
+    naming the signature rather than the sweep. Both halves are asserted: every enforced
+    category is named, plus the four that used to be missing are present by name.
+    """
+    import store
+
+    manual = client.get("/llms.txt").text
+    swept = manual.split("SINGLE LINE:", 1)[1].split("\n\n", 1)[0]
+    for category in store.INVISIBLE_CATEGORIES:
+        assert category in swept, f"the manual does not name {category}, which the sweep takes"
+    # The regression itself: these four were enforced and unnamed.
+    for missing in ("Cs", "Co", "Zl", "Zp"):
+        assert missing in swept, missing
+
+
+def test_the_manual_states_the_url_break_even_it_actually_has(client):
+    """The GET write lane meets two ceilings, of which the character cap is not the binding one.
+
+    Percent-encoding costs 3 bytes per UTF-8 byte, so the ~16 KB a URL survives at the edge
+    divides by `MAX_TEXT_CHARS` into a bytes-per-character break-even. Above it a caller
+    cannot reach the character cap in a URL at all. The prose used to frame that as
+    "non-Latin scripts do not fit", which is the wrong axis: dense Vietnamese is Latin and
+    does not fit either. 16 KB is the edge's number rather than one this service enforces,
+    so what is pinned here is the arithmetic against our own cap.
+    """
+    import store
+
+    break_even = (16 << 10) // store.MAX_TEXT_CHARS
+    budget = client.get("/llms.txt").text.split("URL BUDGET:", 1)[1].split("\n\n", 1)[0]
+    assert f"break-even is {break_even} bytes per character" in budget
+    assert "Vietnamese" in budget  # the counterexample that makes the axis clear
+    assert "Non-Latin scripts do not" not in budget  # the framing this replaced
+
+
+def test_the_service_never_normalizes_so_a_signature_covers_the_form_you_sent(client):
+    """What the manual's NORMALIZATION paragraph promises, asserted through the surface.
+
+    Unicode composition is a caller's choice rather than a canonical form. This service takes
+    neither side: it stores the code points it was given. That has to be documented because
+    the signed lane makes it sharp. NFC and NFD of one word are different bytes, so a
+    signature over one is not a signature over the other, while the 403 that follows says
+    nothing about normalization.
+    """
+    import unicodedata
+
+    precomposed = unicodedata.normalize("NFC", "Việt")
+    decomposed = unicodedata.normalize("NFD", "Việt")
+    assert precomposed != decomposed and len(decomposed) > len(precomposed)
+
+    for form in (precomposed, decomposed):
+        posted = client.post("/r/norm?format=json", json={"from": "vi", "text": form})
+        assert posted.status_code == 200
+        assert posted.json()["posted"]["text"] == form  # stored as sent, neither folded
+
+    stored = [m["text"] for m in client.get("/r/norm?format=json").json()["messages"]]
+    assert stored == [precomposed, decomposed]  # two messages, not one deduplicated word
+
+    did, sign = _keypair()
+    signature = sign(f"norm|1|{precomposed}")
+    crossed = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": decomposed}
+    )
+    assert crossed.status_code == 403  # signed one form, sent the other
+    matched = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": precomposed}
+    )
+    assert matched.status_code == 200
+
+
 def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client):
     """The reported bug, through the surface that reported it (#242).
 
