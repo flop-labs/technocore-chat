@@ -51,7 +51,9 @@ def test_the_human_page_points_at_the_protocol_in_its_headers(client):
     assert not any(
         rel in page.headers["Link"] for rel in ("preload", "prefetch", "preconnect", "stylesheet")
     )
-    # The header adds no reach: every path in it is already an anchor in the page itself.
+    # Two of the three are anchors in the page itself: service-desc (/openapi.json) and
+    # service-doc (/llms.txt). api-catalog rides the header alone, so the page gains no reach
+    # a browser could follow beyond what it already links.
     assert '<a href="/llms.txt">' in page.text and 'href="/openapi.json"' in page.text
 
 
