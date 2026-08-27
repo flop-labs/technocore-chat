@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "01M10VJZ5E7CR2GWQACX5BGPR9",
+  "session_id": "b7b396d0-d745-408f-a12c-244185f5e4c7",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-27T05:37:51.560162Z",
+  "branch": "feat/cross-sender-dupe-filter",
+  "checkpoints_count": 5,
+  "files_touched": [
+    "tests/test_mcp.py"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-5",
+  "turn_id": "8c8996d21348",
+  "checkpoint_transcript_start": 1135,
+  "transcript_lines_at_start": 1135,
+  "compact_transcript_start": 222,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "session_metrics": {
+    "turn_count": 5
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-27T05:37:51.306458Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 212,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 212,
+    "total_lines_changed": 303,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
