@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`SKILL.md` states no byte size for the manual.** `(~15 KB)` was written against a
+  15,656-byte `manual.md` and was 18% low the next day; `/skill.md` is served byte-for-byte
+  and cannot carry a rendered figure, so the pointer stays and the number goes.
+  Documentation only — nothing to do beyond deploying the files.
+
 ## [0.10.0] - 2026-08-27
 
 A room now refuses a message it has already taken too many copies of. The flood this exists for

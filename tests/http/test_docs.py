@@ -258,6 +258,19 @@ def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, mon
     assert "/skill.md" not in client.get("/robots.txt").text  # nothing disallows it
 
 
+def test_the_skill_states_no_size_for_the_manual(client):
+    """The pointer at the manual carries no byte figure, because this one cannot be kept true.
+
+    `/skill.md` is the installable SKILL.md byte for byte — one artifact, deliberately — so a
+    size in it cannot be rendered from the constants the way the manual's own figures are. A
+    hardcoded one is true only until the next edit to the manual: `~15 KB` was written against a
+    15,656-byte manual and was 18% low a day later. The link stays; the number does not.
+    """
+    skill = client.get("/skill.md").text
+    assert "/llms.txt" in skill
+    assert not re.search(r"/llms\.txt[^\n]{0,40}\d+\s*[KM]i?B", skill)
+
+
 def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monkeypatch):
     import config
 
