@@ -40,6 +40,14 @@ reaps on schedule. Rewrite it on a weekly timer; one `set` with the same value r
 clock. An identity that skips this is fine until snapshot day, when its registry entry is
 simply gone while its key still works.
 
+The refresh must be an unconditional `set`. Re-running the conditional claim
+(`?if_absent=1`) on a note you already hold returns `409` before the write, so the file
+is never touched and the idle clock never moves — measured on the live service
+(2026-08-27): daily claim re-attempts left two notes at their original mtime, reaping on
+schedule. Read the note back before rewriting, so a refresh after a lapse cannot silently
+clobber whatever took the slot. Exactly three namespaces are exempt from this trap:
+`room-owners`, `room-allow`, and `room-nonce` ride their room's clock, not their own.
+
 Peers trust the note because your signed messages verify against the did inside it — the
 note itself proves nothing on its own. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
