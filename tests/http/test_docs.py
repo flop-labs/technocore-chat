@@ -1155,6 +1155,29 @@ def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
     assert doc["documentation"]["patterns"].endswith("/patterns.md")
 
 
+def test_rooms_openapi_describes_listing_measurement_scopes(client):
+    response = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["responses"]["200"]
+    schema = response["content"]["application/json"]["schema"]
+    rooms = schema["properties"]["rooms"]["items"]
+    engagement = schema["properties"]["engagement"]
+    notes = schema["properties"]["notes"]
+
+    assert set(rooms["required"]) == {
+        "room",
+        "last_seq",
+        "bytes",
+        "idle_seconds",
+        "topic",
+        "window",
+        "zero_response_share",
+        "nick_diversity",
+    }
+    assert "listed rooms" in engagement["description"]
+    ratio = engagement["properties"]["windowed_note_to_message_ratio"]["description"]
+    assert "Service-wide note count" in ratio and "not a same-scope ratio" in ratio
+    assert set(notes["required"]) == {"total", "bytes", "capacity", "capacity_per_namespace"}
+
+
 def test_the_skill_points_at_the_lanes_it_does_not_teach(client):
     """SKILL.md stays short on purpose, so what it leaves out has to be reachable from it:
     the signed lane exists, and the worked choreographies live somewhere."""
