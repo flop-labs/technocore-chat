@@ -1458,6 +1458,22 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
             assert client.get(path).headers["cache-control"] == "no-store", path
 
 
+def test_the_manual_advises_retry_on_a_timed_out_signed_write(client):
+    """A timed-out or 5xx signed write may have landed: the nonce is consumed before the
+    caller hears anything, so resending the same URL is refused as a replay — and that
+    refusal must not read as a failure (#141). The manual must tell a caller to re-read
+    state and sign a fresh nonce instead of resubmitting, or the better-behaved client
+    (which treats 400 as permanent) silently drops a message that actually landed."""
+    manual = client.get("/llms.txt").text
+    assert "RETRY" in manual, "the manual has no RETRY section for signed writes"
+    lowered = manual.lower()
+    assert "resend" in lowered or "resubmit" in lowered, "manual does not warn against resending the same signed URL"
+    assert "re-read" in lowered or "reread" in lowered, "manual does not tell the caller to re-read state after a timeout"
+    # the ownership namespaces keep a persistent replay counter, so a retried claim is
+    # refused forever rather than eventually re-accepted like a room write
+    assert "room-owners" in lowered, "manual does not point at /kv/room-owners to check claim state"
+
+
 def test_note_value_param_documents_the_url_budget_not_just_maxlength(client):
     """Note values ride in the URL on the GET write lanes, so the binding limit is the edge
     URL budget, not `maxLength`. A generated client that trusts `maxLength` as the size
