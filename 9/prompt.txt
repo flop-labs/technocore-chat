@@ -1,0 +1,42 @@
+A test-generation agent found a real bug in this project but could NOT write a test for it, and recorded a code blind spot. The finding is the finding `guard:687.700.703.706.709.712.715.718.721|:682`.
+
+Why it could not be tested, in the earlier agent's words:
+  guardId 682 (_waiter_release's `waitersByIp.has(ip)` guard, quint-specs/rate-limiting-and-abuse-budgets.qnt:223-237) was queued from a STALE investigation snapshot: reports/rate-limiting-and-abuse-budgets/snapshots/1787461322.json, whose outcome.test.stoppedBy shows "No spec path matches logged action '_waiter_release' at step 9" for tests/test_app.py::test_waiter_slots_are_bounded_per_ip.
+
+Investigation performed:
+1. Executed the test's exact real code path (app._waiter_slot('1.2.3.4') nested 4 deep + a denied 5th + app._waiter_slot('5.6.7.8')) against src/app.py with log_action stubbed to capture arguments, via `.venv/bin/python`. Captured sequence: _waiter_slot(ip1) x4 granted, _waiter_slot(ip1) denied (5th, at MAX_WAITERS_PER_IP=4 cap), _waiter_slot(ip2) granted, then releases in real exit order: release(ip2), release(ip1) x4. Confirmed app._waiters_total==0 and app._waiters_by_ip=={} at the end (real accounting balances exactly).
+2. Hand-replayed that exact sequence against the spec's _waiter_slot/_waiter_release (quint-specs/rate-limiting-and-abuse-budgets.qnt:202-237): waitersByIp.has(ip) is TRUE at every one of the 5 releases (ip1 counts 4->3->2->1->0, ip2 count 1->0) — the guard never goes false in this trace.
+3. A LATER snapshot from the SAME investigation run, reports/.../snapshots/1787461459.json, replays this identical test with "matched": true and resolves the SAME 11-step path (steps 0-10, same picks: ip1 x4 grants, ip1 denied at step4 (no state write), ip2 grant, release ip2, release ip1 x4) with no stopping error at step 9 or anywhere else.
+4. The CURRENT (non-snapshot) report.json's guardScenarios entry for guardId 682 now reads confirmed:"single-conjunct", status:"untested", confirmRuns:2, violatedBy:[] — i.e. re-probing with more confirm runs has already retracted the "confirmed":"all-off-only"/status:"violated"/confirmRuns:1/violatedBy:["tests/test_app.py::test_waiter_slots_are_bounded_per_ip"] result that WAS recorded in the 1787461322 snapshot and which this pipeline's queued subject was built from.
+
+Root cause of the transient stoppedBy failure (best available explanation, not itself proven further): the oracle's replayed waitersByIp/waitersTotal model state is carried continuously across tests (and possibly across separate suite runs against the same long-lived oracle daemon), keyed by the small label alphabet ("ip1"/"ip2"/"ip3", src/app.py:326 `_RATE_LIMIT_IP_SLOTS`) that oracle_client.categorize() (src/oracle_client.py:66-86) assigns per (test_name, kind) — restarting the label index at 0 for every new test, so the SAME label string is reused by different tests for different real IPs. Meanwhile tests/test_app.py's `client` fixture (lines 17-24) does `sys.modules.pop("app"); import app`, resetting the REAL app's `_waiters_by_ip`/`_waiters_total` globals to empty/0 for every test that uses it (including test_waiter_slots_are_bounded_per_ip itself). Neither this fixture nor tests/conftest.py's `_quint_oracle_test_boundary` (lines 11-19, calls start_test/end_test) emits any logged action the oracle's model can use to reset ITS OWN waitersByIp/waitersTotal in step with that real per-test module reload. A continuous model replay can therefore drift out of sync with the real, per-test-reset app state, transiently producing a spurious "no spec path matches" at a release step — exactly once, in one snapshot, never reproduced since.
+
+Conclusion: no code change to _waiter_slot/_waiter_release is warranted — the guard is provably correct for this test in isolation, and MAX_WAITERS_PER_IP matches production exactly (the spec's own comment at quint-specs/rate-limiting-and-abuse-budgets.qnt:26-35 notes this). No spec change is warranted either — the model's guard faithfully mirrors the code. This is a test-harness/oracle-continuity seam, not a code-vs-model divergence, so `kind: 'code'` rather than `'spec'`.
+
+The user is stuck: the bug is real, and there is nothing they can do with it. Your job is to give them CHOICES. Read the code the test would have to drive, and propose 2 to 4 ways to make this reachable from a test — ordered best first.
+
+Ground every option in this codebase: name the file and the symbol, and say what changes. Think about seams that already almost exist (a parameter that could be injected instead of read from the environment, a private function that a crate-internal test could call, a trait the production type could implement, a fixture the suite already builds). Include the honest cheap option and the honest invasive one; do NOT propose adding a dependency unless nothing else works, and do not propose weakening the assertion or faking the scenario.
+
+Everything you write lands in ONE of two registers, and mixing them up is the mistake to avoid.
+
+SHORT is what the user reads in the app. This is what the user reads in the app, so write it the way you would say it out loud to the person who owns this code: no file paths, no symbol names, no line numbers, no ids, no internal field names. It is not the opening of a longer version — it is the whole answer.
+
+The SHORT `summary` describes a problem, so it takes the house shape. Write it as SYMPTOM, then SOURCE, then CONSEQUENCE — one or two plain sentences, in that order:
+  - SYMPTOM: what goes wrong, observably. The thing a person could watch happen.
+  - SOURCE: the one place it comes from, named concretely (the operation, the check, the value). Not "the logic is wrong" and not a restatement of the symptom.
+  - CONSEQUENCE: what it costs whoever is running this code.
+Plain declarative sentences. No scene-setting, no metaphors, no hedging ("appears to", "may potentially"), no restating the diff or the title. If one clause covers two of the three, say it once — length is not the goal, the three answers are.
+
+Each SHORT `gist` describes a WAY OUT rather than a problem, so it takes the matching shape in one sentence: what the change does, what it then makes testable, and what it costs. Same register — plain, concrete, no paths or symbols, no hedging.
+
+LONG is what an agent reads to do the work: paths, symbols, exact steps, as long as it needs to be. Nobody sees it.
+
+Answer as ONE JSON object, and do not change any file:
+{
+  "summary": <SHORT, at most 220 characters: why no test can reach this finding>,
+  "options": [ { "title": <a few words>, "gist": <SHORT, at most 160 characters: what this change does, one sentence>, "change": <LONG: exactly what to do, naming file and symbol — an agent must be able to carry it out from this text alone>, "enables": <LONG: what becomes testable>, "cost": "small" | "moderate" | "invasive" } ]
+}
+
+Deliver your final answer by calling the `quint-studio` MCP tool submit_result(pipeline_key 'oneshot:2', result <the answer>) — do NOT print the answer in the chat. If Studio refuses it, fix the problems and call submit_result again. After it is accepted, end your turn.
+
+STUDIO INTERACTION CONTRACT: for every blocking question, call the `quint-studio` MCP tool ask_user(pipeline_key, question, options). Do not leave a required decision only in prose. Studio coordinates the terminal user and supervising operator through that tool.
