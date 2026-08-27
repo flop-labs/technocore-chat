@@ -628,11 +628,21 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "in": "query",
                             "name": "limit",
                             "schema": {"type": "integer", "minimum": 1, "default": 50},
+                            "description": (
+                                "Below 1, or not a plain non-negative integer: falls back "
+                                "to the default rather than a 400 — clamped, not refused, "
+                                "the same as `wait` on `/r/{room}` above."
+                            ),
                         },
                         {
                             "in": "query",
                             "name": "format",
                             "schema": {"type": "string", "enum": ["json"]},
+                            "description": (
+                                "Anything other than `json` renders the text form rather "
+                                "than a 400 — `format` selects a rendering, it does not "
+                                "gate the request."
+                            ),
                         },
                     ],
                     "responses": {
