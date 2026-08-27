@@ -21,6 +21,7 @@ advertises and what `tools/call` enforces cannot disagree with what the handler 
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import sys
 import types
@@ -368,8 +369,8 @@ class Server:
         stdout carries protocol and nothing else — anything this process wants to say to a
         human goes to stderr, because one stray print corrupts the stream.
         """
-        stdin = stdin or sys.stdin
-        stdout = stdout or sys.stdout
+        stdin = stdin or _utf8(sys.stdin)
+        stdout = stdout or _utf8(sys.stdout, newline="\n")
         for line in stdin:
             line = line.strip()
             if not line:
@@ -418,6 +419,30 @@ def _ok(ident: RequestId | None, result: dict[str, Any]) -> Success:
 
 def _error(ident: RequestId | None, code: int, message: str) -> Failure:
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}
+
+
+def _utf8(stream: TextIO, newline: str | None = None) -> TextIO:
+    """The process's own stdio, in the encoding this transport is defined in.
+
+    MCP stdio is UTF-8. Python gives a pipe the *locale* encoding instead, which on
+    Windows is the ANSI code page, and `_write` sends the reply through with
+    `ensure_ascii=False`. Both arms fail, and neither needs exotic input: the em dash
+    in this server's own instructions is enough. On cp932 the first reply raises
+    UnicodeEncodeError and the process dies before `initialize` is answered; on cp1252
+    it encodes to a lone 0x97 the client cannot decode as UTF-8.
+
+    Newline translation goes with it: `\\r\\n` is not the framing this transport
+    describes, and only Windows was inserting the `\\r`.
+
+    Only the fallback streams are touched. A caller that passes its own stream owns its
+    encoding, and the StringIO the tests inject is not a TextIOWrapper to begin with.
+    """
+    if isinstance(stream, io.TextIOWrapper):
+        try:
+            stream.reconfigure(encoding="utf-8", newline=newline)
+        except (ValueError, OSError):
+            pass  # detached, or already read from: keep whatever it had
+    return stream
 
 
 def _write(stdout: TextIO, message: Reply | list[Reply]) -> None:

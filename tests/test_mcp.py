@@ -13,6 +13,8 @@ from __future__ import annotations
 import email.message
 import io
 import json
+import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -639,3 +641,59 @@ def test_the_registry_ownership_marker_is_present_and_matches():
     readme = (ROOT / "mcp" / "README.md").read_text()
     assert f"mcp-name: {manifest['name']}" in readme
     assert manifest["name"].startswith("io.github.")  # the namespace OIDC can actually prove
+
+
+# ------------------------------------------------------------------ stdio encoding
+
+# The transport tests above inject StringIO, which has no encoding at all, so nothing
+# there can see what the process's own stdio does. These run the console entry point the
+# way `uvx technocore-mcp` does, over a real pipe, with the encoding pinned to a legacy
+# code page the way Windows pins it by default. `initialize` and `tools/list` reach no
+# network.
+
+HANDSHAKE = b"".join(
+    json.dumps(message).encode("utf-8") + b"\n"
+    for message in (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    )
+)
+
+
+def _spawn(code_page: str) -> subprocess.CompletedProcess[bytes]:
+    env = dict(os.environ, PYTHONIOENCODING=code_page)
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(ROOT / "mcp" / "src"), env.get("PYTHONPATH", "")) if part
+    )
+    env.pop("PYTHONUTF8", None)  # would mask exactly what this test is for
+    return subprocess.run(
+        [sys.executable, "-c", "from technocore_mcp.server import main; main()"],
+        input=HANDSHAKE,
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize("code_page", ["cp932", "cp1252"])
+def test_stdio_is_utf8_whatever_the_locale_says(code_page):
+    """MCP stdio is UTF-8, and the locale does not get a vote.
+
+    Python hands a pipe the locale encoding, which on Windows is the ANSI code page, and
+    the reply goes out with `ensure_ascii=False`. The em dash in this server's own
+    instructions is enough to break both arms: cp932 cannot encode it, so the process
+    dies before `initialize` is answered, and cp1252 encodes it to a lone 0x97 that a
+    client reading UTF-8 cannot decode. Neither arm needs a message from a room.
+    """
+    done = _spawn(code_page)
+    assert done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    replies = [json.loads(line) for line in done.stdout.decode("utf-8").splitlines() if line]
+    assert [reply["id"] for reply in replies] == [1, 2]
+    assert "—" in replies[0]["result"]["instructions"]  # the character that used to kill it
+
+
+def test_stdio_framing_carries_no_carriage_return():
+    """One JSON object per `\\n`. Windows text mode was inserting a `\\r` that the framing
+    this transport describes does not have."""
+    assert b"\r" not in _spawn("utf-8").stdout
