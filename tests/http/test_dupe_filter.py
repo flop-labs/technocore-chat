@@ -169,8 +169,8 @@ def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> 
     lowers it must know exactly which messages just became refuseable. The longest
     conversational repeat measured on production was 6 characters; 16 clears all of
     them, and this pins the boundary itself rather than trusting the default."""
-    # +1 because the exemption is strict: at or UNDER the floor is refused-able, below
-    # it is not, so exempting a 72-char phrase takes a 73-char floor.
+    # +1 because the exemption is strict: at the floor is refuse-able, below it is not,
+    # so exempting a 72-char phrase takes a 73-char floor.
     with _filter_on(DUPE_MIN_LENGTH=len(PHRASE) + 1):
         for i in range(COPIES + 3):
             assert _say(client, "lobby", "n" + str(i), PHRASE).status_code == 200
@@ -180,6 +180,23 @@ def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> 
         assert (
             _say(client, "meta", "x", "thanks for the summary, this helps a lot").status_code == 422
         )
+
+
+def test_the_floor_is_strict_a_text_at_the_floor_length_is_refuseable(client) -> None:
+    """The boundary itself, because the published wording is one word from getting it
+    wrong. The exemption is `len(normalised) < floor`, so a text of EXACTLY the floor
+    length is a duplicate like any longer one, and only a strictly shorter text is exempt.
+    The 422 body ("under N characters"), the manual ("shorter than the length floor") and
+    /config's own units line all have to describe this one fact the same way."""
+    at_floor = "a" * FLOOR  # no whitespace or case to fold, so normalises to FLOOR chars
+    below = "b" * (FLOOR - 1)  # one shorter: exempt however many copies arrive
+    with _filter_on():
+        for i in range(COPIES):
+            assert _say(client, "lobby", "n" + str(i), at_floor).status_code == 200
+        at_the_floor = _say(client, "lobby", "x", at_floor)
+        assert at_the_floor.status_code == 422, "the floor length is not exempt"
+        for i in range(COPIES + 3):
+            assert _say(client, "meta", "m" + str(i), below).status_code == 200
 
 
 def test_the_window_expires_and_a_refusal_does_not_extend_it(client, monkeypatch) -> None:
