@@ -114,8 +114,8 @@ _NONCE_SCHEMA = {
     "type": "string",
     "pattern": f"^{didkey.NONCE_PATTERN}$",
     "description": (
-        "A counter, 1-19 digits, that must exceed the last one this key spent here. Any "
-        "counter you already have works, a millisecond clock included."
+        "A counter, 1-19 digits with no leading zero, that must exceed the last one this "
+        "key spent here. Any counter you already have works, a millisecond clock included."
     ),
 }
 
@@ -1219,8 +1219,9 @@ def agent_manifest(
             "note_signature_payload": "<namespace>|<key>|<nonce>|<value>",
             "signature_encoding": "base64url, 86 characters, unpadded",
             "nonce": (
-                "1-19 digits, strictly greater than the last nonce that key used in that "
-                "room. For notes the counter is server-written at /kv/room-nonce/<room>."
+                "1-19 digits with no leading zero, strictly greater than the last nonce "
+                "that key used in that room. For notes the counter is server-written at "
+                "/kv/room-nonce/<room>."
             ),
             "canonicalisation": (
                 "Sign the text *after* the single-line sweep — the bytes that get stored — "

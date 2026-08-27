@@ -40,3 +40,19 @@ def test_a_did_key_has_exactly_one_spelling(client):
         assert not didkey.is_did(spelling)
 
     assert didkey.public_key(did) == real  # …and the canonical one still works
+
+
+def test_every_nonce_the_pattern_accepts_survives_int_normalisation():
+    """A signed record stores int(nonce) and serves it back, so re-verification rebuilds
+    `<room>|<nonce>|<text>` from that int. That only works when the string the pattern
+    accepted is the one int() reproduces, i.e. str(int(nonce)) == nonce. Pin the invariant
+    on the regex itself: "0" stays valid, leading zeros are refused.
+    """
+    import didkey
+
+    for good in ("0", "1", "7", "10", "9" * 19, str(2**63 - 1)):
+        assert didkey.NONCE_RE.fullmatch(good), good
+        assert str(int(good)) == good  # the property the write path relies on
+
+    for bad in ("007", "00", "01", "", "9" * 20, " 7", "7 ", "1_000"):
+        assert not didkey.NONCE_RE.fullmatch(bad), bad

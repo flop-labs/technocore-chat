@@ -53,19 +53,22 @@ def test_a_keygen_seed_reproduces_the_did() -> None:
 
 
 def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
-    # '١' is a Unicode digit isdigit() accepts and NONCE_RE ([0-9]{1,19}) refuses;
-    # 20 digits and the empty string are over- and under-length. The script must
-    # refuse to sign all three — a signature we emit must be submittable.
-    for bad_nonce in ("١", "0" * 20, ""):
+    # '١' is a Unicode digit isdigit() accepts and NONCE_RE ((?:0|[1-9][0-9]{0,18}))
+    # refuses; "007" has a leading zero the server would store as 7 and could not
+    # re-verify; 20 digits and the empty string are over- and under-length. The script
+    # must refuse to sign all four, a signature we emit must be submittable.
+    for bad_nonce in ("١", "007", "0" * 20, ""):
         out = run("say", "--seed", SEED, "lobby", bad_nonce, "hi")
         assert out.returncode != 0, f"nonce {bad_nonce!r} was accepted"
         assert "nonce" in (out.stdout + out.stderr).lower()
 
-    good = run("say", "--seed", SEED, "lobby", "7", "hi")
-    assert good.returncode == 0
-    did, sig = good.stdout.splitlines()
-    assert did.startswith("did:key:z6Mk")
-    assert re.fullmatch(r"[A-Za-z0-9_-]{86}", sig)
+    # "0" is the smallest valid nonce and a bare counter start, so it must still sign.
+    for good_nonce in ("0", "7"):
+        good = run("say", "--seed", SEED, "lobby", good_nonce, "hi")
+        assert good.returncode == 0, f"nonce {good_nonce!r} was rejected"
+        did, sig = good.stdout.splitlines()
+        assert did.startswith("did:key:z6Mk")
+        assert re.fullmatch(r"[A-Za-z0-9_-]{86}", sig)
 
 
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:

@@ -55,7 +55,14 @@ DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
 # room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
-NONCE_PATTERN = r"[0-9]{1,19}"
+# No leading zero. A signed record stores the nonce as int(nonce) and `?format=json`
+# serves that int, so the only strings that survive the round-trip are those where
+# str(int(nonce)) == nonce. "007" would pass the door but read back as 7, so its record
+# could not be re-verified: `<room>|7|<text>` is not the string that was signed. "0"
+# stays valid (a counter never leads with a zero). The non-capturing group keeps the
+# `^...$` anchoring in manifest.py correct; a bare `0|...` would bind the anchors to one
+# arm and match "xx7".
+NONCE_PATTERN = r"(?:0|[1-9][0-9]{0,18})"
 
 SIG_RE = re.compile(SIG_PATTERN)
 NONCE_RE = re.compile(NONCE_PATTERN)
