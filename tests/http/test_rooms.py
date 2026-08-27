@@ -1041,6 +1041,52 @@ def test_the_replay_scan_stops_at_the_first_record_from_the_caller(client, tmp_p
     assert store._last_nonce(tmp_path, room, _keypair(seed=3)[0]) is None
 
 
+def test_the_replay_guard_never_scans_shallower_than_a_reader_can_see(
+    client, tmp_path, monkeypatch
+):
+    """The ordering this PR establishes, pinned so a later change cannot quietly undo it.
+
+    Before, the guard and a reader shared one budget, so nothing had to state a relationship
+    between them. They are deliberately different now, and the property that matters is the
+    direction rather than either number: the guard must reach at least as deep as the deepest
+    record a reader can still be shown, or a replay is accepted while its original is on
+    screen. That is the exact defect this change fixes, stated as an invariant instead of as
+    one constructed room.
+
+    Asserted through the depths the two paths actually request, not through the constants they
+    happen to name today, so raising READ_BUDGET (or narrowing the guard back to it) fails
+    here rather than silently reopening the window. Suggested by @Orvynel on this PR, whose
+    stateful model in #319 explores the same guard; a tripwire asserting the two were *equal*
+    is what `main` would pass and what this PR correctly breaks in the safe direction.
+    """
+    import store
+
+    did, sign = _keypair()
+    room = "guarddepth"
+    assert _say_signed(client, room, did, sign, "one", nonce=1).status_code == 200
+
+    asked: dict[str, int] = {}
+    real = store.reverse_lines
+
+    def record(label):
+        def counted(f, chunk_size=65536, max_bytes=store.READ_BUDGET):
+            asked[label] = max_bytes
+            yield from real(f, chunk_size=chunk_size, max_bytes=max_bytes)
+
+        return counted
+
+    monkeypatch.setattr(store, "reverse_lines", record("guard"))
+    store._last_nonce(tmp_path, room, did)
+    monkeypatch.setattr(store, "reverse_lines", record("reader"))
+    store.read_messages(tmp_path, room)
+
+    assert asked.keys() == {"guard", "reader"}, "both paths must have been exercised"
+    assert asked["guard"] >= asked["reader"], (
+        f"the replay guard scans {asked['guard']} bytes and a reader sees {asked['reader']}: "
+        "a captured signed URL would be accepted again while its original is still readable"
+    )
+
+
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     owner, owner_sign = _keypair()
     friend, _ = _keypair(seed=2)
