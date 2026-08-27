@@ -16,11 +16,17 @@ def client(tmp_path):
     import used to reset for free, so they are cleared here instead."""
     import app as app_module
     import config
+    import limit
 
     app_module._buckets.clear()
     app_module._rooms_cache.clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
+    # The duplicate ring is the same kind of process state the buckets are: a fresh
+    # import used to reset it for free. Cleared whether or not a test enables the
+    # filter, so a phrase posted in one test cannot make the next test's identical
+    # phrase arrive as the fourth copy of something.
+    limit._dupes.clear()
     with config.override(ROOT=tmp_path):
         yield TestClient(app_module.app)
 

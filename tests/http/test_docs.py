@@ -481,7 +481,41 @@ def test_an_integral_ceiling_publishes_as_an_integer(client):
     assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
 
 
-_REFUSALS = frozenset({"400", "403", "404", "409"})
+_REFUSALS = frozenset({"400", "403", "404", "409", "422"})
+
+
+_DUPE_TEXT = "the fourth identical copy of this sentence is refused, measured"
+
+
+def _fourth_copy(client, lane: str):
+    """Land the allowed copies of one long text, then one more, and return its response.
+
+    Named for the shape (the Nth+1 copy), not the literal count: DUPE_MAX_COPIES is the
+    knob that decides which copy is the refused one, so this reads it rather than
+    hardcoding a count that drifts the next time someone tunes the threshold.
+    """
+    import app as app_module
+    import config
+    import limit
+
+    allowed = config.DUPE_MAX_COPIES
+    limit._dupes.clear()
+    app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
+    with config.override(RATE_WRITE=600):
+        for i in range(allowed):
+            if lane == "say":
+                client.get(f"/r/dupe422/say/n{i}/{_DUPE_TEXT.replace(' ', '%20')}")
+            elif lane == "post":
+                client.post("/r/dupe422", json={"from": f"n{i}", "text": _DUPE_TEXT})
+            else:
+                did, sign = _keypair(100 + i)
+                _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
+        if lane == "say":
+            return client.get(f"/r/dupe422/say/last/{_DUPE_TEXT.replace(' ', '%20')}")
+        if lane == "post":
+            return client.post("/r/dupe422", json={"from": "last", "text": _DUPE_TEXT})
+        did, sign = _keypair(199)
+        return _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
 
 
 def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
@@ -617,6 +651,28 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             lambda: client.get(
                 f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
+        ),
+        # The cross-sender duplicate filter: the 4th copy of one text inside the window,
+        # through each write lane. Enabled per case because it is off by default and the
+        # case has to be self-contained; the ring is cleared first because it is process
+        # state that outlives any one room file.
+        (
+            "/r/{room}/say/{nick}/{text}",
+            "get",
+            422,
+            lambda: _fourth_copy(client, "say"),
+        ),
+        (
+            "/r/{room}",
+            "post",
+            422,
+            lambda: _fourth_copy(client, "post"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            422,
+            lambda: _fourth_copy(client, "say-signed"),
         ),
     ]
 

@@ -155,8 +155,11 @@ LISTING_BANNER = (
 # call time and passed into limit as parameters, exactly as per_min/burst already were.
 MAX_BUCKETS, CHARGED_CREATION = limit.MAX_BUCKETS, limit.CHARGED_CREATION
 MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP = limit.MAX_WAITERS_TOTAL, limit.MAX_WAITERS_PER_IP
-DEDUP_SECONDS = config.DEDUP_SECONDS
-MAX_RECENT_WRITES = limit.MAX_RECENT_WRITES
+DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES = (
+    config.DUPE_FILTER_SECONDS,
+    config.DUPE_MIN_LENGTH,
+    config.DUPE_MAX_COPIES,
+)
 FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
 _requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
 # _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
@@ -1063,42 +1066,36 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     return did
 
 
-def _retry_key(request: Request, room: str, nick: str, body: str) -> tuple:
-    """What makes two unsigned writes the same write. The text is digested rather than
-    kept, so the key is a fixed size whatever the caller sent.
+def _dupe_refusal(room: str) -> Response:
+    """422 for a text this room has already taken from other senders inside the window.
 
-    The client is part of the key and has to be: behind a CDN that this deployment is not
-    configured to read a header from, every caller shares one address (see the
-    client_identity block in /stats), and a key without it would let one agent's "ok"
-    swallow another's. Including it can only ever make the key more specific.
+    Not 200 — a 200 on a write lane carries the record that landed, and there is no
+    record of the refuser's to return: their message did not land. Not 429 — this is not
+    a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
+    automate into an identical resend. Not 409 — that is the CAS answer and carries the
+    current value; there is no value to merge here. 422 says the request was
+    well-formed and understood, and names the two things that actually work.
     """
-    digest = hashlib.blake2b(body.encode("utf-8"), digest_size=16).digest()
-    return (client_ip(request), room, nick, digest)
+    return text(
+        f"422 duplicate text: /r/{room} has already taken this exact message from "
+        f"{DUPE_MAX_COPIES} other senders in the last {DUPE_FILTER_SECONDS:g}s, and more "
+        "copies of it are refused until that window passes.\n"
+        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
+        "— short replies are never filtered. This is not a rate limit and not a retry "
+        "signal: the same bytes will be refused again, from any identity.\n"
+        "the enforced window, threshold and length floor are published at /config under "
+        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        422,
+    )
 
 
-def _already_written(request: Request, key: tuple, room: str, left: int) -> Response | None:
-    """The reply an identical write got moments ago, or None to go ahead and write it.
-
-    Answering with the original record rather than an error is the whole point: a retry
-    means the caller never saw its 200, so a refusal would report failure for a write that
-    succeeded. It gets the seq its message actually has.
-
-    The record is recovered from the room view this reply carries anyway, so a hit costs
-    one read and skips the append entirely — no flock, no fsync, no reaper. If the seq has
-    already left the window (a busy room, or compaction), there is nothing to answer with
-    and the write goes ahead: a duplicate is the safe direction, not a dropped message.
-    """
-    if DEDUP_SECONDS <= 0:
-        return None
-    seq = limit.recent_write(key, time.monotonic(), DEDUP_SECONDS)
-    if seq is None:
-        return None
-    view = store.read_messages(config.ROOT, room, limit=20)
-    posted = next((m for m in view["messages"] if m.get("seq") == seq), None)
-    if posted is None:
-        return None
-    config._dbg(3, "retry", room=room, seq=seq)
-    return respond(request, {**view, "posted": posted}, note=budget_note("write", left, RATE_WRITE))
+def _dupe_refused(room: str, body: str) -> bool:
+    # Thin adapter over limit.dupe_refused, knobs read HERE at call time so
+    # config.override() and monkeypatch.setattr(app, ...) keep reaching the ring —
+    # the same contract take() already follows.
+    return limit.dupe_refused(
+        room, body, time.monotonic(), DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
+    )
 
 
 def room_say(request: Request) -> Response:
@@ -1110,12 +1107,9 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    key = _retry_key(request, room, nick, body)
-    replay = _already_written(request, key, room, left)
-    if replay is not None:
-        return replay
+    if _dupe_refused(room, body):
+        return _dupe_refusal(room)
     rec = store.append(config.ROOT, room, nick, body)
-    limit.remember_write(key, rec["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1143,6 +1137,8 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
+    if _dupe_refused(room, body):
+        return _dupe_refusal(room)
     rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
@@ -1239,15 +1235,12 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
-            key = _retry_key(request, room, nick, sent)
-            replay = _already_written(request, key, room, left)
-            if replay is not None:
-                return replay
+            if _dupe_refused(room, sent):
+                return _dupe_refusal(room)
             posted = store.append(config.ROOT, room, nick, sent)
-            limit.remember_write(
-                key, posted["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES
-            )
         else:
+            if _dupe_refused(room, body):
+                return _dupe_refusal(room)
             posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
