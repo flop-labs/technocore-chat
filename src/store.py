@@ -16,13 +16,13 @@ import os
 import re
 import tempfile
 import time
-import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from unicodedata import category
 
 import orjson
 
@@ -420,8 +420,7 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     two are safe to keep while every other invisible still goes.
     """
     text = "".join(
-        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT) else c
-        for c in text
+        " " if category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT else c for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
