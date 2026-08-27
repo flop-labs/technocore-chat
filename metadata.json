@@ -3,7 +3,7 @@
   "checkpoint_id": "01M10TYRVWX55HGC9XV7M79PHA",
   "strategy": "manual-commit",
   "branch": "feat/cross-sender-dupe-filter",
-  "checkpoints_count": 37,
+  "checkpoints_count": 39,
   "files_touched": [
     "src/app.py"
   ],
@@ -56,13 +56,20 @@
       "compact_transcript": "/6/transcript.jsonl",
       "content_hash": "/6/content_hash.txt",
       "prompt": "/6/prompt.txt"
+    },
+    {
+      "metadata": "/7/metadata.json",
+      "transcript": "/7/full.jsonl",
+      "compact_transcript": "/7/transcript.jsonl",
+      "content_hash": "/7/content_hash.txt",
+      "prompt": "/7/prompt.txt"
     }
   ],
   "token_usage": {
-    "input_tokens": 1780,
-    "cache_creation_tokens": 3071724,
-    "cache_read_tokens": 267325781,
-    "output_tokens": 1133713,
-    "api_call_count": 879
+    "input_tokens": 1882,
+    "cache_creation_tokens": 3350054,
+    "cache_read_tokens": 272764728,
+    "output_tokens": 1179011,
+    "api_call_count": 929
   }
 }
