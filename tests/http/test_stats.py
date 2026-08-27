@@ -26,6 +26,28 @@ def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatc
         assert ident["distinct_identities"] == 1  # ...seen as one
 
 
+def test_proxied_requests_ignored_counts_each_request_once_not_each_call(client):
+    """The field is documented as a request count. The "high proxied, one identity" reading
+    is calibrated on that. But client_ip runs more than once on a write (the write take, then
+    the room-creation take), so a per-call increment reported one request as two. Each
+    room-creating write here trips client_ip twice; the counter must still move by one."""
+    import config
+
+    n = 4
+    with config.override(
+        STATS_TOKEN="t", STATS_CACHE_SECONDS=0, RATE_ROOMS_PER_DAY=n, RATE_WRITE=500
+    ):
+        for i in range(n):
+            r = client.get(f"/r/fresh{i}/say/bot/hi", headers={"CF-Connecting-IP": "203.0.113.7"})
+            assert (
+                r.status_code == 200
+            )  # a fresh room, so the write take is followed by a create take
+        ident = client.get("/stats", headers={"X-Stats-Token": "t"}).json()["client_identity"]
+        assert ident["client_ip_header"] is None  # the CDN header is ignored, not trusted
+        assert ident["distinct_identities"] == 1  # one socket peer behind the header
+        assert ident["proxied_requests_ignored"] == n  # n, not 2n, though client_ip ran 2n times
+
+
 @pytest.fixture()
 def stats_client(tmp_path, monkeypatch):
     """A client whose service has the stats token configured (the deployed shape)."""

@@ -247,13 +247,18 @@ def client_ip(request: Request, ip_header: str = "") -> str:
     """
     if ip_header:
         forwarded = request.headers.get(ip_header, "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-        return request.client.host if request.client else "?"
+        return forwarded or (request.client.host if request.client else "?")
     # Not configured to read one. Note whether the request looks proxied anyway, so a
-    # misconfiguration is visible in /stats instead of only in a support ticket.
+    # misconfiguration is visible in /stats instead of only in a support ticket. Counted at
+    # most once per request: client_ip runs several times on one request (the write take,
+    # then the room-creation take, then the waiter slot on a blocking read), so a per-call
+    # increment reported this field at 2-3x the request count it is documented to be. The
+    # flag rides on the scope like CHARGED_CREATION: module state would be shared across the
+    # overlapping requests of one IP.
     if any(h in request.headers for h in PROXY_IP_HEADERS):
-        _proxy_evidence["proxied_requests"] += 1
+        if not request.scope.get("_proxied_counted"):
+            request.scope["_proxied_counted"] = True
+            _proxy_evidence["proxied_requests"] += 1
     return request.client.host if request.client else "?"
 
 
