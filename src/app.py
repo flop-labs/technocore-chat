@@ -1582,8 +1582,10 @@ def humans(request: Request) -> Response:
             # Safe under `default-src 'none'`: service-desc, service-doc and api-catalog
             # are relations a browser records and never acts on. preload, prefetch and
             # stylesheet are the ones that would turn a header into a request the CSP then
-            # refuses, and none of them is here. Nothing new is disclosed either — all
-            # three paths are anchors in this page's own footer already.
+            # refuses, and none of them is here. It discloses nothing new either: /openapi.json
+            # (service-desc) and /llms.txt (service-doc) are anchors in this page's own footer,
+            # while /.well-known/api-catalog (api-catalog) is header-only here but robots.txt
+            # already lists it.
             "Link": manifest.link_header(_base_url(request)),
         },
     )
