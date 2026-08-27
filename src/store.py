@@ -1090,20 +1090,17 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
     """
     if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
         return False
-    stem = entry.name.rpartition(".")[0]
-    # The stem is a room name this service wrote, but the reaper walks every file on disk,
-    # including any left by an older validator or created by hand (_listable makes the same
-    # allowance for listings). A stem that fails the allowlist guards no room this service
-    # would accept today, so it protects nothing -- and feeding it to room_path would raise
-    # StoreError (a ValueError, not the OSError caught below), aborting the whole reap pass
-    # and surfacing as a misleading "bad name" 400 on an unrelated, valid write.
-    if not NAME_RE.fullmatch(stem):
-        return False
-    room = room_path(root, stem)
+    # room_path validates the stem, and the reaper walks every file on disk -- including any
+    # left by an older validator or created by hand (_listable makes the same allowance for
+    # listings). A stem that fails the allowlist names no room this service would accept
+    # today, so it guards nothing: room_path raises StoreError (a ValueError) for it, and
+    # catching that here treats it like a vanished room instead of letting it abort the whole
+    # reap pass and surface as a misleading "bad name" 400 on an unrelated, valid write.
     try:
+        room = room_path(root, entry.name.rpartition(".")[0])
         return now - room.stat().st_mtime <= IDLE_SECONDS
-    except OSError:
-        return False  # no room left to guard
+    except (OSError, ValueError):
+        return False  # no room left to guard, or a name no live room could carry
 
 
 def _reconcile_note_count(root: Path) -> None:
@@ -1417,7 +1414,10 @@ def _walk(d: Path | str, suffix: str) -> Iterator[os.DirEntry[str]]:
     try:
         with os.scandir(d) as entries:
             for e in entries:
-                if e.is_dir():
+                # follow_symlinks=False: a directory symlink under the tree is not descended
+                # into. The store writes none, so this only refuses foreign links -- and it
+                # keeps the reaper's unlink from resolving through one to a file outside root.
+                if e.is_dir(follow_symlinks=False):
                     yield from _walk(e.path, suffix)
                 elif e.name.endswith(suffix):
                     yield e

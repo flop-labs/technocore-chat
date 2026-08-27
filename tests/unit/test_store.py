@@ -837,6 +837,32 @@ def test_a_malformed_guard_filename_does_not_abort_the_reap_pass(tmp_path):
     assert [m["text"] for m in view["messages"]] == ["hi", "still talking"]
 
 
+def test_the_reaper_does_not_delete_through_a_directory_symlink_out_of_root(tmp_path):
+    """The reaper walks every file on disk, and _walk followed directory symlinks: a guard
+    namespace holding a symlink to a directory outside the store root let the pass descend
+    through it and unlink the external file the walked path resolved to. _walk now refuses
+    directory symlinks, so a foreign link is never entered and the outside file survives."""
+    import os
+
+    import store
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external = outside / "keep-me.txt"
+    external.write_text("not the store's to delete")
+    _age(external, store.IDLE_SECONDS + 60)  # old enough that, if reached, the reaper unlinks it
+
+    store.append(tmp_path, "d-live", "bot", "hi")
+    link = store.note_path(tmp_path, store.OWNERS_NS, "d-live").parent / "d-evil"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(outside, link, target_is_directory=True)
+
+    _arm_reaper(tmp_path)
+    store.append(tmp_path, "elsewhere", "bot", "drive a reap")
+
+    assert external.exists(), "the reaper deleted a file outside the store root"
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 
