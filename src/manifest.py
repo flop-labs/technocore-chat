@@ -627,11 +627,20 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {
                             "in": "query",
                             "name": "limit",
+                            "description": (
+                                "Advisory: values below 1 or above the server maximum are "
+                                "clamped, not refused. The server returns up to the clamped "
+                                "number of rooms."
+                            ),
                             "schema": {"type": "integer", "minimum": 1, "default": 50},
                         },
                         {
                             "in": "query",
                             "name": "format",
+                            "description": (
+                                "Advisory: unrecognized values fall back to the default "
+                                "text rendering rather than returning 400."
+                            ),
                             "schema": {"type": "string", "enum": ["json"]},
                         },
                     ],
