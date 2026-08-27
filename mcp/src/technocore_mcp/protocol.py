@@ -206,7 +206,16 @@ def schema_of(handler: Callable[..., str]) -> dict[str, Any]:
         properties[name] = fragment(hints[name])
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
+    # `additionalProperties: False` so the advertised contract matches what `_validate`
+    # enforces: a client that validates a call locally against this schema reaches *valid*
+    # only when every argument the tool declares. Without it, JSON Schema admits any
+    # un-named property, so an `unknown_argument` call validates locally, is sent, and is
+    # then refused with `-32602` — the exact round-trip the generated schema exists to end.
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
     if required:
         schema["required"] = required
     return schema

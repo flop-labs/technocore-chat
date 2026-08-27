@@ -259,6 +259,24 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
     assert pages["enum"] == ["manual", "patterns", "skill"]
 
 
+def test_generated_schemas_reject_unknown_arguments_like_the_call_path(mcp):
+    """`tools/list` must advertise the same rejection the `tools/call` path enforces.
+
+    The call path (_validate) refuses any argument the handler does not declare; the
+    advertised schema must too, via `additionalProperties: False`, or a client that
+    validates locally against our own document reaches *valid* on a call that is then
+    refused with -32602. This is the contract #105 reports as broken.
+    """
+    server, _ = mcp
+    tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+    for tool in tools:
+        schema = tool["inputSchema"]
+        assert schema.get("additionalProperties") is False
+    # Mirror the call path: an undeclared argument is refused.
+    bad = call(server, "read_room", {"room": "lobby", "colour": "blue"})
+    assert "unexpected arguments: colour" in bad["error"]["message"]
+
+
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     """The point of `Annotated` here: the sentence lives next to the parameter, and one
     room description is shared by the four tools that take a room."""
