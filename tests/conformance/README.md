@@ -51,7 +51,48 @@ The module may also export several client objects, each with its own `sweep` —
 one implementation in a run is the point. Not writing JavaScript? Read `vectors.json` directly;
 it is plain JSON and the Python side of the contract is `test_conformance.py`.
 
-## The two traps
+## Are the signatures real?
+
+```bash
+node tests/conformance/verify.mjs
+```
+
+`runner.mjs` and `verify.mjs` point in opposite directions on purpose, and the pair is worth more
+than either:
+
+- **`runner.mjs` reimplements the protocol** — sweep, canonical assembly, DID decode — and diffs
+  its answers against the vectors. That is where clients actually fail.
+- **`verify.mjs` reimplements nothing.** It derives each public key from its `did:key` and checks
+  that the recorded signature verifies over the recorded bytes, using `node:crypto`. Without it,
+  every signature here is checked only by the library that produced it — homework marked by its
+  own author. With it, a second language's crypto agrees, which is the claim your client is
+  leaning on when it diffs itself against this file.
+
+It checks the canonical spelling, all sixteen accepted spellings through Node's base64url decoder
+rather than Python's, and the negative direction: that the **unswept** payload does *not* verify.
+Signatures are read from `payload_utf8_hex`, not from a JSON string field, so the check does not
+depend on how `JSON.parse` handles `U+FFFD`, NBSP, or a lone surrogate.
+
+Carried over from [#314](https://github.com/flop-labs/technocore-chat/pull/314) — thanks to
+@Magicianhax, who offered it when that PR was closed in favour of this one.
+
+## This file is not a source of identities
+
+Every `seed_hex` in `identities` and `signature_cases` is a counting pattern — `0x01` × 32,
+`0x02` × 32, and so on. **The matching `did:key` is therefore controlled by everyone who can read
+this file.** Never sign with these seeds outside a test, never treat a message from one of these
+DIDs as authenticated, and never copy one into a client as a default identity — whoever writes
+first also takes the nonce sequence, since nonces must strictly increase per `(key, room)`.
+
+```bash
+python scripts/sign.py keygen
+```
+
+The same warning is `test_only` and `warning` **inside `vectors.json`**, not only here, and
+`test_the_fixture_warning_travels_inside_the_file` pins it. A fixture gets copied far more often
+than it gets read, and a README does not travel with the bytes.
+
+## The three traps
 
 **Surrogates.** Python iterates a `str` by code point, so `U+1F680` (🚀) is one character of
 category `So` and survives the sweep. A client that iterates UTF-16 **code units** —
@@ -59,10 +100,35 @@ category `So` and survives the sweep. A client that iterates UTF-16 **code units
 sees `D83D` + `DE80`, both category `Cs`, and emits *two spaces*. Every astral character then
 signs the wrong bytes. Use `Array.from(text)`, `[...text]`, or a `/u`-flagged regex.
 
+`astral-emoji-SURVIVES` is the row that catches this, and it is worth saying why a **kept**
+character is the useful test rather than a swept one. Every other row asserts that something
+*becomes* a space, and a code-unit iterator passes those by accident — it also emits a space, for
+the wrong reason. Only a character that must come through **unchanged** distinguishes the two:
+correct iteration preserves `U+1F680`, code-unit iteration destroys it, and there is no way to
+pass by coincidence.
+
 It gets worse than a mangled emoji. The `zwj-family-flattens` vector (👨‍👩‍👧) sweeps to
 **nothing at all** under code-unit iteration — every code unit is either a surrogate half or the
 `Cf` joiner — and a client that then sends the empty result gets a 400 for a message that was
 perfectly valid.
+
+**`U+FFFD` is kept, and it is reachable.** The other half of the surrogate story, and the one a
+client walks into while reasoning *correctly*. `Cs` sweeps to a space, so `a%ED%A0%80b` looks like
+it should store `a b`. It does not:
+
+```
+GET /r/x/say-signed/<did>/<sig>/<nonce>/a%ED%A0%80b   →  200
+stored:  "a" + U+FFFD U+FFFD U+FFFD + "b"
+```
+
+Those three bytes are CESU-8 for `U+D800`. The server's UTF-8 decode is **lossy, not fatal**, so
+each undecodable byte becomes `U+FFFD` — category `So`, not one of the six, **kept**. A client
+that predicted "one surrogate, so one space" signs `a b` and gets a bare 403. Sweep the bytes that
+*arrived*; never predict the sweep from the bytes you sent. This is `replacement-char-So-KEPT`,
+and its twin `lone-surrogate-Cs` is marked input-hygiene-only precisely because no wire lane
+delivers a real surrogate — the GET lane folds it here, and the POST lane's `orjson` rejects the
+`\ud800` escape outright (stdlib `json.loads` and `JSON.parse` both accept it, so this is a
+property of one pinned dependency at `src/app.py:1191`, not of JSON).
 
 **Signature spelling.** 64 raw bytes is 86 unpadded base64url characters — 516 bits of alphabet
 for 512 bits of signature — so the final character's low 4 bits are unconstrained. `verify` pads
@@ -70,6 +136,14 @@ with `==` and decodes without checking them, so **every signature has sixteen va
 and two conformant clients can emit different `sig` strings for the same message. All sixteen are
 recorded per case. Anything that compares, caches or deduplicates signatures as opaque strings
 has to decode them first.
+
+Sixteen are *accepted*; exactly one is ever *produced*. Both `base64.urlsafe_b64encode` and Node's
+`Buffer.toString("base64url")` zero-fill the unused bits, so a real signature's last character is
+always one of `AQgw` — measured across 400 signatures per encoder, zero exceptions.
+`canonical_sig_last_chars` records it and
+`test_this_repos_encoder_only_ever_emits_the_canonical_spelling` pins it, which is what makes
+[#178](https://github.com/flop-labs/technocore-chat/issues/178) — require the canonical spelling —
+a tightening rather than a compatibility break.
 
 ## Two things about the file format
 
@@ -113,18 +187,30 @@ Two rules the generator holds to, both load-bearing:
 
 ## Does this find anything real?
 
-Yes — which is the argument for the directory existing. Run against the two published npm
-clients on 2026-08-26:
+Yes — which is the argument for the directory existing. Run against the two published npm clients
+on 2026-08-26:
 
 - **`@mpbs/technocore-js@0.2.0` — 30/30, fully conformant.** It uses a `/gu` regex over pinned
   literal ranges plus a load-time self-check, and trims. It passed even across the Unicode
   15.1 → 17.0 gap, which is what pinning ranges buys you.
 - **`technocore@0.2.2` — 8 vector failures, 3 root causes.** Its sweep never calls `.trim()`, so
   a trailing newline — the single most common accident — silently signs different bytes than the
-  server computes. An exhaustive scan of all 1.1M code points found **137,618 that the server
-  sweeps and it does not** (0 in the other direction), including `U+200E`/`U+200F` and
-  `U+2066`–`U+2069`, which appear in *any* bidirectional text, and `U+E000`–`U+F8FF`, which is
-  where Nerd Font and Powerline glyphs live — common in agent terminal output.
+  server computes. An exhaustive scan of all 1.1M code points found **139,666 that the server
+  sweeps and it does not** (0 in the other direction): `Cf` 150, `Cs` 2,048, `Co` 137,468. That
+  includes `U+00AD`, `U+200E`/`U+200F` and `U+2066`–`U+2069`, which appear in *any* bidirectional
+  text; `U+E000`–`U+F8FF`, where Nerd Font and Powerline glyphs live — common in agent terminal
+  output; and `U+E0020`–`U+E007F`, the tag characters in subdivision flag emoji (🏴󠁧󠁢󠁥󠁮󠁧󠁿).
+
+  The cause was not code-unit iteration — that client iterates correctly with `Array.from`. It
+  **enumerated hardcoded ranges where the server tests general categories**, matching 87 code
+  points against the server's 139,753. The omission is one-directional, so it is always a 403 and
+  never silent corruption.
+
+  Fixed upstream in **`technocore@0.2.5`**, confirmed against the live service. The maintainer
+  checked it against `store.py` rather than against the report, and noted that one vector caught a
+  wrong expectation in their own test suite: they had asserted NBSP survives at the edges, and it
+  does not — `.trim()` and `str.strip()` both remove it, which is what `nbsp-edges-stripped` is
+  for.
 
 Both failure modes are refusals, not bypasses: the server sweeps whatever it receives and checks
 the signature against *that*, and the sweep is idempotent (`test_the_sweep_is_idempotent`), so
