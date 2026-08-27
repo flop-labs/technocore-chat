@@ -547,7 +547,7 @@ def test_oversize_body_is_refused_before_it_is_buffered(client):
 
     r = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
     assert r.status_code == 413 and "too large" in r.text
-    assert "no rooms yet" in client.get("/rooms").text  # nothing was written
+    assert "no rooms are listed" in client.get("/rooms").text  # nothing was written
 
 
 def test_chunked_body_is_stopped_at_the_same_cap_and_says_how_to_split_it(client):
