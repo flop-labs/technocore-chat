@@ -50,7 +50,7 @@ MAX_LIMIT = 200
 # bound the count and read the disk figure off the product, MAX_ROOMS * MAX_ROOM_BYTES.
 # That works exactly once. It ties the number of conversations the service will hold to
 # the size of the volume, so the count cannot grow without the bill growing with it: at
-# the 5120 below the product is 51 GiB, a volume nobody provisions for a worst case that
+# the 5120 below the product is 50 GiB, a volume nobody provisions for a worst case that
 # needs an attacker to fill every ring to the brim. So the two are now separate constants
 # with separate jobs, and both are enforced (see `_check_room_capacity`).
 #
@@ -66,7 +66,7 @@ MAX_ROOMS = config.MAX_ROOMS
 MAX_TOTAL_ROOM_BYTES = 5 << 30
 # The budget above is only a real bound if rooms cannot grow past it after they are made.
 # Gating *creation* alone does not do that: 5120 rooms created while usage is low can each
-# then grow to MAX_ROOM_BYTES, which is 51 GiB — ten times the number the operator was told
+# then grow to MAX_ROOM_BYTES, which is 50 GiB — ten times the number the operator was told
 # to provision. So the ring itself yields under pressure. Every room is guaranteed this
 # much; above it a room keeps up to MAX_ROOM_BYTES only while the service has headroom, and
 # compacts back to its guaranteed floor on the next append once the budget is spent.
