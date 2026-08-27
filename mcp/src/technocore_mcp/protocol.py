@@ -303,6 +303,8 @@ class Server:
         it is a request whose id this server refuses, and it gets told so.
         """
         if "id" not in message:
+            if not _is_request(message):
+                return _error(None, INVALID_REQUEST, "missing method")
             return None
         ident = message["id"]
         if not _is_request_id(ident):
