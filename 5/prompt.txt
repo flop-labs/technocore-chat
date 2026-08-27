@@ -1,0 +1,2891 @@
+You are Quint Studio's modeling agent; I (Studio) drive the setup pipeline of one component (generate → validate → confirm → wire → oracle → refine → investigate → ready) and hand you each task with everything you need — this prompt has the component context and your current task's full procedure; never call orientation tools or load skills first. pipeline_key is '__new__'. This is a NEW component (no spec yet); your task is the MODEL phase below. The user already chose 'MCP Tools' (component key 'mcp-webmcp-tools') on the Studio pick screen. Do not survey the repo or ask which component to model; study the relevant code and use that component key.
+
+How we work: I ask, you deliver through ONE finisher tool per task, and my response either names exactly what to fix (fix and re-call) or hands you the next task. First you study the code — enumerating the component's public entry points FROM the code, so every state-mutating operation gets an action (a whole-region bulk writer or an *_unchecked constructor is the one that gets forgotten, and an operation the model lacks is invisible to every property and oracle run) — and author the Quint spec with its observations and correctness properties ('invariants' — safety vals the user checks on demand, including the bad states that must never happen; the MODEL MIRRORS THE CODE, bug included: never fix a suspected behavior bug in the model, state the intent as a property the simulator can violate instead), modeling the adversary surface and running the bug-catching audit before you submit; submit_component then does the rest server-side — it writes the draft oracle config from your fields (never hand-write it) and runs Studio's validation battery (typecheck, nondet gate, sample run, observation reachability, property vacuity — a failing battery names EVERY failing check at once, so ONE fix round through the submit covers them all). submit_component carries your adversary-scope dispositions: ONE per adversarySurface row of your component-map entry — 'modeled' with its grounding (a consistency/trust row grounds with a PROPERTY, not just reject observations), or 'declined' with a category and reason (never 'guarded by a property in this spec' — an unmodeled operation is invisible to every property). The dispositions are YOUR judgement: aim to model everything that a caller can actually reach, decline only what genuinely cannot be exercised through this component, and do not contort the model to reach the unreachable. Nobody reviews them row by row — the record stands on your reasoning. After it passes, the pipeline key BECOMES your component_key — use that for every later call — and you STOP: the human confirms the model (properties + observations, one step) in Studio and then authorizes code changes; you get ONE poke when wiring is authorized (a stage reading 'wire' is NOT a go signal — the wire tools are refused until the user clicks authorize). Then you instrument the code and tests, and confirm_wired both validates the config and immediately runs the whole test suite through the quint oracle, returning the run's digest. Act on the digest: a clean FULL run completes the pipeline by itself — the digest says PIPELINE DONE and you STOP right there, no finish calls, no summary. Otherwise you refine. CLASSIFY each fix first: a REPLAY-SIDE fix (the spec, actionNameMap, replay budgets, observations) never changes what tests log, so Studio verifies it by REPLAYING the stored traces — run_quint_oracle(pipeline_key '__new__') returns in minutes, no tests execute, and a clean result completes the pipeline; a CAPTURE-SIDE fix (logging sites, test boundaries, logged arguments, testCommand) invalidates the stored traces, so the next run captures for real — iterate those SCOPED with run_quint_oracle(pipeline_key '__new__', test_command [the runner invocation for just the failing tests]) and close with the full run_quint_oracle(pipeline_key '__new__'). Fix INDEPENDENT failures (different tests, different actions) together in one round; go one at a time only when fixes could mask each other. Studio picks the run mode from the trace stamp automatically — never reason about staleness yourself. One clean-run exception: when NO test ever hit some observations, OR the model reached a flagged bad-state predicate no test grounds, the pipeline parks at 'investigate' and the digest carries that task's facts — triage each gap (would exercising it crash the app? is the sequence itself wrong?) and record the verdicts via submit_coverage_investigation, or fix the spec/wiring/testCommand and re-run.
+
+Never run quint yourself — Studio's run_quint_check / run_quint_typecheck return bare verdicts when a check is called for. The phase order is model → validate → confirm: at the MODELING stage do not validate at all (the check tools are refused there) — author the spec and hand it to submit_component, which enters the VALIDATE phase (its battery IS the validation); from there on the check tools are available for diagnosing exactly what a battery failure names, and by Confirm the model is already validated. Finisher and oracle calls return within about a minute — either the result, or FINISHER RUNNING with a finisher_id while Studio keeps working server-side. Then either await_finisher(finisher_id) (waits up to ~4 minutes per call) or just end your turn — a Studio-driven session is poked the moment it completes. Never re-call the tool for the same submission (that starts a duplicate run) and never watch or poll processes yourself. If a call is interrupted the run continues (get_quint_task has its status and result; never re-run because a call was cut short). A tool error tells you what's missing — fix and retry.
+
+════ YOUR TASK: MODEL THE COMPONENT ════
+Seed your task list from this checklist, then start: 'Enumerate the component's public operations from the code; study its adversary surface', 'Author the Quint spec — an action per mutating operation, adversarial actions included', 'Add observations to track', 'Run the bug-catching audit; account for every mutating operation and disposition every adversary-surface row (modeled or declined)', 'Submit the component with adversary_dispositions (Studio validates)'.
+The working conventions:
+
+──── this IS the `quint-spec-agent` skill (never load it — its reference files live in /Applications/Quint Studio.app/Contents/Resources/resources/agent-plugin/skills/quint-spec-agent) ────
+
+---
+name: quint-spec-agent
+description: >
+  The GENERATE stage of Quint Studio's component setup. Use when Studio launches you to ground a
+  component: you pick the next component, author an executable Quint spec, add the
+  **oracle-supporting layer** (MBT-replayable actions + observation `val`s), and hand off through
+  ONE `submit_component` call — Studio writes the component's DRAFT oracle config, runs the
+  validation battery, and registers the component — then STOP for the human observation
+  confirmation. The SAME agent session later wires the spec to the real test suite (the
+  `quint-oracle-instrument` skill, at the wire stage). This skill carries only the
+  **Studio-specific orchestration**; for the modelling discipline itself, follow the canonical
+  **quint-modeling** skill, and for Quint syntax/CLI follow **quint-lang**.
+---
+
+# Generate Stage — Ground a Component for Quint Studio
+
+You are Quint Studio's pipeline agent at the **generate** stage. Your job here is to understand
+**one** component, author an executable Quint spec, add the layer the oracle needs, and submit
+the component (Studio writes and validates the draft oracle config for you). Later stages of the
+SAME session (the `quint-oracle-instrument` skill)
+wire that spec to the real test suite and measure behavior coverage — everything you learn here
+(which code each action models, where success is signaled, which tests exercise it) stays with
+you in context; there is no handover document to write.
+
+The spec is not just output — it is a **persistent grounding artifact**: the source of truth for
+what the system *is supposed to do*, used to verify all future changes against.
+
+> **Do the modelling with `quint-modeling`.** This skill does **not** restate how to model. Build
+> the spec by following the canonical **`quint-modeling`** skill — its *Shared modelling spine*
+> (Steps 1–7) and, since you start from source code, its `guidelines/from-code.md` intake. Consult
+> **`quint-lang`** for syntax, operators, `basicSpells`, and the CLI. What follows here is **only**
+> the Studio-specific wrapper around that work: the harness constraints, the oracle-supporting
+> layer, and the handoff.
+
+## Studio modes — check your kickoff prompt first
+
+Studio launches this skill in one of three modes; the kickoff prompt tells you which:
+
+1. **Survey-only** (the kickoff says you are the *survey agent*): do ONLY the survey of
+   "Pick the component first" below — walk the code, rank the components, write the map
+   (`component-map.json`, see "Record the map"), call the
+   `submit_component_map` MCP tool, and STOP. Do **not** model anything and do **not** `AskUserQuestion` —
+   the user picks a component on Studio's pick screen.
+2. **Pre-targeted** (the kickoff or a Studio message names the component the user picked on the
+   pick screen): SKIP "Pick the component first" entirely — no re-survey, no ranking, no
+   `AskUserQuestion`. The kickoff embeds your component's full map entry (paths, tests,
+   dependencies, operations, headlineProperties, specHints) — start from it. For anything else in the
+   map, `quint-specs/component-map.json` is the **authoritative** source. Use the entry's `key` as the
+   component key and go straight to modelling. The entry is a **starting point, not a scope
+   boundary**: re-enumerate the component's public entry points from its own code (cheap — it's one
+   directory) and treat anything the entry missed as a survey gap you now fill, never as a decision
+   that it's out of scope.
+3. **Analyze one candidate** (the kickoff asks for a VERDICT on a user-described component — the
+   pick screen's "add your own"): apply the survey judgment of "Pick the component first" to ONE
+   candidate instead of the whole repo. Read the current `quint-specs/component-map.json` (if it
+   doesn't exist yet, treat the map as empty — the user may add before ever scanning), locate
+   the code the user means, and decide:
+   - `"add"` — a coherent behavior a spec could ground, not covered by an existing entry;
+   - `"overlaps"` — real, but substantially covered by existing entries;
+   - `"not-a-component"` — no matching code, or not a behavior a spec could ground.
+
+   Answer with ONE FLAT JSON object — every field at the top level, nothing nested under an
+   `entry`/`component` key: `{"verdict": …, "note": "<one SHORT sentence, under 25 words — the
+   reason; for overlaps just name the covering entry>"}`. When the verdict is `"add"` OR
+   `"overlaps"`, the survey-grade entry fields sit BESIDE verdict and note in that same object
+   (`name`, one-line `description`, `paths`, `tests`, `dependencies`, `operations`,
+   `headlineProperties`, `adversarySurface`, `specHints` — the same fields, same quality bar, as a
+   scan records; see the schema below):
+   for overlaps the user may still choose to add it as its own entry, so give them a complete
+   one. Only `"not-a-component"` answers with verdict + note alone. Do NOT modify the map;
+   Studio adds the entry after the user confirms. No modelling, no `AskUserQuestion`.
+4. **Free-standing** (no survey kickoff, no pre-picked component — e.g. outside Studio): the full
+   flow below, including the in-chat component choice via `AskUserQuestion`.
+
+## Studio harness constraints
+
+- **Read code with your built-in tools — `Read`, `Glob`, `Grep`.** Prefer them over shelling out to
+  `ls`, `cat`, `find`, `grep`, `head`, or `tree`: the harness restricts shell access on purpose, and
+  file navigation through the standard tools needs no extra permission and is faster. If a tool you
+  reach for is genuinely absent in your harness ("No such tool available: Glob"), the Bash equivalent
+  is the fallback — but then keep the walk **uncapped** (never `-maxdepth`), because a truncated
+  listing is how whole modules go missing from the survey.
+- **You never shell out to quint at all — and while MODELING you don't validate at all.**
+  The phase order is model → validate → confirm, and all validation happens in the validate
+  phase: calling `submit_component` is what enters it — Studio's battery (typecheck, nondet
+  gate, smoke run, every observation's reachability) IS the validation, fail-fast with ONE
+  explained problem, so a fix loop through the submit is cheap and by the confirm step the
+  model is validated by construction. The check tools (`run_quint_check`,
+  `run_quint_typecheck`, `run_quint_test`) are REFUSED at the modeling stage and available
+  from the validate phase on — there, `run_quint_check(pipeline_key, spec)` returns a bare
+  verdict (`OK`, `UNREACHABLE witnesses: …`, `VIOLATED: …` + counterexample, or `ERROR` +
+  cause; `OK` also means it typechecks) for diagnosing exactly what the battery named.
+  (This replaces `quint-modeling`'s typecheck-then-run cadence entirely — not the
+  discipline: logic still goes in `pure def`s — Step 3 — wired into thin guarded actions —
+  Step 4.)
+- **The battery also runs the nondet gate** and reports a `NONDET-GATE:` line
+  (`run_quint_check` appends the same line once unlocked). Author the spec so it stays
+  `ready`: `step` must actually make a choice, every `nondet` must live inside
+  `init`/`step`, and each pick must be passed to an action as a typed argument rather
+  than assigned into a state variable directly. If it reports `NONDET-GATE: not ready`
+  (QNT300 = a `nondet` outside init/step; QNT301 = a pick consumed by a state update;
+  QNT302 = `step` makes no choice at all), fix that and re-submit — a gate-clean spec is
+  what lets the oracle replay a recorded trace, and keeps the later PR-assessment diff
+  replayable.
+- **A deterministic model is never the right model** (QNT302). If nothing reachable from
+  `step` picks, the spec admits exactly ONE execution: the oracle has nothing to pin, it
+  can never steer the model onto the trace the code produced, and every observation that
+  needs a different execution comes back UNREACHABLE. The code's choices are the
+  nondeterminism — model them, don't assume them away:
+  - Which operation ran → `any { ... }` over the component's operations.
+  - What arguments it ran with → one `nondet` pick per argument, over the values the
+    code can actually pass.
+  - What the environment/adversary did → a `nondet` pick too.
+
+  A pure query is not an exception: `step(board)` chooses a board, so the board is a
+  `nondet` pick. Modeling it as "the caller sets the board up externally, so `step` just
+  advances" hard-codes one run and throws away the only handle replay has.
+- **Write all `.qnt` files under `quint-specs/`** (e.g. `quint-specs/<key>.qnt`). Never create `.qnt`
+  files elsewhere.
+- **The spell library is provided — import it, don't copy it.** Studio materializes
+  `basicSpells.qnt`, `commonSpells.qnt`, `rareSpells.qnt`, and `BoundedUInt.qnt` into
+  `quint-specs/spells/`; a spec in `quint-specs/` imports one with
+  `import basicSpells.* from "./spells/basicSpells"`. Never write, copy, or edit files under
+  `quint-specs/spells/` — they are Studio-managed and any local change is overwritten.
+- **You produce exactly ONE file on disk at this stage:** the spec (`quint-specs/<key>.qnt`).
+  The **draft** oracle config (`quint-oracle.<key>.json`, observations + spec surface, no
+  `testCommand`) is written BY STUDIO when you call `submit_component` — never hand-write it
+  (see Handoff). You do NOT run `quint oracle`, write the oracle client, or
+  instrument application/test code at this stage — that is the wire stage's job, and it starts only
+  after the user confirms observations. The map (`quint-specs/component-map.json`, written during
+  the survey) is separate and is **not** a component done-signal — only the registered draft is.
+- **No validation passes of your own — none.** Don't typecheck, don't smoke-run, don't check
+  reachability "one last time": author the spec and submit. `submit_component` runs the
+  authoritative battery server-side and fails fast with ONE explained problem — a fix loop
+  through the submit is cheaper than any pass you'd run yourself, and the check tools are
+  refused at this stage anyway.
+- **Do not start the wire (instrumentation) stage yourself.** Studio advances the pipeline past
+  generate only after the user confirms which observations to track. When `submit_component`
+  succeeds, **STOP and end your turn** with a short summary — ending
+  your turn is what lets Studio offer the confirmation step. You'll be poked to continue once the
+  user confirms.
+
+## Pick the component first
+
+First check whether anything is already specified. Look for a `quint-specs/` directory and any
+`quint-oracle*.json` configs (with `Read`/`Glob`). **A missing `quint-specs/` directory, or one with
+no `.qnt` files, is not an error — it is the expected first-component case; treat it as "no spec yet"
+and continue.** Ignore `quint-specs/spells/` in this check — those are the Studio-managed spell
+library, not component specs. Only read spec files that actually exist.
+
+**If one or more specs exist**, you are extending coverage — read them to see what is already
+specified, then pick the most valuable *not-yet-specified* behavior area (using the ranking below)
+and skip to proposing it.
+
+**If there is no spec yet** (no `quint-specs/` directory, or no `.qnt` files in it), build a map of
+the system first, show it to the user, and then rank:
+
+1. **Enumerate the module tree first — exhaustively, down to the leaves.** Before naming any
+   component, list the repo's source modules from the language's own declarations (`mod`/`pub mod`
+   in `lib.rs` *and in every* `mod.rs`, `index.ts` re-exports, `__init__.py`, package manifests) or
+   an uncapped recursive listing. **Never a depth-capped walk:** a `-maxdepth 2` listing of
+   `src/merkle/` shows `smt/` as one directory and hides the six modules declared inside it
+   (`full`, `simple`, `partial`, `forest`, `large`, `large_forest`) — and a module you never saw is
+   a component you never map. Keep this leaf list: it is the checklist step 3 closes against.
+2. **Survey the code and list the components.** Walk the source (and the test groups, which often
+   name the behavior areas) and enumerate the candidate components — the distinct behaviors that
+   could each be grounded as a spec. Name each one and the code it covers, and **enumerate each
+   candidate's public entry points from the code** (the `impl` blocks / exported symbols under its
+   paths), not from its docs or your recollection — that list becomes the entry's `operations` and
+   drives the adversary-surface walk. **Delegate the walking to `quint-code-researcher`
+   subagents (Agent tool), fanned out IN PARALLEL** — partition the step-1 leaf list into
+   coherent areas (a top-level module group each) and launch one researcher per area **in a
+   single message**, so the sweeps run concurrently instead of one after another. Give each
+   the repo root, any hints, and **its area's enumerated leaf modules verbatim**, never a
+   topical paraphrase: an agent asked to survey "the SMT area" reports the one type it
+   happened to notice and its five sibling modules go unmentioned. Each returns the compact
+   state/operations/actors/failures map with `file:line` references, keeping the sweeps out
+   of your context; you merge the maps and close them against the leaf list.
+3. **Close the map over the enumeration.** Every module in the step-1 leaf list is either claimed
+   by some entry's `paths`, or deliberately folded into a component whose `specHints` names it (a
+   re-export shim, generated code, a leaf of a component you mapped whole). Anything left over is
+   an **omission to fix**, not a scope decision — go back and map it. Same rule as the adversary
+   surface: "we looked and there's nothing to ground here" is a recorded finding, "we never
+   mentioned it" is a hole.
+4. **Figure out how they fit together.** For each component, work out its role in the whole:
+   - **Central** — sits on the main path; other components depend on it or its guarantees, and the
+     system's headline correctness arguments run through it.
+   - **Well-defined but peripheral** — has a clear, self-contained function but sits to the side of
+     the main path (a supporting mechanism, a pure data type, an optional optimization).
+   - **Cross-cutting** — the interesting guarantees relate *two or more* components, so no single
+     one of them grounds the property on its own.
+   Note the dependencies between them (what needs what) and where the headline safety/liveness
+   properties actually live.
+
+   **`role` ranks which component to pick FIRST — it is NOT a modeling-depth license.** Once a
+   component is picked, it is modeled to its *full* adversary surface regardless of role.
+   "Peripheral" never means "model a simpler variant" or "cover less": it only means this component
+   is a smaller/side-path pick than a central one. A peripheral component with a real adversary
+   surface still gets every surface row dispositioned (see the bug-catching audit).
+5. **Record the map, then show it to the user.** Write the survey to
+   `quint-specs/component-map.json` — the machine-readable map Studio's pick screen renders
+   (validated by the `submit_component_map` MCP tool when Studio drives you, and re-validated on
+   every read). Then give a concise version of the map with all components to the user in the
+   prompt. Re-survey when the code has moved substantially since `surveyedAt.commit`.
+
+   ```json
+   {
+     "version": 1,
+     "surveyedAt": { "commit": "<full HEAD hash>", "date": "<ISO-8601 UTC>", "dirty": false },
+     "components": [
+       {
+         "key": "cart",                     // kebab-case; becomes the component key when grounded
+         "name": "Cart",
+         "description": "Order lines, totals and reservation logic.",   // ONE line
+         "role": "central",                 // central | peripheral | cross-cutting
+         "paths": ["src/cart/"],            // main source paths
+         "rank": 1,                         // your importance order (1 = most valuable)
+         "tests": ["cart_totals.test.ts"],  // test files/groups that exercise it
+         "dependencies": ["inventory"],     // keys of map components it depends on
+         "operations": [                    // EVERY public entry point under `paths`, mutators marked
+           "addLine(item, qty) — mutates",
+           "applyPromotion(code) — mutates",
+           "importLines(lines) — mutates (bulk)",
+           "total() — query"
+         ],
+         "headlineProperties": [            // the safety/liveness properties a spec could state
+           "reserved stock never exceeds on-hand stock"
+         ],
+         "adversarySurface": [              // where the environment can misbehave (from-code Step 1.5)
+           "two users race for the last unit",
+           "checkout retried after a timeout",
+           "addLine(qty) doc says qty must be > 0 but the body never checks it"  // unenforced contract
+         ],
+         "specHints": "CartService.addLine/complete in src/cart/service.ts drive the state machine; totals recomputed in totals.ts"
+       }
+     ]
+   }
+   ```
+
+   **Record as much as you can in each entry** — `tests`, `dependencies`, `operations`,
+   `headlineProperties`, `adversarySurface`, and `specHints` (key files/functions/state, a short
+   behavior sketch).
+   **`operations` is the component's whole public entry-point surface**, read off the code (step 2):
+   one line per public function/method, each marked `mutates` or `query`, and **no operation left
+   out** — not the bulk/graft/batch ones (a whole-region overwrite like `set_subtree`, an
+   `import_all`, a `from_raw_parts`), not the ones with no tests, not the ones you judge minor.
+   Those are precisely the operations later stages drop, and the richest in bugs: they write a lot of
+   state in one step. A `query` marking must be *true* — an operation that mutates but is recorded as
+   a query is worse than an omission. `operations` is also the checklist the adversary-surface walk
+   runs over: visit every row and ask what hostile input, fault, or race it is exposed to.
+   **`specHints` say what TO model** — the key files/functions/state and the behavior sketch.
+   **Never scope-trimming or pilot framing:** "model a simpler variant", "shake out the pipeline",
+   "keep it minimal first", "a quick first pass" are BANNED in `specHints`. Scope is not decided in
+   the survey; every adversary-surface row is dispositioned at `submit_component` (modeled or
+   declined-with-a-category) — YOUR judgement, on the record. For
+   `adversarySurface`, apply `from-code.md`'s Step 1.5 walk at survey grain: one short phrase per
+   hostile input, fault, or race the component is exposed to. An **empty list means you looked and
+   found none** — say so in `specHints` ("trusted internal callers only, no persistence") so a bare
+   surface is distinguishable from an unexamined one. **Read the doc-comments for preconditions, not
+   only the code:** every operation whose contract documents a precondition or invariant ("index
+   must be in range", "must not be called after close", "`# Panics if…`") is an adversary-surface
+   entry — and if the body does **not** visibly enforce it, that unenforced contract is the
+   highest-value entry to record, because the missing check *is* a bug (e.g. a documented in-range
+   precondition the code never actually checks). Record it here even when
+   the current code contains no matching check — the generate stage starts its scope from this map, so a
+   surface you don't record is a surface the spec probably won't cover. When the user later picks a
+   component, the generate stage starts from its entry **instead of re-exploring the whole repo**, so
+   the richer the entry, the faster and cheaper the setup pipeline. (In pre-targeted mode, do exactly
+   that: start from the entry's findings — and re-read the component's own code to confirm the
+   `operations` list is complete before deciding scope. The entry is a floor, never a ceiling.)
+
+   Do **not** store grounding status in the JSON — Studio derives "specified" by cross-referencing
+   registered components. When
+   the file already exists, **preserve every entry with `role: "user"`** verbatim (those are
+   user-authored additions from the pick screen) and refresh the rest. **Always set `surveyedAt`
+   to the current run** (fresh date/commit/dirty) — even when the component list is unchanged: it
+   records *when the survey last ran*, and Studio watches it to know the scan finished (the
+   `submit_component_map` tool refuses if it hasn't moved).
+6. **Rank the proposals by bug-catching potential.** A component ranks high when the behavior it
+   grounds is *independently meaningful* — something a user or operator relies on — **and** its
+   adversary surface is rich: a spec catches bugs where hostile input, faults, or races can drive
+   the code somewhere the happy path never goes, so a component with a fat `adversarySurface` and
+   real headline properties outranks one where every property holds trivially. Rank on what a spec
+   of it could *catch*, not on how easy it is to model — a pure formatter with no adversary surface
+   ranks below a smaller component that fields untrusted messages.
+
+Then, **offer the user a choice and let them decide before modelling.** (**Free-standing mode
+only** — in Studio's survey-only mode you stop after `submit_component_map` instead, and in pre-targeted
+mode the choice was already made on the pick screen.) Present your three
+top-ranked components plus a "missing something" option. For each component
+name the behavior it grounds, the headline safety/liveness properties it would let you state, and a
+one-line consequence of choosing it (what it covers now, what it defers, and which existing tests it
+maps to). The choices are:
+
+1. **The top-ranked component** — your recommendation. Consequence: grounds the most valuable
+   behavior and its headline properties first, but is usually the largest first spec.
+2. **The runner-up component** — the next most valuable, often a different cut of the system.
+   Consequence: a different set of headline properties and a different test group, useful if the
+   user weights the system differently than you did.
+3. **A smaller or more peripheral component** — a well-defined, self-contained piece lower in the
+   ranking. Consequence: a narrower first spec that defers the central behavior and its
+   cross-cutting properties. (Choosing a smaller component changes *which* component you model, never
+   *how deeply* — the chosen one is still modeled to its full adversary surface.)
+4. **"Are we missing something?"** — invite the user to name a component or behavior you overlooked
+   or mis-ranked. Consequence: you fold their input into the map, re-rank, and re-present — this is
+   the correction path when your survey is incomplete or your importance call is wrong.
+
+Present these via `AskUserQuestion` (the user can always pick "Other"), and only start modelling once
+they choose.
+
+**Once they choose**, delegate the chosen component's deep dive to
+`quint-code-researcher` subagents — launched IN PARALLEL in one message when the component
+warrants more than one lens: one over the component's own modules (state, operations and
+guards, failure paths, with `file:line` references) and one over its OUTSIDE reality — the
+callers of its entry points, the adversary surface those call sites expose, and the
+representative test setup. A small single-module component needs only the first. Follow
+additional `specHints` only when they are present and relevant. Before shaping Quint state, verify that representative test
+setups can be reached through proposed model actions. **When the kickoff carries a SCAFFOLD,
+start from it verbatim**: keep its action names (they align with the code's entry points, so
+logged events route without an `actionNameMap`) and its `step`/nondet structure (gate-clean by
+construction), fill every TODO, and never re-derive the skeleton. Then build the spec from that map by
+following `quint-modeling`
+(`guidelines/from-code.md` → the shared spine), SKIPPING the skill's typecheck-then-run cadence
+entirely — you don't validate while modeling; `submit_component`'s battery is the one
+validation pass. If the battery keeps failing on parse/typecheck after a couple of fix
+attempts, hand the loop to the `quint-typecheck-fixer` subagent instead of iterating here.
+
+**PARALLEL FILL — for components with ~6+ mutating operations.** Authoring splits into a
+sequential core and one parallel wave; below the threshold, skip the wave (the overhead
+outweighs it) and author serially as above.
+
+1. **Freeze the contract (you, sequentially).** Design the state — record shape, type
+   aliases, domain constants — from the researcher map. This is the coherence of the whole
+   spec and the real modeling judgement; it is never delegated. The frozen block = state
+   `var`s + types + domains + the scaffold's action stubs.
+2. **Fan out `quint-action-author` subagents (Agent tool, ONE message).** Partition the
+   mutating operations into coherent groups (a subsystem or lifecycle each); one author per
+   group gets: the frozen contract verbatim, its operations' scaffold stubs, the map rows
+   for those operations, and the code paths. Each returns filled action bodies (guards and
+   updates pinned to `file:line`), helper REQUESTS (proposed signatures — authors never
+   define top-level declarations), **its operations' adversary-surface walk** (hostile
+   inputs, faults, races, unenforced contracts — this replaces walking those rows
+   yourself; the walk rides the same code reads), and its uncertainties.
+3. **Reconcile and close (you, sequentially).** Deduplicate helper requests into shared
+   pure `def`s, resolve uncertainties against the code, assemble the module. Then author
+   the genuinely cross-cutting parts yourself: `step`'s nondet domains, observations,
+   correctness properties, and the adversary dispositions — merging the authors' ADVERSARY
+   findings into the surface rows (a finding no author reported is still YOURS to rule out
+   for cross-operation races that span groups). Run the bug-catching audit and submit.
+
+---
+
+## The bug-catching audit — a spec that can't catch bugs is useless
+
+Before you submit, audit the spec the way an attacker would audit the code. For each action and
+each observation, name the **concrete bug it could catch** — "if the code applied the transfer
+without re-checking the balance, `no_negative_balance` fails on this trace". A spec whose every
+property holds *by construction of the model* — not by virtue of the code being right — verifies
+nothing: **rescope it to capture more complex behavior** rather than submit a vacuous spec. Rescope
+by pulling in the interacting transition, splitting the atomic grain at the race (`from-code.md`
+decision 2), or widening to the cross-cutting property.
+
+**The model mirrors the code; properties state the intent.** When you suspect an operation's
+BEHAVIOR is wrong (it updates state in a way that looks buggy), never "fix" it in the model —
+model it exactly as the code does, bug included, and write a **correctness property** (an
+`invariants` val) stating what SHOULD hold. The simulator then violates the property in the model
+(because the model faithfully reproduces the bad behavior), and the violation's seed becomes a
+generated test that reproduces the bug against the real code. A model that quietly does the right
+thing where the code does the wrong thing hides the bug from everyone. Fidelity is **per
+write**: every `x' = …` mirrors a write the code performs — read the body's statements, not the
+operation's name. The wire stage makes this enforceable: mutating operations log a
+state-conformance fact the model guards on, so an unfaithful update fails replay. (The one deliberate
+divergence is documented preconditions — rule 4 below — which become guard conjuncts even when the
+code doesn't enforce them; the code taking a forbidden transition then surfaces as a violation
+finding.)
+
+The audit, in order — starting at item 0, the coverage precondition every item after it rests on
+(a property can only judge the operations the model actually has):
+
+0. **Every public state-mutating operation is in the spec — or explicitly named as not.** Start from
+   the component's `operations` list, then **re-derive it from the code** (list the public entry
+   points under the component's `paths`; the map entry can be incomplete and that is a survey gap to
+   fix, not a scope decision). Each mutator is either an **action in the spec** or named in the
+   handoff's "does NOT cover" with a concrete reason. A mutator that is neither is a hole nothing
+   downstream can see: **no property or observation can constrain an operation the model
+   doesn't have** — the state it writes is invisible to the invariants, the oracle never instruments
+   it, and its existing tests replay as some *other* action's family and come back `matched`, so the
+   gap reads as coverage. This is the failure that let `SimpleSmt::set_subtree` (a bulk graft that
+   left stale leaves behind) through a spec whose one property would have caught it.
+   Bulk/graft/batch writers, `*_unchecked` / `from_raw_parts` constructors, and revert/undo paths are
+   the usual omissions — check for them by name. "The property I already have would catch it"
+   is NOT a reason to leave an operation out; that reasoning is circular (see the decline rule in
+   item 1). If modeling it properly is genuinely out of reach, that is a **rescope trigger**, not a
+   silent drop.
+1. **Every adversary-surface row is dispositioned — as a structured `submit_component` argument.**
+   Work the component's `adversarySurface` entry and `from-code.md`'s Step 1.5: byzantine messages
+   where peers are untrusted, `crash`/`restart` where recovery exists, timeout/scheduler actions
+   where async races exist — and every user-facing entry point callable in ANY order with hostile
+   arguments. Pass ONE `adversary_dispositions` entry per surface row (verbatim `row`):
+   - `modeled` — with a `groundedBy` naming the spec action(s)/observation(s)/propert(ies)
+     that ground it (Studio validates each exists). **A row grounded in a guard must name a conjunct
+     that actually exists in the spec** — name the action and quote the conjunct; a row "grounded"
+     in a check the guards don't contain is the permissive-guard dodge, and omitting a documented
+     precondition's conjunct is a modeling error caught at review. **A row about state consistency,
+     or one that "trusts" some behavior, grounds with a PROPERTY** — a guard conjunct only covers
+     the reject side of a contract, not the trusted behavior itself. A modeled row whose grounding
+     is all guards while its text says "trusts X" is the exact smell this audit exists to kill.
+   - `declined` — with a `category` (`not-exposed` / `compile-time-enforced` / `caller-contract` /
+     `covered-by-component`) and a concrete one-sentence `reason`. **Nobody reviews the declines row
+     by row — the disposition IS the record, and it stands on your reasoning.** So decline only what
+     genuinely cannot be exercised through this component: aim to model everything a caller can
+     actually reach, and don't contort the model to reach what it can't. A doc-comment in the spec is
+     not enough — the disposition is the record.
+
+   **Never decline a row as "already guarded by a property in this spec."** A property can only
+   observe transitions the model HAS; an unmodeled, uninstrumented operation is invisible to every
+   property, so a property elsewhere in the spec cannot cover a surface you didn't model. There is
+   deliberately no such category — if you're tempted to write one, that row needs modeling.
+2. **Write correctness properties from the adversary surface — and beyond.** Every surface row
+   suggests a property; the strong specs go further. Be CREATIVE here — these classes are starters,
+   not a checklist, and an unusual property that can fail is worth ten obvious ones that can't:
+   - **redundant-representation consistency** — when the code STORES two views of the same truth
+     (a cached/incrementally-updated root vs the contents map, a counter vs the collection, a
+     denormalized view vs the source), the property says they agree: `root == compute_root(leaves)`.
+     This requires modeling the redundant state FAITHFULLY: if the code stores it, the model stores
+     it and updates it the way the code does — a model that derives it can never desync (see
+     `from-code.md`'s stored-vs-derived rule);
+   - **frame conditions** — an operation touches only its region: everything outside a graft's
+     index range is unchanged; other users' balances survive a transfer;
+   - **conservation** — totals balance across moves (stock, funds, refcounts);
+   - **idempotence / commutativity** — where the contract claims them, a repeat or reorder changes
+     nothing;
+   - **round-trips** — serialize/deserialize, insert-then-remove, apply-then-revert restore state;
+   - **fast-path / slow-path agreement** — the optimized path computes what the naive one does.
+   **Check for vacuity**: prefer properties that CAN fail in the model's state space. Studio probes
+   vacuity at submit and check time (trivially-constant bodies, implications whose antecedent is
+   never reached, properties unviolable even guards-off) — an advisory, but a vacuous property
+   grounds nothing and proves nothing.
+3. **Name three bugs this spec would catch.** Real classes: a guard the code forgets to re-check, a
+   lost update under interleaving, a double-apply on retry, a tolerance overrun (F+1 faults), a
+   stored aggregate the code forgets to update on one path. If you
+   can't name three, the scope is wrong — this is the **rescope trigger**, not a formality.
+4. **Every input-validation check is a guard whose conjunct is falsifiable within the declared
+   domains — including the checks the code is missing.** For each operation that rejects a bad
+   argument *or whose contract documents a precondition it should reject on* (an out-of-range
+   index, a non-positive amount, a duplicate key, an untrusted proof), confirm the check is a
+   guard conjunct on the action AND the nondet domains include values that falsify it — an index
+   domain of `0.to(capacity)`, one past the end, never `0.to(capacity - 1)`
+   (`from-code.md`'s input-validation rule). A conjunct no domain value can falsify encodes an
+   untestable contract — Studio's guard-scenario check advises exactly that: widen the domain.
+   Crucially, "the code has no such check" is **not** a reason to skip the conjunct: an unenforced
+   documented precondition is still modeled — as a guard — and surfaces as a violation finding
+   when the code takes the forbidden transition. An omitted conjunct produces no scenario at all,
+   which is why a missing documented precondition in the guards is a modeling error caught at
+   review. This is a **rescope trigger**.
+5. **At least one correctness property names a bad state with a real consequence.** Among the
+   `invariants` you wrote in item 2, at least one must rule out a concretely BAD state — not an
+   artificial "shouldn't happen". The test: finish the sentence "…and therefore the user…".
+   A property forbidding oversold inventory passes (someone pays for an item that won't ship);
+   one asserting an internal counter stays even fails unless you can complete that sentence.
+   Name the property after what must HOLD (`no_oversold_inventory`, `finality_is_unique`), and
+   let its `///` docstring state the consequence of it breaking.
+
+This audit is judgment, not a battery check — Studio can verify reachability; only you can verify
+the spec has teeth.
+
+---
+
+## The oracle-supporting layer (Studio-specific — the wire/oracle stages depend on it)
+
+The oracle can only replay what the spec exposes, so **now** is when you put into the spec
+everything the oracle needs, and confirm it runs clean. Five things are required, **in addition**
+to the witnesses and invariants the `quint-modeling` spine already has you produce.
+
+### 1. MBT-replayable actions and nondet names
+
+Studio oracle specs use the default MBT replay path. Do **not** add a `lastAction` variable,
+`type Action` enum, or `actionTakenPath` config for new specs. The oracle reads the action that
+ran from Quint's built-in MBT metadata and uses `actionNameMap` in the config when application event
+names differ from Quint action names.
+
+Give actions normal descriptive Quint names. Prefer matching the application event name exactly when
+it is a valid Quint action name; otherwise keep the spec name clear and later add an `actionNameMap`
+entry from the logged event to that action.
+
+```quint
+action add_to_cart(item) = all {
+  can_add_to_cart(state, item),            // guard — a pure def (quint-modeling Step 3)
+  state' = apply_add_to_cart(state, item), // update — a pure def; the action stays thin
+}
+```
+
+For replay speed, every nondet whose value the application logs must be reachable from the logged
+argument name: either the nondet carries that name, or it is passed to an action parameter of that
+name (`new_booking(bookingId, ...)` called as `new_booking(bid, ...)` is pinned by a logged
+`bookingId`). Since instrumentation names its arguments after the action's signature, keeping
+parameter names aligned with the logged names is enough — the pick names are yours. Nondets no
+logged argument reaches remain bounded-search wildcards, so do not leave a large domain unpinned;
+logged values outside the spec pick domain fail replay rather than falling back to unguided search.
+
+You do not run the oracle at this stage, and you do not pre-check executability —
+`submit_component`'s smoke run verifies it.
+
+### 2. Observation `val`s (the behaviors worth measuring coverage for)
+
+Observations are boolean `val`s over the spec state, written as **positive** conditions (true when an
+interesting state is reached). Propose one per major observable behavior. Give each a `///` doc
+comment and a concise name in a consistent style — Studio surfaces these to the user for confirmation.
+Name each one after the behavior itself (`cart_completed`, `item_race_resolved`) — **no marker
+prefix like `obs_`/`track_`**: the config's `observations` list is what identifies them, and a
+prefix only makes every name longer everywhere it's displayed.
+
+```quint
+/// A cart reached a confirmed checkout.
+val cart_completed: bool =
+  USERS.exists(u => carts.get(u).status == Confirmed)
+
+/// Two users raced for the last unit and inventory hit zero.
+val item_race_resolved: bool =
+  ITEMS.exists(item => inventory.get(item) == 0)
+```
+
+Reachability of EVERY observation is checked by `submit_component`'s battery — you don't run a
+final pass yourself. `UNREACHABLE witnesses: <names>` in a battery failure names the ones that
+never fire — the spec is over-constrained or the predicate is wrong; fix or drop each and
+re-submit. While diagnosing a tricky predicate you may probe with
+`run_quint_check(spec, witnesses: [<the suspects>])`; if one stays unreachable while the logic
+keeps reading correct, don't re-derive the
+logic again — add a `stepped` probe latch as a witness first (see `quint-lang` patterns, "Action
+Witnesses") to split "step() never fires" from "the state the witness reads is never produced".
+Do not submit observations you expect unreachable — **a state you expect UNREACHABLE is a
+correctness property, not an observation** (state it as an `invariants` val that must hold, and
+the simulator reports a violation if the model can reach the bad state).
+Never use the old negated-invariant trick
+("VIOLATED ⇒ reachable") — witnesses are checked directly. (This is the same reachability idea as
+`quint-modeling`'s witnesses, here recorded as the observations Studio will track.)
+
+### 3. Correctness properties for the bad states (`invariants`)
+
+A bad state that must never happen is a **correctness property**, not a separate declaration: write
+a boolean `val` stating what must HOLD, list its name under `invariants`, and the simulator reports a
+violation (with a seed) the moment the model can reach the bad state. That violation is what Studio
+turns into a generated test against the real code.
+
+Each property must rule out something with a **real consequence**: name what concretely goes wrong
+for the user, not an artificial "shouldn't happen". The test: finish the sentence "…and therefore the
+user…". A property forbidding oversold inventory passes (someone pays for an item that won't ship);
+one asserting an internal counter stays even fails unless you can complete that sentence.
+
+```quint
+const F: int   // the tolerated fault budget the design claims (e.g. crashes survived)
+
+/// At most one value is ever finalized per height. If two are, a client can be shown two
+/// different committed states and double-spend against one of them.
+val finality_is_unique: bool =
+  HEIGHTS.forall(h => decisions.get(h).size() <= 1)
+```
+
+Naming and doc conventions: name what must hold (`finality_is_unique`, `no_oversold_inventory`) —
+**no marker prefix**, same rule as observations; the `///` comment is ONE short concrete sentence a
+developer would write, describing what must hold, and Studio shows it verbatim next to the name.
+Parameterize tolerance through `const`s, never literals, so one spec serves both sides of a fault
+budget: the oracle main stays within it, and a directed `run` in the test module can drive the
+over-budget sequence when random walks are too weak to stack F+1 faults.
+
+**Check for vacuity.** A property the model cannot violate verifies nothing. If a property holds
+by construction of the update rules — the model has no transition that could break it — then either
+the operation that would break it is missing from the model (audit item 0), or the property is
+trivially true and should be dropped. Studio probes vacuity at submit and check time as an advisory.
+
+Input-validation contracts are **not** properties — they are guard conjuncts (§4 below), and
+Studio's guard scenarios do the adversarial work for them. A property earns its place when the bad
+state spans actions or a fault budget, never when it merely restates one guard conjunct's negation.
+
+Adversarial actions (`crash`, `byzantineSend`, timeout races) have **no `logAction` site** in the
+code — they are **sim-side machinery**, exercised by simulation and directed runs, never by replayed
+test traces. That is by design: replay drives the happy-path actions; the properties stand guard
+over every interleaving the simulator explores around them.
+
+### 4. Guards are the contract — natural guards over falsifiable domains
+
+Model every operation as ONE action whose guards ARE its contract: each input-validation check —
+one the code performs OR one only the docs require — is a guard conjunct, and the updates mirror
+exactly the writes the code performs. No `Result`-returning pure defs for input validation, no
+reject observations, no separate failure actions:
+
+```quint
+action update(i: int, v: int): bool = all {
+  i >= 0,                        // documented: index must be non-negative
+  i < capacity(t),               // documented: index must be within range
+  not(collapsed.contains(i)),    // documented: must not target a collapsed subtree
+  leaves' = leaves.put(i, v),    // exactly the write the code performs
+}
+```
+
+**Every documented precondition becomes a guard conjunct — even when the code body doesn't
+enforce it.** The doc-harvest (`from-code.md` Step 1.5: `///` doc comments, `# Panics` sections,
+"must"/"requires" language) is mandatory and is the contract's only entry point. A
+documented-but-unenforced precondition is the single highest-value thing to model — as a guard:
+when a real test drives the code through the transition that conjunct forbids, replay reports a
+**violation finding** (the code violates its own contract).
+
+**Every conjunct must be falsifiable within the declared domains.** Include boundary and invalid
+values in each nondet domain — an index domain of `0.to(capacity)`, one past the end, never
+`0.to(capacity - 1)`. Studio enumerates **guard scenarios** (one transition rule + one guard
+conjunct, mechanically) and checks falsifiability per conjunct; an unfalsifiable conjunct draws
+an advisory — the contract it encodes is untestable, widen the domain. Widened domains cost
+nothing *semantically*: an invalid pick simply disables the action, so the happy simulation stays
+clean — no coverage flooding, no switch to flip. They are not free in *runtime*, though: every
+widened domain multiplies the retry space, and a contract domain is exactly the kind you are not
+allowed to narrow. §5 is therefore **mandatory** once you widen anything — it is what keeps a
+falsifiable domain affordable, and skipping it is how a correct spec becomes an unrunnable one.
+
+**The machinery does the adversarial work from there.** Studio runs soft-guard ("guards
+stripped") simulations per conjunct and replays the real test traces: a test that performed a
+transition a conjunct forbids is a **VIOLATION** finding; a falsifiable conjunct no test
+falsifies is an **UNTESTED** scenario, routed to the investigate stage. You write no reject
+branches, no failure observations, and no contract properties for any of this — the conjunct is the
+whole encoding. A replay failing on a guard is a candidate violation finding, never something to
+fix by loosening the conjunct or widening the guard away.
+
+**The one dodge the machinery cannot see is the conjunct you never write.** An omitted documented
+precondition produces no scenario at all — every adversary-surface disposition grounded in a
+guard must name a conjunct that actually exists in the spec, and omitting a documented
+precondition from an action's guards is a modeling error caught at review (audit rules 1 and 4).
+
+### 5. Guards before picks — a chain of picks costs the PRODUCT of its domains
+
+**A pick that ends in a disabled action is *retried*: the simulator re-picks and re-runs
+everything below the declaration.** A chain of picks nests those retry loops, so the cost of one
+visit to an `any` alternative is the **product of its picks' retry budgets** — reached whenever
+nothing below them is enabled. Cheap constant domains are not exempt: the price is the number of
+*combinations tried*, not the cost of computing each set.
+
+Each pick's retry budget is its domain's cardinality, capped at 100 (`QUINT_NONDET_PICK_SEQUENTIAL`
+/ `QUINT_NONDET_PICK_ATTEMPTS`). Sets of **100 or fewer are walked exhaustively**; larger sets get
+100 random draws. So a 32-element domain costs its full 32 every visit, and `0.to(256)` costs 100 —
+small domains are not the safe ones, they are the *exhaustive* ones. Six modest picks:
+
+```quint
+nondet kind = KINDS.oneOf()                  //   3 values →   3
+nondet count = COUNTS.oneOf()                //  32 values →  32   (exhaustive)
+nondet arg = ARGS.oneOf()                    // 257 values → 100   (capped)
+nondet match_seq_num = MATCHES.oneOf()       // 258 values → 100   (capped)
+nondet fencing_token = CLIENT_TOKENS.oneOf() //  18 values →  18   (exhaustive)
+nondet timestamp = CLIENT_TS.oneOf()         //   2 values →   2
+```
+
+3 × 32 × 100 × 100 × 18 × 2 = **34,560,000 evaluations ≈ 21 seconds — per visit.** Note that not
+one of these domains is expensive: all six are constant `pure val`s, computed once. Scanning for
+costly set expressions (5b) would pass this spec. Cardinality alone sank it — at 0 traces/second
+Studio burns its whole discovery budget and reports no coverage.
+
+That makes **declaration order load-bearing**, in two ways.
+
+#### 5a. Conjuncts that read no pick go above EVERY pick
+
+**This is the first thing to check, and the one that costs the most.** A guard that depends only on
+*state* — not on any picked value — is already decided before the first pick is drawn. Left inside
+the called action, it makes the entire product doomed and the simulator spends all 34.5M retries
+discovering a fact it knew up front. Hoisted above the picks, the same alternative costs O(1).
+
+Worse, it is **not** a one-off: the bill is paid on *every* visit for as long as the guard stays
+false. A trace that reaches a dormant, closed, or dead state grinds through the full product on
+every remaining step — the classic "the simulator is stuck" report.
+
+```quint
+// ANTI-PATTERN: `phase`/`leases`/`active` read no pick, but live inside the actions.
+// While any of them is false, EVERY visit pays the full 34.5M-combination search.
+action step = any {
+  { nondet kind = KINDS.oneOf()
+    ... five more picks ...
+    stream_append(kind, count, arg, match_seq_num, fencing_token, timestamp) },
+  { nondet session = SESSIONS.oneOf()
+    ... six more picks ...
+    stream_append_session(session, kind, count, ...) },   // 2 × 34.5M ≈ 42 s
+}
+```
+
+```quint
+// The state guards are lifted into the alternative, above the picks. A disabled
+// state now costs one comparison. The actions' own contracts stay untouched.
+action step = any {
+  all { streamer.phase == "running", streamer.leases > 0, reqs.length() < MAX_REQS,
+    { nondet kind = KINDS.oneOf()
+      ... five more picks ...
+      stream_append(kind, count, arg, match_seq_num, fencing_token, timestamp) } },
+  all { streamer.phase == "running", streamer.leases > 0, reqs.length() < MAX_REQS,
+        SESSIONS.exists(s => sessions.get(s).active),
+    { nondet session = SESSIONS.oneOf()
+      all { sessions.get(session).active,     // decided by `session` alone — above the rest
+        { nondet kind = KINDS.oneOf()
+          ... five more picks ...
+          stream_append_session(session, kind, count, ...) } } } },
+}
+```
+
+**Order the picks so the most decisive one is outermost, and re-guard under it.** A conjunct
+settled by an early pick belongs directly under that pick, not below the rest: `session` is
+outermost above, so a `session` whose `active` is false would otherwise exhaust all 34.5M inner
+combinations before the *other* session is even tried. One `all` moves it from 34.5M to 1.
+
+This is a duplication of conjuncts the action already has, and that is correct and intended — see
+"Guards inside the called action do not count" below. It changes no behavior (the alternative is a
+conjunction either way), so it is *not* the restructuring `quint-pr-nondets-gate` Step 2 warns
+against: no action is flattened, no branch is merged, no pick is moved between branches, and no
+shared pick is split into re-picking siblings. Add the hoist while isolating nondets, not after.
+
+#### 5b. Guards go above expensive set expressions
+
+**A `nondet x = <set>.oneOf()` also evaluates `<set>` the moment control reaches the declaration,
+not when `x` is first read.** So every set expression below the first pick is *recomputed* once per
+combination the search tries — not once per step. Put every guard that can reject a combination
+above any expensive set expression, so a doomed combination is thrown out before the expensive work
+is paid for.
+
+The anti-pattern — an expensive domain declared above the guards that reject most picks:
+
+```quint
+// ANTI-PATTERN: `settled_total` is recomputed for EVERY (u, sku, qty) the
+// search tries, including the ~90% that `checkout`'s guards immediately reject.
+action step = any {
+  nondet u = USERS.oneOf()
+  nondet sku = SKUS.oneOf()
+  nondet qty = 0.to(MAX_QTY).oneOf()
+  nondet settled_total = Set(total_after_promotions(carts, u, sku, qty)).oneOf()
+  checkout(u, sku, qty, settled_total),
+}
+```
+
+The fix — the guards move above the heavy pick, so only surviving combinations pay for it:
+
+```quint
+action step = any {
+  nondet u = USERS.oneOf()
+  nondet sku = SKUS.oneOf()
+  nondet qty = 0.to(MAX_QTY).oneOf()
+  all {
+    has_open_cart(carts, u),
+    qty <= inventory.get(sku),
+    nondet settled_total = Set(total_after_promotions(carts, u, sku, qty)).oneOf()
+    checkout(u, sku, qty, settled_total),
+  },
+}
+```
+
+**Guards inside the called action do not count.** `checkout`'s own conjuncts short-circuit, but
+only after `settled_total`'s domain has already been computed — the cost is paid at the
+declaration, before the call. A guard only saves work when it sits textually above the pick, which
+is why the fix duplicates the cheap conjuncts into the `any` alternative and leaves `checkout`'s
+contract untouched.
+
+**Filter each set before combining, never after.** When a pick ranges over a combination, narrow
+the component sets first so the product is small, instead of building the big set and rejecting
+from it:
+
+```quint
+// ANTI-PATTERN: builds |USERS| * |SKUS| pairs, then throws most away.
+nondet pair = tuples(USERS, SKUS).filter(p => has_open_cart(carts, p._1)).oneOf()
+
+// Filter the subsets, then combine — the product is small by construction.
+nondet u = USERS.filter(u => has_open_cart(carts, u)).oneOf()
+nondet sku = SKUS.filter(i => inventory.get(i) > 0).oneOf()
+```
+
+**Narrowing never applies to a contract guard's domain.** Filtering a domain by the very condition
+a guard checks makes that conjunct unfalsifiable, which is the §4 advisory — an index domain stays
+`0.to(capacity)` even though most picks are rejected. Narrow *search* domains only; leave the
+domains that feed input-validation conjuncts wide.
+
+**Which is exactly why 5a is not optional.** A contract domain cannot be shrunk, so hoisting is the
+*only* lever left on it — the wide domains stay wide and 5a is what stops them from being searched
+in states where nothing could have been enabled anyway. Before handing off, check every `any`
+alternative that binds more than one pick: multiply the retry budgets, and if the product runs to
+millions, name the conjuncts that read no pick and lift them. A spec whose contracts are perfect
+and whose `step` costs 34.5M evaluations per visit does not get assessed — it times out.
+
+---
+
+## Handoff
+
+When the spec reads right and the user has approved the model, **hand off through ONE MCP call**:
+
+```
+submit_component(pipeline_key, component_key, spec, main?, observations, invariants?,
+                 observation_groups?, adversary_dispositions?, action_name_map?,
+                 name?, description?)
+```
+
+as your LAST action. Studio then does the whole span server-side with no rounds in between: it
+writes the draft `quint-oracle.<key>.json` from your fields (envelope pinned — format/version,
+budgets, `reportDir`, `studio` metadata; **never hand-write that file**, and do not overwrite any
+existing `quint-oracle*.json` by reusing its key), runs the validation battery (typecheck, nondet
+gate, smoke run, every observation's reachability — fail-fast), and registers the component. The
+response is either ONE explained failure (nothing registered — fix exactly that and re-call) or
+the registration plus your next task. Do NOT rely on a file watcher, and do NOT just tell the
+user to "return to Studio": without `submit_component` the confirm step may never be offered
+(re-setups of an existing component especially). The user confirms, and only *after* that does
+Studio advance you to the wire stage. You do not start it yourself, and you do not run
+`quint oracle`.
+
+The argument semantics:
+
+- `observations` (flat) and/or `observation_groups` (`{ key: { name, observations } }`) — the
+  observation `val` names the user will confirm; list only ones you expect reachable (the battery
+  checks every one).
+- `invariants` — the names of the safety-invariant `val`s you wrote (the `quint-modeling` spine's
+  invariants, plus the bad-state properties of §3); required — pass `[]` only when the spec truly has none. The battery refuses names
+  the spec doesn't define; they are NOT checked for holding at submit (Studio lists them in the report's
+  Unexpected behavior tab, where the user checks them on demand). Each needs a `///` docstring in the
+  spec: one short concrete sentence a developer would write ("A withdrawal never overdraws the
+  wallet."), shown verbatim in the UI. Describe what must hold — never whether it holds or why.
+- `action_name_map` — MBT replay routing (`{ loggedEvent: [QuintAction, …] }`); omit entries when
+  logged event names already match the Quint action names.
+- `name` is the sidebar display name: the component's OWN short name in Title
+  Case — `"Cart"`, `"Order Transfer"`. **Never prefix the product/project name**
+  (`"Medusa Cart"` is wrong — the sidebar already lives inside the project).
+- `main` — the main module, when the file basename doesn't name it.
+- `description` — a one-line plain-language summary of what the component does. Always pass it:
+  you just modeled the component, so you know it better than the discovery survey did — Studio
+  refreshes the component map's description with yours, and shows it under the component's name
+  across the UI.
+
+### Keep the spec surface in mind — you'll instrument against it at the wire stage
+
+There is no handover note: **you** are the agent who instruments the code later in this same
+session, so just keep the mapping straight as you model — for each action, the logged name, the
+Quint action name, its arguments (name : domain), the `actionNameMap` entry if names differ, and
+the real code call site; plus where success is
+signaled in the code (so `logAction` fires only on success) and how the existing tests mark a test
+boundary. If any of this is worth writing down, put it in `///` doc comments **in the spec itself**
+(the action's call site, the domain sets) — the spec is the one persistent artifact.
+
+### Then STOP — this is the end of your turn
+
+You are done when:
+
+- [ ] `quint-specs/<key>.qnt` exists — MBT-replayable spec (thin actions over `pure def`s) with
+      the observation `val`s
+- [ ] the **bug-catching audit** passed — every public mutating operation modeled or named in "does
+      NOT cover" (audit item 0), every adversary-surface row dispositioned (modeled or
+      declined-with-a-category), three catchable bugs named, ≥1 correctness property ruling out a
+      bad state with a real consequence
+- [ ] `submit_component(…)` succeeded — called WITH `adversary_dispositions` (one per surface row);
+      Studio wrote and validated the draft `quint-oracle.<key>.json`, registered the component, and
+      now offers the model confirmation
+
+Then give a **short** summary (what the spec covers / does not, and any surface rows you declined
+with why) and tell the user to **return to Quint Studio**, where they'll confirm the model — its
+correctness properties and its observations, in one step — after which Studio tells you to proceed
+with the wire stage.
+
+**Do not** run `quint oracle` and do not instrument tests yet — ending your turn here is what lets
+Studio advance the pipeline. If the user asks for the oracle work anyway, explain that it starts
+from the Confirm step in Studio.
+
+## Spec fixes during wire/refine (later stages, same session)
+
+At the wire and refine stages the oracle will surface spec problems (a logged action the spec
+doesn't model, a structural guard that misreads the code, a missing observation, an
+argument/domain mismatch).
+You fix the spec **directly** — you authored it and it's in your context — then re-run
+`run_quint_check` until clean and confirm any new observation is reachable. **Never weaken the
+spec just to hide a real product bug** — a "state assertion failed" trace may be a genuine bug;
+flag it for the user instead of editing the spec around it.
+
+**Guards are where "make replay clean" and "flag the bug" pull apart — resolve toward
+flagging.** If a replay fails on a **guard** — a logged transition whose inputs falsify one of the
+action's conjuncts — that is a candidate **violation finding**: the code performed a transition
+its documented contract forbids, the highest-value find this pipeline can make. Do NOT refine it
+away by loosening the conjunct, widening its domain, or deleting it so the trace replays; route it
+to the reproduce flow (a contract-assertion test that feeds the input and asserts the rejection
+through the app's own error API — it FAILS against the code that skips the check) and flag it.
+"The spec must match the code" applies to *intended* behavior; a precondition the contract
+documents is intended behavior even when the code forgets it. Only a guard that misreads the code
+— a structural constraint you inferred wrong, with no documented precondition behind it — is a
+legitimate spec fix.
+
+**Never modify the spec to match broken code. The spec is the ground truth.** If the spec is wrong,
+stop and discuss with the user — that is the highest-leverage review point.
+
+---
+
+## Handoff signal (REQUIRED)
+
+Quint Studio detects you are done by **an artifact on disk**, not by you saying you finished. Your
+done signal is the **draft `quint-oracle.<key>.json` config** — written and registered by
+`submit_component`, which is what makes Studio offer the model confirmation. Once
+`submit_component` succeeded, you are done: STOP and wait to be told to continue. TWO human
+steps follow in Studio — the user confirms observations, then authorizes code changes — and you
+get ONE poke, when wiring is authorized. Do not begin any oracle/instrumentation work before
+that poke: a pipeline state reading `wire` is not a go signal, and the wire tools are refused
+server-side until the user authorizes.
+
+To implement code against a finished spec later, use the `quint-execute-spec` skill. The wire stage
+uses `quint-oracle-instrument`.
+
+
+──── this IS the `quint-modeling` skill (never load it — its reference files live in /Applications/Quint Studio.app/Contents/Resources/resources/agent-plugin/skills/quint-modeling) ────
+
+---
+name: quint-modeling
+description: >
+  Build a Quint model of a system, protocol, or algorithm. Use whenever the user wants to model,
+  spec out, formally describe, model-check, or verify a system in Quint — e.g. "model this
+  protocol in Quint", "spec out this design", "translate this TLA+", "formally check this Rust
+  code" — even if they never say "specification." If the goal is to verify or model-check a
+  design and no Quint model exists yet, writing it is the required first step, so start here. It
+  generates the spec from whatever the user has — an idea, requirements, source code (Rust, Go,
+  TypeScript, etc.), or an existing TLA+ spec — and walks the modelling flow (state, actions,
+  invariants), adapting to the source. Also use this to **review or audit an existing Quint
+  spec** — "review my .qnt", "is this model any good" — it carries the review checklist. For pure
+  Quint syntax/CLI/debugging questions with no new model to build, use quint-lang instead.
+---
+
+# Quint Modelling
+
+Produce a Quint specification from whatever the user starts with. This skill owns the
+**shared modelling discipline** (below) and **routes** to a flow-specific guideline for the
+intake — the part that turns a particular kind of input into the understanding the shared
+steps build on.
+
+For language syntax, operators, the CLI, and `basicSpells`, defer to the **quint-lang**
+reference. This skill is about *how to model*, not Quint syntax.
+
+---
+
+## Pick the flow
+
+Identify what the user is starting from, then read the matching guideline. The guideline
+handles **intake** — extracting the system's state, operations, and assumptions from that
+source. After intake, everyone converges on the **Shared modelling spine** below.
+
+| Starting point | Flow | Guideline |
+|---|---|---|
+| Only an idea / informal proposal, built interactively with the user | **from nothing** | `guidelines/from-nothing.md` |
+| A written requirements / functional-spec document | **from requirements** | `guidelines/from-requirements.md` |
+| Source code (Rust, Go, TypeScript, …) | **from code** | `guidelines/from-code.md` |
+| An existing TLA+ specification | **from TLA+** | `guidelines/from-tlaplus.md` |
+| A **finished `.qnt` spec to audit**, not build | **review** | `guidelines/review.md` |
+
+The first four are **build** flows: intake → the Shared modelling spine below. The **review**
+flow is different — there is no new model to produce; you audit an existing spec against a
+checklist and report findings. It does not use the spine; read `guidelines/review.md` and follow
+it directly.
+
+If the starting point is ambiguous (e.g. "a design doc with some pseudocode"), ask the user
+which source is authoritative before picking — the intake differs materially.
+
+---
+
+## Shared modelling spine
+
+Every flow lands here. Intake (flow-specific) produces an **understanding** of the system:
+its entities, the operations they perform, the state each operation reads and writes, and the
+system-model assumptions (communication, failures, time, participants). The spine turns that
+understanding into a verified Quint spec.
+
+Two principles hold throughout:
+
+- **Executable from the first line.** Quint specs run immediately — you validate design
+  decisions as you make them, not at the end. Never build more than one step without
+  verifying the previous one: `quint typecheck`, **then `quint run`**. Typecheck is not
+  enough — a spec can typecheck and still fail to *execute*, which defeats the whole point of
+  an executable spec. The trap to watch for: a **`const` not given a value** typechecks but
+  cannot run — `quint run` fails with `Uninitialized const`. To make the spec runnable,
+  **instantiate the const in a concrete instance module** —
+  `module spec_3 { import spec(C = Set(1,2,3)).* }` — and run *that* module. (`assume` documents a
+  premise; it does not supply a value — see Step 1 and quint-lang's `guidelines/simulations.md`.)
+  After each addition, actually run it — if you can't `quint run` the module, it isn't done.
+  **Use `quint run` only — never `quint verify`.** This holds for the whole skill: building,
+  iterating, reviewing, sanity-checking invariants — every step uses sampled `quint run`, not once
+  `quint verify`, not even as a final pass. `verify` is exhaustive bounded model checking
+  (Apalache): far slower (minutes to hours) and not part of the modeling workflow. It is a
+  *model-checking* tool, documented in quint-lang (`guidelines/cli.md`, `guidelines/simulations.md`)
+  — reach for it **only when the user explicitly asks to model-check** the spec, never on your own.
+- **What, not how.** Model observable state transitions and their effects. Abstract away
+  implementation detail (serialization, memory management, retry plumbing). If a detail
+  doesn't affect an invariant you care about, it doesn't belong in the spec.
+
+#### Reference examples
+
+Two complete, runnable specs are bundled in `examples/`, one for each of the **two ways
+components coordinate** — by **passing messages** or by **sharing state**. Almost any system maps
+onto one of them; pick by *that* question, not by domain label, and read the closer match as a
+worked instance of the spine patterns (Step 2 state-shaping, Step 4 guarded actions, Step 5
+witnesses + invariants) — to see how the pieces compose into a whole spec. (They are canonical
+shapes to learn from, not the only valid ones.)
+
+| Example | Coordinates by… | Read it when modelling… |
+|---|---|---|
+| `examples/tendermint/` | **message passing** (`choreo::` broadcast/send; real BFT consensus) | **any distributed protocol where parties exchange messages** — consensus, BFT, replication, atomic commit, leader election, reliable broadcast/gossip, request/response, a mempool. This is the **default** reference for distributed systems. Shows: grouped `Id -> LocalState` (Step 2), guarded transitions (Step 4), `choreo::cue` listen/act split, safety invariants (`agreement`/`validity`) + an accountability/liveness angle + a counterexample demo (Step 5), `const`-instantiation, and test separation. Its banner has a "quick read" path so you needn't read all ~760 lines. See also Step 2's "When to use Choreo" and `../quint-lang/guidelines/choreo.md`. |
+| `examples/ewd426.qnt` | **shared state** (no messages) | systems whose parts coordinate through **common state** rather than messages — mutexes/locks, token rings, shared registers, self-stabilization, anything where a process reads its neighbours/the environment directly. Shows: grouped-map state (Step 2), guarded `step` (Step 4), `const`-instantiation, and `temporal` **liveness** properties (Step 5). |
+
+If a system has both (e.g. message-passing nodes that also touch a shared ledger), start from
+**tendermint** (the message-passing structure dominates) and add shared state as its own `var`,
+per Step 2. Plain message *soup* (`Set[Msg]`) without the Choreo framework isn't a separate file —
+Choreo's broadcast is soup underneath, so `tendermint/` is also the reference for that shape (read
+the state decls + a guarded transition; the `choreo::` wrapper is the only added layer).
+
+### Step 1 — Separate concerns
+
+Partition the understanding into three layers. Keeping them apart is what makes a spec
+testable; mixing them is the most common source of untestable specs.
+
+- **State machine** — variables, initialization, transitions → `var`, `init`, actions
+- **Functional logic** — pure computations: guards, quorum checks, state updates → `pure def`
+- **Properties** — what must always hold, what must be reachable, what must *eventually* happen →
+  `val` invariants + witnesses, plus `temporal` properties for liveness (Step 5; quint-lang has the detail)
+
+Also pin down the **system-model assumptions** — they shape every invariant built on top.
+Encode them as **`const` declarations**. To actually *check* an assumption (e.g. a quorum
+condition like `2 * f < n`), write a **`run` test** that asserts it — the `assume` keyword
+*documents* a premise but is not enforced, so don't rely on it as a check (see quint-lang's
+`## Assume` for why and the `run`-test pattern). Each flow's intake fills this in from its own
+source (interview, requirements doc, code, or TLA+); the checklist is the same regardless:
+
+| Concern | Questions to answer |
+|---|---|
+| **Communication** | **How do the actors communicate — messages or shared state? If messages: reliable or lossy? ordered or unordered? broadcast or point-to-point?** (The other shaping question — answer it right after actors; it picks the message medium in Step 2 and, with the actor count, settles the Choreo decision.) |
+| **Failures** | Crash-stop? Crash-recovery? Byzantine? What fraction `f` of `n`? |
+| **Time** | Synchronous? Asynchronous? Partial synchrony? Are timeouts modelled? |
+| **Actors / Participants** | **Who are the actors and roles, and what local state does each hold?** (This is the most concrete intake question — answer it first; it feeds Step 2's `Id -> LocalState` shaping directly.) Fixed membership or dynamic? How many processes? |
+
+If an assumption is wrong, every property built on it is wrong — surface them before building.
+
+### Step 2 — Shape the state
+
+**Start from the two questions you answered in Step 1 — *who the actors are* and *how they
+communicate*. Together they drive every structural decision this step makes.** They are not just
+background; they pick the shape, the message medium, and the framework:
+
+- **How many actors → the state shape.** One actor → a single `var s: Record`. N actors of the
+  same kind → one `Id -> LocalState` map (the record describes *one* actor; see "Scaling to N"
+  below). Distinct roles → either a field on `LocalState` (e.g. `role: Coordinator | Participant`)
+  or separate maps. Get the actor count/roles right and the shape falls out.
+- **How actors communicate → the message medium.** Messages → a separate `var` for the medium,
+  *not* crammed into `LocalState`: unordered `Set[Message]` soup (the default), or `... ->
+  List[Message]` ordered per-pair queues only when delivery order is load-bearing. No messages,
+  coordination through common state → shared memory (no medium var; see `examples/ewd426.qnt`).
+  This is the "Communication shapes" choice detailed just below.
+- **Actors + communication → Choreo or not.** Multiple actors coordinating by **exchanging
+  messages** → default to Choreo (see "Default to Choreo" below). A single actor, or actors
+  coordinating through **shared state** → plain Quint. So answer "who, how many, and how do they
+  talk?" first, and all three decisions below are mostly settled before you write a type.
+
+**Group cohesive state into a record** and let the functional layer operate on that record — this is
+the recommended shape, because most of the time the variables that describe one entity *are*
+cohesive, and grouping keeps the functional layer clean and the invariants readable. Keeping
+variables flat is the deliberate exception, not a co-equal default:
+
+- **Group into a record when** the fields are the local state of one entity (a node's phase + log +
+  vote), are always passed together, or an invariant relates several of them. This is the usual case.
+- **Keep flat (separate `var`s) only when** the variables are genuinely independent concerns that
+  change on their own, or the spec is small enough that grouping adds no clarity. (Some canonical
+  examples, e.g. `ewd840`, keep per-field maps flat because the fields don't form an obvious unit.)
+
+**The cohesive case — one unit:**
+
+```quint
+type State = {
+  phase:    str,
+  balances: NodeId -> int,
+  members:  Set[NodeId],
+}
+
+var state: State
+```
+
+The `apply…` pure functions take and return `State`; actions assign the next-state record directly
+(`state' = applyTransfer(state, …)`). No per-field reassembly.
+
+**Scaling to N instances** — when there are N actors, the record describes **one** actor's
+local state, and the variable becomes a map keyed by actor id. The pure functions are
+**unchanged** — they still operate on a single `LocalState`; only the wiring around them
+changes:
+
+```quint
+type NodeId = int
+type LocalState = { phase: str, balance: int, voted: bool }
+
+var nodes:    NodeId -> LocalState   // per-actor cohesive state
+var messages: Set[Message]           // genuinely global concern → its OWN var, not inside LocalState
+```
+
+| | One instance | N instances |
+|---|---|---|
+| state var | `var state: State` | `var nodes: NodeId -> LocalState` |
+| pure fns | `can…(State, …): bool` + `apply…(State, …): State` | `can…(LocalState, …): bool` + `apply…(LocalState, …): LocalState` — same shape |
+| action read | reads `state` | `nodes.get(id)` |
+| action write | `state' = applyOp(state, …)` | `nodes' = nodes.set(id, applyOp(nodes.get(id), …))` |
+| `init` | one record literal | `NODES.mapBy(_ => <record>)` |
+
+The guideline, stated once: **group cohesive state into a record (one var for one unit, an
+`Id -> LocalState` map for N), and keep genuinely independent concerns — the message soup, a shared
+registry — as their own separate vars**, never crammed into the per-instance record. Reach for flat
+per-field vars only when the fields don't cohere into a unit.
+
+**Communication shapes** (decide alongside the state shape):
+- **Message soup** — `var network: Set[Message]`, processes receive any in-flight message. The
+  default for asynchronous protocols; use it unless ordering genuinely matters.
+- **Shared memory** — no message medium; processes read/write common state directly. See the
+  bundled **`examples/ewd426.qnt`** (a token ring where each node reads its neighbours).
+- **Ordered per-pair queues** — `... -> List[Message]` with head/tail ops. Use **only when
+  delivery order is semantically required** (e.g. logical-clock causality); it is more expensive
+  to model-check than soup. The corpus spec `LamportMutex` is the canonical example — prefer
+  soup unless you can name why ordering is load-bearing.
+
+#### Default to Choreo for distributed protocols
+
+For **any distributed, message-passing protocol with N processes** (consensus, BFT, replication,
+multi-phase commit, broadcast/gossip, leader election), **default to the Choreo framework** — and
+make a deliberate, justified decision if you are *not* going to. This isn't a stylistic toss-up:
+Choreo's listen → react structure and its clean split between local-state updates and network
+effects (the `choreo::cue` pattern) actively push you toward a better-organized, more reviewable
+spec than a hand-rolled `NodeId -> LocalState` + message-soup `step`. The default expectation is
+Choreo; plain Quint for a message-passing protocol is the thing that needs a reason.
+
+**The one legitimate reason to decline:** on a *small* protocol, Choreo's scaffolding (the type
+boilerplate — `LocalContext`/`Transition`/effects — and framework wiring) can add more ceremony
+than the spec's structure is worth, making it materially more verbose for little gain. That's a
+real judgment call — but it is the **only** routine exception, and even then lean toward Choreo.
+Two structural cases also fall outside Choreo: a **single actor** (no inter-process messaging to
+choreograph) and **shared-memory coordination** (no message medium at all → plain Quint, see
+`examples/ewd426.qnt`).
+
+Not a reason: *"still exploring the design."* You can explore *in* Choreo, and switching frameworks
+later is expensive — so don't defer the decision on those grounds.
+
+**This is a structural fork — decide it before writing logic.** If you intend to go plain Quint for
+a protocol that would otherwise be a Choreo candidate, **say so to the user, name the
+verbosity/benefit tradeoff, and get agreement** (fold this into the type-sketch sign-off below).
+
+When Choreo fits, the per-process state still follows the grouping rule above — Choreo just
+supplies the messaging and handler scaffolding around it. See
+`../quint-lang/guidelines/choreo.md` for the framework's API and patterns, and
+**`examples/tendermint/`** for a complete, runnable Choreo spec — real BFT consensus
+demonstrating the `choreo::cue` listen/act split, `agreement`/`validity`/`accountability`
+invariants, and `with_cue`-based tests in a separate `tendermintTest.qnt` (run via
+`--main=valid`).
+
+Decide grouping (and Choreo-or-not) with the user and **get explicit approval on the type
+sketch before writing any logic** (Step 3). Typecheck the types + `var` declarations first;
+this is the highest-leverage review point — a wrong shape is expensive to unwind later.
+
+### Step 3 — Write the functional logic (pure functions)
+
+Implement each operation's logic as `pure def`s — they take the state record and arguments and
+return plain values, so you can exercise them in the REPL with hand-built states. Split the two
+distinct questions a transition answers:
+
+- **Can it happen?** — a `pure def … : bool` guard (the precondition).
+- **What's the resulting state?** — a `pure def … : State` that computes the next state, *assuming*
+  the guard holds.
+
+```quint
+pure def canTransfer(s: State, from: NodeId, recipient: NodeId, amount: int): bool =
+  amount > 0 and from != recipient and s.balances.get(from) >= amount
+
+pure def applyTransfer(s: State, from: NodeId, recipient: NodeId, amount: int): State =
+  { ...s, balances: s.balances.setBy(from, b => b - amount)
+                              .setBy(recipient, b => b + amount) }
+```
+
+Write signatures first (stub the bodies), typecheck, then fill in one function at a time and
+exercise each in the REPL with a hand-built state before moving on. If the output surprises
+you, the function has a bug — fix it before wiring it into the state machine.
+
+> Keep the guard separate from the update because they are separate facts about the operation: one
+> says *when* it is allowed, the other says *what it does*. The action (Step 4) uses the guard to
+> decide whether it fires at all. A single `pure def` returning `{ success, newState }` — handing
+> back the unchanged state when the guard fails — fuses the two and pushes the action toward a no-op
+> branch; prefer the split. (If a *failed* operation is itself something the system observes and
+> reacts to, model that failure as its own guarded action, not as a fallback.)
+
+### Step 4 — Wire the state machine (guarded actions)
+
+An action puts the guard and the update together in one `all { ... }`: the guard gates whether the
+action fires, the update sets the next state. When the guard is false the action is **disabled** —
+it does not fire and does not change anything. No `success` flag, no no-op branch.
+
+```quint
+action init: bool = all {
+  state' = { phase: "idle",
+             balances: NODES.mapBy(_ => INITIAL_BALANCE),   // pre-populate every map
+             members: NODES },
+}
+
+action transferAction(from: NodeId, recipient: NodeId, amount: int): bool = all {
+  canTransfer(state, from, recipient, amount),          // guard — disables the action when false
+  state' = applyTransfer(state, from, recipient, amount),
+}
+```
+
+A disabled action is the faithful model of "this cannot happen in this state." Resist adding a
+blanket `else` / `unchanged_all` fallback to keep things moving — that puts a transition in the
+model that the real system can't take, which is a modeling inaccuracy regardless of what you do
+with the spec afterward.
+
+An action and a `pure def` cannot share a name. Pre-populate every map in `init` — `.get()` on an
+absent key is undefined behavior. See quint-lang for the full list of such gotchas.
+
+### Step 5 — Properties: witnesses first, then invariants
+
+**Witnesses first.** A witness names a target state and asks whether it is *reachable* — write the
+predicate **positively** (the state you hope to reach) and pass it to `quint run --witnesses`, which
+reports **how many sampled traces reached it**. Add one per major action: a witness reached in 0
+traces means the action is dead (its precondition can never hold), so fix that before spending
+effort on safety.
+
+```quint
+// the state you want to be reachable — written plainly, no negation
+val someBalanceChanged: bool =
+  state.members.exists(n => state.balances.get(n) != INITIAL_BALANCE)
+```
+
+```
+quint run spec.qnt --witnesses someBalanceChanged --max-steps 10
+  → someBalanceChanged was witnessed in 90 trace(s) out of 100 explored (90.00%)
+```
+
+A non-zero count means the state is reachable; **0% means it never happened** — investigate.
+
+There is a second, complementary form: write the *negation* as an invariant — `val w = not(target)`
+— so a reported "violation" is an execution that *reaches* the state. It can't batch with the other
+invariants and you read a "violation" as success, but it gives you something `--witnesses` cannot: an
+**actual trace** that reaches the state. Pick by what you need — `--witnesses` for the routine
+reachability + coverage check, the negated-invariant form when you want to *see the path* (to
+understand or document how the state is reached, or to debug a witness that fires unexpectedly).
+
+**Then invariants** — the safety properties that must hold in every reachable state:
+
+```quint
+val noNegativeBalances: bool =
+  state.members.forall(n => state.balances.get(n) >= 0)
+```
+
+Invariants and witnesses run together in one pass: `quint run --invariant noNegativeBalances
+--witnesses someBalanceChanged`.
+
+When a source yields *many* candidate properties and you need to prioritize verification effort,
+the from-requirements flow describes a High/Medium/Low impact-scoring aid (`guidelines/from-requirements.md`);
+it applies wherever you're modelling against stated requirements.
+
+(Witness vs invariant interpretation, fairness, and temporal properties are detailed in quint-lang's
+`guidelines/simulations.md`. `someBalanceChanged` is *state* evidence — phrase such a target so only
+an action can make it true, since a predicate that already holds at `init` is "reached" at step 0 and
+witnesses nothing. To confirm a *specific* action fired when several could reach the same state, use a
+per-action flag `var` — quint-lang's `guidelines/patterns.md` §7 covers it and how to debug a witness
+that never fires.)
+
+### Step 6 — Compose `step` and simulate
+
+Compose the actions in `any { ... }` and stress the model with random walks.
+
+```quint
+action step: bool = {
+  nondet from = NODES.oneOf()
+  nondet dst  = NODES.oneOf()   // `dst`, not `to` (a built-in) — see quint-lang
+  any {
+    transferAction(from, dst, 10),
+    // other actions…
+  }
+}
+```
+
+- Check **witnesses** with `quint run --witnesses` — expect a non-zero trace count (reachable);
+  0% means a dead action.
+- Check **invariants** with `quint run` (sampled) — expect no violation; read counterexample
+  traces step by step when one appears. Use `quint run` for this, not `quint verify` (see the
+  "Executable from the first line" principle — `verify` is only for when the user explicitly asks
+  to model-check).
+
+#### A guarded model can reach a state where nothing is enabled
+
+Because actions are guarded (Step 4), the model can reach a state with **no enabled action**. The
+trap during a build: **`quint run` does not detect deadlocks** — it stops early and prints `[ok] No
+violation found` with a trace shorter than `--max-steps`. A short trace is the only hint, and the
+run reads as success, so watch trace length when you expect the protocol to keep going. (For the
+record, `quint verify` reports a deadlock outright — `Found a deadlock` — but that's a
+model-checking step, only in play if the user explicitly asks for it; don't switch to `verify` just
+to chase a suspected deadlock mid-build — inspect the short trace with `quint run` instead.)
+
+Whether reaching such a state is correct depends on the system: one that should keep serving must
+never get stuck, while one that genuinely finishes (everyone committed, nothing left to do) is
+*supposed* to end in a terminal state. The tool can't tell these apart — only you know which you
+intended. (This is the other reason Step 4 avoids the no-op fallback: a blanket `unchanged_all`
+lets every trace extend forever, so the model can never reach — or reveal — such a state.)
+
+**A note on bounding.** `--max-steps` (how deep a run explores) is not a modeling decision — it's
+always there. Whether the *model itself* has a bounded state space is: some protocols are
+**terminating by construction** (a one-shot commit reaches a final state and stops), and modeling
+them that way is correct — reaching a terminal state is the design, not a deadlock. You may also
+bound an otherwise-unbounded model deliberately to shrink the state space, but never with a no-op
+escape hatch (Step 4) — bound it by modeling the real terminal states, not by a fake step.
+
+Tests (`run` definitions) go in a **separate `*_test.qnt` file** that imports the spec — keep
+the main module free of test scenarios. Build incrementally: typecheck after every addition,
+simulate after every action.
+
+### Step 7 — Self-review, then hand off the spec
+
+Before writing the handoff record, do a quick pass over your own spec against the same bar a
+reviewer would apply — catching these now is cheaper than having them bounce back. Most you've
+already followed while building; this is the closing check that they all hold together:
+
+- **Guarded actions** — no business logic in an action beyond the guard and assignments; it lives
+  in `pure def`s, and the guard is lifted into the action so it's disabled when it can't fire (Step 4).
+- **Every operation accounted for** — walk the intake's operations list: each state-modifying
+  operation is an action in the spec, or appears in the handoff's "does NOT cover" with a reason.
+  One that is in neither is a silent hole — no invariant can constrain state the model never writes.
+- **Witness per major action** — every action in `step` has a witness, and each one is reached in
+  > 0 traces under `quint run --witnesses`, not dead at 0 traces (Step 5).
+- **At least one protocol-level invariant** — a real safety property (no two leaders, conservation,
+  agreement), not just a type/bounds check; and every invariant references a `var`.
+- **`init` assigns every `var`** and every action assigns every `var` (a missing `x' = x` is a
+  silent stutter bug); every map is pre-populated (Step 4).
+- **Right abstraction** — IDs are opaque (no string manipulation), messages are a `Set` unless
+  ordering is the property, no serialization/retry/memory detail leaked in.
+- **No `// -*- mode: Bluespec; -*-` line** — some older Quint specs start with it; it shouldn't
+  be there. The file starts directly with the spec's header comment.
+
+If a spec is large or being handed to someone else, run the full audit in `guidelines/review.md`
+(the C1–C6 / R1–R2 checklist with a report) — reach for it when a self-pass isn't enough.
+
+A finished spec needs a short record so the next reader knows its scope and can trust it.
+Produce one (as a comment block, a `README.md`, or whatever the flow prefers) covering:
+
+- **What it covers** — which modules/protocols are modelled, which assumptions (`const`
+  declarations, with `run`-test checks for the ones that must hold) are encoded, which
+  properties are verified.
+- **What it does NOT cover** — implementation detail left out on purpose, edge cases excluded
+  (and why), properties still to add. This honesty note is what stops the spec from being
+  over-trusted.
+- **When to update it** — for a spec that grounds an artifact (code, a TLA+ source), update
+  the spec and re-verify *before* changing the artifact.
+
+**The spec is the ground truth. Never edit the spec to match broken code.** If the spec is
+wrong, stop and discuss with the user — that is the highest-leverage review point.
+
+Each flow adds its own format detail (source-file correspondence for code, a translation
+README with recorded `quint run` output for TLA+, a comment block for an interactive build).
+
+---
+
+## Conventions
+
+- `NodeId` / `LocalState` for per-actor state, and `NODES` for the participant set (the `Set[NodeId]`
+  the model ranges over); descriptive type names after the protocol (`VoteRequest`, `PrepareMsg`) not
+  `Msg1`, `Msg2`.
+- Small domains: `N = 3` actors (or `N = 2` for first exploration) and value ranges like
+  `0..10` are enough for most safety properties and keep simulation cheap. Use **symbolic IDs**
+  (`int` or `str`) for participants.
+- Message soup: store sent messages in one `Set` and don't model delivery order unless
+  ordering is what you're verifying.
+- Abstract time: when the protocol has a notion of time or progress, model it as an integer
+  **round/epoch counter** (`round: int`), not wall-clock time or timer mechanics — a timeout is
+  just the round advancing. Exception: model timing explicitly only when the timing bound
+  itself is what you're verifying.
+- Start with **one action**: get `init` + one action + one witness working before adding the
+  rest. For N actors, model **one actor first, verify, then generalize** to the map — never
+  wire up all N at once.
+- Test pure functions in **isolation** in the REPL with hand-built states; that catches logic
+  bugs before they get tangled into the state machine.
+
+For everything syntactic — operators, undefined-behavior rules, `basicSpells`, the CLI flags —
+consult the **quint-lang** reference rather than reproducing it here.
+
+
+──── this IS the `quint-lang` skill (never load it — its reference files live in /Applications/Quint Studio.app/Contents/Resources/resources/agent-plugin/skills/quint-lang) ────
+
+---
+name: quint-lang
+description: >
+  Quint language and CLI reference — the expert on Quint syntax, operators, types, `basicSpells`,
+  the toolchain (typecheck/run/test/verify), and how to read simulation and counterexample output.
+  Use when writing or debugging Quint (`.qnt`) files, fixing a typecheck/parse error,
+  looking up an operator or idiom, analyzing an invariant violation or counterexample trace, or
+  optimizing state-space exploration. For building a new model end-to-end from some source
+  (including translating TLA+, or modeling code/requirements/an idea), use quint-modeling instead —
+  it consults this reference for syntax as needed.
+---
+# Quint Language Reference
+
+Quint is an executable specification language for complex systems, developed by Informal Systems. It compiles to TLA+ and supports simulation and model checking.
+
+## Module structure
+
+```quint
+module MyProtocol {
+  // type aliases, constants, state, actions, properties
+}
+```
+
+Modules can import others:
+```quint
+import Voting.*              // all definitions
+import Voting(quorum)        // specific definition
+import Voting as V           // namespace alias
+```
+
+---
+
+## Types
+
+| Type | Description | Example |
+|---|---|---|
+| `int` | Integers | `-1, 0, 42` |
+| `bool` | Booleans | `true, false` |
+| `str` | Strings | `"hello"` |
+| `Set[T]` | Finite set | `Set(1, 2, 3)` |
+| `List[T]` | Ordered sequence | `List(1, 2, 3)` |
+| `K -> V` | Key-value map (type is `K -> V`, **not** `Map[K, V]`) | value: `Map("a" -> 1)` |
+| `(T1, T2)` | Tuple | `(1, "x")` |
+| `{ f: T, g: U }` | Record | `{ x: 1, ok: true }` |
+| `T \| U` | Sum (variant) | (use type alias) |
+
+Type aliases:
+```quint
+type NodeId = int
+type Phase = Idle | Propose | Vote | Commit   // enum — prefer over string literals
+```
+
+---
+
+## Definitions
+
+```quint
+// Module parameter — fixed at instantiation, not a state variable
+const N: int
+const Nodes: Set[str]
+
+// Pure function — no state access, usable anywhere
+pure def max(a: int, b: int): int = if (a > b) a else b
+
+// Stateful operator — can read vars, takes arguments (unlike val)
+def isActive(n: str): bool = active.contains(n)
+
+// State-reading value — can read vars, no arguments
+val quorum: bool = votes.size() * 2 > nodes.size()
+
+// Compile-time constant
+pure val N: int = 4
+val threshold: int = N / 2 + 1
+```
+
+`const` vs `pure val`: `const` is a module parameter bound at instantiation (`import A(N = 3)`); `pure val` is a fixed expression computed once. `def` vs `val`: `def` takes arguments; `val` does not.
+
+---
+
+## State variables
+
+```quint
+type LocalState = {
+  leader: int,
+  phase: Phase,        // enum (see Type aliases) — prefer over a bare str
+  votes: Set[int],
+  log: List[str],
+}
+
+var localState: LocalState  // cohesive local protocol state
+var peers: int -> str       // independent concern (peer metadata)
+```
+
+State variables can only be read in `val` definitions and actions; they cannot be read in `pure def`.
+
+---
+
+## Actions
+
+Actions describe state transitions. They return `bool` — `true` if the action fires.
+
+```quint
+action init: bool = all {
+  leader' = 0,
+  phase' = Idle,
+  votes' = Set(),
+  log' = List(),
+  state' = Map(),
+}
+
+action propose(node: int): bool = all {
+  phase == Idle,
+  node > 0,
+  leader' = node,
+  phase' = Propose,
+  votes' = votes,
+  log' = log,
+  state' = state,
+}
+```
+
+Key rules:
+- Every `var` must be assigned in every action (use `x' = x` to leave unchanged).
+- `all { ... }` — all sub-expressions must hold (conjunction). Guards are plain boolean expressions inside `all { }`.
+- `any { ... }` — at least one must hold (disjunction); the REPL picks non-deterministically.
+
+---
+
+## Non-determinism
+
+```quint
+action step: bool = any {
+  propose(1),
+  propose(2),
+  vote,
+  timeout,
+}
+
+// Non-deterministic choice from a set
+action deliverMessage: bool = {
+  nondet msg = pending.oneOf()
+  all {
+    pending.size() > 0,
+    delivered' = delivered.union(Set(msg)),
+    pending' = pending.exclude(Set(msg)),
+    // ... other vars unchanged
+  }
+}
+```
+
+---
+
+## Set operators
+
+```quint
+Set(1, 2, 3).contains(2)          // true
+Set(1, 2).union(Set(2, 3))        // Set(1, 2, 3)
+Set(1, 2, 3).intersect(Set(2, 3)) // Set(2, 3)
+Set(1, 2, 3).exclude(Set(2))      // Set(1, 3)
+Set(1, 2, 3).filter(x => x > 1)  // Set(2, 3)
+Set(1, 2, 3).map(x => x * 2)     // Set(2, 4, 6)
+Set(1, 2, 3).fold(0, (acc, x) => acc + x)  // 6
+Set(1, 2, 3).size()               // 3
+Set(1, 2, 3).forall(x => x > 0)  // true
+Set(1, 2, 3).exists(x => x > 2)  // true
+1.to(5)                           // Set(1, 2, 3, 4, 5)
+nondet x = Set(1, 2, 3).oneOf()   // non-deterministic pick — only valid in nondet bindings
+```
+
+---
+
+## List operators
+
+```quint
+List(1, 2, 3).head()              // 1
+List(1, 2, 3).tail()              // List(2, 3)
+List(1, 2, 3).length()            // 3
+List(1, 2, 3).nth(1)              // 2  (0-indexed)
+List(1, 2, 3).append(4)           // List(1, 2, 3, 4)
+List(1, 2).concat(List(3, 4))     // List(1, 2, 3, 4)
+List(1, 2, 3).foldl(0, (acc, x) => acc + x)  // 6
+List(1, 2, 3).select(x => x > 1) // List(2, 3)
+```
+
+---
+
+## Map operators
+
+```quint
+Map("a" -> 1, "b" -> 2).get("a")        // 1
+Map("a" -> 1).put("b", 2)               // Map("a" -> 1, "b" -> 2)
+Map("a" -> 1, "b" -> 2).keys()          // Set("a", "b")
+Set(1, 2, 3).mapBy(k => k * 2)          // Map(1 -> 2, 2 -> 4, 3 -> 6)  — set of keys → map
+```
+
+---
+
+## Records
+
+Records group related fields into a named type. They are the primary tool for modelling structured state in Quint.
+
+### Type aliases for records
+
+```quint
+type NodeState = {
+  phase:  Phase,   // enum: Idle | Propose | Vote | Commit
+  voted:  bool,
+  log:    List[int],
+}
+
+type Message = {
+  from:    int,
+  to:      int,
+  round:   int,
+  payload: str,
+}
+```
+
+### Creating and accessing
+
+```quint
+val n: NodeState = { phase: Idle, voted: false, log: List() }
+n.phase                          // Idle
+n.voted                          // false
+```
+
+### Updating (immutable — returns a new record)
+
+```quint
+{ ...n, phase: Propose }                            // ✅ preferred — idiomatic, handles multiple fields
+{ ...n, voted: true, phase: Vote }                  // ✅ multiple fields at once
+
+n.with("phase", Propose)                            // ⚠️ valid but non-idiomatic — field name is a string literal
+```
+
+### Records as state — when to group variables
+
+TLA+ specs typically flatten all state into independent top-level variables. Quint's type system lets you group them. **When fields describe one cohesive local state, make a record type and use a single state variable of that type.**
+
+**Group into a record when:**
+- They represent the local state of a single actor (e.g. one node's phase + log + vote)
+- They are always passed together as function arguments
+- An invariant relates multiple fields of the same conceptual entity
+
+**Keep flat when:**
+- The variables represent distinct concerns that change independently
+- The component is simple and grouping adds no clarity
+- The variables are intentionally in different ownership/lifecycle domains
+
+### Example: preferred grouped local state vs. anti-pattern
+
+**Preferred (cohesive local state):**
+```quint
+type LocalState = {
+  id: int,
+  phase: Phase,
+  est1: int,
+  est2: Option[int],   // Option is from basicSpells, not built in — see Basic spells below
+  round: int,
+  crashed: bool,
+  leader: int,
+  received_messages: Set[Message],
+}
+
+var localState: LocalState
+```
+
+**Avoid for cohesive local state:**
+```quint
+var id: int
+var phase: Phase
+var est1: int
+var est2: Option[int]
+var round: int
+var crashed: bool
+var leader: int
+var received_messages: Set[Message]
+```
+
+**For N actors, use a map of grouped records:**
+```quint
+type LocalState = { phase: Phase, votedFor: int, log: List[int] }
+
+var nodes: int -> LocalState
+
+action commit(id: int): bool = {
+  val node = nodes.get(id)
+  all {
+    node.phase == Vote,
+    nodes' = nodes.put(id, {...node, phase: Commit}),
+  }
+}
+```
+
+### Nested records
+
+```quint
+type ClusterState = {
+  nodes:   int -> NodeState,
+  leader:  int,
+  epoch:   int,
+}
+
+var cluster: ClusterState
+
+// Read nested field:
+cluster.nodes.get(1).phase
+
+// Update nested field (must rebuild from the inside out):
+val updated = {...cluster.nodes.get(1), phase: Commit}
+cluster' = {...cluster, nodes: cluster.nodes.put(1, updated)}
+```
+
+### Records in sets (messages, events)
+
+```quint
+var inFlight: Set[Message]
+
+action send(src: int, dst: int, r: int, p: str): bool = all {
+  inFlight' = inFlight.union(Set({ from: src, to: dst, round: r, payload: p })),
+  // ...
+}
+
+// Filter by field:
+inFlight.filter(m => m.to == nodeId)
+inFlight.exists(m => m.round == currentRound and m.payload == "vote")
+```
+
+---
+
+## Sum types
+
+Sum types (variants) represent a value that can be one of several distinct cases.
+
+```quint
+type Action =
+  | Propose({ value: int, proposer: int })
+  | Vote({ value: int, voter: int })
+  | Decide({ value: int })
+```
+
+Each variant has a named constructor and carries one payload. A constructor takes exactly one argument — wrap multiple fields in a record (as above) or a tuple.
+
+Construct a value by calling the constructor:
+```quint
+val a: Action = Propose({ value: 1, proposer: 2 })
+```
+
+Pattern-match with `match`, binding the payload:
+```quint
+pure def describeAction(a: Action): str =
+  match a {
+    | Propose(p) => "proposal"
+    | Vote(v)    => "vote"
+    | Decide(d)  => "decision"
+  }
+```
+
+Use `_` to ignore the payload when you only care which variant it is:
+```quint
+match a {
+  | Propose(_) => "proposal"
+  | _          => "other"
+}
+```
+
+Use sum types when a message, event, or state can take structurally different forms — not just different values of the same type.
+
+---
+
+## Enum types
+Enum types are a special case of sum types where each case has no additional data.
+
+```quint
+type Phase = Idle | Propose | Vote | Commit
+var phase: Phase
+
+if (phase == Propose) { ... }
+```
+
+---
+
+## Variable grouping — decision guide
+
+Before writing `var` declarations, answer these questions for each candidate group:
+
+| Question | Group → record if... | Keep flat if... |
+|---|---|---|
+| Do these vars always change together? | Yes, in most actions | No, they're independent |
+| Do they describe the same entity? | Same node / same message / same round | Different concerns |
+| Is there one instance or N instances? | Either one or N (group if cohesive; for N use `Id -> RecordType`) | Flat only when concerns are truly independent |
+| Do invariants relate them? | Invariant spans multiple fields of one entity | Invariant uses vars independently |
+
+---
+
+## Boolean operators
+
+```quint
+not(p)             // negation — Quint has no ! operator
+p and q            // conjunction
+p or q             // disjunction
+p implies q        // p => q  (not(p) or q)
+p iff q            // p == q for booleans
+
+and { p1, p2, p3 } // block form — equivalent to p1 and p2 and p3
+or  { p1, p2, p3 } // block form — at least one must hold
+```
+
+`and { }` and `or { }` are the same operators as `all { }` and `any { }` in actions — use whichever reads more naturally in context.
+
+---
+
+## Invariants and temporal properties
+
+```quint
+// Safety invariant — must hold in every reachable state
+// @invariant
+val noDuplicateLeader: bool =
+  leaders.size() <= 1
+
+// Temporal property — evaluated over traces
+// @temporal
+temporal eventualProgress: bool =
+  eventually(committed.size() > 0)
+
+// Temporal operators
+eventually(p)      // p holds in some future state
+always(p)          // p holds in all future states
+p.implies(q)       // p => q
+```
+
+---
+
+## Assume
+
+```quint
+assume nodeCountPositive = N > 0
+assume quorumMajority = 2 * quorum > N
+```
+
+An `assume` states a premise about constants, but it is **not enforced** — a violated `assume`
+is silently ignored by `quint typecheck`, `quint run`, and `quint verify` (none of them flags
+it). It is documentation, not a checked constraint. To actually *check* a condition on
+constants, write a `run` test that asserts it (it executes and fails when the condition is
+false):
+
+```quint
+run quorumAssumptionTest = all {
+  2 * quorum > N,
+  N > 0,
+}
+```
+
+Run it with `quint test`; the test fails (reporting which conjunct broke) if a constant
+assignment violates the condition.
+
+---
+
+## Conditional and let
+
+```quint
+if (x > 0) "positive" else "non-positive"
+
+val result = {
+  val doubled = x * 2
+  doubled + 1
+}
+```
+
+---
+
+## REPL usage
+
+Prefer CLI commands (`quint typecheck`, `quint run`, `quint test`, `quint verify`) for all validation and execution tasks. Open the REPL (`quint` or `quint -r spec.qnt::ModuleName`) only when you need expression-level interaction the CLI does not provide.
+
+Type inspection:
+```
+>>> :type myExpression
+```
+
+---
+
+## File layout
+
+Split specs across two files:
+
+```
+<protocol-name>.qnt        # main module — step, init, vars, invariants
+<protocol-name>_test.qnt   # test module — run tests and scenario witnesses (imports main)
+```
+
+### Module responsibilities
+
+**Main module** (`<protocol-name>.qnt`):
+- Declares all state variables, `init`, actions, and safety invariants
+- **`step` must live in the main module** — it is the entry point for `quint run` simulation
+- The module name matches the file stem: `module myProtocol` in `myProtocol.qnt`
+
+**Test module** (`<protocol-name>_test.qnt`):
+- Imports the main module (`import myProtocol.*`)
+- Contains `run` tests and scenario witnesses invoked via `quint test` or `quint run`
+- Inherits `step` from the main module through the import
+
+### Which `--main` to pass for `quint run`
+
+`quint run` must receive the module that **owns the property** being checked:
+
+| Property location | Correct `--main` |
+|---|---|
+| Invariant defined in main module | main module name |
+| Witness / `run` test defined in test module | test module name (it imports `step` from main) |
+
+The primitive's `module_name` field (set during indexing) always holds the correct value. Use it directly — do not derive from the filename.
+
+---
+
+---
+
+## Basic spells
+
+Many useful operators are not built into Quint but are available in `basicSpells.qnt`, a standard library shipped with most Quint projects. Import it with:
+
+```quint
+import basicSpells.* from "./basicSpells"
+```
+
+Key definitions it provides:
+
+| Definition | What it does |
+|---|---|
+| `type Option[a] = Some(a) \| None` | The option type — Quint has **no** built-in `Option`. Any spec field typed `Option[T]` depends on this import. |
+| `unwrap(o)` | The value inside `Some`; undefined on `None` |
+| `require(cond)` | Blocks the action if `cond` is false (cleaner than bare `all { cond, ... }`) |
+| `values(m)` | Set of all values in map `m` |
+| `transformValues(m, f)` | New map with `f` applied to every value |
+| `has(m, key)` | True if `key` is bound in `m` |
+| `getOrElse(m, key, default)` | `m.get(key)` if present, otherwise `default` |
+| `mapRemove(m, key)` / `mapRemoveAll(m, ks)` | Copy of `m` without `key` (or without the set of keys `ks`) |
+| `setRemove(s, e)` / `setAdd(s, e)` | Copy of set `s` without / with element `e` |
+| `find(s, f)` / `findFirst(l, f)` | First element of set / list satisfying `f`, as `Option` |
+| `max(i, j)` / `min(i, j)` / `abs(i)` | Max / min of two integers; absolute value |
+
+When you see a spec using `Option`, `require`, `values`, or `transformValues` without an import, it is relying on basicSpells — check whether the project includes it. (Less common operators live in a sibling `rareSpells.qnt`.)
+
+---
+
+## Guidelines
+
+Detailed references — read these when you need more than the quick reference above:
+
+| File | Contents |
+| --- | --- |
+| `guidelines/operators.md` | Complete operator reference: extended set/list/map operators, `run`/`then`/`expect`/`reps` for tests and witnesses, temporal fairness, `q::debug` |
+| `guidelines/simulations.md` | Witnesses vs invariants, result interpretation, progressive increase protocol, trace analysis, coverage standard |
+| `guidelines/constraints.md` | Hard language limitations: no string ops, no nested match, no destructuring, no loops, no early returns |
+| `guidelines/cli.md` | Full CLI reference: `quint run`, `quint test`, `quint verify` flags, verbosity guide, reading output |
+| `guidelines/patterns.md` | 14 core patterns: State Type, Pure Functions, Thin Actions, Map Pre-population, Syntax Rules, Undefined Behavior, Witnesses, Nondeterministic Testing, Separate Test Files, REPL-First Debugging, Separate Concerns First, Extract System Model, Types-First Scaffolding, Logic Stubs |
+| `guidelines/tests.md` | Writing and debugging tests: `run`/`then`/`expect`/`reps`/`fail`, nondeterministic tests, error location ≠ failure point, frame counting, REPL-first debugging |
+| `guidelines/choreo.md` | Choreo framework for distributed protocols: two-file split, `choreo::cue` pattern, `.with_cue().perform()` testing, witness-based test discovery |
+
+
+PACE: never write summaries, conclusions, or transition commentary between steps or stages — the user follows progress in Quint Studio, not in your transcript. The moment a stage's artifacts are ready, call its finisher tool; the moment a tool response names the next action, start it immediately. When a response says the pipeline is complete or already marked done, STOP right away — no wrap-up, no recap, no further tool calls.
+
+PROGRESS DISPLAY: Studio shows your built-in task list (TaskCreate/TaskUpdate) live under the pipeline stage, as the user's only window into what you are doing. At the START of each phase, seed your task list from the CHECKLIST that phase's procedure block provides (verbatim or lightly adapted — don't deliberate over items), then keep statuses current as you work: mark the item you are on in_progress (one at a time, with an activeForm like 'Authoring the PR overlay spec'), completed as soon as it is done. Before a phase's submit call, complete or delete its remaining items. Never batch-complete at the end — update as you go.
+
+STUDIO INTERACTION CONTRACT: use your native AskUserQuestion tool for every blocking question. Studio wraps that tool so the terminal user and supervising operator can answer the same structured question. Do not leave a required decision only in prose. The `quint-studio` ask_user MCP tool is a fallback when the native tool is unavailable.
+
+---
+
+<task-notification>
+<task-id>kfj8n9yau</task-id>
+<status>completed</status>
+<summary>MCP task kfj8n9ya (quint-studio/await_finisher) completed.</summary>
+<result>
+Registered component 'mcp-webmcp-tools' — the draft config is written and validated: all checks green (typecheck · smoke run · 23 observation(s) reachable · nondet gate)
+
+EXHAUSTIVENESS (sim-only oracle over the given witnesses as observations): 8797 behavior families.
+In EVERY family (never avoidable — the action fires unconditionally, so it cannot discriminate; fix the guard/step()): notification_produced_no_reply
+8797 behavior families: [notification_produced_no_reply] [notification_produced_no_reply,handshake_ok] [notification_produced_no_reply,handshake_ok,ping_ok] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream,bad_request_id_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream,bad_request_id_rejected,unknown_tool_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream,bad_request_id_rejected,unknown_tool_rejected,tools_listed] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream,bad_request_id_rejected,unknown_tool_rejected,tools_listed,extra_key_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_succeeded,a_tool_call_failed_downstream,bad_request_id_rejected,unknown_tool_rejected,tools_listed,extra_key_rejected,missing_required_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,a_tool_call_failed_downstream] … +8785 more
+
+
+REACHABILITY: all 21 transition rule(s) were exercised in simulation.
+
+SCENARIOS: 1/5 guard conjunct(s) can never be false given the current domains — the contract they encode is untestable; widen the nondet domains to include violating values:
+  · tool_read_docs: PAGES.contains(page)
+
+PROPERTY VACUITY (advisory — properties that may not be able to fail):
+- 'network_only_reached_via_tool_result_channel' was never violated even with guards OFF — it may hold by construction of the model. If the code STORES the state this property relates (a cached root, a counter, a denormalized view), model it stored and updated the way the code updates it — a derived-only model can never falsify this property
+- 'reply_iff_id_present' was never violated even with guards OFF — it may hold by construction of the model. If the code STORES the state this property relates (a cached root, a counter, a denormalized view), model it stored and updated the way the code updates it — a derived-only model can never falsify this property
+- 'initialize_negotiates_a_supported_version' was never violated even with guards OFF — it may hold by construction of the model. If the code STORES the state this property relates (a cached root, a counter, a denormalized view), model it stored and updated the way the code updates it — a derived-only model can never falsify this property
+
+(stage: confirm.) IMPORTANT: from now on pipeline_key is 'mcp-webmcp-tools' — the keyless '__new__' sentinel no longer works. STOP and wait now — TWO human steps happen in Quint Studio: the user confirms the model (its properties and its observations, in one step), then authorizes code changes ('Authorize &amp; connect'). You get ONE poke, when wiring is authorized; until then do not edit any files (the wire-family tools are refused server-side, and a get_pipeline_state showing stage 'wire' is NOT a go signal — wait for the poke). Your task after that poke is the WIRE work below (handed to you now so you can start immediately, without re-orienting).
+
+════ YOUR TASK: WIRE THE SPEC TO THE TEST SUITE ════
+Seed your task list from this checklist, then start: 'Write or extend the oracle client', 'Instrument the application code', 'Wire the test boundary and testCommand', 'Confirm wired (Studio runs the suite)'.
+The working conventions:
+
+──── this IS the `quint-oracle-instrument` skill (never load it — its reference files live in /Applications/Quint Studio.app/Contents/Resources/resources/agent-plugin/skills/quint-oracle-instrument) ────
+
+---
+name: quint-oracle-instrument
+description: &gt;
+  The WIRE (instrument) and REFINE stages of Quint Studio's component setup: given the Quint spec
+  authored at the generate stage (quint-spec-agent), wire the spec to the real test suite. Add the
+  testCommand to the existing draft config, write/extend the oracle client, and instrument the
+  application CODE (plus the oracle test boundary in the EXISTING tests — never authoring new
+  tests) so transitions are reported to the Quint oracle. Finish by calling confirm_wired — Studio
+  validates the config and immediately runs the suite through the oracle, returning the digest;
+  oracle failures are reported there and in `report.json`. This skill is the complete
+  reference for the `quint oracle` interface. Use after a spec + confirmed draft config exist.
+---
+
+# Wire Stage — Wire a Quint Spec to the Test Suite
+
+You are Quint Studio's pipeline agent at the **wire** (instrument) stage. Earlier in this same
+session, at the generate stage (the `quint-spec-agent` skill), you authored the spec at
+`quint-specs/&lt;key&gt;.qnt` — so you already know which code each action models, where success is
+signaled, and which tests exercise it. Your job now is to make the real test suite feed traces to
+the Quint oracle — instrument the application code, wire the existing tests' oracle boundary, and
+add the `testCommand` to the config. Your finish line is **`confirm_wired`**: Studio validates the
+config and immediately runs the whole suite through the oracle, handing you the run's digest in
+that same call. A clean run completes the pipeline right there; an unclean one starts the refine
+loop. You do **not** produce a coverage report or recommend tests.
+
+## Your tools and the one command you may run
+
+- **Read code with your built-in tools — `Read`, `Glob`, `Grep`.** Do NOT shell out to `ls`, `cat`,
+  `find`, `grep`, `head`, or `tree`. File navigation through the standard tools needs no extra
+  permission and is faster.
+- **You never run `quint oracle` yourself.** The FIRST run is chained onto
+  `confirm_wired(pipeline_key, oracle_config)`; refine-loop re-runs go through
+  `run_quint_oracle(pipeline_key)`. Either way Studio runs the component's wired config with
+  `--max-samples 100` PINNED (the 10,000-sample default can OOM and crash the run with
+  `fetch failed` mid-validation) and returns a compact digest. The oracle is the
+  real coverage signal; there is no reason to simulate large here.
+- **Keep spec edits separate from wiring.** At this stage you own: the oracle config, the oracle
+  client, and the instrumentation in the **application code** (plus the minimal oracle boundary in
+  existing tests). When the oracle reveals a genuine spec problem, you fix the spec yourself — you
+  authored it — but as a deliberate spec change (see *Fixing the spec* below), validated with
+  `run_quint_check`, never as a quick contortion to make a run pass.
+- **The instrumentation lives in application code, not test code.** The `logAction` calls go in the
+  service/middleware/event layer (see Philosophy). The single unavoidable test-side touch is the
+  per-test `startTest(name)` boundary — and you wire that through a shared hook on the existing
+  suite, not by editing tests one by one.
+- **NEVER add new tests.** You only instrument what already exists. Do not create test files, test
+  cases, fixtures, or scaffolding. If the existing tests don't exercise enough behavior, that is a
+  gap for the user to fill later — not your job, and not something you report on here.
+- **Finish as soon as the oracle is runnable.** Once the config has a `testCommand`, the app is
+  instrumented, and a run captures traces (`tests &gt; 0`), you are done. Do not produce a coverage
+  report, blind-spot analysis, or test recommendations — the coverage run is the next pipeline step.
+
+## Philosophy
+
+**Instrumentation belongs in the application, not the test suite.** Test wrappers that call
+`logAction()` around every request are fragile and diverge from the real code path. Insert oracle
+logging at the service/middleware layer so any test automatically feeds traces, and the logged
+actions map to the spec's state-machine transitions, not to HTTP method names. The tests stay as they
+are — the only thing they gain is a `startTest` boundary (ideally via one shared hook).
+
+**Coverage is about behavior families, not line coverage.** The oracle maps each test run to a
+subset of the spec's observations (behavior flags). Producing and interpreting that coverage is the
+next step (Studio runs the stored oracle pass) — not your concern. Your job ends at "the oracle runs
+and captures traces."
+
+---
+
+## Phase 0: Check the draft config — don't re-derive what you already know
+
+The generate stage already produced two things, and the user has **already confirmed which
+observations to track** (Studio trimmed the draft config before this stage):
+
+- `quint-specs/&lt;key&gt;.qnt` — the spec (with MBT-replayable actions and observation `val`s)
+- `quint-oracle.&lt;key&gt;.json` — a **draft** config carrying the confirmed `observations` /
+  `observationGroups`, `spec`, `main`, `actionNameMap`, `unguidedStepBudget`, `reportDir`, and `studio`, but **no
+  `testCommand`**.
+
+`Read` the config to see which observations survived confirmation. You authored the spec earlier
+in this session, so you already know the main module, each action's Quint name, logged event name,
+`actionNameMap` entry if names differ, arguments (name:domain), real code call site, the constant-set domains, and where
+the real code signals success — do not re-survey the codebase. If this session was resumed and
+that context is gone, recover it from the spec itself (its actions, domains, and doc comments)
+and the scout subagent (Phase 2), not by re-modelling.
+
+**Do not change the observations in the config and do not overwrite the config wholesale** — those
+observations are the user's confirmed selection. Your job is to *add* the test wiring
+(`testCommand`, optional `buildCommand`) to the existing config and instrument the code (Phase 1+).
+
+If the spec's oracle surface is missing or wrong (an action that the code clearly performs but the
+spec doesn't model, nondet names that cannot be pinned from logged args, etc.), that is spec work — fix the spec first (see
+*Fixing the spec* below) rather than guessing around it.
+
+---
+
+## The `quint oracle` interface (complete reference)
+
+### The config file
+
+The whole run is described in `quint-oracle.&lt;key&gt;.json` (format `"quint-oracle-config"`, version
+`1`) so you invoke `quint oracle --config quint-oracle.&lt;key&gt;.json` instead of ~15 flags. Quint Studio
+watches this file. **The draft already exists** (written at generate, observations user-confirmed);
+your task is to **add `testCommand` (and `buildCommand` if the tests need a rebuild first), and
+confirm `reportDir`** — leaving `observations`/`observationGroups`, `spec`, `main`, and
+`actionNameMap` untouched except to add missing event-to-action routes you discover while wiring.
+**Relative paths resolve against the config file's directory**, and the `testCommand` is
+spawned from that directory, so relative script paths keep working from any cwd.
+
+The keys you add/own at this stage are `testCommand` and `buildCommand`; the rest of the table
+below was already filled in at generate (read it, don't rewrite it):
+
+| key | meaning |
+|---|---|
+| `format` | `"quint-oracle-config"` (required) |
+| `version` | `1` (required) |
+| `spec` | path to the `.qnt` (stands in for the input positional) |
+| `main` | main module name (omit to auto-guess); needed when the spec is imported under a wrapper |
+| `actionNameMap` | MBT replay routing, `{ loggedEvent: [QuintAction, ...] }`; omit entries when names already match; one logged event may map to multiple spec actions |
+| `eventScope` | Studio-owned component key used to select explicitly-scoped log events before replay. Read it and use the exact value when constructing the component logger; never change it during wiring/refinement |
+| `unguidedStepBudget` | max alternatives for one missing replay pick; Studio default is `10` |
+| `stepReplayBudget` | max missing-pick alternatives across one logged step; Studio default is `50` |
+| `observations` | flat list of observation `val` names — their first-firing order names the behavior classes |
+| `observationGroups` | `{ key: { name, observations } }` for per-group projected coverage; groups may overlap. Members are folded into the effective observation list automatically, so a fully-grouped run needs no separate `observations` key |
+| `components` | explicit `{ key: { name, observations } }` partition (auto-detected if omitted) |
+| `testCommand` | the test command, **array form** (`["jest", "cart.spec.ts"]`); spawned from the config dir. Select whole files/targets, not an enumerated test-name list — this command defines the suite every future run rebuilds coverage from, and a pinned name list silently excludes tests added later (test generation appends to these files) |
+| `buildCommand` | optional **array-form** command run from the config dir BEFORE the tests, so tests exercise freshly-built code (e.g. a compiled `dist`); a non-zero exit aborts the run. Scope it to rebuild every package exercised by this component's tests so the run uses the current instrumentation |
+| `reportDir` | where `report.json` is written |
+| `studio.broadTestCommand` | the promote-time broad run, **array form** like `testCommand` — every test across the targets exercising this spec (incl. any integration-test target). PARALLEL by default (buffered logs are test-tagged, so parallel workers/processes attribute correctly); force **serial** only for suites that live-log (see the parallelism note below). At **promote** Studio runs it **verbatim** for ANY test runner (it carries no per-runner knowledge). Scope it with the runner's own flags — e.g. Jest `["jest","cart/","sync/"]`, pytest `["pytest","tests/cart","tests/sync"]`, Rust `["cargo","nextest","run","-p","cart","-p","integration"]` (add `--runInBand` / `-p no:xdist` / `--test-threads=1` only for a live-logging suite). Omit → promote reuses `testCommand` as-is, so scope THAT broadly enough. **Must live UNDER `studio`** — quint's strict parser rejects unknown top-level keys; `studio` is passed through |
+| `randomSteps`, `maxSteps`, `maxSamples`, `agrStrategy`, `agrConfig` | run-shape settings (CLI flags override these) |
+| `studio` | `{ system, model }` metadata embedded in the report for Quint Studio |
+
+Note: the keys are `observations` / `observationGroups`. The old names `tracks` / `trackGroups` are
+rejected with an explicit error. Set `reportDir` to a **new** directory for this component (do not
+reuse another component's).
+
+Example:
+
+```json
+{
+  "format": "quint-oracle-config",
+  "version": 1,
+  "spec": "quint-specs/cart.qnt",
+  "main": "cart_contention",
+  "eventScope": "cart",
+  "actionNameMap": { "add_to_cart": ["AddToCart"] },
+  "unguidedStepBudget": 10,
+  "stepReplayBudget": 50,
+  "randomSteps": true,
+  "maxSteps": 60,
+  "observationGroups": {
+    "lifecycle": { "name": "Cart lifecycle", "observations": ["cart_completed", "item_removed_from_cart"] },
+    "inventory": { "name": "Inventory protection", "observations": ["last_unit_added", "inventory_depleted"] }
+  },
+  "reportDir": "mc-out-cart",
+  "studio": { "system": "Medusa Cart", "model": "quint-specs/cart.qnt" },
+  "testCommand": ["node", "node_modules/.bin/jest", "__tests__/cart"]
+}
+```
+
+### Invocation and precedence
+
+The first run rides `confirm_wired`; re-runs go through `run_quint_oracle(pipeline_key)` —
+either way Studio runs `quint oracle --config quint-oracle.&lt;key&gt;.json --max-samples 100` for you.
+
+CLI flags win over config values, so keep the test command in the config — Studio's
+run passes only the config, the report dir, and the pinned sample cap.
+
+### What a run does
+
+1. Runs `buildCommand` (if any) from the config dir; a non-zero exit aborts.
+2. Starts the oracle **HTTP daemon** and exports `QUINT_ORACLE_URL` into the test process.
+3. Spawns `testCommand` (from the config dir). Your instrumented code POSTs/PUTs traces to the daemon.
+4. After the tests exit, the daemon validates each captured trace against the spec, then shuts down.
+5. Writes `report.json` to `reportDir` (run metadata + observation docs are extracted from the spec
+   automatically — Studio needs no separate spec access).
+
+### The daemon HTTP protocol (what the oracle client talks to)
+
+- `POST /test/&lt;name&gt;` — begin a test; `&lt;name&gt;` becomes the trace's test name in the report.
+- `PUT  /log` — body `{ "action": "&lt;logged name&gt;", "arguments": [ { "name", "value", "domain?" } ], "scopes": ["&lt;component-key&gt;"] }`.
+  An argument `{ "name": "outcome", "value": "rejected" }` marks the event a **rejected attempt**:
+  it replays as a stutter (no transition) and counts as tested evidence for the matching guard
+  scenario (see Phase 2).
+- `POST /validate`, `POST /shutdown` — internal; the CLI handles these.
+
+`QUINT_ORACLE_URL` is set by `quint oracle` in the test **child** process before it spawns. **The
+oracle must spawn the test command — never the other way around.** If the app process is already
+running (e.g. loaded by a test framework) before the env var exists, the client captures
+`QUINT_ORACLE_URL` as `undefined` for the whole run and the oracle receives **zero** traces.
+
+### The report
+
+`report.json` in `reportDir` groups tests into **behavior families** (observation combinations that
+fired together). Open it with `quint report &lt;reportDir&gt;`. Each test entry has `matched: true|false`;
+failures carry a text you classify (see the validation loop). Studio re-imports this report.
+
+---
+
+## Phase 1: Write / extend the Oracle Client
+
+The client reads `QUINT_ORACLE_URL` (no-op when unset), exposes `startTest(name)` (POSTs `/test/&lt;name&gt;`)
+and `scope(componentKey)`, whose logger sends `logAction(action, args)` to `/log` with that component
+scope. Each arg is `{ name, value, domain? }`:
+- `name` matches the parameter name in the Quint action signature (copy from the spec)
+- `value` is the concrete value
+- `domain` is the Quint constant set the value belongs to (e.g. `"USERS"`, `"ITEMS"`)
+
+If the repo already has an oracle client (another component set one up), reuse it — only extend its
+action/domain mapping to cover this component's actions. Otherwise:
+
+- **Rust, TypeScript or Go** — call the **`vendor_oracle_client` MCP tool** with the language. Studio
+  writes the client library into `quint-specs/oracle-client/&lt;language&gt;/` (Rust: a local crate;
+  TypeScript: a local no-build npm package; Go: a local module wired with a replace directive) and
+  its response tells you exactly how to consume it
+  (path/file/replace dependency + import + call-site snippets). Never copy-paste an HTTP client, never
+  path-depend into a Quint checkout, and never edit files under `quint-specs/oracle-client/` —
+  they are Studio-managed and get committed with the repo so instrumentation works on other
+  machines. Guard rule for Rust: bind `let _t = start_test(…)` and HOLD it for the whole test
+  scope; buffered (sync) tests may run fully parallel — only async/actor tests whose transitions
+  live-log off the test thread need `--test-threads=1`. For TypeScript: `const t =
+  startTest(name)` in the shared beforeEach, `await t.end()` in afterEach; parallel jest/vitest
+  workers are fine (tagged flushes), but avoid `test.concurrent` within one file and add
+  `--runInBand` only when logging is live. For Go: `g := StartTest(t.Name())` with
+  `t.Cleanup(g.End)` in each test; avoid `t.Parallel()` within a package, while `go test ./...`
+  package-parallelism is fine.
+- **Any other language / a crate that can't take the dep** — Read
+  [`guidelines/oracle-client.md`](guidelines/oracle-client.md): it specifies the protocol and the
+  attribution semantics a custom client MUST replicate.
+
+---
+
+## Phase 2: Instrument the application code (+ a test boundary)
+
+**Delegate site DISCOVERY to the `quint-instrumentation-scout` subagent (Agent tool) first**: pass it
+the action list (names + args + domains from the spec / draft config) and the app source
+root; it returns a per-action `file:line` site table, the shared test-boundary hook point, and any
+unplaceable actions — without filling your context with the codebase sweep. You then make the edits
+at the sites it found (spot-check a site if it looks off; the scout is read-only).
+
+**The `logAction` instrumentation goes in the application code — never in test code, and never as a
+new test.** Find the single point in the application where each state transition completes and insert
+the `logAction` call there (you identified these call sites while modelling; the scout re-locates
+them if needed). **Log completed transitions only — and tag rejected attempts.** An untagged
+`logAction` asserts "this transition HAPPENED", so it fires only after the state change completes.
+When the code REJECTS an operation the spec guards (an early return, a thrown validation error —
+the reject side of a guard conjunct), do NOT emit a normal transition event on the reject path:
+emit the **same action name and args tagged with an `outcome` argument whose value is
+`"rejected"`** (`{ name: "outcome", value: "rejected" }`). A rejected-tagged event replays as a
+**stutter** — no transition — and marks the matching guard scenario as tested: the tests exercised
+the contract and the code held. Never invent a second `&lt;op&gt;_rejected` event name or
+`actionNameMap` entry — one operation, one action name; the `outcome` tag is the only
+discriminator. An **untagged** logged transition whose inputs falsify the action's guard replays
+as a **violation finding** — the code performed a transition its contract forbids; that is the
+finding this pipeline exists to make, never something to fix by loosening or widening the guard.
+Keep logging success-only for *internal/unmodeled* failures (a bubbled-up plumbing error the spec
+doesn't model is a disabled action — nothing to log).
+Construct a scoped logger from the config's exact `eventScope` and use that logger for every event
+owned by this component. If one successful transition genuinely belongs to multiple component
+abstractions, target all of their keys explicitly. Do not add unrelated actions to `actionNameMap`
+and do not leave calls unscoped to make a report pass. The oracle rejects unscoped events; every
+instrumentation event must declare its owner.
+The existing tests then feed traces automatically just by exercising that code. Choose a
+`testCommand` that runs existing tests covering this component's behavior; do not create test files,
+cases, or fixtures.
+
+**Do not add oracle calls to test helper functions.** The only test-side change is the per-test
+`startTest` boundary below, wired through one shared hook.
+
+### Where to instrument
+
+| Application style | Instrumentation point |
+|---|---|
+| Express / HTTP server | Response middleware that fires after a successful route handler |
+| Service / store layer | Inside the service method, after the state mutation, before returning |
+| Event-driven / CQRS | Event store `emit()`/`commit()` after the command is accepted |
+| Actor model | Inside `handle()` after applying the state update |
+| CLI tool | After each command function returns without error |
+
+### Test boundaries are essential — without them, the oracle captures nothing
+
+The oracle needs one `startTest(name)` per test so it records one trace per test. Wire this through a
+**single shared hook** — e.g. a `beforeEach` in the suite's existing setup file, or the project's
+existing `oracleStartTest`-style helper — rather than editing tests one by one (`Grep` for
+`QUINT_ORACLE_URL` to find how this repo already does it, and reuse it). This is the only test-side
+touch, and it adds no new tests. Without per-test boundaries the oracle records **zero** traces.
+
+### Express middleware pattern (TypeScript)
+
+```typescript
+// src/middleware/oracle-middleware.ts
+import { Request, Response, NextFunction } from 'express';
+import { scope, OracleArg } from 'quint-oracle-client';
+
+const oracle = scope('cart'); // exact eventScope from quint-oracle.cart.json
+
+export interface OracleTrace { action: string; args: OracleArg[]; }
+
+export function oracleMiddleware(req: Request, res: Response, next: NextFunction): void {
+  const originalJson = res.json.bind(res);
+  res.json = function (body: unknown) {
+    const trace: OracleTrace | undefined = res.locals.oracleTrace;
+    if (trace &amp;&amp; res.statusCode === 200) {
+      oracle.logAction(trace.action, trace.args).catch(() =&gt; {}); // fire-and-forget
+    }
+    return originalJson(body);
+  };
+  next();
+}
+```
+
+```typescript
+// in each route handler, before res.json():
+res.locals.oracleTrace = {
+  action: 'add_to_cart',
+  args: [
+    { name: 'user', value: user, domain: 'USERS' },
+    { name: 'item', value: itemName, domain: 'ITEMS' },
+  ],
+};
+```
+
+### Service layer pattern (Rust / Go / any language)
+
+```rust
+impl ShopService {
+    pub fn add_to_cart(&amp;mut self, user: &amp;str, item: &amp;str) -&gt; Result&lt;Cart, ShopError&gt; {
+        let args = [
+            OracleArg { name: "user", value: user.into(), domain: Some("USERS") },
+            OracleArg { name: "item", value: item.into(), domain: Some("ITEMS") },
+        ];
+        match self.state.add_item(user, item) {
+            Ok(updated) =&gt; {
+                oracle_client::scope(&amp;["cart"]).log_action("add_to_cart", &amp;args); // completed transition
+                Ok(updated)
+            }
+            // The spec GUARDS this operation → tag the rejected attempt (it replays as a
+            // stutter and marks the guard scenario tested). Never log a reject as a plain
+            // transition — the transition didn't happen. (A rejection of an operation the
+            // spec doesn't model: don't log at all.)
+            Err(e) =&gt; {
+                let mut rejected = args.to_vec();
+                rejected.push(OracleArg { name: "outcome", value: "rejected".into(), domain: None });
+                oracle_client::scope(&amp;["cart"]).log_action("add_to_cart", &amp;rejected);
+                Err(e)
+            }
+        }
+    }
+}
+```
+
+### State-conformance facts — make model-code fidelity ENFORCEABLE
+
+Trace replay checks that each logged action is *admissible* in the model (name + pinned args
+satisfy the guards); it never compares post-state. So a model whose update logic quietly diverges
+from the code — the classic slip is modeling an operation's *intent* instead of its actual writes
+— replays green forever. Close that hole per mutating operation:
+
+1. **In the code**: after the mutation, log ONE abstracted post-state fact as an extra argument —
+   something cheap, deterministic, and computable in the model's abstraction. Collection **size**
+   is the workhorse (`leaf_count: self.num_leaves()`); emptiness flags and abstract enums also
+   work. Never a hash or anything below the model's abstraction level.
+2. **In the spec**: the action takes the fact as a parameter **named exactly as the logged
+   argument** and **guards on equality with the model-computed post-state**; `step` supplies it via
+   a singleton nondet so simulation pays nothing:
+
+   ```quint
+   // step:
+   nondet observed_count = Set(count_after_insert(leaves, key, value)).oneOf()
+   ...
+   insert(key, value, observed_count)
+
+   // action — parameter name matches the logged arg (`leaf_count`); the pick it
+   // is passed (`observed_count`) can be called anything:
+   action insert(key: int, value: int, leaf_count: int): bool = all {
+     leaf_count == count_after_insert(leaves, key, value),  // conformance guard
+     ...
+   }
+   ```
+
+   In simulation the singleton makes the guard free. At replay the pick is **pinned to the
+   code's logged fact** — if the model's update disagrees with the code's, the guard fails, the
+   trace lands UNMATCHED, and the pipeline routes to refine instead of quietly reaching ready.
+   The pin is what makes this a test at all: a fact the logged name cannot reach leaves the pick
+   free, the singleton satisfies itself, and the trace matches while checking nothing. The oracle
+   log says so — `guidance for "&lt;test&gt;": N/M logged args pin a step nondet`, plus an explicit
+   warning naming the args that reach no pick.
+   That unmatched trace is the fidelity test: investigate whether the MODEL is unfaithful (fix
+   the model to mirror the code and let a correctness property state the intent) before touching
+   anything else.
+
+Give every state-MUTATING instrumented operation at least one conformance fact. Read-only
+operations need none.
+
+### Instrumentation checklist
+
+- [ ] `logAction` fires on completed transitions only; **rejections of guarded operations carry the
+      `outcome: "rejected"` tag** (same action name); nothing logged for internal/unmodeled failures
+- [ ] every state-MUTATING operation logs at least one **state-conformance fact** (see above) that the spec guards on
+- [ ] every logged argument name matches the spec action's parameter name (or the pick's own name), so it PINS — check the run's `N/M logged args pin a step nondet` line; an unpinned conformance fact checks nothing
+- [ ] every new/refined call uses a scoped logger whose key exactly matches config `eventScope`
+- [ ] multi-component scopes are used only when the transition genuinely belongs to each component
+- [ ] action names match the spec's logged-action names exactly (copy from the spec)
+- [ ] argument `name` fields match the Quint parameter names exactly
+- [ ] `domain` fields match the Quint constant-set names exactly
+- [ ] `startTest(name)` is called once per test
+
+---
+
+## Phase 2b: Instrument for the PROMOTE-time broad coverage (not a dashboard widen)
+
+The "proper", beyond-the-PR coverage does NOT run on the dashboard. It runs once, automatically, at
+**promote** (when a merged PR's spec becomes a component): Studio writes the component config with a
+**broad** `testCommand` (parallel where the logging is buffered, serial where it is live) and runs
+the oracle in the background. The dashboard then just displays
+the spec-relevant traces and lets you re-run that same config. There is no "Run full test suite" widen
+agent. So your job in the PR instrument step is to annotate so that promote's broad run finds everything
+**without any re-instrumentation**. Two conditions must BOTH hold for a test in another crate to
+contribute a trace:
+
+1. **Code annotation lives in shared LIBRARY code.** The `logAction` calls must sit in the
+   application/library code other crates actually execute — NOT in this crate's test wrappers (the
+   Philosophy rule). Then any crate calling that library — including the integration suite — emits
+   automatically. Verify this; it is what makes broad coverage possible at all.
+2. **Each candidate test carries a `startTest` boundary, registered up front.** Buffered logs (the
+   transition fires on the test's own thread) are flushed TAGGED with their test name, so such tests
+   are attribution-safe under full parallelism — threads AND process-parallel runners (nextest, jest
+   workers). Only tests whose transitions fire off the test's own thread (an async/actor test on a
+   `tokio` worker) fall back to live untagged logs into the daemon's serial slot — **those must run
+   serially** (in Rust, `--test-threads=1`). Scope the serial constraint to the async suites instead
+   of blanketing the whole command: a sync-only unit-test target may keep its parallelism. When
+   unsure whether transitions run off-thread, keep that target serial. A test with no boundary
+   contributes **zero** traces.
+   - **JS/TS:** a `beforeEach`/global setup hook blankets a package; wire the same shared hook into each
+     package whose tests should report.
+   - **Rust:** no global per-test hook — each test binds the guard (`let _t =
+     quint_oracle_client::start_test("…")`). Reuse a **shared helper** rather than editing tests
+     ad-hoc — e.g. the integration suite's `quint_oracle_guard(name)` (in `tests/it/main.rs`); add one
+     where a crate lacks it. Only crates whose tests adopt the helper contribute coverage.
+
+**Record the broad scope as `studio.broadTestCommand`.** The promote-time broad run must cover every
+test target/package whose tests exercise this spec — **including any integration-test target** (an
+async/end-to-end suite is usually the only place cross-component behavior is driven). Keep it
+PARALLEL wherever the logging is buffered (tagged flushes attribute correctly across workers and
+processes); force serial ONLY on the suites that live-log. Write it as a single **array-form**
+command (like `testCommand`), scoped to exactly the targets/tests below and expressed in your
+runner's own flags — e.g. Jest `["jest","cart/","sync/"]`, pytest
+`["pytest","tests/cart","tests/sync"]`, Rust `["cargo","nextest","run","-p","cart","-p","integration"]`
+(append the serial flag — `--runInBand` / `-p no:xdist` / `--test-threads=1` — only when that
+target live-logs). It MUST go under `studio`
+(quint's strict config parser rejects unknown top-level keys; `studio` is a pass-through metadata blob);
+Studio runs it VERBATIM at promote, so it works for any runner. If you omit it, promote reuses the PR
+`testCommand` as-is — so either set `broadTestCommand` or make the PR command broad enough. If you omit
+a target, its tests won't run at promote and that coverage is lost.
+
+**Estimate the scope — which packages AND tests actually touch this spec.** Don't run the whole
+project (or a whole integration target of hundreds of tests, most contributing nothing) — but don't
+under-scope either: **the relevant set is exactly the tests that carry the oracle boundary guard**, and
+they are usually SCATTERED across many modules, not one. The decisive signal is the guard, not the
+module name.
+1. Take the library function(s) you put `log_action` in (your Phase 2 edits).
+2. `Grep the WHOLE integration target for the boundary` (`start_test` / the repo's boundary helper such
+   as `quint_oracle_guard`) — every test that binds it is a contributor and MUST be in scope.
+   (Uninstrumented tests produce no trace, so you don't need them — and that's the only reason you can
+   narrow at all.)
+3. Scope the broad command to keep the cheap in-process unit tests whole AND include EVERY guarded
+   integration test — using your runner's own selectors (a Jest/pytest path or `-t` name filter, a
+   nextest **filterset**, …). Don't scope to a single module — one that drops guarded modules silently
+   drops the families only those tests cover; include ALL the guarded modules. For **Rust** the filter
+   is a nextest filterset passed to `cargo nextest run … -E &lt;expr&gt;` — e.g.
+   `not package(arc-malachitebft-test) | test(value_sync)` is WRONG if `full_nodes`, `reset`,
+   `validity_change`, … also carry guards; use
+   `not package(arc-malachitebft-test) | test(value_sync) | test(full_node) | test(n3f1) |
+   test(reset_height) | test(persistent_peers_only) | test(vote_rebroadcast) | test(validity_change)`.
+4. Record the scope. In Quint Studio's PR flow you do NOT hand-write the config — pass the full
+   broad argv array (scoped to the targets/tests above; serial flags only on live-logging targets)
+   to `write_oracle_config` as `broad_test_command`; Studio stamps it as `studio.broadTestCommand`
+   and runs it verbatim at promote. Cost check: a serial live-logging suite is ~10–15 s/test, so
+   the guarded subset (~60) ≈ 12–15 min vs ~180 tests ≈ 40 min for the whole suite — narrow to the
+   guarded set (the ~120 unguarded tests contribute nothing), and parallelize the buffered targets
+   on top of that.
+
+**Static completeness check BEFORE the run — advisory, ONE pass, never a loop.** Once the
+instrumentation is in place but BEFORE you run the oracle, call
+`check_action_coverage(pipeline_key, spec, src)` (`src` = the app source directory) **once**. Studio
+extracts both sides **statically** (no test run) and returns two diffs — **NOT INSTRUMENTED** (a spec
+action with no code event) and **NOT MODELED** (a code event with no spec action) — plus a `warning`
+flag. Do not hand-run the grep pipeline. Tell the check how the code is actually annotated: if the
+codebase logs through its own wrapper (`emit(node, "name", …)`), pass `log_fns: ["emit"]` so those
+sites are detected reliably; if the config resolves actions via `actionTakenPath` (an imported spec
+with a `lastAction`-style variant), pass `action_taken_path` — Studio then skips the name diffs
+(they'd compare the wrong namespaces) and just lists the logged events.
+
+Studio rejects logged argument names that do not match the routed Quint action parameters; copy
+identifiers from the action signature, while omitted arguments remain wildcard picks.
+
+This is a HINT, not a gate. The static grep matches a fixed set of instrumentation styles, so it
+**cannot see** annotations it doesn't recognize: `actionTakenPath`/variant-tag logging (the name is a
+runtime sum-type variant, never a literal at the call site), names routed through `actionNameMap`, or a
+custom logging wrapper. When it misses those, it reports correctly-annotated actions as NOT
+INSTRUMENTED. **The oracle run — not this grep — is ground truth** (the live `loggedTrace` proves what
+actually fired). So:
+- **Reconcile each NOT INSTRUMENTED entry against what YOU just wrote.** You authored the
+  instrumentation; if you know you annotated that action (variant mode, a mapped name, or a wrapper the
+  grep can't match), the detector simply missed your style — note it and move on. **Do NOT re-add it,
+  and do NOT re-run the static check hoping for a different answer.**
+- **If `warning` is set** (detection fell back to matching bare quoted names), treat the whole result
+  as low-confidence — a single reconciliation pass, then run.
+- **Only add a missing `log_action` when you genuinely forgot one** — a real, frequently-exercised
+  action with no site anywhere. Do it once, here, before running. (**test-only model helper** not in
+  `step()` → exclude; **failure-injection the tests can't trigger** → keep as a witness, instrument the
+  real site, expect 0 hits, document.)
+- **Never gate the run on a clean static result.** After at most one fix pass, PROCEED to the oracle
+  run regardless of what NOT INSTRUMENTED still lists — the run resolves whether those are real gaps.
+
+Do NOT run the agent's how-well-annotated / blind-family triage here — that is a post-run analysis and
+belongs after Phase 3 (below).
+
+**Run integration tests with a runner that gives per-test process isolation + a stable per-test slot.**
+Multi-node integration suites typically assign each test a network port range from a per-test slot
+index; without process-per-test isolation every test falls back to the same slot → identical ports →
+mass `Address already in use` failures (and cascading `Connection refused`), which look like product
+failures but are purely a runner mismatch. In **Rust** this means `cargo nextest run …` (nextest sets
+`NEXTEST_TEST_GLOBAL_SLOT` → unique ports + process-per-test; plain `cargo test` leaves the slot unset
+→ the port clash above). Process-per-test also makes the client's buffered flushes parallel-safe
+(they are tagged with their test name), so nextest may keep its default parallelism — add
+`--test-threads=1` only when the suite's transitions LIVE-log (a plain `log_action` firing on a
+worker thread; per-node `log_action_for` buffering is process-global and therefore fine under
+process-per-test). The PR's own scoped unit tests, which bind no ports, can stay on `cargo test`
+(parallel is fine). Other runners: pick the equivalent isolated invocation.
+
+**Checklist before you finish the instrument step:**
+- [ ] transition `logAction` sites are in shared/library code, not test wrappers
+- [ ] the tests that drive this component across crates (incl. the integration suite) bind the
+      `startTest` boundary via a shared helper
+- [ ] the scoped PR run captured traces (`tests &gt; 0`) so you know the annotation fires
+- [ ] `studio.broadTestCommand` covers every test target (incl. any integration-test target) whose tests exercise the spec — parallel where buffered, serial only where live-logging
+
+---
+
+## Phase 3: Confirm wired — Studio runs the suite in the same call (your finish line)
+
+Once the config has a working `testCommand` and the instrumentation is in place, call
+`confirm_wired(pipeline_key, oracle_config)`. Studio validates the config and IMMEDIATELY runs the
+whole test suite through the oracle, returning the run's digest — do **not** follow it with a
+`run_quint_oracle` call of your own. The call returns within about a minute — the result, or
+FINISHER RUNNING with a `finisher_id`: the suite keeps running server-side, and
+`await_finisher(finisher_id)` is the only wait (never re-call the tool, never watch processes).
+The oracle maps each trace to valid sequences in the spec; mismatches are reported per test in
+`report.json` and summarized in the digest.
+
+- **A clean run completes the pipeline in that same call** — the digest says PIPELINE DONE; STOP
+  immediately, no finish calls, no summary.
+- **`tests` empty / no traces captured**: the test boundaries are missing, the oracle didn't spawn
+  the tests, or `QUINT_ORACLE_URL` wasn't set when the app loaded — fix that before anything else
+  (set `QUINT_ORACLE_DEBUG=1` to see client traffic), then re-run with `run_quint_oracle`.
+- **Unmatched failures**: the refine loop — use the digest and `report.json` to decide the
+  next changes. **Classify each fix first.** A REPLAY-SIDE fix (the spec, `actionNameMap`,
+  replay budgets, observations) never changes what the tests log, so Studio verifies it by
+  replaying the STORED traces: `run_quint_oracle(pipeline_key)` returns in minutes, no tests
+  execute, and a clean replay-only result completes the pipeline — it is the same verdict a
+  fresh suite run would give, because the code is unchanged. A CAPTURE-SIDE fix (logging
+  sites, test boundaries, logged arguments, `testCommand`) invalidates the stored traces —
+  the next run captures for real; iterate those SCOPED with
+  `run_quint_oracle(pipeline_key, test_command [...])` (the runner invocation for just the
+  failing tests) and close with the full `run_quint_oracle(pipeline_key)`. Studio picks
+  replay vs capture from the trace stamp automatically — never reason about staleness
+  yourself. Fix independent failures together in one round, diagnosing the classes IN
+  PARALLEL with read-only subagents (see "Error classes and triage"); go one at a time only
+  when fixes could mask each other.
+
+Events explicitly scoped to other components are removed before replay and appear as the
+non-fatal `foreign-action-excluded` warning. They are not evidence of a spec gap. An
+`action-unresolved` failure after scope filtering targets the active component and remains a real
+refinement blocker: fix its event name/mapping or the component's replay surface; never
+blanket-ignore unknown actions.
+
+**A blind family is a SELF-CORRECT trigger, not a footnote (post-run analysis).** After the run, for
+every spec family that is sim-reachable but has NO covering test, do NOT just report it — first rule
+out that YOU caused it:
+- **Did you under-scope?** A guarded test that covers it may have been filtered out (Phase 2b step 3).
+  Broaden `broadTestCommand` to include every guarded module and re-check. (This is exactly how a
+  value-sync filter can hide the `Invalid` family if the test that drives a bad certificate lives in
+  another module.)
+- **Is the branch annotated?** Confirm the library code for that outcome actually has a `log_action`
+  (a conditional path that commits its transition off the main site; for a guarded operation's
+  reject branch, the `outcome: "rejected"` tag — without it the matching guard scenario looks
+  untested). If it's missing, that's YOUR bug — add it and re-run; the behavior was
+  never observable, not untested. (The pre-run static check should have caught this, but a branch only
+  reachable at runtime can still slip through.)
+- **Only if scope is complete AND the branch is annotated AND still no test hits it** is it a GENUINE
+  untested-behavior gap — surface it as a finding (the PR's error/edge path has no test). Never
+  fabricate a test or weaken the spec to make it look covered.
+
+### Error classes and triage
+
+The oracle reports factual diagnostics through `failureKind`, `failureCode`, `failure`, and
+`diagnostics`. Treat them as evidence for your own triage, not as a prescribed cause. Before
+editing, decide whether the smallest next step is test-command scope, test boundary or
+instrumentation, logged action mapping/arguments, model scope/granularity, or real product/model
+divergence.
+
+**Diagnose independent failure classes IN PARALLEL.** When the digest names failures in more
+than one independent class (different tests, different actions, different `failureCode`s), don't
+walk them one after another: fan out one read-only `quint-code-researcher` subagent per class
+(Agent tool, all in a single message). Give each ONE class and its exact evidence pointers — the
+report path, the failing tests' names, their `loggedTrace` entries, the spec path, and the
+relevant code paths — and ask for a grounded diagnosis at the right altitude (wiring / test
+entrypoint / model scope, see below) plus the smallest proposed fix, each claim pinned to
+`file:line` or a trace step. The subagents only diagnose; YOU read the returned diagnoses,
+resolve conflicts (two classes may share one root cause — apply that fix once), make the edits,
+and re-run scoped. Failures that plausibly share a cause go to the SAME subagent, never split.
+
+**Where the evidence lives.** The digest ends with the report's real path (`Full report: …`), and
+`get_pipeline_state` carries it as `reportPath` — Studio redirects the config's `reportDir` to its
+own app-data location, so never go hunting the filesystem for `report.json`. Each unmatched test's
+report entry carries `diagnostics` and `loggedTrace` — the events retained for this component after
+scope filtering, in order, with scopes and argument values. That trace is the ground truth: before choosing a fix, walk it against
+the spec (which actions fired, in what order, what state they imply) instead of reasoning from the
+failure text alone. Never re-capture traces yourself (no ad-hoc servers, no manual oracle runs).
+
+**Form a hypothesis at the right altitude before editing.** A replay failure can sit at three
+levels, and the failure code alone does not tell you which:
+- **Model scope/granularity** — the spec ties together what the code treats independently, misses
+  an action the trace shows, or models at the wrong grain. Signature: the loggedTrace is sensible
+  but no spec path can follow it.
+- **Test entrypoint** — the configured tests drive the system through a different layer than the
+  one you instrumented (or the wrong suite entirely). Signature: traces start mid-story or miss
+  actions you know the code performs.
+- **A small wiring tweak** — one name, one domain, one missing logged argument. Signature: the
+  evidence names it exactly.
+Verify the hypothesis in the evidence (loggedTrace, the spec, the test source) before editing;
+a fix you can't ground in something you actually read is a guess.
+
+**Zoom out instead of digging in.** If the same `failureCode` survives two consecutive targeted
+fixes, the problem is almost certainly NOT at the level you are fixing — stop tweaking, move one
+level up (wiring → test entrypoint → model scope), and re-derive the hypothesis from the
+loggedTrace. Repeating variations of the same fix is the rabbit hole this rule exists to prevent.
+
+Keep this stage's ownership narrow while applying the troubleshooting result:
+- fix instrumentation, test boundaries, `testCommand`, logged event names, `actionNameMap`, and
+  replay argument logging here;
+- fix the spec only when the diagnostic shows the model or replay surface is genuinely wrong;
+- stop once the oracle is runnable and captures traces; remaining spec gaps belong to the refine
+  loop.
+
+**Iteration rule:** make one targeted change per run. Judge progress by whether the specific
+failure you addressed changed, not by the unmatched total — under fail-fast (and whenever the
+test scope shifts) counts are not comparable across runs. Stop when the run captures traces
+(`tests &gt; 0`) and has zero unmatched failures that are instrumentation issues — remaining spec
+gaps are what the refine stage's loop resolves.
+
+---
+
+## Fixing the spec (a deliberate change, never a workaround)
+
+You authored the spec at the generate stage, so when a problem is genuinely spec work — a missing
+action, a structural guard that misreads the code, a missing or unreachable observation, a domain
+set that is too narrow, an argument the spec doesn't accept, or a nondet shape that cannot be
+replayed from logged args — fix the spec directly. Treat it as spec work, not wiring:
+
+1. Make the smallest faithful change (add the action / relax the guard / add the observation / fix
+   the replayable nondet/action surface), keeping the modelling discipline of `quint-modeling`.
+   A new observation `val` is named after the behavior itself — no `obs_`/`track_` marker prefix
+   (the config's `observations` list is what identifies it).
+
+**Refinement preserves the unhappy paths.** The suite you are refining against is mostly
+happy-path; the spec is deliberately more adversarial than the tests — that asymmetry is the point,
+not a mismatch to repair. **Never delete or weaken an adversarial action** (`crash`, `byzantineSend`,
+a timeout race), a **correctness property**, or an **observation** to make a trace replay — those never
+appear in logged traces (they are sim-side machinery), so they are never the cause of a replay
+failure, and removing them only removes the spec's ability to catch bugs. Refine the *happy-path
+fidelity* of the actions the logged trace actually exercises; if an adversarial action genuinely
+interferes with replay, constrain it (a separate `any{}` arm, a budget `const`), don't excise it.
+Dropping a correctness property or adversarial action is a **user decision** — surface it, with the consequence it
+guards, and stop.
+
+**A guard conjunct that encodes a documented precondition is never "stricter than the real code" —
+it IS the contract.** Relax a guard only when it misreads the code: a structural constraint you
+inferred wrong, with no documented precondition behind it. When a trace fails replay on a conjunct
+that encodes a documented contract, the unmatched trace is a candidate **violation finding** — the
+code performed a transition its contract forbids, the highest-value find this pipeline can make.
+Do not loosen the conjunct or widen its domain to make the trace replay; surface it and route it to
+the reproduce lane, which pins the divergence as a failing contract-assertion test through the
+app's own error API — red on the buggy code, green when the check lands.
+2. Validate with `run_quint_check` until clean, and confirm every observation is still reachable
+   — pass the config's **complete** observations list as `witnesses`, never a subset (a check
+   that silently drops the observations that were failing proves nothing).
+3. Re-run the oracle and confirm the failure class disappeared.
+
+**Never weaken the spec to match broken code — the spec is the ground truth.** A trace that
+violates a safety invariant may be a real product bug: surface it to the user instead of editing
+the spec around it. If the right model is genuinely unclear, stop and discuss with the user — that
+is the highest-leverage review point.
+
+---
+
+## Investigate stage — triage the untested scenarios, observations, and blind families
+
+When a clean run leaves coverage gaps, the pipeline parks at **investigate**. The digest hands you
+the findings; your job is a **verdict per finding**, recorded through
+`submit_coverage_investigation`. A finding's subject is one of three kinds:
+
+| subject | shape | meaning |
+|---|---|---|
+| untested observation | the observation `val` name | an observation no test fired |
+| blind family | the family's observation sequence | a sim-reachable behavior family no test lands in (untested *sequences*, not just untested flags) |
+| guard scenario | `{"kind": "guard-scenario", "ruleId": "...", "guardId": ...}` — one transition rule paired with one guard conjunct | a falsifiable conjunct no test falsified: no test attempted the transition the conjunct forbids (no rejected-tagged attempt, no violation) |
+
+First rule out that the gap is self-inflicted, cheapest check first: spec reachability/polarity, an
+unannotated branch, a missing `outcome: "rejected"` tag on the code's reject path (a tested reject
+looks untested without it), `testCommand` scope. Fix and re-run `run_quint_oracle` — **a fixable
+gap is never recorded around.**
+
+For each genuine gap, answer TWO questions, in order:
+
+1. **Would exercising it break the app?** Walk the sequence against the code: if a test drove
+   exactly these transitions today, would the code crash, corrupt state, or violate the spec's
+   invariants? You are reading code, not guessing — find the handler for each step and check what it
+   assumes about the steps before it.
+2. **Is the sequence itself wrong?** Even if nothing crashes: is this an ordering the user would
+   call a bug on sight (a refund before a capture, a vote after a decision)? The spec permits it —
+   should it?
+
+The answers classify the finding:
+
+| verdict | meaning | suggestedAction |
+|---|---|---|
+| `data-loss-or-corruption` | exercising it leaves the system in a state that is wrong and KEPT — data lost or overwritten, an invariant violated, an invalid record persisted (a crash on the way there counts). A latent bug the tests never poke | `reproduce` when the spec encodes a **contract the code should honor** (a guard conjunct stating a precondition) and you suspect the code doesn't — a contract-assertion test will PROVE the divergence; else `fix-first`, or `generate-test` to drive the fix |
+| `unwanted-sequence` | runs fine, but the ordering itself is wrong — likely a missing guard in code AND a too-permissive spec worth flagging | `fix-first`, or `reproduce` if a guard conjunct pins a concrete assertion |
+| `benign` | legal, harmless, just unexercised — worth a test only for coverage | `generate-test` or `none` |
+| `out-of-scope` | reachable only through machinery outside this component's tests (e.g. requires fault injection) | `none` |
+
+Every finding is written **twice, in two registers** — different texts, not long and truncated
+versions of one text. `reasoning` is the LONG one, for the next agent: what you actually **read**,
+the code path and the assumption that does (or doesn't) hold, with paths, symbols and line numbers
+— never "seems unlikely". It is never shown to the user. `summary` is the SHORT one and the ONLY
+text Studio shows for the finding: two lines of plain prose, at most 220 characters, no paths, no
+symbols, no line numbers — the way you would explain it out loud to whoever owns this code. Write
+it fresh; the opening sentences of `reasoning` are not a summary, and Studio refuses the
+submission without it. Recording completes the pipeline; `generate-test` verdicts
+become the pre-selected families the next test-generation batch offers the user. **`reproduce`** is
+the sharpest verdict: use it when the finding pins a contract the code may not honor (a guard
+conjunct encoding a documented "must" the code may skip) — accepting it generates a
+contract-assertion test that asserts the contract through the app's own error API, and its FAILURE
+reproduces a real bug (a code-vs-model divergence), surfaced in the Bugs tab. Prefer it over
+`generate-test` whenever the gap is a suspected unenforced contract, not just missing coverage.
+**For a guard-scenario finding**, read the code for the conjunct's check: if you cannot find it,
+the contract may be unenforced — the verdict is `data-loss-or-corruption` with suggestedAction `reproduce`,
+and the contract test feeding the forbidden input and asserting the rejection is exactly what
+proves it. **A VIOLATED scenario** — a real test already performed the transition the conjunct
+forbids — is not a triage question but a confirmed code-vs-contract divergence: `reproduce` it to
+pin the divergence as a failing contract-assertion test (red on the buggy code, green when the
+check lands); never resolve it by loosening the guard.
+
+---
+
+## Instrumentation by Language / Framework
+
+### Go (net/http or chi)
+
+```go
+func OracleMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        rw := &amp;responseCapture{ResponseWriter: w}
+        next.ServeHTTP(rw, r)
+        if rw.status == 200 {
+            if trace, ok := r.Context().Value(oracleTraceKey{}).(OracleTrace); ok {
+                oracle.LogAction(trace.Action, trace.Args) // fire-and-forget
+            }
+        }
+    })
+}
+```
+
+### Python (FastAPI / Flask)
+
+```python
+import os, httpx
+ORACLE_URL = os.getenv("QUINT_ORACLE_URL")
+
+async def log_action(action: str, args: list[dict]):
+    if not ORACLE_URL: return
+    async with httpx.AsyncClient() as client:
+        await client.put(f"{ORACLE_URL}/log", json={
+            "action": action,
+            "arguments": args,
+            "scopes": ["cart"],  # exact eventScope from the config
+        })
+```
+
+### Rust (Axum)
+
+Use tower middleware: attach an `OracleTrace` extension before `next.run(req)`, read it after the
+response is built, log only on 2xx.
+
+---
+
+## Common Pitfalls
+
+| Pitfall | Fix |
+|---|---|
+| Shelling out to `ls`/`cat`/`find`/`grep` | Use `Read`/`Glob`/`Grep` |
+| Running quint yourself (any subcommand) | The first oracle run rides `confirm_wired`; re-runs go through `run_quint_oracle`; spec validation goes through `run_quint_check` |
+| Contorting the spec to make a run pass | Spec fixes are deliberate changes (see *Fixing the spec*) — validated with `run_quint_check`, never a guard-loosening workaround |
+| Deleting an adversarial action / correctness property to fix a replay failure | Sim-side machinery never appears in logged traces — fix the happy-path action the trace exercises; removal is a user decision to surface |
+| Writing a new test to raise coverage | Never — only instrument existing tests; coverage gaps are for the user to fill later |
+| Producing a coverage report / running the full pass | Not your job — finish once the oracle is runnable; Studio runs the coverage pass next |
+| Putting `logAction` in test code | It goes in the application code; the only test-side change is the shared `startTest` hook |
+| Logging before the outcome is known | `logAction` once the operation resolves — a completed transition logs plain; a rejection of a guarded operation logs the same action tagged `outcome: "rejected"` (log from the branch that ran, never speculatively before) |
+| Loosening a guard to make a trace replay | A conjunct encoding a documented precondition IS the contract — the failing trace is a candidate violation finding; surface it and route to the reproduce lane, never widen the guard or its domain |
+| Action name mismatch | Add/fix `actionNameMap`; unmapped logged events must equal Quint action names |
+| Arg/domain name mismatch | Copy exact identifiers from the spec — don't retype |
+| Missing `startTest` | Each test needs a boundary, or traces merge / report `trace-empty` |
+| Unscoped event rejected | Construct the logger with the config's exact `eventScope`; the public clients expose no global transition API |
+| `event-unscoped` failure | Instrumentation emitted an ownerless transition. Repair the named application logging sites with the correct component-scoped logger and rerun; never edit the spec for this code |
+| `tests` empty in report | Tests not spawned by the oracle, or `QUINT_ORACLE_URL` unset at app load, or no `startTest` |
+| Running oracle server manually, then tests separately | Oracle gets zero traces — let `quint oracle` spawn the tests |
+| Replay budget failures | Add missing logged picks when possible; raise `unguidedStepBudget` or `stepReplayBudget` only deliberately |
+| Oracle crashes with `fetch failed` mid-run | Studio's runs pin `--max-samples 100`; add `maxSteps: 20` in the config if a run still struggles |
+| `POST /create` inlines sub-resources | Some transitions never hit their endpoint — fetch the created resource and emit the missing `logAction` conditionally when `QUINT_ORACLE_URL` is set |
+| Old `tracks`/`trackGroups` config keys | Use `observations`/`observationGroups` |
+| Hunting the filesystem for `report.json` | The digest's `Full report:` line and `get_pipeline_state`'s `reportPath` carry the real path (Studio redirects the config's `reportDir`) |
+| `foreign-action-excluded` warning | Expected cross-component traffic was scoped out before replay. Verify the scope only if the ownership looks wrong; do not add the foreign action to this component's map/spec |
+| Active `action-unresolved` failure | The event explicitly targets this component but resolves to no replay action. Fix the scoped call/action name or `actionNameMap`; do not ignore unknown actions globally |
+| Comparing unmatched counts across runs | Not comparable under fail-fast or when test scope changed — judge by whether the specific failure you addressed changed |
+| Compile-checking outside the project's build environment | Use the same wrapper the config's `testCommand`/`buildCommand` already uses (e.g. `nix develop --command`, a repo script) instead of rediscovering the toolchain |
+| Promote's broad coverage finds nothing | Candidate targets' tests lack a `startTest` boundary, the transition is logged in test wrappers (not library code), or `studio.broadTestCommand` omits the integration-test target — see Phase 2b |
+| Async/actor test's trace is empty or mis-attributed | Its transition LIVE-logs from a worker thread (e.g. a `tokio` worker) — a plain `log_action` there is untagged and lands in the daemon's serial slot; `start_test` POSTs up front so it attributes, but only if that suite runs **serially** (one test at a time). Add the serial flag to THAT target; buffered targets keep their parallelism |
+| Integration tests mass-fail with `Address already in use` / `Connection refused` | The suite assigns ports from a per-test slot index and you ran it without process-per-test isolation (every test used the same slot → same ports). Run it isolated instead (in Rust, **`cargo nextest run`** — parallel is fine when logging is buffered) — not a product bug |
+
+---
+
+## End-of-Skill Output
+
+When the wiring is complete (config wired + instrumentation in place), deliver:
+
+1. **Oracle config** at `quint-oracle.&lt;key&gt;.json` — the draft with your added `testCommand`
+   (and `buildCommand` if needed); confirmed observations left untouched.
+2. **Oracle client** vendored at `quint-specs/oracle-client/&lt;language&gt;/` (via `vendor_oracle_client`)
+   with the dependency wired in — or the existing client's mapping extended if one was already set up.
+3. **Instrumentation diff** — component-scoped `logAction` calls in the application code + the `startTest` boundary
+   wired into the existing tests (via a shared hook); no new tests, no logic in test wrappers.
+4. **Any spec fixes you made along the way** (what changed and why), and any suspected product
+   bugs surfaced rather than modeled around.
+
+Then `confirm_wired` — the run it chains produces the coverage. Do **not** produce a coverage
+report or recommend tests yourself.
+
+## Handoff signal (REQUIRED)
+
+Quint Studio registers that you are done by **a concrete artifact on disk**, never by you narrating
+that you finished — so always finish by producing the artifact, then the finisher call:
+
+- **Wiring (oracle setup):** the Studio oracle config `quint-oracle.&lt;key&gt;.json` must contain a
+  working `testCommand` (and `buildCommand` if the suite needs a rebuild). Wire it **in place**;
+  do not leave the command only in a separate mapping/allowlist config. Then call `confirm_wired`
+  — Studio validates that file and chains the first oracle run onto it, returning the digest.
+- **Component Refine stage:** address every entry in `refinement.requests`, validate changed
+  models with `run_quint_check`, call `submit_refinement`, then call `run_quint_oracle`.
+- **Post-test refinement (`refine:&lt;component&gt;`):** address every request from the kickoff and
+  validate changed models, then call `run_quint_oracle` directly. Starting the run checkpoints
+  the validation; there is no separate submit call. A clean run settles the refinement and the
+  controller resumes pending test generation after releasing the shared Oracle slot.
+
+</result>
+</task-notification>
+
+---
+
+User has authorised code changes in Studio — proceed to wire the spec to the test suite per the WIRE procedure (pipeline_key 'mcp-webmcp-tools').
+
+---
+
+<task-notification>
+<task-id>kr0mdhzf9</task-id>
+<status>completed</status>
+<summary>MCP task kr0mdhzf (quint-studio/await_finisher) completed.</summary>
+<result>
+OK
+
+NONDET-GATE: ready
+
+EXHAUSTIVENESS (sim-only oracle over the given witnesses as observations): 8793 behavior families.
+In EVERY family (never avoidable — the action fires unconditionally, so it cannot discriminate; fix the guard/step()): notification_produced_no_reply
+8793 behavior families: [notification_produced_no_reply] [notification_produced_no_reply,handshake_ok] [notification_produced_no_reply,handshake_ok,ping_ok] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream,wait_seconds_clamped_from_above] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream,wait_seconds_clamped_from_above,bad_call_shape_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream,wait_seconds_clamped_from_above,bad_call_shape_rejected,say_rejected_for_blank_nick] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream,wait_seconds_clamped_from_above,bad_call_shape_rejected,say_rejected_for_blank_nick,a_tool_call_succeeded] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,tools_listed,params_not_object_rejected,a_tool_call_failed_downstream,wait_seconds_clamped_from_above,bad_call_shape_rejected,say_rejected_for_blank_nick,a_tool_call_succeeded,write_note_if_absent_wins_over_if_matches] … +8781 more
+
+
+REACHABILITY: all 21 transition rule(s) were exercised in simulation.
+</result>
+</task-notification>
+
+---
+
+<task-notification>
+<task-id>k93hqhrl9</task-id>
+<status>completed</status>
+<summary>MCP task k93hqhrl (quint-studio/await_finisher) completed.</summary>
+<result>
+OK
+
+NONDET-GATE: ready
+
+EXHAUSTIVENESS (sim-only oracle over the given witnesses as observations): 8693 behavior families.
+In EVERY family (never avoidable — the action fires unconditionally, so it cannot discriminate; fix the guard/step()): notification_produced_no_reply
+8693 behavior families: [notification_produced_no_reply] [notification_produced_no_reply,handshake_ok] [notification_produced_no_reply,handshake_ok,ping_ok] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick,a_tool_call_succeeded] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick,a_tool_call_succeeded,write_note_if_absent_wins_over_if_matches] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick,a_tool_call_succeeded,write_note_if_absent_wins_over_if_matches,tools_listed] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick,a_tool_call_succeeded,write_note_if_absent_wins_over_if_matches,tools_listed,bad_call_shape_rejected] [notification_produced_no_reply,handshake_ok,ping_ok,params_falsy_coerced_and_dispatched,unknown_method_rejected,a_tool_call_failed_downstream,say_rejected_for_blank_nick,a_tool_call_succeeded,write_note_if_absent_wins_over_if_matches,tools_listed,bad_call_shape_rejected,params_not_object_rejected] … +8681 more
+
+
+REACHABILITY: all 21 transition rule(s) were exercised in simulation.
+</result>
+</task-notification>
