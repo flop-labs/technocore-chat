@@ -17,6 +17,7 @@ import secrets
 import time
 import tomllib
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 
 import orjson
@@ -1066,8 +1067,8 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     return did
 
 
-def _dupe_refusal(room: str) -> Response:
-    """422 for a text this room has already taken from other senders inside the window.
+def _dupe_refusal(request: Request, room: str) -> Response:
+    """422 for a text this room has already taken inside the window.
 
     Not 200 — a 200 on a write lane carries the record that landed, and there is no
     record of the refuser's to return: their message did not land. Not 429 — this is not
@@ -1075,27 +1076,51 @@ def _dupe_refusal(room: str) -> Response:
     automate into an identical resend. Not 409 — that is the CAS answer and carries the
     current value; there is no value to merge here. 422 says the request was
     well-formed and understood, and names the two things that actually work.
+
+    The write gate above may have charged this caller a room-creation token on the way
+    here, and that budget is a *daily* one: settling it with no record hands it straight
+    back, because nothing was created. Every other exit from a write lane already does
+    this — a refusal must not be the one that quietly spends a day's allowance.
     """
+    limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     return text(
-        f"422 duplicate text: /r/{room} has already taken this exact message from "
-        f"{DUPE_MAX_COPIES} other senders in the last {DUPE_FILTER_SECONDS:g}s, and more "
-        "copies of it are refused until that window passes.\n"
+        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
+        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
+        "are refused until that window passes.\n"
         f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
         "— short replies are never filtered. This is not a rate limit and not a retry "
-        "signal: the same bytes will be refused again, from any identity.\n"
+        "signal: the same bytes will be refused again, from any identity — the filter "
+        "counts copies, not senders.\n"
         "the enforced window, threshold and length floor are published at /config under "
         "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
         422,
     )
 
 
-def _dupe_refused(room: str, body: str) -> bool:
-    # Thin adapter over limit.dupe_refused, knobs read HERE at call time so
-    # config.override() and monkeypatch.setattr(app, ...) keep reaching the ring —
-    # the same contract take() already follows.
-    return limit.dupe_refused(
-        room, body, time.monotonic(), DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
+@contextmanager
+def _dupe_slot(room: str, body: str):
+    """Reserve one copy of `body` in `room`'s ring for the append that follows, yielding
+    True when the room has already taken enough copies and the caller must refuse.
+
+    Knobs read HERE at call time so config.override() and monkeypatch.setattr(app, ...)
+    keep reaching the ring — the same contract take() already follows.
+
+    A context manager rather than a bare call because the reservation has to be undone
+    when the append refuses the write: store.append validates the nick, the nonce and
+    the room's capacity, so DUPE_MAX_COPIES malformed requests would otherwise spend a
+    room's whole window on a text nothing ever stored. Returning (the refusal, or the
+    200 path) releases nothing; only an exception does.
+    """
+    now = time.monotonic()
+    refused = limit.dupe_refused(
+        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
     )
+    try:
+        yield refused
+    except BaseException:
+        if not refused:
+            limit.dupe_release(room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH)
+        raise
 
 
 def room_say(request: Request) -> Response:
@@ -1107,9 +1132,10 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    if _dupe_refused(room, body):
-        return _dupe_refusal(room)
-    rec = store.append(config.ROOT, room, nick, body)
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, nick, body)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1137,9 +1163,10 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    if _dupe_refused(room, body):
-        return _dupe_refusal(room)
-    rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1235,13 +1262,15 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
-            if _dupe_refused(room, sent):
-                return _dupe_refusal(room)
-            posted = store.append(config.ROOT, room, nick, sent)
+            with _dupe_slot(room, sent) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(config.ROOT, room, nick, sent)
         else:
-            if _dupe_refused(room, body):
-                return _dupe_refusal(room)
-            posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+            with _dupe_slot(room, body) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(

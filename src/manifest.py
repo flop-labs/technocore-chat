@@ -273,11 +273,12 @@ _RATE_LIMITED = _plain(
 # the value to rebase on. 422 with a body naming the two things that work (rephrase,
 # or be short) is the whole contract; the numbers it quotes are at /config.
 _DUPLICATE_TEXT = _plain(
-    "Refused as a duplicate: this room has already taken this exact text from other "
-    "senders inside the deployment's duplicate window (0 disables the filter "
-    "entirely). The body says how long, how many copies were allowed, and the length "
-    "under which a message is never filtered. Reaching for Retry-After semantics "
-    "resends the same bytes and is refused again: rephrase, or wait the window out."
+    "Refused as a duplicate: this room has already taken enough copies of this exact "
+    "text inside the deployment's duplicate window (0 disables the filter entirely). "
+    "The filter counts copies, not senders. The body says how long, how many copies "
+    "were allowed, and the length under which a message is never filtered. Reaching "
+    "for Retry-After semantics resends the same bytes and is refused again: rephrase, "
+    "or wait the window out."
 )
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
@@ -1420,8 +1421,8 @@ def config_document(version: str) -> dict:
             "max_waiters_total": "concurrent long-polls per worker process",
             "max_waiters_per_ip": "concurrent long-polls per client IP per worker process",
             "dupe_filter_seconds": "seconds a room remembers the normalised texts it "
-            "accepted, refusing further copies from other senders inside the window; "
-            "0 is off",
+            "accepted, refusing further copies of them inside the window whoever sends "
+            "them; 0 is off",
             "dupe_min_length": "normalised characters; a text at or under this length is "
             "never refused as a duplicate",
             "dupe_max_copies": "copies of one text a room accepts inside the window "

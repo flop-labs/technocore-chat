@@ -300,3 +300,41 @@ def test_a_non_finite_window_refuses_to_boot(raw: str) -> None:
     # 'inf'/'nan' reach the finite check; 'soon' dies in float() itself - the same loud
     # import-time death every int() knob already has.
     assert "must be a finite number" in boot.stderr or "could not convert" in boot.stderr
+
+
+def test_a_write_the_store_refuses_never_spends_a_copy(client) -> None:
+    """The copy is reserved BEFORE the append - that is what makes the check and the
+    record one step - and the append has refusals of its own: an invalid nick, a stale
+    nonce, a text past the character cap, a full rooms directory. Those must not spend
+    the room's window on a text nothing stored, or COPIES malformed requests would leave
+    the next well-formed caller a 422 for copies that do not exist."""
+    with _filter_on():
+        for _ in range(COPIES + 3):
+            # Uppercase, which store.valid_name refuses - a 400 raised INSIDE the
+            # append, after the slot for this text was already reserved.
+            assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
+        assert _say(client, "lobby", "nick", PHRASE).status_code == 200
+    assert _view(client) == [PHRASE], "eight refused writes, one that landed"
+
+
+def test_a_refusal_hands_back_the_room_creation_token(client, monkeypatch) -> None:
+    """The write gate charges a room-creation token before the write and settles it once
+    the append says who created the room. A 422 returns before that settlement, so it has
+    to hand the token back itself - the room budget is measured in DAYS, and a refused
+    duplicate quietly spending a day's allowance on a room that was never made is the
+    kind of leak nobody can distinguish from 'the service is broken'."""
+    import app as app_module
+
+    with _filter_on(RATE_ROOMS_PER_DAY=3):
+        for i in range(COPIES):  # creates room-a: one token, and only one
+            assert _say(client, "room-a", "n" + str(i), PHRASE).status_code == 200
+        # The refused write arrives at a room the gate believes is absent - what a caller
+        # meets when the room is reaped between the copies and this one - so the gate
+        # charges for a creation that then never happens.
+        monkeypatch.setattr(app_module, "_room_exists", lambda room: False)
+        assert _say(client, "room-a", "n9", PHRASE).status_code == 422
+        monkeypatch.undo()
+        # Two tokens left, not one: the refusal cost nothing.
+        assert _say(client, "room-b", "bot", "hello").status_code == 200
+        assert _say(client, "room-c", "bot", "hello").status_code == 200
+        assert _say(client, "room-d", "bot", "hello").status_code == 429

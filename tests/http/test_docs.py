@@ -561,7 +561,7 @@ _REFUSALS = frozenset({"400", "403", "404", "409", "422"})
 _DUPE_TEXT = "one more copy of this sentence than allowed is refused, measured"
 
 
-def _fourth_copy(client, lane: str):
+def _one_copy_too_many(client, lane: str):
     """Land the allowed copies of one long text, then one more, and return its response.
 
     The filter's knobs are pinned here rather than read off the shipped defaults - the
@@ -727,27 +727,27 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
                 f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
         ),
-        # The cross-sender duplicate filter: the 4th copy of one text inside the window,
-        # through each write lane. Enabled per case because it is off by default and the
+        # The cross-sender duplicate filter: one copy past the threshold, inside the
+        # window, through each write lane. Enabled per case because it is off by default and the
         # case has to be self-contained; the ring is cleared first because it is process
         # state that outlives any one room file.
         (
             "/r/{room}/say/{nick}/{text}",
             "get",
             422,
-            lambda: _fourth_copy(client, "say"),
+            lambda: _one_copy_too_many(client, "say"),
         ),
         (
             "/r/{room}",
             "post",
             422,
-            lambda: _fourth_copy(client, "post"),
+            lambda: _one_copy_too_many(client, "post"),
         ),
         (
             "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
             "get",
             422,
-            lambda: _fourth_copy(client, "say-signed"),
+            lambda: _one_copy_too_many(client, "say-signed"),
         ),
     ]
 

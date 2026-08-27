@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import threading
 import time
 import unicodedata
 from collections import OrderedDict
@@ -87,8 +88,21 @@ MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a d
 # Only ACCEPTED writes are recorded. A refused copy adds no timestamp, so a farm cannot
 # drag its own window open by hammering: the phrase becomes acceptable again exactly
 # `window` after the last copy that landed, never later.
+#
+# Guarded by a lock, unlike every other structure in this module. The waiter counters are
+# safe unlocked because they are only ever touched by the single-threaded event loop, and
+# the buckets are read-modify-write on ONE key so a lost update costs a fraction of a
+# token. This one is neither: both write lanes reach it from a threadpool (the GETs are
+# sync endpoints, the POST goes through run_in_threadpool), and the sweep walks and
+# deletes from the front while another thread may be inserting — which is an
+# `OrderedDict mutated during iteration` RuntimeError, or a KeyError on a key the other
+# thread just evicted, i.e. a 500 on exactly the write path the filter exists to protect.
+# It is a leaf lock: held for a hash, a tuple rebuild and at most nine dict operations,
+# never across the flock, the append or any I/O, so nothing can deadlock against it and
+# an uncontended acquire is cheaper than the digest it guards.
 MAX_DUPE_KEYS = 4096
 _dupes: OrderedDict[tuple[str, bytes], tuple[float, ...]] = OrderedDict()
+_dupes_lock = threading.Lock()
 
 
 def normalize_text(text: str) -> str:
@@ -120,6 +134,19 @@ def normalize_text(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
+    """The ring key for `text` in `room`, or None when the length floor exempts it.
+
+    One function so reserving and releasing a copy can never disagree about what "the
+    same text" is — a release that normalised differently would leak the reservation it
+    was meant to hand back.
+    """
+    normalized = normalize_text(text)
+    if len(normalized) < min_length:
+        return None
+    return (room, hashlib.blake2b(normalized.encode("utf-8"), digest_size=16).digest())
+
+
 def dupe_refused(
     room: str,
     text: str,
@@ -137,39 +164,67 @@ def dupe_refused(
     the Nth message both pass. Failing that way admits one extra copy — never a wrong
     refusal — which is the failure this whole module prefers.
 
-    `window <= 0` is the off switch and is the first statement, so a deployment that has
-    opted out pays one comparison and no allocation — the opt-out buys back the
-    pre-filter hot path exactly, which is the compatibility promise.
+    `window <= 0` is the off switch, short-circuited before the key is built, so a
+    deployment that has opted out pays one comparison and no allocation — the opt-out
+    buys back the pre-filter hot path exactly, which is the compatibility promise. It
+    also takes no lock: an off filter cannot contend with anything.
     """
-    if window <= 0:
-        return False
-    normalized = normalize_text(text)
-    if len(normalized) < min_length:
-        return False  # short conversational repeats are legitimate by nature
-    key = (room, hashlib.blake2b(normalized.encode("utf-8"), digest_size=16).digest())
-    seen = _dupes.get(key)
-    if seen is not None:
-        live = tuple(t for t in seen if now - t <= window)
-        if len(live) >= max_copies:
-            _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
-            return True
-        _dupes[key] = (live + (now,))[-max_copies:]
-    else:
-        _dupes[key] = (now,)
-    _dupes.move_to_end(key)
-    # Two bounds, because one is not enough under load: a per-call-capped sweep from the
-    # oldest so a burst cannot turn one write into a pause, and the hard cap that
-    # actually holds the memory whatever the sweep leaves behind.
-    for _ in range(8):
-        if not _dupes:
-            break
-        oldest = next(iter(_dupes))
-        if not all(now - t > window for t in _dupes[oldest]):
-            break
-        del _dupes[oldest]
-    while len(_dupes) > cap:
-        _dupes.popitem(last=False)
+    key = _dupe_key(room, text, min_length) if window > 0 else None
+    if key is None:
+        return False  # off, or a short conversational repeat: legitimate by nature
+    with _dupes_lock:
+        seen = _dupes.get(key)
+        if seen is not None:
+            live = tuple(t for t in seen if now - t <= window)
+            if len(live) >= max_copies:
+                _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
+                return True
+            _dupes[key] = (live + (now,))[-max_copies:]
+        else:
+            _dupes[key] = (now,)
+        _dupes.move_to_end(key)
+        # Two bounds, because one is not enough under load: a per-call-capped sweep from
+        # the oldest so a burst cannot turn one write into a pause, and the hard cap that
+        # actually holds the memory whatever the sweep leaves behind.
+        for _ in range(8):
+            if not _dupes:
+                break
+            oldest = next(iter(_dupes))
+            if not all(now - t > window for t in _dupes[oldest]):
+                break
+            del _dupes[oldest]
+        while len(_dupes) > cap:
+            _dupes.popitem(last=False)
     return False
+
+
+def dupe_release(room: str, text: str, now: float, window: float, min_length: int = 16) -> None:
+    """Give back the copy `dupe_refused` recorded at `now`, because the write it was
+    reserved for never landed.
+
+    The reservation has to be taken before the append — that is what makes the check and
+    the record one step — but the append refuses writes of its own: an invalid nick, a
+    stale nonce, a text past the character cap, a full rooms directory. Without this,
+    `max_copies` such failures would spend a room's whole window on a text nothing ever
+    stored, and the next well-formed caller of that phrase would meet a 422 for copies
+    that do not exist.
+
+    Removes exactly one timestamp, by value: releasing is per reserved copy, so a
+    concurrent accept of the same text at a different instant keeps its own. Silent when
+    the entry has already been swept or evicted — that is the same free window this would
+    have opened, arrived at by another route.
+    """
+    key = _dupe_key(room, text, min_length) if window > 0 else None
+    if key is None:
+        return
+    with _dupes_lock:
+        live = list(_dupes.get(key, ()))
+        if now in live:
+            live.remove(now)
+        if live:
+            _dupes[key] = tuple(live)
+        else:
+            _dupes.pop(key, None)
 
 
 def client_ip(request: Request, ip_header: str = "") -> str:

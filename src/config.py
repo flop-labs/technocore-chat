@@ -230,8 +230,10 @@ WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 # the short conversational replies ("ok", "gm", "+1") that are legitimate repeats by
 # nature, and DUPE_MAX_COPIES lets the first N copies through so a genuine echo wave is
 # never refused. State is per worker, bounded (see limit.MAX_DUPE_KEYS), and costs no
-# I/O: nothing that can deadlock against the lock it is protecting. Costs ~microseconds
-# per write when on, one comparison when off.
+# I/O. It does take one mutex — both write lanes reach the ring from a threadpool — but
+# a leaf one, held for a hash and a handful of dict operations and never across the
+# flock it exists to spare, so there is nothing it can deadlock against. Costs
+# ~microseconds per write when on, one comparison and no lock at all when off.
 #
 # Sizing the window, from bench/dupe_filter.py's sweep on a sustained corpus at the
 # measured rates: catch rises steeply to ~60s and then flattens, while the ring reaches

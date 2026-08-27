@@ -12,7 +12,9 @@ have moved with it). A ring test asserts arithmetic at numbers it chose.
 
 from __future__ import annotations
 
+import itertools
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -133,4 +135,72 @@ def test_rooms_are_isolated_and_copies_count_not_senders() -> None:
     assert refused(LONG, now=float(COPIES), room="lobby") is True
     assert refused(LONG, now=float(COPIES), room="meta") is True
     assert refused(LONG, now=float(COPIES), room="elsewhere") is False
+    limit._dupes.clear()
+
+
+def test_releasing_a_reserved_copy_gives_exactly_that_slot_back() -> None:
+    """A copy is reserved before the append, and the append has refusals of its own.
+    Releasing has to give back the one timestamp it reserved - not the key, not the
+    whole window - or a write the store rejected either spends a slot forever or wipes
+    copies that did land."""
+    limit._dupes.clear()
+    for i in range(COPIES):
+        assert refused(LONG, now=float(i)) is False
+    limit.dupe_release("r", LONG, 4.0, WINDOW, FLOOR)
+    assert refused(LONG, now=5.0) is False, "the released slot is the one just taken"
+    assert refused(LONG, now=6.0) is True, "and only that one - the other four still count"
+    # Releasing the last live copy drops the key rather than leaving an empty tuple to
+    # be swept later: the ring's bound is keys, not timestamps.
+    for reserved in (0.0, 1.0, 2.0, 3.0, 5.0):
+        limit.dupe_release("r", LONG, reserved, WINDOW, FLOOR)
+    assert not limit._dupes
+
+
+def test_releasing_what_was_never_reserved_is_silent() -> None:
+    """The release runs on the failure path, where the reservation may already have been
+    swept, evicted, or never taken at all (an off filter, a text under the floor). None
+    of those may raise: the caller is already returning an error the store chose."""
+    limit._dupes.clear()
+    limit.dupe_release("r", LONG, 1.0, WINDOW, FLOOR)  # never reserved
+    limit.dupe_release("r", "x" * (FLOOR - 1), 1.0, WINDOW, FLOOR)  # under the floor
+    limit.dupe_release("r", LONG, 1.0, 0, FLOOR)  # filter off
+    assert not limit._dupes
+
+
+def test_concurrent_writers_never_corrupt_the_ring() -> None:
+    """Every write lane reaches the ring from a threadpool - the GET lanes are sync
+    endpoints, the POST goes through run_in_threadpool - so the check, the record, the
+    sweep and the eviction have to be one atomic step.
+
+    Unguarded they were not: the sweep's walk from the front raced an insert into
+    'OrderedDict mutated during iteration', and its delete raced another thread's
+    eviction into a KeyError - a 500 on exactly the write path this filter exists to
+    protect, reached by a flood of DISTINCT texts, which is what an evasive farm sends.
+    A small cap and a one-second window keep every call inside both loops, which is
+    where the race lives; the switch interval makes the interleaving reliable rather
+    than lucky.
+    """
+    limit._dupes.clear()
+    cap, errors, counter = 64, [], itertools.count()
+
+    def flood() -> None:
+        try:
+            for _ in range(2_000):
+                n = next(counter)
+                refused("a distinct phrase number " + str(n), now=float(n % 3), window=1.0, cap=cap)
+        except BaseException as exc:  # noqa: BLE001 - the exception IS what this asserts on
+            errors.append(exc)
+
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=flood) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(switch)
+    assert not errors, [repr(exc) for exc in errors[:3]]
+    assert len(limit._dupes) <= cap, "the bound has to hold under concurrency too"
     limit._dupes.clear()
