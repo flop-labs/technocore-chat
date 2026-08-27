@@ -218,6 +218,7 @@ def test_a_replayed_signed_url_is_refused_while_the_message_is_still_there(clien
     assert client.get(url).status_code == 200
     r = client.get(url)  # the identical captured URL, again
     assert r.status_code == 400 and "not greater than 7" in r.text
+    assert "newest 1 MiB" in r.text and "older writes may exist" in r.text
     assert (
         client.get(f"/r/lobby/say-signed/{did}/{sign('lobby|6|older')}/6/older").status_code == 400
     )
