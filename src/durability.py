@@ -27,20 +27,20 @@ def fsync_parent(path: Path, *, permission_boundary: bool = False) -> bool:
     return True
 
 
-def fsync_ancestors(path: Path) -> None:
+def fsync_ancestors(path: Path, *, strict_first: bool = False) -> None:
     """Persist a visible directory chain up to its mount or provisioning boundary."""
     path = path.resolve()
     while path != path.parent:
         parent = path.parent
         if path.stat().st_dev != parent.stat().st_dev:
             break
-        if not fsync_parent(path, permission_boundary=True):
+        if not fsync_parent(path, permission_boundary=not strict_first):
             config._dbg(2, "fsync_boundary")
             break  # a searchable pre-existing ancestor is the operator's boundary
-        path = parent
+        path, strict_first = parent, False
 
 
-def sync_room_entry(root: Path, path: Path) -> None:
+def sync_room_entry(root: Path, path: Path, *, root_was_missing: bool = False) -> None:
     """Persist a legacy or sharded room entry and repair its root chain once."""
     rooms = (root / "rooms").resolve()
     parent = path.parent.resolve()
@@ -49,5 +49,5 @@ def sync_room_entry(root: Path, path: Path) -> None:
         fsync_parent(parent)
     if rooms not in _synced_room_directories:
         fsync_parent(rooms)
-        fsync_ancestors(rooms.parent)
+        fsync_ancestors(rooms.parent, strict_first=root_was_missing)
         _synced_room_directories.add(rooms)

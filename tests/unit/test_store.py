@@ -1026,7 +1026,9 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
         real(fd)
 
     monkeypatch.setattr(store.os, "fsync", counted)
-    monkeypatch.setattr(durability, "fsync_ancestors", lambda root: events.append("ancestors"))
+    monkeypatch.setattr(
+        durability, "fsync_ancestors", lambda root, **_kwargs: events.append("ancestors")
+    )
 
     store.append(tmp_path, "lobby", "bot", "durable")
     # The first room persists its shard in rooms/, then rooms/ in root. Its /r/events
@@ -1132,6 +1134,43 @@ def test_root_ancestor_sync_stops_at_an_unreadable_provisioning_boundary(tmp_pat
     assert logged == [((2, "fsync_boundary"), {})]
 
 
+def test_new_root_fails_closed_at_an_unreadable_parent(tmp_path, monkeypatch):
+    import durability
+
+    attempted = []
+
+    def permission_boundary(directory, *, permission_boundary=False):
+        attempted.append((directory, permission_boundary))
+        if not permission_boundary:
+            raise PermissionError
+        return False
+
+    monkeypatch.setattr(durability, "fsync_parent", permission_boundary)
+
+    with pytest.raises(PermissionError):
+        durability.fsync_ancestors(tmp_path, strict_first=True)
+
+    assert attempted == [(tmp_path.resolve(), False)]
+
+
+def test_write_marks_only_a_new_data_root_for_strict_parent_sync(tmp_path, monkeypatch):
+    import durability
+    import store
+
+    root = tmp_path / "data"
+    strict = []
+    monkeypatch.setattr(
+        durability,
+        "sync_room_entry",
+        lambda _root, _path, **kwargs: strict.append(kwargs["root_was_missing"]),
+    )
+
+    store._write_record(root, "p-root", "bot", "first")
+    store._write_record(root, "p-root", "bot", "second")
+
+    assert strict == [True, False]
+
+
 def test_root_ancestor_sync_does_not_swallow_fsync_permission_errors(tmp_path, monkeypatch):
     import durability
 
@@ -1154,7 +1193,7 @@ def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer
     path.touch()
     synced = []
     monkeypatch.setattr(durability, "fsync_parent", lambda path: synced.append(path) or True)
-    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root: None)
+    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root, **_kwargs: None)
 
     store.append(tmp_path, "p-interrupted", "bot", "repair it")
 
@@ -1188,7 +1227,7 @@ def test_legacy_room_entry_does_not_sync_outside_the_data_root(tmp_path, monkeyp
     monkeypatch.setattr(
         durability, "fsync_parent", lambda path, **_kwargs: synced.append(path) or True
     )
-    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root: None)
+    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root, **_kwargs: None)
 
     durability.sync_room_entry(tmp_path, path)
 

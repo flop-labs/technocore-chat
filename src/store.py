@@ -1778,7 +1778,7 @@ def _write_record(
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
-    path = room_path(root, room)
+    path, root_existed = room_path(root, room), root.exists()
     # Validated here rather than trusted from the caller: `from` is the one field readers
     # treat as provenance, and the allowlist that protects it does not apply to a DID (it
     # rejects ':'). One place decides the shape, for both write lanes.
@@ -1847,7 +1847,7 @@ def _write_record(
         if config.FSYNC:
             # The record is committed before these entry syncs. A failure stays loud even
             # though a client retry can duplicate it; claiming durability would be worse.
-            durability.sync_room_entry(root, path)
+            durability.sync_room_entry(root, path, root_was_missing=not root_existed)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)

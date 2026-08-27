@@ -32,7 +32,7 @@
       "raw_lines": 53,
       "code_lines": 36,
       "comment_lines": 1,
-      "tokens_per_line": 6.17
+      "tokens_per_line": 6.86
     },
     "core/limit.py": {
       "raw_lines": 423,
@@ -44,7 +44,7 @@
       "raw_lines": 2017,
       "code_lines": 845,
       "comment_lines": 443,
-      "tokens_per_line": 7.35
+      "tokens_per_line": 7.36
     },
     "extra/manifest.py": {
       "raw_lines": 1818,
