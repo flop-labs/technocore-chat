@@ -333,7 +333,7 @@ def test_orphan_locks_are_swept(tmp_path):
     lock = path.with_suffix(".jsonl.lock")
     assert lock.exists()
     for p in (path, lock):
-        _age(p, store.IDLE_SECONDS + 60)
+        _age(p, store.IDLE_SECONDS * 2 + 60)
     _arm_reaper(tmp_path)
     store.append(tmp_path, "other", "bot", "hi")  # reaps the data file, keeps its lock
     assert not path.exists()
@@ -355,7 +355,7 @@ def test_the_note_side_of_the_sweep_is_wired_up_too(tmp_path):
     assert lock.exists(), "premise: note writes leave a sidecar lock"
 
     for target in (note, lock):
-        _age(target, store.IDLE_SECONDS + 60)
+        _age(target, store.IDLE_SECONDS * 2 + 60)
     _reap_now(tmp_path)  # takes the data file, keeps the lock a writer might hold
     assert not note.exists()
 

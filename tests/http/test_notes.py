@@ -51,7 +51,8 @@ def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client)
     assert lost.status_code == 409
     lines = lost.text.rstrip("\n").split("\n")
     assert lines[0].startswith("409") and "world" not in lines[0]
-    assert lines[-1] == "world"
+    # The value appears after the UNTRUSTED CONTENT banner, before the closing ---.
+    assert "world" in lost.text and "UNTRUSTED CONTENT" in lost.text
 
 
 def test_webmcp_tool_results_carry_the_whole_server_reply(client):

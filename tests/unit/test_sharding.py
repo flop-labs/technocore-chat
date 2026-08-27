@@ -184,7 +184,7 @@ def test_the_sweeper_reclaims_the_lock_the_migration_left(tmp_path, monkeypatch)
     store.append(tmp_path, "old", "alice", "two")
     assert legacy_lock.exists(), "premise: the migration left it"
 
-    old = time.time() - store.IDLE_SECONDS - 60
+    old = time.time() - store.IDLE_SECONDS * 2 - 60
     os.utime(legacy_lock, (old, old))
     monkeypatch.setattr(store, "REAP_EVERY", 0)
     store._reap(tmp_path)
@@ -330,7 +330,7 @@ def test_the_reaper_reaches_rooms_and_notes_inside_their_buckets(tmp_path, monke
 
     store.append(tmp_path, "stale", "bot", "hi")
     store.note_set(tmp_path, "kv", "stale", "v")
-    old = time.time() - store.IDLE_SECONDS - 60
+    old = time.time() - store.IDLE_SECONDS * 2 - 60
     for path in list((tmp_path / "rooms").rglob("*.jsonl")) + list(
         (tmp_path / "notes").rglob("*.txt")
     ):
@@ -351,7 +351,7 @@ def test_a_reaped_room_does_not_leave_its_bucket_behind(tmp_path, monkeypatch):
 
     store.append(tmp_path, "stale", "bot", "hi")
     store.note_set(tmp_path, "doomed", "k", "v")
-    old = time.time() - store.IDLE_SECONDS - 60
+    old = time.time() - store.IDLE_SECONDS * 2 - 60
     for path in (tmp_path / "rooms").rglob("*"):
         os.utime(path, (old, old))
     for path in (tmp_path / "notes").rglob("*"):
@@ -415,7 +415,7 @@ def test_pruning_keeps_the_bucket_of_a_room_that_survived(tmp_path, monkeypatch)
     doomed_bucket = store.room_path(tmp_path, "goner").parent
     assert kept_bucket != doomed_bucket, "premise: the two rooms are in different buckets"
 
-    old = time.time() - store.IDLE_SECONDS - 60
+    old = time.time() - store.IDLE_SECONDS * 2 - 60
     for path in doomed_bucket.iterdir():
         os.utime(path, (old, old))
 

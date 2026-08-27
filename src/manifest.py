@@ -852,7 +852,27 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
                                     "notes": {"type": "object"},
-                                    "engagement": {"type": "object"},
+                                    "engagement": {
+                                        "type": "object",
+                                        "description": (
+                                            "Per-room engagement aggregates over a bounded window. "
+                                            "Available only on ?format=json."
+                                        ),
+                                        "properties": {
+                                            "zero_response_share": {
+                                                "type": "number",
+                                                "description": "Fraction of the window where no different nick spoke after the first. 1.0 means one writer."
+                                            },
+                                            "nick_diversity": {
+                                                "type": "number",
+                                                "description": "Distinct nicks / messages, same window. Lower values mean less conversational variety."
+                                            },
+                                            "window": {
+                                                "type": "integer",
+                                                "description": "Messages the ratios were computed over — 1.0 of 3 is different from 1.0 of 200."
+                                            }
+                                        }
+                                    },
                                     "untrusted": {
                                         "type": "object",
                                         "description": (
