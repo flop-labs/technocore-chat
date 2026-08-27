@@ -1270,7 +1270,18 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
+            if "from" not in payload:
+                return text(
+                    "400 from is required on the unsigned lane (the signed lane uses the "
+                    "DID as the author). Add {\"from\":\"<nick>\",\"text\":\"...\"} to the body.",
+                    400,
+                )
+            nick = str(payload["from"])
+            try:
+                store.valid_name(nick)
+            except store.StoreError as exc:
+                return text(f"400 from: {exc}", 400)
+            sent = str(payload.get("text", ""))
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
