@@ -316,7 +316,7 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    Only consulted for the four documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 

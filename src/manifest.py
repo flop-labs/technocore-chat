@@ -225,7 +225,7 @@ def _plain(description: str) -> dict:
 def _prose(description: str) -> dict:
     """A document that negotiates: text/plain by default, text/markdown on request.
 
-    Only the three that pass `markdown=True` — the manual is deliberately not one of them,
+    Only the four that pass `markdown=True` — the manual is deliberately not one of them,
     because the transport is lossy and plain text survives it.
     """
     return {
