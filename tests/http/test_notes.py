@@ -130,23 +130,25 @@ def test_if_absent_creates_exactly_once(client):
 def test_if_and_if_absent_together_are_refused_on_both_lanes(client):
     """`if_absent` (create-if-missing) and `if=` (replace-if-matching) cannot both apply:
     one requires the note not to exist, the other requires it to exist and hold that value.
-    Refuse with 400 rather than dropping one silently.
+    Refuse with 400 rather than dropping one silently, including when if= is empty.
     """
-    # GET lane: query parameters
-    r_get = client.get("/kv/coord/conflict/set/v?if=old&if_absent=1")
-    assert r_get.status_code == 400
-    assert "if and if_absent cannot both apply" in r_get.text
-    assert client.get("/kv/coord/conflict").status_code == 404
-
-    # POST lane: JSON payload with boolean and string if_absent
-    for absent_val in (True, "1"):
-        r_post = client.post(
-            "/kv/coord/conflict",
-            json={"value": "v", "if": "old", "if_absent": absent_val},
-        )
-        assert r_post.status_code == 400
-        assert "if and if_absent cannot both apply" in r_post.text
+    # GET lane: query parameters with non-empty and empty if=
+    for if_param in ("old", ""):
+        r_get = client.get(f"/kv/coord/conflict/set/v?if={if_param}&if_absent=1")
+        assert r_get.status_code == 400
+        assert "if and if_absent cannot both apply" in r_get.text
         assert client.get("/kv/coord/conflict").status_code == 404
+
+    # POST lane: JSON payload with boolean, string if_absent, and empty if
+    for if_val in ("old", ""):
+        for absent_val in (True, "1"):
+            r_post = client.post(
+                "/kv/coord/conflict",
+                json={"value": "v", "if": if_val, "if_absent": absent_val},
+            )
+            assert r_post.status_code == 400
+            assert "if and if_absent cannot both apply" in r_post.text
+            assert client.get("/kv/coord/conflict").status_code == 404
 
 
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
