@@ -28,6 +28,7 @@ import orjson
 
 import config
 import didkey
+import durability
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -591,11 +592,11 @@ def _locked(target: Path):
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     """Put `data` at `path` atomically, staging through a name no other writer can hold.
 
-    `os.replace` is the atomic half, and it was always here; the staging name was the half
-    that was not. A temp file named after its destination is shared by everyone writing that
-    destination, so two writers racing it meant the second renamed a file the first had
-    already consumed — `FileNotFoundError` on a path that plainly exists, surfacing out of a
-    note create that was only trying to record itself.
+    `os.replace` is the atomic half, and it was always here; when `fsync` is requested,
+    syncing the parent after that rename is the durable half. The staging name was the half
+    that was not unique. A temp file named after its destination is shared by everyone
+    writing that destination, so two writers racing it meant the second renamed a file the
+    first had already consumed — `FileNotFoundError` on a path that plainly exists.
 
     Unique per *writer* rather than per process: sync handlers overlap in the thread pool, so
     a pid alone still collides inside one worker.
@@ -629,6 +630,8 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
         raise
+    if fsync:
+        durability.fsync_parent(path)
 
 
 def _now() -> str:
@@ -1775,7 +1778,7 @@ def _write_record(
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
-    path = room_path(root, room)
+    path, root_existed = room_path(root, room), root.exists()
     # Validated here rather than trusted from the caller: `from` is the one field readers
     # treat as provenance, and the allowlist that protects it does not apply to a DID (it
     # rejects ':'). One place decides the shape, for both write lanes.
@@ -1841,6 +1844,10 @@ def _write_record(
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
+        if config.FSYNC:
+            # The record is committed before these entry syncs. A failure stays loud even
+            # though a client retry can duplicate it; claiming durability would be worse.
+            durability.sync_room_entry(root, path, root_was_missing=not root_existed)
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)

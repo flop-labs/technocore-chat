@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import time
 from contextlib import contextmanager
 
@@ -998,30 +999,239 @@ def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path)
 def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     """CHAT_FSYNC=0 trades the per-message fsync for write headroom: a host crash can lose
     the final moments of appends, and torn-tail healing already prices a cut-short write at
-    one record. Compaction is not part of the trade — os.replace of a file whose bytes never
-    reached disk can lose the room's whole retained ring, so it pays the fsync either way."""
+    one record. A durable creation needs the file and its directory entry; compaction needs
+    the staged file, rename and directory entry, and is not part of the trade."""
     import config
+    import durability
     import store
 
     real = os.fsync
     calls = []
+    events = []
 
     def counted(fd):
-        calls.append(fd)
+        synced = os.fstat(fd)
+        rooms = (tmp_path / "rooms").stat() if (tmp_path / "rooms").exists() else None
+        identity = (synced.st_dev, synced.st_ino)
+        if not stat.S_ISDIR(synced.st_mode):
+            kind = "file"
+        elif rooms and identity == (rooms.st_dev, rooms.st_ino):
+            kind = "rooms"
+        elif identity == (tmp_path.stat().st_dev, tmp_path.stat().st_ino):
+            kind = "root"
+        else:
+            kind = "bucket"
+        calls.append(kind)
+        events.append(kind)
         real(fd)
 
     monkeypatch.setattr(store.os, "fsync", counted)
+    monkeypatch.setattr(
+        durability, "fsync_ancestors", lambda root, **_kwargs: events.append("ancestors")
+    )
 
     store.append(tmp_path, "lobby", "bot", "durable")
-    # Two, not one: creating the room also appends its announcement to /r/events, and
-    # both records are on disk before the caller's 200.
-    assert len(calls) == 2
+    # The first room persists its shard in rooms/, then rooms/ in root. Its /r/events
+    # announcement uses another shard but reuses the already-synced rooms/ root entry.
+    assert events == [
+        "file",
+        "bucket",
+        "rooms",
+        "root",
+        "ancestors",
+        "file",
+        "bucket",
+        "rooms",
+    ]
+
+    store.append(tmp_path, "lobby", "bot", "still durable")
+    assert events[-3:] == ["file", "bucket", "rooms"]
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 2  # the append skipped it
+        assert len(calls) == 10  # the append skipped all syncs and the ancestor repair
+        store.append(tmp_path, "p-fast-new", "bot", "fast creation")
+        assert len(calls) == 10  # a newly created room skips the directory syncs too
+        events.clear()
+        real_replace = store.os.replace
+
+        def replaced(src, dst):
+            result = real_replace(src, dst)
+            events.append("replace")
+            return result
+
+        monkeypatch.setattr(store.os, "replace", replaced)
         store._compact(store.room_path(tmp_path, "lobby"))
-        assert len(calls) == 3  # the rewrite did not
+        assert events == ["file", "replace", "bucket"]
+
+
+def test_root_ancestor_sync_reaches_but_does_not_cross_the_mount(tmp_path, monkeypatch):
+    """The device boundary is stubbed: this must not pass merely because /tmp and /
+    happen to share a device on the CI host."""
+    import durability
+
+    path = tmp_path.resolve()
+    boundary = path.parent
+    across_mount = boundary.parent
+    real_stat = type(path).stat
+
+    def mounted_stat(self):
+        stat = real_stat(self)
+        if self == across_mount:
+            return type("Stat", (), {"st_dev": stat.st_dev + 1})()
+        return stat
+
+    synced = []
+    monkeypatch.setattr(type(path), "stat", mounted_stat)
+    monkeypatch.setattr(
+        durability, "fsync_parent", lambda path, **_kwargs: synced.append(path) or True
+    )
+
+    durability.fsync_ancestors(path)
+
+    assert synced == [path]
+
+
+def test_root_ancestor_sync_resolves_symlinked_roots(tmp_path, monkeypatch):
+    """Walk the real volume hierarchy, not the lexical parent of CHAT_ROOT's symlink."""
+    import durability
+
+    target = tmp_path / "volume" / "chat"
+    target.mkdir(parents=True)
+    link = tmp_path / "data"
+    link.symlink_to(target, target_is_directory=True)
+    synced = []
+    monkeypatch.setattr(
+        durability, "fsync_parent", lambda path, **_kwargs: synced.append(path) or True
+    )
+
+    durability.fsync_ancestors(link)
+
+    assert synced[0] == target.resolve() and link not in synced
+
+
+def test_root_ancestor_sync_stops_at_an_unreadable_provisioning_boundary(tmp_path, monkeypatch):
+    """A 0711 ancestor outside the store must not turn an acknowledged write into a 500;
+    EIO and every other sync failure still propagate."""
+    import config
+    import durability
+
+    path = tmp_path.resolve()
+    blocked = path.parent
+    attempted = []
+
+    def permission_boundary(directory, **_kwargs):
+        attempted.append(directory)
+        return directory != blocked
+
+    logged = []
+    monkeypatch.setattr(durability, "fsync_parent", permission_boundary)
+    monkeypatch.setattr(config, "_dbg", lambda *args, **kwargs: logged.append((args, kwargs)))
+
+    durability.fsync_ancestors(path)
+
+    assert attempted == [path, blocked]
+    assert logged == [((2, "fsync_boundary"), {})]
+
+
+def test_new_root_fails_closed_at_an_unreadable_parent(tmp_path, monkeypatch):
+    import durability
+
+    attempted = []
+
+    def permission_boundary(directory, *, permission_boundary=False):
+        attempted.append((directory, permission_boundary))
+        if not permission_boundary:
+            raise PermissionError
+        return False
+
+    monkeypatch.setattr(durability, "fsync_parent", permission_boundary)
+
+    with pytest.raises(PermissionError):
+        durability.fsync_ancestors(tmp_path, strict_first=True)
+
+    assert attempted == [(tmp_path.resolve(), False)]
+
+
+def test_write_marks_only_a_new_data_root_for_strict_parent_sync(tmp_path, monkeypatch):
+    import durability
+    import store
+
+    root = tmp_path / "data"
+    strict = []
+    monkeypatch.setattr(
+        durability,
+        "sync_room_entry",
+        lambda _root, _path, **kwargs: strict.append(kwargs["root_was_missing"]),
+    )
+
+    store._write_record(root, "p-root", "bot", "first")
+    store._write_record(root, "p-root", "bot", "second")
+
+    assert strict == [True, False]
+
+
+def test_root_ancestor_sync_does_not_swallow_fsync_permission_errors(tmp_path, monkeypatch):
+    import durability
+
+    monkeypatch.setattr(durability.os, "fsync", lambda _fd: (_ for _ in ()).throw(PermissionError))
+
+    with pytest.raises(PermissionError):
+        durability.fsync_ancestors(tmp_path)
+
+
+def test_a_successful_append_repairs_entries_left_by_an_interrupted_first_writer(
+    tmp_path, monkeypatch
+):
+    """Existence is not durability: a killed writer can leave both paths visible without
+    ever syncing either directory. The next acknowledged append must repair that state."""
+    import durability
+    import store
+
+    path = store.room_path(tmp_path, "p-interrupted")
+    path.parent.mkdir(parents=True)
+    path.touch()
+    synced = []
+    monkeypatch.setattr(durability, "fsync_parent", lambda path: synced.append(path) or True)
+    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root, **_kwargs: None)
+
+    store.append(tmp_path, "p-interrupted", "bot", "repair it")
+
+    assert synced == [path, path.parent, path.parent.parent]
+
+
+def test_an_existing_room_append_always_repairs_its_directory_entry(tmp_path, monkeypatch):
+    """A peer may reap and recreate a room with the same inode, then die before its sync.
+    This worker cannot distinguish that from its old file, so every durable append repairs."""
+    import durability
+    import store
+
+    path = store.room_path(tmp_path, "p-existing")
+    store.append(tmp_path, "p-existing", "bot", "first")
+    synced = []
+    monkeypatch.setattr(durability, "fsync_parent", lambda path: synced.append(path) or True)
+
+    store.append(tmp_path, "p-existing", "bot", "repair regardless")
+
+    assert synced == [path, path.parent]
+
+
+def test_legacy_room_entry_does_not_sync_outside_the_data_root(tmp_path, monkeypatch):
+    import durability
+
+    rooms = tmp_path / "rooms"
+    rooms.mkdir()
+    path = rooms / "legacy.jsonl"
+    path.touch()
+    synced = []
+    monkeypatch.setattr(
+        durability, "fsync_parent", lambda path, **_kwargs: synced.append(path) or True
+    )
+    monkeypatch.setattr(durability, "fsync_ancestors", lambda _root, **_kwargs: None)
+
+    durability.sync_room_entry(tmp_path, path)
+
+    assert synced == [path, rooms]
 
 
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
