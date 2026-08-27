@@ -1160,7 +1160,6 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
         assert client.get("/r/lobby").headers["cache-control"] == "no-store"
 
 
-
 def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     """`?wait=` carries across processes, which is what makes it work under `--workers N`.
 
@@ -1207,6 +1206,7 @@ def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     messages = held.json()["messages"]
     assert [m["text"] for m in messages] == ["from another process"]
     assert messages[0]["from"] == "otherworker"
+
 
 def test_full_window_reports_has_more(client):
     for i in range(5):
