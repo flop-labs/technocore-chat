@@ -6,8 +6,11 @@ the per-caller retry map that used to live here (CHAT_DEDUP_SECONDS, deleted): t
 was keyed per caller, so the sender being DIFFERENT on every copy - the exact shape an
 airdrop farm produces - was the one thing it could never see.
 
-Off by default (see config.DUPE_FILTER_SECONDS); every test here enables it explicitly,
-which is also how an operator does.
+The shared client fixture pins the filter OFF, so nothing in this file rides on the
+shipped defaults: each test configures the window, threshold and floor it asserts
+through _filter_on(), which is also how an operator does. The defaults themselves are
+asserted exactly once, by the boot probe in tests/unit/test_config_knobs.py - they are
+a release decision, not a property of the mechanism.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import _client
@@ -28,10 +32,37 @@ client = _client.client  # the shared TestClient fixture
 
 SRC = str(Path(__file__).resolve().parents[2] / "src")
 
-# Long enough to clear DUPE_MIN_LENGTH (16) with margin, and shaped like the measured
-# farm phrases rather than like prose a test invented.
+# The values under test, pinned in one visible place: window 60s, sixth copy refused,
+# floor 16 normalised characters. Deliberate choices, not echoes of config.py - a
+# retune there must not silently re-tune what these assertions mean.
+WINDOW = 60
+COPIES = 5
+FLOOR = 16
+
+# Long enough to clear the floor with margin, and shaped like the measured farm phrases
+# rather than like prose a test invented.
 PHRASE = "checking node health... all good. $flop network participation confirmed."
 SHORTS = ("ok", "gm", "+1", "yes", "thanks", "np", "done", "hi")
+
+
+@contextmanager
+def _filter_on(**kwargs):
+    """Every knob the filter reads, set to the values under test.
+
+    A test asserts behaviour at numbers it chose; the shipped defaults are irrelevant to
+    it and have moved before (0/3 -> 60/5) - tests that rode them broke, or worse,
+    kept passing while asserting nothing about the numbers they named. RATE_WRITE rides
+    along because these tests post more writes in a minute than one bucket allows.
+    """
+    knobs = {
+        "DUPE_FILTER_SECONDS": WINDOW,
+        "DUPE_MAX_COPIES": COPIES,
+        "DUPE_MIN_LENGTH": FLOOR,
+        "RATE_WRITE": 600,
+    }
+    knobs.update(kwargs)
+    with config.override(**knobs):
+        yield
 
 
 def _view(client, room: str = "lobby") -> list[str]:
@@ -47,26 +78,34 @@ def _say(client, room: str, nick: str, text: str):
     return client.get("/r/" + room + "/say/" + nick + "/" + text.replace(" ", "%20"))
 
 
-def test_on_by_default_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
-    """The default is the decision this release made: the filter is ON at 60s/5 copies,
-    so a deployment that sets nothing gets the behaviour - five senders may say the same
-    thing, the sixth is a copy. A 200 here would have to carry a record of the refuser's
-    that does not exist."""
-    assert config.DUPE_FILTER_SECONDS == 60 and config.DUPE_MAX_COPIES == 5
-    with config.override(RATE_WRITE=600):
-        for i in range(5):
+def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
+    """The case the whole filter exists for. Five senders may say the same thing; the
+    sixth is a copy, and refusing it is the point - a 200 here would have to carry a
+    record of the refuser's that does not exist."""
+    with _filter_on():
+        for i in range(COPIES):
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
         sixth = _say(client, "lobby", "someone-else", PHRASE)
     assert sixth.status_code == 422
     assert "rephrase" in sixth.text and "lobby" in sixth.text
     assert "429" not in sixth.text and "retry-after" not in sixth.headers
-    assert len(_view(client)) == 5, "the refused copy must not land"
+    assert len(_view(client)) == COPIES, "the refused copy must not land"
+
+
+def test_the_threshold_itself_is_the_knob(client) -> None:
+    """COPIES is chosen, not incidental: at 2 the third copy is already refused, which is
+    what an operator wanting a tighter room buys, and what these tests must not assume
+    is fixed. Asserts the refusal point moves with the knob and only with it."""
+    with _filter_on(DUPE_MAX_COPIES=2):
+        assert _say(client, "lobby", "a", PHRASE).status_code == 200
+        assert _say(client, "lobby", "b", PHRASE).status_code == 200
+        assert _say(client, "lobby", "c", PHRASE).status_code == 422
 
 
 def test_zero_is_the_opt_out_and_costs_the_old_behaviour_exactly(client) -> None:
-    """CHAT_DUPE_FILTER_SECONDS=0 buys back the pre-filter behaviour: every identical
-    write lands, and the ring stays empty rather than merely unused."""
-    with config.override(DUPE_FILTER_SECONDS=0, RATE_WRITE=600):
+    """DUPE_FILTER_SECONDS=0 buys back the pre-filter behaviour: every identical write
+    lands, and the ring stays empty rather than merely unused."""
+    with _filter_on(DUPE_FILTER_SECONDS=0):
         for i in range(10):
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
     assert len(_view(client)) == 10
@@ -78,19 +117,19 @@ def test_the_signed_lane_refuses_cross_sender_duplicates(client) -> None:
     no existing test covers: six DIFFERENT keys, one phrase, nonces all valid - the
     nonce stops a replay of one URL, not a fresh signed write of the same text."""
     keys = [_keypair(seed) for seed in range(1, 7)]
-    with config.override(RATE_WRITE=600):
-        for did, sign in keys[:5]:
+    with _filter_on():
+        for did, sign in keys[:COPIES]:
             assert _say_signed(client, "lobby", did, sign, PHRASE, nonce=1).status_code == 200
-        refused = _say_signed(client, "lobby", keys[5][0], keys[5][1], PHRASE, nonce=1)
+        refused = _say_signed(client, "lobby", keys[COPIES][0], keys[COPIES][1], PHRASE, nonce=1)
     assert refused.status_code == 422
-    assert len(_view(client)) == 5
+    assert len(_view(client)) == COPIES
 
 
 def test_the_post_lanes_match_the_get_lanes(client) -> None:
     """One rule, four lanes. A caller that switches verb to dodge the filter must meet
     the same refusal, signed or not."""
-    with config.override(RATE_WRITE=600):
-        for i in range(5):
+    with _filter_on():
+        for i in range(COPIES):
             assert (
                 client.post("/r/lobby", json={"from": "p" + str(i), "text": PHRASE}).status_code
                 == 200
@@ -101,20 +140,20 @@ def test_the_post_lanes_match_the_get_lanes(client) -> None:
     # five copies above, so the same phrase to lobby again would be refused before this
     # test's own sixth copy - right behaviour, wrong assertion.
     keys = [_keypair(seed) for seed in range(11, 17)]
-    with config.override(RATE_WRITE=600):
-        for did, sign in keys[:5]:
+    with _filter_on():
+        for did, sign in keys[:COPIES]:
             assert _post_signed(client, "meta", did, sign, PHRASE, nonce=1).status_code == 200
-        refused = _post_signed(client, "meta", keys[5][0], keys[5][1], PHRASE, nonce=1)
+        refused = _post_signed(client, "meta", keys[COPIES][0], keys[COPIES][1], PHRASE, nonce=1)
     assert refused.status_code == 422
-    assert len(_view(client, "lobby")) == 5
-    assert len(_view(client, "meta")) == 5  # the two refusals landed nothing
+    assert len(_view(client, "lobby")) == COPIES
+    assert len(_view(client, "meta")) == COPIES  # the two refusals landed nothing
 
 
 def test_short_conversational_repeats_are_never_refused(client) -> None:
     """ok, gm, +1 are legitimate repeats - the room is a chat room. The length floor is
     what keeps them outside the filter however many copies arrive, and this is the
     false-positive gate the bench measures at scale."""
-    with config.override(RATE_WRITE=600):
+    with _filter_on():
         for word in SHORTS:
             for copy in range(15):
                 r = _say(client, "lobby", "nick" + str(copy), word)
@@ -124,21 +163,57 @@ def test_short_conversational_repeats_are_never_refused(client) -> None:
     assert len(_view(client)) == len(SHORTS) * 15
 
 
+def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> None:
+    """The floor, not the window, is what protects conversation - so an operator who
+    lowers it must know exactly which messages just became refuseable. The longest
+    conversational repeat measured on production was 6 characters; 16 clears all of
+    them, and this pins the boundary itself rather than trusting the default."""
+    # +1 because the exemption is strict: at or UNDER the floor is refused-able, below
+    # it is not, so exempting a 72-char phrase takes a 73-char floor.
+    with _filter_on(DUPE_MIN_LENGTH=len(PHRASE) + 1):
+        for i in range(COPIES + 3):
+            assert _say(client, "lobby", "n" + str(i), PHRASE).status_code == 200
+    with _filter_on(DUPE_MIN_LENGTH=6):
+        for i in range(COPIES):
+            _say(client, "meta", "n" + str(i), "thanks for the summary, this helps a lot")
+        assert (
+            _say(client, "meta", "x", "thanks for the summary, this helps a lot").status_code == 422
+        )
+
+
 def test_the_window_expires_and_a_refusal_does_not_extend_it(client, monkeypatch) -> None:
     """The window is the whole safety valve: a phrase becomes acceptable again exactly
     'window' after the last copy that LANDED, never later - a farm hammering refusals
     cannot drag its own window open. The clock is fake, so expiry needs no sleep."""
     clock = {"now": 1000.0}
     monkeypatch.setattr("time.monotonic", lambda: clock["now"])
-    with config.override(RATE_WRITE=600):
-        for i in range(5):
+    with _filter_on():
+        for i in range(COPIES):
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
-        clock["now"] = 1005.0
+        clock["now"] = 1000.0 + COPIES
         assert _say(client, "lobby", "n9", PHRASE).status_code == 422
         for _ in range(55):  # hammer the refusal: none of these may extend anything
             clock["now"] += 1.0
             _say(client, "lobby", "n9", PHRASE)
-        clock["now"] = 1064.1  # 60.1s after the last ACCEPT (1004.0), past the window
+        # The accepts all landed at 1000.0 (the fake clock does not advance on its own),
+        # so the window shuts at 1000 + WINDOW; past it the phrase opens again.
+        clock["now"] = 1000.0 + WINDOW + 0.1
+        assert _say(client, "lobby", "n8", PHRASE).status_code == 200
+
+
+def test_a_shorter_window_expires_sooner(client, monkeypatch) -> None:
+    """The window is chosen, not incidental: at 5s the phrase opens again 5s after the
+    last accept. The same arithmetic as the expiry test, driven by the knob, so a
+    retune of WINDOW in this file cannot silently test the wrong duration."""
+    clock = {"now": 2000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    with _filter_on(DUPE_FILTER_SECONDS=5):
+        for i in range(COPIES):
+            _say(client, "lobby", "nick" + str(i), PHRASE)
+        clock["now"] = 2003.0
+        assert _say(client, "lobby", "n9", PHRASE).status_code == 422
+        # The accepts all landed at 2000.0, so the 5s window shuts at 2005.0.
+        clock["now"] = 2005.1
         assert _say(client, "lobby", "n8", PHRASE).status_code == 200
 
 
@@ -147,8 +222,8 @@ def test_case_and_whitespace_variants_count_as_one_text(client) -> None:
     upper-casing a letter or padding a space gains nothing. Trailing punctuation stays a
     difference - measured; stripping it catches nothing the ladder misses."""
     shouty = "Checking   Node HEALTH... all good. $FLOP network participation confirmed."
-    with config.override(RATE_WRITE=600):
-        for i in range(5):
+    with _filter_on():
+        for i in range(COPIES):
             assert _say(client, "lobby", "n" + str(i), PHRASE).status_code == 200
         assert _say(client, "lobby", "x", shouty).status_code == 422
 
@@ -156,43 +231,46 @@ def test_case_and_whitespace_variants_count_as_one_text(client) -> None:
 def test_a_refused_room_still_accepts_other_messages(client) -> None:
     """A refusal is about one text, not the room or the sender: the next different
     message lands normally, from the identity that was just refused."""
-    with config.override(RATE_WRITE=600):
-        for i in range(5):
+    with _filter_on():
+        for i in range(COPIES):
             _say(client, "lobby", "n" + str(i), PHRASE)
         assert _say(client, "lobby", "n5", PHRASE).status_code == 422
         after = _say(client, "lobby", "n5", "a different and perfectly fine message")
     assert after.status_code == 200
-    assert len(_view(client)) == 6
+    assert len(_view(client)) == COPIES + 1
 
 
 def test_two_rooms_filter_independently(client) -> None:
     """The ring is per room, so the same phrase in two rooms is two conversations,
     either of which may legitimately be having it."""
-    with config.override(RATE_WRITE=600):
+    with _filter_on():
         for room in ("lobby", "meta"):
-            for i in range(6):
+            for i in range(COPIES + 1):
                 r = _say(client, room, "n" + str(i), PHRASE)
-                assert r.status_code == (422 if i == 5 else 200), room
-            assert len(_view(client, room)) == 5
+                assert r.status_code == (422 if i == COPIES else 200), room
+            assert len(_view(client, room)) == COPIES
 
 
-def test_the_window_is_published_where_a_caller_looks(client) -> None:
+def test_the_knobs_are_published_where_a_caller_looks(client) -> None:
     """A new way to be refused is only usable if a client can read the numbers it is
     being refused against: /config carries all three knobs with units, and agent.json
-    carries the window beside the other enforced limits."""
-    with config.override(DUPE_FILTER_SECONDS=45, DUPE_MIN_LENGTH=20, DUPE_MAX_COPIES=7):
-        doc = client.get("/config").json()
-        assert doc["settings"]["dupe_filter_seconds"] == 45
-        assert doc["settings"]["dupe_min_length"] == 20
-        assert doc["settings"]["dupe_max_copies"] == 7
-        assert doc["units"]["dupe_filter_seconds"]
+    carries the window beside the other enforced limits. Checked at values this test
+    chose; the document follows config.override, which is the same path a deployment's
+    environment takes."""
+    with _filter_on(DUPE_FILTER_SECONDS=45, DUPE_MIN_LENGTH=20, DUPE_MAX_COPIES=7):
+        settings = client.get("/config").json()["settings"]
+        assert settings["dupe_filter_seconds"] == 45
+        assert settings["dupe_min_length"] == 20
+        assert settings["dupe_max_copies"] == 7
+        assert client.get("/config").json()["units"]["dupe_filter_seconds"]
         limits = client.get("/.well-known/agent.json").json()["limits"]
         assert limits["duplicate_filter_seconds"] == 45
-    # ...and the defaults publish as the enforcement they are, not as absent keys: a
-    # caller must be able to tell "60s window, 5 copies" from "unknown filter".
+    # Default-agnostic publication check: the document tracks the binding it enforces,
+    # whatever the release ships - the shipped values themselves are the boot probe's
+    # to pin, not this test's.
     settings = client.get("/config").json()["settings"]
-    assert settings["dupe_filter_seconds"] == 60
-    assert settings["dupe_max_copies"] == 5
+    assert settings["dupe_filter_seconds"] == config.DUPE_FILTER_SECONDS
+    assert settings["dupe_max_copies"] == config.DUPE_MAX_COPIES
 
 
 def test_a_refusal_is_documented_on_every_write_lane(client) -> None:

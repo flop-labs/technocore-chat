@@ -27,7 +27,13 @@ def client(tmp_path):
     # filter, so a phrase posted in one test cannot make the next test's identical
     # phrase arrive as the fourth copy of something.
     limit._dupes.clear()
-    with config.override(ROOT=tmp_path):
+    # The cross-sender filter is pinned OFF here so a test that is not about the filter
+    # never rides on its shipped default: a suite whose rooms all behave pre-filter is
+    # hermetic against any future retune of DUPE_* (they moved once already, 0/3 -> 60/5,
+    # and tests that silently depended on the old defaults were the debris). The tests
+    # that exercise the filter configure it explicitly; the defaults themselves are
+    # asserted once, by the boot probe in tests/unit/test_config_knobs.py.
+    with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
         yield TestClient(app_module.app)
 
 

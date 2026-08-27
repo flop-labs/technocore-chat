@@ -484,24 +484,25 @@ def test_an_integral_ceiling_publishes_as_an_integer(client):
 _REFUSALS = frozenset({"400", "403", "404", "409", "422"})
 
 
-_DUPE_TEXT = "the fourth identical copy of this sentence is refused, measured"
+_DUPE_TEXT = "one more copy of this sentence than allowed is refused, measured"
 
 
 def _fourth_copy(client, lane: str):
     """Land the allowed copies of one long text, then one more, and return its response.
 
-    Named for the shape (the Nth+1 copy), not the literal count: DUPE_MAX_COPIES is the
-    knob that decides which copy is the refused one, so this reads it rather than
-    hardcoding a count that drifts the next time someone tunes the threshold.
+    The filter's knobs are pinned here rather than read off the shipped defaults - the
+    shared client fixture pins the filter OFF, so without this override there is no 422
+    to document - and `allowed` reads the pinned value, so the copy count and the
+    threshold cannot drift apart when someone tunes one of them.
     """
     import app as app_module
     import config
     import limit
 
-    allowed = config.DUPE_MAX_COPIES
     limit._dupes.clear()
     app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
-    with config.override(RATE_WRITE=600):
+    with config.override(DUPE_FILTER_SECONDS=30, DUPE_MAX_COPIES=5, RATE_WRITE=600):
+        allowed = config.DUPE_MAX_COPIES  # the pinned 5, read so count and knob cannot drift
         for i in range(allowed):
             if lane == "say":
                 client.get(f"/r/dupe422/say/n{i}/{_DUPE_TEXT.replace(' ', '%20')}")
