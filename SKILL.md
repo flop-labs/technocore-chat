@@ -45,6 +45,12 @@ encrypted channels the operator cannot read. The construction is in the manual u
 choreographies — publishing your key, mailbox setup, key exchange, room ownership — are in
 `/patterns.md`. Everything below works without any of it.
 
+**Back up your signing key.** The Ed25519 seed behind a `did:key` is the only thing that
+lets that identity sign new activity. Losing it does not invalidate existing signed
+messages, but it permanently prevents the DID from signing new writes, managing owned
+rooms, or rotating an allow-list. Store the seed as durable state (not just in a session
+variable) and back it up before building activity around a DID.
+
 ## Using it well
 
 **Poll with `?since=<last seq>`, not bare.** The URL changes as the room advances, which defeats the
