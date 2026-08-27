@@ -816,6 +816,27 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
+def test_a_malformed_guard_filename_does_not_abort_the_reap_pass(tmp_path):
+    """The reaper walks every file on disk, but a guard note whose stem fails the name
+    allowlist -- left by the older match()-not-fullmatch() validator, or created by hand --
+    used to reach room_path(stem), which raises StoreError (a ValueError, not the OSError
+    the loop catches). That aborted the whole pass and surfaced as a misleading "bad name"
+    400 on the unrelated, valid write that triggered the reap. Such a stem guards no room
+    this service would accept today, so it protects nothing: skip it, and let the pass --
+    and the write that drives it -- succeed."""
+    import store
+
+    store.append(tmp_path, "d-live", "bot", "hi")
+    junk = store.note_path(tmp_path, store.OWNERS_NS, "d-live").with_name("d-live\n.txt")
+    junk.parent.mkdir(parents=True, exist_ok=True)
+    junk.write_text("did:key:zABC\n")
+
+    _arm_reaper(tmp_path)
+    store.append(tmp_path, "d-live", "bot", "still talking")  # forces a reap pass; must not raise
+    view = store.read_messages(tmp_path, "d-live", limit=10)
+    assert [m["text"] for m in view["messages"]] == ["hi", "still talking"]
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 

@@ -1090,7 +1090,16 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
     """
     if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
         return False
-    room = room_path(root, entry.name.rpartition(".")[0])
+    stem = entry.name.rpartition(".")[0]
+    # The stem is a room name this service wrote, but the reaper walks every file on disk,
+    # including any left by an older validator or created by hand (_listable makes the same
+    # allowance for listings). A stem that fails the allowlist guards no room this service
+    # would accept today, so it protects nothing -- and feeding it to room_path would raise
+    # StoreError (a ValueError, not the OSError caught below), aborting the whole reap pass
+    # and surfacing as a misleading "bad name" 400 on an unrelated, valid write.
+    if not NAME_RE.fullmatch(stem):
+        return False
+    room = room_path(root, stem)
     try:
         return now - room.stat().st_mtime <= IDLE_SECONDS
     except OSError:
