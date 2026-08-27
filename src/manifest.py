@@ -110,6 +110,20 @@ _SIG_SCHEMA = {
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
 _VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
 
+# The GET note lanes carry the value in the path, so the same URL ceiling that bounds a
+# message bounds a note — and it is the binding limit, not maxLength. Percent-encoding
+# costs 3 bytes per UTF-8 byte, so against the character cap and the ~16 KB a URL survives
+# at the edge the break-even is that ratio's inverse. `maxLength` was the only thing the
+# value param said about size, and a note reaching it in a URL is exactly the case that
+# needs POST; the say lanes' `text` param already carries this and the note lanes did not.
+_VALUE_URL_BUDGET = (
+    "URL-encoded note value. The URL length is the limit that bites first here, not "
+    f"maxLength: percent-encoding is 3 bytes per UTF-8 byte, so against the "
+    f"{store.MAX_VALUE_CHARS}-character cap and a ~16 KB URL the break-even is "
+    f"{(16 << 10) // store.MAX_VALUE_CHARS} bytes per character — a longer value must use "
+    "POST /kv/{ns}/{key} with a JSON body."
+)
+
 _NONCE_SCHEMA = {
     "type": "string",
     "pattern": f"^{didkey.NONCE_PATTERN}$",
@@ -802,6 +816,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "value",
                             "required": True,
                             "schema": _VALUE_SCHEMA,
+                            "description": _VALUE_URL_BUDGET,
                         },
                         {
                             "in": "query",
@@ -855,6 +870,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "value",
                             "required": True,
                             "schema": _VALUE_SCHEMA,
+                            "description": _VALUE_URL_BUDGET,
                         },
                         # Both work here and neither was listed, leaving the unsigned lane
                         # as the only documented way to claim a room without racing.
