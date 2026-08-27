@@ -128,7 +128,7 @@ single-use only while the message remains in the newest 1 MiB scanned for the
 last nonce. Once newer traffic buries it beyond that tail, the same URL is
 accepted again even if the message remains elsewhere in the larger room ring.
 Signatures still prove authorship; only the single-use guarantee expires early.
-RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
+RENDERING: the text view shows a verified writer as <z6Mk...EGta2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
 

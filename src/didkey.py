@@ -107,11 +107,19 @@ def is_did(value: str) -> bool:
 
 
 def abbreviate(did: str) -> str:
-    """`did:key:z6Mk…2doK` — 56 characters of base58 tokenize badly, and printed in full on
-    a 50-message fetch a DID is ~1200 tokens of pure identifier (design §5.4). The text view
-    abbreviates; `?format=json` carries the DID in full."""
+    """`did:key:z6Mk…EGta2doK` — 56 characters of base58 tokenize badly, and printed in full
+    on a 50-message fetch a DID is ~1200 tokens of pure identifier (design §5.4). The text
+    view abbreviates; `?format=json` carries the DID in full.
+
+    The leading `z6Mk` is the constant `ed25519-pub` multicodec tag — every Ed25519 did:key
+    starts with it, so those four characters discriminate nothing. The marker therefore shows
+    8 *trailing* characters (~46.9 bits of the varying suffix) rather than 4 (~23.4 bits): at
+    4 chars a birthday collision between two honestly-generated identities is even odds by
+    ~4k keys, and a targeted second-preimage match is minutes of search (#300). 8 chars pushes
+    the birthday bound out to ~10M identities for a few extra characters of render budget.
+    """
     mb = did[len(PREFIX) :]
-    return f"{mb[:4]}…{mb[-4:]}"
+    return f"{mb[:4]}…{mb[-8:]}"
 
 
 def verify(did: str, signature: str, message: str) -> None:

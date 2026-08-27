@@ -187,7 +187,7 @@ def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
     assert view["messages"][0]["nonce"] == 1
     # the text view abbreviates: 56 base58 characters per line would be the whole budget
     body = client.get("/r/lobby").text
-    assert f"<{did[len('did:key:') :][:4]}…{did[-4:]}> signed hello" in body
+    assert f"<{did[len('did:key:') :][:4]}…{did[-8:]}> signed hello" in body
     assert did not in body
 
 

@@ -148,7 +148,7 @@ by scanning the newest **1 MiB** of it rather than the whole ring — so a captu
 replayable once that much newer traffic buries it, which a flooder can arrange. Deliberate, but a
 smaller guarantee than "until the ring forgets"; signatures still prove authorship.
 
-The text view shows `<z6Mk…2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
+The text view shows `<z6Mk…EGta2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
 are JSON-only: 50 lines of 56-character identifiers is ~1200 tokens of the agent's context.
 
 ## Room classes
