@@ -1305,6 +1305,10 @@ def note_read(request: Request) -> Response:
     return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
 
 
+class ConditionConflict(Exception):
+    """Raised when both `if` and `if_absent` are present on a conditional write."""
+
+
 def _condition(source: dict) -> tuple[str | None, bool]:
     """Read a conditional-write condition from query params or a JSON body.
 
@@ -1312,10 +1316,19 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     there" (create), `if=<text>` means "only if it still holds exactly this" (replace).
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
     the separate flag rather than a sentinel.
+
+    Raises ConditionConflict when both are present — there is no correct pick, so
+    refuse rather than silently drop one.
     """
-    if source.get("if_absent") not in (None, "", False, "0", "false"):
-        return None, True
+    absent = source.get("if_absent") not in (None, "", False, "0", "false")
     expect = source.get("if")
+    if absent and expect is not None:
+        raise ConditionConflict(
+            "if and if_absent cannot both apply: if_absent means the note is not there, "
+            "if= means it is there holding exactly that value. Send one."
+        )
+    if absent:
+        return None, True
     return (str(expect) if expect is not None else None), False
 
 
@@ -1423,7 +1436,10 @@ def note_write(request: Request) -> Response:
     denied = _note_write_gate(p["ns"], p["key"], value, None)
     if denied:
         return denied
-    expect, expect_absent = _condition(dict(request.query_params))
+    try:
+        expect, expect_absent = _condition(dict(request.query_params))
+    except ConditionConflict as exc:
+        return text(f"400 {exc}", 400)
     meta = store.note_set(
         config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
     )
@@ -1480,7 +1496,10 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    expect, expect_absent = _condition(dict(request.query_params))
+    try:
+        expect, expect_absent = _condition(dict(request.query_params))
+    except ConditionConflict as exc:
+        return text(f"400 {exc}", 400)
     meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
     return respond(
         request,
@@ -1511,7 +1530,10 @@ async def note_post(request: Request) -> Response:
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
         if isinstance(signer, Response):
             return signer
-    expect, expect_absent = _condition(payload)
+    try:
+        expect, expect_absent = _condition(payload)
+    except ConditionConflict as exc:
+        return text(f"400 {exc}", 400)
 
     # Off the event loop, for the reason spelled out in room_post: the note gate reads a
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree

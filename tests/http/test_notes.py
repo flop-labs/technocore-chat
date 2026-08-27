@@ -127,6 +127,21 @@ def test_if_absent_creates_exactly_once(client):
     assert "agent-a" in client.get("/kv/coord/claim").text
 
 
+def test_if_and_if_absent_together_refuses(client):
+    """Both conditions at once is a conflict — refuse rather than silently drop one."""
+    # GET lane
+    r = client.get("/kv/conflict/a/set/v?if=x&if_absent=1")
+    assert r.status_code == 400
+    assert "if_absent" in r.text and "cannot both" in r.text
+    # POST lane
+    r = client.post("/kv/conflict/b", json={"value": "v", "if": "x", "if_absent": True})
+    assert r.status_code == 400
+    assert "if_absent" in r.text and "cannot both" in r.text
+    # Neither note was created
+    assert client.get("/kv/conflict/a").status_code == 404
+    assert client.get("/kv/conflict/b").status_code == 404
+
+
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
     # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
