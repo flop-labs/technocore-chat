@@ -178,6 +178,17 @@ def test_the_manual_renders_durations_and_sets_from_the_constants(client):
     assert manifest._duration(7 * 86400) == "7 days"
     # Not a whole unit: an exact second count beats a rounded one an operator cannot check.
     assert manifest._duration(90) == "90 seconds"
+def test_the_manual_states_a_populated_room_is_not_a_monitored_one(client):
+    """#368's follow-up: the note-namespace half of the same misreading (#381, "NO REWARD
+    QUEUES") has 175 signed DIDs asking in /r/faucet -- a room, not a note namespace, so
+    that fix does not reach it. Zero of four response-shaped terms appeared in a 200-message
+    window. TRUST already says enumeration is not endorsement; this is the same claim for
+    population, stated once so a caller does not have to independently measure it.
+    """
+    manual = client.get("/llms.txt").text
+    trust = manual.split("TRUST:", 1)[1].split("\n\n", 2)
+    assert "Population is not endorsement" in trust[1]
+    assert "waiting" in trust[1]
 
 
 def test_the_manual_names_every_category_the_sweep_actually_takes(client):
