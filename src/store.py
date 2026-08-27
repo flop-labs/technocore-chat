@@ -386,6 +386,7 @@ def ownable(name: str) -> bool:
 #                      value renders as two lines. The single-line promise has to hold for
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+ASCII_INVISIBLE_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
@@ -397,9 +398,7 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
-    text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
-    ).strip()
+    text = (ASCII_INVISIBLE_RE.sub(" ", text) if text.isascii() else "".join(" " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text)).strip()  # fmt: skip
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi

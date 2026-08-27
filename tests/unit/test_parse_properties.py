@@ -21,6 +21,7 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -92,6 +93,14 @@ def test_clean_text_sweeps_trims_and_is_idempotent(text: str) -> None:
     assert len(out) <= len(text)
     # Idempotence: the output is already a fixed point of the sweep.
     assert store.clean_text(out) == out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("\x00hello\x1f", "hello"), ("left\tright\nnext\x7f", "left right next")],
+)
+def test_clean_text_ascii_fast_path_preserves_control_sweep(raw: str, expected: str) -> None:
+    assert store.clean_text(raw) == expected
 
 
 # clean_text takes its limit as a parameter, so the cap can be exercised over-limit at
