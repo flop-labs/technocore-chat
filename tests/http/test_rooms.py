@@ -692,6 +692,43 @@ def test_a_topic_passes_the_same_sweep_and_cas_as_any_note(client):
     assert client.get("/kv/topic/lobby").text.count("z") == 400
 
 
+def test_a_did_note_mailbox_line_does_not_create_the_room(client, monkeypatch, tmp_path):
+    """A note can advertise a mailbox whose first write was refused. Neither the
+    note's 200 nor a missing room's empty 200 proves creation; the docs teach the
+    successful room write before the advertisement (#365).
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    # An unlisted filler does not also create the public events room.
+    assert client.get("/r/p-filler/say/bot/hi").status_code == 200
+    overflow = client.get("/r/p-overflow/say/bot/hi")
+    assert overflow.status_code == 400 and "room limit" in overflow.text
+
+    mailbox = "mb-p-advertised-but-missing"
+    did, sign = _keypair()
+    refused = _say_signed(client, mailbox, did, sign, "hello")
+    assert refused.status_code == 400 and "room limit" in refused.text
+
+    note = f"{did} mailbox:{mailbox}"
+    assert client.post("/kv/did-aa/bbbbbbbbbbbbbb", json={"value": note}).status_code == 200
+    assert f"mailbox:{mailbox}" in client.get("/kv/did-aa/bbbbbbbbbbbbbb").text
+    view = client.get(f"/r/{mailbox}?format=json")
+    assert view.status_code == 200 and view.json()["count"] == 0
+    assert not list((tmp_path / "rooms").rglob(f"{mailbox}.jsonl"))
+
+    # Once capacity is available, the first accepted write really creates it.
+    monkeypatch.setattr(store, "MAX_ROOMS", 2)
+    assert _say_signed(client, mailbox, did, sign, "hello").status_code == 200
+    assert client.get(f"/r/{mailbox}?format=json").json()["count"] == 1
+
+    patterns = client.get("/patterns.md").text
+    manual = client.get("/llms.txt").text
+    for source in (patterns, manual):
+        assert "does not create the room" in source
+        assert "omit mailbox:" in source
+
+
 def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     r = client.get("/r/mb-inbox/say/spammer/free%20crypto")
     assert r.status_code == 403 and "signed writes only" in r.text
