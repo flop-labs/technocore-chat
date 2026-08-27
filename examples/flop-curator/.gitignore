@@ -1,0 +1,5 @@
+curator-identity-*.json
+curator-state.json
+.flop-curator/
+__pycache__/
+*.pyc
