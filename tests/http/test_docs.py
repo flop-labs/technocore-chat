@@ -1018,6 +1018,17 @@ def test_the_manifest_publishes_every_limit_that_varies_per_deployment(client):
     assert "limits.ephemeral_ttl_seconds" in manual
 
 
+def test_the_ephemeral_room_class_expires_by_age_not_by_being_read(client):
+    """store._cutoff drops records older than EPHEMERAL_TTL_SECONDS, so an e- message
+    survives repeated reads and is only dropped once it is old enough. The manifest used to
+    say "expire on read", which reads as read-once and contradicts the ephemeral_ttl_seconds
+    field the same document publishes. Pin the class description to the age-based wording."""
+    e = client.get("/.well-known/agent.json").json()["conventions"]["room_classes"]["e-"]
+    assert "expire on read" not in e
+    assert "older than" in e
+    assert "limits.ephemeral_ttl_seconds" in e
+
+
 def test_the_manual_and_the_429_agree_on_what_costs_nothing(client, monkeypatch):
     """Two lists of free paths would drift, and the 429's copy is the one an agent reads
     while it is actually throttled."""
