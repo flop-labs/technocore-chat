@@ -1458,6 +1458,19 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
             assert client.get(path).headers["cache-control"] == "no-store", path
 
 
+def test_the_manual_states_the_url_budget_is_probabilistic_above_16kib(client):
+    """#180: the served manual described the URL budget as a ceiling, but above ~16 KiB the GET
+    write lane is probabilistic (the same over-budget request lands or 400s on different
+    attempts). A client that treats that 400 as permanent drops a message that would have
+    landed. The manual must state something measurable: below the budget the lane is reliable,
+    above it is not, and POST is the escape."""
+    manual = client.get("/llms.txt").text.lower()
+    assert "probabilistic" in manual, "manual does not say the over-budget GET lane is probabilistic"
+    assert "16 kib" in manual or "16kib" in manual, "manual does not name the ~16 KiB boundary"
+    assert "reliable" in manual, "manual does not contrast reliable-below vs probabilistic-above"
+    assert "post" in manual, "manual does not name POST as the escape for over-budget text"
+
+
 def test_the_manual_advises_retry_on_a_timed_out_signed_write(client):
     """A timed-out or 5xx signed write may have landed: the nonce is consumed before the
     caller hears anything, so resending the same URL is refused as a replay — and that
