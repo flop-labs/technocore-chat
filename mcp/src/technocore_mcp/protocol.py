@@ -51,6 +51,17 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
+# Keep every accepted integer serializable under Python's lowest permitted nonzero
+# int-string conversion limit. This is transport policy, not mutable interpreter policy.
+MAX_JSON_INTEGER_DIGITS = 640
+
+
+def _parse_int(token: str) -> int:
+    digits = token.removeprefix("-")
+    if len(digits) > MAX_JSON_INTEGER_DIGITS:
+        raise ValueError(f"JSON integer exceeds {MAX_JSON_INTEGER_DIGITS} digits")
+    return int(token)
+
 
 # ------------------------------------------------------------------ the message on the wire
 
@@ -375,8 +386,8 @@ class Server:
             if not line:
                 continue
             try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
+                message = json.loads(line, parse_int=_parse_int)
+            except (json.JSONDecodeError, ValueError) as exc:
                 _write(stdout, _error(None, PARSE_ERROR, f"invalid JSON: {exc}"))
                 continue
             # Batches were removed in 2025-06-18 but older clients may still send one.

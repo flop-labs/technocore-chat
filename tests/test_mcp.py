@@ -600,6 +600,78 @@ def test_malformed_json_does_not_kill_the_session(mcp):
     assert replies[1] == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def test_json_integer_limit_is_transport_owned_and_serializable(mcp):
+    """Accepted integer IDs round-trip under Python's lowest legal global limit."""
+    server, protocol = mcp
+    assert protocol.MAX_JSON_INTEGER_DIGITS <= sys.int_info.str_digits_check_threshold
+    boundary = "9" * protocol.MAX_JSON_INTEGER_DIGITS
+    too_large = boundary + "9"
+    old_limit = sys.get_int_max_str_digits()
+    try:
+        for process_limit in (0, 640, 5000):
+            sys.set_int_max_str_digits(process_limit)
+            stdout = io.StringIO()
+            server.serve(
+                io.StringIO(
+                    f'{{"jsonrpc":"2.0","id":{boundary},"method":"ping"}}\n'
+                    f'{{"jsonrpc":"2.0","id":-{boundary},"method":"ping"}}\n'
+                    f'{{"jsonrpc":"2.0","id":{too_large},"method":"ping"}}\n'
+                    f'{{"jsonrpc":"2.0","id":-{too_large},"method":"ping"}}\n'
+                    '{"jsonrpc":"2.0","id":7,"method":"ping"}\n'
+                ),
+                stdout,
+            )
+            replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+            assert len(str(replies[0]["id"])) == protocol.MAX_JSON_INTEGER_DIGITS
+            assert len(str(replies[1]["id"]).removeprefix("-")) == protocol.MAX_JSON_INTEGER_DIGITS
+            assert [reply["error"]["code"] for reply in replies[2:4]] == [protocol.PARSE_ERROR] * 2
+            assert replies[4] == {"jsonrpc": "2.0", "id": 7, "result": {}}
+    finally:
+        sys.set_int_max_str_digits(old_limit)
+
+
+def test_accepted_integer_serializes_after_process_limit_is_lowered(mcp):
+    """Changing interpreter policy after parsing cannot strand an accepted response."""
+    server, protocol = mcp
+    boundary = "9" * protocol.MAX_JSON_INTEGER_DIGITS
+    old_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(0)
+        messages = [
+            json.loads(
+                f'{{"jsonrpc":"2.0","id":{sign}{boundary},"method":"ping"}}',
+                parse_int=protocol._parse_int,
+            )
+            for sign in ("", "-")
+        ]
+        sys.set_int_max_str_digits(sys.int_info.str_digits_check_threshold)
+        stdout = io.StringIO()
+        for message in messages:
+            protocol._write(stdout, protocol._response(server, message))
+        replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        assert [reply["id"] for reply in replies] == [message["id"] for message in messages]
+    finally:
+        sys.set_int_max_str_digits(old_limit)
+
+
+def test_oversized_json_integer_positions_do_not_kill_the_session(mcp):
+    """One oversized token invalidates its whole frame without affecting later frames."""
+    server, protocol = mcp
+    oversized = "9" * (protocol.MAX_JSON_INTEGER_DIGITS + 1)
+    frames = [
+        f'{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"n":{oversized}}}}}',
+        f'[{{"jsonrpc":"2.0","id":2,"method":"ping"}},{{"n":{oversized}}}]',
+        f'{{"jsonrpc":"2.0","method":"notifications/initialized","n":{oversized}}}',
+        '{"jsonrpc":"2.0","id":8,"method":"ping"}',
+    ]
+    stdout = io.StringIO()
+    server.serve(io.StringIO("\n".join(frames) + "\n"), stdout)
+    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [reply["error"]["code"] for reply in replies[:3]] == [protocol.PARSE_ERROR] * 3
+    assert all(len(json.dumps(reply)) < 300 for reply in replies[:3])
+    assert replies[3] == {"jsonrpc": "2.0", "id": 8, "result": {}}
+
+
 # ------------------------------------------------------------------ packaging
 
 
