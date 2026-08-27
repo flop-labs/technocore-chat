@@ -1,0 +1,7 @@
+# build artifacts (regenerate with: node build.mjs)
+worker.js
+
+# local / editor
+node_modules/
+.DS_Store
+*.log
