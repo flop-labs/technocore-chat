@@ -662,6 +662,43 @@ def test_torn_final_line_costs_only_that_record(tmp_path):
     assert store.read_messages(tmp_path, "crash", limit=1)["messages"][0]["text"] == "after"
 
 
+@pytest.mark.parametrize(
+    ("kind", "reader", "empty"),
+    (
+        ("room", lambda store, root: store.read_messages(root, "gone")["messages"], []),
+        ("room", lambda store, root: store.last_seq(root, "gone"), 0),
+        ("room", lambda store, root: store.room_window(root, "gone"), (0, [])),
+        ("note", lambda store, root: store.note_get(root, "plans", "gone"), None),
+    ),
+)
+def test_readers_tolerate_a_reap_between_path_resolution_and_open(
+    tmp_path, monkeypatch, kind, reader, empty
+):
+    """A concurrent reaper may unlink after a reader chose the path but before open().
+
+    That state is externally indistinguishable from an already-absent room or note, so it
+    must return the ordinary empty result instead of turning an idle cleanup into a 500.
+    """
+    import store
+
+    if kind == "room":
+        store.append(tmp_path, "gone", "bot", "hi")
+        target = store.room_path(tmp_path, "gone")
+    else:
+        store.note_set(tmp_path, "plans", "gone", "hi")
+        target = store.note_path(tmp_path, "plans", "gone")
+    path_type = type(target)
+    real_open = path_type.open
+
+    def open_after_reap(self, *args, **kwargs):
+        if self == target:
+            target.unlink(missing_ok=True)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "open", open_after_reap)
+    assert reader(store, tmp_path) == empty
+
+
 def test_concurrent_appends_never_duplicate_a_seq(tmp_path):
     import threading
 

@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -746,19 +746,18 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
-    if path.exists():
-        with path.open("rb") as f:
-            for raw in reverse_lines(f):
-                rec = _parse(raw)
-                if rec is None:
-                    continue
-                if since is not None and rec["seq"] <= since:
-                    break
-                if cutoff is not None and _expired(rec, cutoff):
-                    break
-                out.append(rec)
-                if len(out) >= limit:
-                    break
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in reverse_lines(f):
+            rec = _parse(raw)
+            if rec is None:
+                continue
+            if since is not None and rec["seq"] <= since:
+                break
+            if cutoff is not None and _expired(rec, cutoff):
+                break
+            out.append(rec)
+            if len(out) >= limit:
+                break
     out.reverse()
     return {
         "room": room,
@@ -771,9 +770,7 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
 
 def last_seq(root: Path, room: str) -> int:
     path = room_path(root, room)
-    if not path.exists():
-        return 0
-    with path.open("rb") as f:
+    with suppress(FileNotFoundError), path.open("rb") as f:
         for raw in reverse_lines(f, max_bytes=65536):
             rec = _parse(raw)
             if rec is not None:
@@ -803,17 +800,16 @@ def room_window(root: Path, room: str) -> tuple[int, list[str]]:
     nicks: list[str] = []
     top = 0
     path = room_path(root, room)
-    if path.exists():
-        with path.open("rb") as f:
-            for raw in reverse_lines(f, max_bytes=WINDOW_BYTES):
-                rec = _parse(raw)
-                if rec is None:
-                    continue
-                if not nicks:
-                    top = rec["seq"]
-                nicks.append(str(rec.get("from", "")))
-                if len(nicks) >= WINDOW_MESSAGES:
-                    break
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in reverse_lines(f, max_bytes=WINDOW_BYTES):
+            rec = _parse(raw)
+            if rec is None:
+                continue
+            if not nicks:
+                top = rec["seq"]
+            nicks.append(str(rec.get("from", "")))
+            if len(nicks) >= WINDOW_MESSAGES:
+                break
     return top, nicks
 
 
@@ -1953,8 +1949,9 @@ def note_set(
 
 
 def note_get(root: Path, ns: str, key: str) -> str | None:
-    path = note_path(root, ns, key)
-    return path.read_text(encoding="utf-8") if path.exists() else None
+    with suppress(FileNotFoundError):
+        return note_path(root, ns, key).read_text(encoding="utf-8")
+    return None
 
 
 def topic(root: Path, room: str) -> str | None:
