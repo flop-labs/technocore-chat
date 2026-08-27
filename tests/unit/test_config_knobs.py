@@ -37,6 +37,12 @@ PROBE = (
     "'limit.MAX_WAITERS_PER_IP': limit.MAX_WAITERS_PER_IP, "
     "'app.MAX_WAITERS_PER_IP': app.MAX_WAITERS_PER_IP, "
     "'config.WAIT_POLL': config.WAIT_POLL, 'app.WAIT_POLL': app.WAIT_POLL, "
+    "'config.DUPE_FILTER_SECONDS': config.DUPE_FILTER_SECONDS, "
+    "'app.DUPE_FILTER_SECONDS': app.DUPE_FILTER_SECONDS, "
+    "'config.DUPE_MIN_LENGTH': config.DUPE_MIN_LENGTH, "
+    "'app.DUPE_MIN_LENGTH': app.DUPE_MIN_LENGTH, "
+    "'config.DUPE_MAX_COPIES': config.DUPE_MAX_COPIES, "
+    "'app.DUPE_MAX_COPIES': app.DUPE_MAX_COPIES, "
     "'config.WORKERS': config.WORKERS}))"
 )
 
@@ -165,6 +171,33 @@ def test_the_poll_interval_floors_above_zero() -> None:
     instead of to a way of taking an instance down from the environment."""
     for raw in ("0", "-1", "0.001"):
         assert boot(CHAT_WAIT_POLL=raw)["config.WAIT_POLL"] == 0.01
+
+
+def test_the_dupe_filter_knobs_default_on_and_reach_the_lanes() -> None:
+    """The filter's default is ON at 60s/5 copies - the decision this release made once
+    the false-positive shape was measured. And the knobs must reach `app`, which
+    is the module the write lanes read them from at call time - a knob that stopped at
+    config would parse cleanly and filter nothing."""
+    values = boot()
+    assert values["config.DUPE_FILTER_SECONDS"] == values["app.DUPE_FILTER_SECONDS"] == 60
+    assert values["config.DUPE_MIN_LENGTH"] == values["app.DUPE_MIN_LENGTH"] == 16
+    assert values["config.DUPE_MAX_COPIES"] == values["app.DUPE_MAX_COPIES"] == 5
+    moved = boot(CHAT_DUPE_FILTER_SECONDS="90", CHAT_DUPE_MIN_LENGTH="24", CHAT_DUPE_MAX_COPIES="7")
+    assert moved["config.DUPE_FILTER_SECONDS"] == moved["app.DUPE_FILTER_SECONDS"] == 90
+    assert moved["config.DUPE_MIN_LENGTH"] == moved["app.DUPE_MIN_LENGTH"] == 24
+    assert moved["config.DUPE_MAX_COPIES"] == moved["app.DUPE_MAX_COPIES"] == 7
+
+
+def test_the_dupe_filter_knobs_floor_sensibly() -> None:
+    """A negative window is 0 (off), not a refusal to boot - an operator backing out of
+    the filter by deleting a digit should not take the service down. The copy floor is
+    at 1, because 0 would refuse the FIRST copy of everything: that is not a filter, it
+    is turning the room off. min_length floors at 0, where it means filter everything -
+    a real setting an operator could want."""
+    negative = boot(CHAT_DUPE_FILTER_SECONDS="-5")
+    assert negative["config.DUPE_FILTER_SECONDS"] == 0
+    assert boot(CHAT_DUPE_MIN_LENGTH="-1")["config.DUPE_MIN_LENGTH"] == 0
+    assert boot(CHAT_DUPE_MAX_COPIES="0")["config.DUPE_MAX_COPIES"] == 1
 
 
 def test_junk_in_the_poll_interval_refuses_to_boot() -> None:

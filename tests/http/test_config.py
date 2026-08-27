@@ -78,11 +78,11 @@ def test_the_published_values_are_the_ones_this_process_enforces(client):
     it here, it would not follow the environment there either."""
     import config
 
-    with config.override(RATE_READ=7, MAX_WAIT=2.5, DEDUP_SECONDS=5.0, FSYNC=False):
+    with config.override(RATE_READ=7, MAX_WAIT=2.5, DUPE_FILTER_SECONDS=45.0, FSYNC=False):
         settings = client.get("/config").json()["settings"]
         assert settings["rate_read"] == 7
         assert settings["max_wait"] == 2.5
-        assert settings["dedup_seconds"] == 5
+        assert settings["dupe_filter_seconds"] == 45
         assert settings["fsync"] is False
 
     # …and back, because a document that latched the first value it saw would pass the

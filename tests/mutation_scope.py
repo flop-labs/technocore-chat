@@ -64,6 +64,9 @@ SCOPE: dict[str, tuple[str, ...]] = {
         "store.x_clean_text__*",  # the character caps, and the invisible-character sweep
         "limit.x_take__*",  # the rate limiter (src/limit.py since the extraction)
         "limit.x_refund__*",
+        "limit.x_dupe_refused__*",  # the cross-sender ring: count, refuse, and the bound
+        "limit.x_dupe_release__*",  # and giving a copy back when the append refused it
+        "limit.x_normalize_text__*",  # the ladder duplicates are keyed on
         "app.x__room_create_gate__*",  # new rooms per IP per day
         "app.x_read_json__*",  # the body cap, on both the header and the stream
     ),
