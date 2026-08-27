@@ -176,16 +176,23 @@ def dupe_refused(
         seen = _dupes.get(key)
         if seen is not None:
             live = tuple(t for t in seen if now - t <= window)
-            if len(live) >= max_copies:
-                _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
-                return True
-            _dupes[key] = (live + (now,))[-max_copies:]
+            refuse = len(live) >= max_copies
+            _dupes[key] = live[-max_copies:] if refuse else (live + (now,))[-max_copies:]
         else:
+            refuse = False
             _dupes[key] = (now,)
+        # Touched either way, not only on an accept: a key still being refused every call
+        # is exactly as active as one still being accepted, and the eviction below has to
+        # see that or a sustained flood ages itself out of the ring behind ordinary traffic
+        # that never triggered a single refusal. This moves the LRU position only — the
+        # tuple assigned above never gains `now` on a refusal, which is what keeps a farm
+        # from dragging its own window open by hammering.
         _dupes.move_to_end(key)
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
         # the oldest so a burst cannot turn one write into a pause, and the hard cap that
-        # actually holds the memory whatever the sweep leaves behind.
+        # actually holds the memory whatever the sweep leaves behind. Runs on a refusal
+        # too now, for the same reason the touch does — a flood in its refused phase must
+        # not stop paying into the maintenance every other call already does.
         for _ in range(8):
             if not _dupes:
                 break
@@ -195,7 +202,7 @@ def dupe_refused(
             del _dupes[oldest]
         while len(_dupes) > cap:
             _dupes.popitem(last=False)
-    return False
+    return refuse
 
 
 def dupe_release(room: str, text: str, now: float, window: float, min_length: int = 16) -> None:

@@ -84,6 +84,73 @@ def test_a_refusal_never_extends_the_window() -> None:
     assert refused(LONG, now=100.0 + COPIES - 1 + WINDOW + 0.1) is False
 
 
+def test_a_refusal_keeps_the_key_from_being_evicted_early() -> None:
+    """A refusal has to be at least as sticky as an accept, or the eviction order works
+    against the exact traffic this ring exists to hold onto.
+
+    Only the accept branch called move_to_end, so once a key stopped being accepted (it
+    hit max_copies and every further copy is a refusal) it stayed frozen at its
+    last-accept position in the LRU order, no matter how many more times it was
+    refused. Ordinary distinct traffic arriving alongside it — one message per sender,
+    the normal shape of a busy room — kept advancing past it call by call, so a farm
+    still hammering the door every second was, from the ring's point of view,
+    indistinguishable from a key nobody had touched in a while. Interleaved with a
+    steady trickle of unrelated messages, that made the actively-refused flood the
+    FIRST thing the hard cap evicted — and the very next copy of the same still-live,
+    still-in-window phrase was then accepted as if it were brand new.
+    """
+    limit._dupes.clear()
+    cap = 8
+    t = 0.0
+    for _ in range(COPIES):
+        assert refused(LONG, now=t, cap=cap) is False
+        t += 1.0
+
+    # Interleaved traffic: one more refusal of the flood, then one ordinary distinct
+    # message, repeated well past `cap` — the shape of a room where a farm's flood and
+    # real senders both keep arriving. Every one of these refusals is still comfortably
+    # inside the window.
+    for i in range(3 * cap):
+        assert refused(LONG, now=t, cap=cap) is True
+        t += 1.0
+        assert refused(f"ordinary message number {i} from a real sender", now=t, cap=cap) is False
+        t += 1.0
+
+    # The flood is still inside its window and was refused a moment ago — a ring that
+    # forgot it under interleaved ordinary traffic would now accept it as if it were a
+    # fresh key, handing the farm another `max_copies` free copies.
+    assert refused(LONG, now=t, cap=cap) is True, (
+        "a key under active, in-window refusal must not be evicted by ordinary traffic "
+        "that kept arriving alongside it while it was still being refused"
+    )
+    limit._dupes.clear()
+
+
+def test_a_refusal_also_pays_into_the_sweep() -> None:
+    """The sweep and the hard cap ran only on the accept branch before this fix: a
+    refusal returned before reaching either, so a stretch where a flood was refused call
+    after call and nothing else in the whole process ever accepted left every other
+    key's fully-expired entries sitting in the ring untouched. One refusal now sweeps
+    exactly as an accept would.
+    """
+    limit._dupes.clear()
+    # Five old phrases, still comfortably live under the 50s window used throughout.
+    for i in range(5):
+        assert refused(f"an old phrase number {i}", now=10.0, window=50, cap=10_000) is False
+    # Five accepts of the flood, each still within 50s of the old phrases too - the
+    # sweep these accept calls run correctly leaves them alone, since nothing has
+    # expired yet.
+    for t in (20.0, 21.0, 22.0, 23.0, 24.0):
+        assert refused(LONG, now=t, window=50, cap=10_000) is False
+    assert len(limit._dupes) == 6, "five old phrases plus the flood key, nothing swept yet"
+
+    # By now the flood's own history (20..24) is still within 50s of 65, so this call is
+    # a refusal - but the old phrases (10) are 55s back, past the same window.
+    assert refused(LONG, now=65.0, window=50, cap=10_000) is True
+    assert len(limit._dupes) == 1, "the refusal above should have swept the five expired keys"
+    limit._dupes.clear()
+
+
 def test_the_threshold_decides_which_copy_is_the_refused_one() -> None:
     """COPIES is arithmetic, not a constant of nature: at 2 the third copy is refused.
     Pinned so a retune of the default cannot silently re-tune what this file means."""
