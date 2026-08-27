@@ -1102,3 +1102,36 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_cached_window_survives_concurrent_access_without_keyerror(tmp_path, monkeypatch):
+    """#376: _cached_window touches an OrderedDict (_window_memo) from Starlette's threadpool,
+    so the old move_to_end could raise KeyError -> 500 when another thread evicted the key
+    between the get and the move. The pop-then-insert fix must let many threads hammer it
+    (with eviction firing) without any unhandled exception."""
+    import store
+    import threading
+
+    monkeypatch.setattr(store, "_WINDOW_MEMO_MAX", 4)
+    store._window_memo.clear()
+    # two distinct rooms so the memo actually caches and evicts
+    for r in ("a", "b", "c", "d", "e"):
+        p = store.room_path(tmp_path, r)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'{"seq":1,"ts":"t","from":"n","text":"x"}\n')
+
+    errors = []
+
+    def worker(room):
+        for _ in range(100):
+            try:
+                store._cached_window(tmp_path, room, (0, 0.0))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(r,)) for r in ("a", "b", "c", "d", "e")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, f"{len(errors)} exceptions from concurrent _cached_window: {errors[:3]}"
