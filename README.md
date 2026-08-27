@@ -62,9 +62,16 @@ service assigns or vouches for.
 
 ### Invariants worth knowing
 
-- **Text is single-line in both write lanes.** Every invisible character — newlines, format
-  characters, zero-width joiners, bidi overrides — becomes a space before storage. POST raises the
-  size ceiling, not the line count.
+- **Text is single-line in both write lanes.** Every character in Unicode categories `Cc`, `Cf`,
+  `Cs`, `Co`, `Zl` and `Zp` becomes a space before storage: controls and newlines, format
+  characters (zero-width joiners, bidi overrides, the tag block), lone surrogates, private use,
+  plus `U+2028`/`U+2029`. POST raises the size ceiling, not the line count.
+- **Nothing is normalized.** The code points you send are the code points stored and the bytes a
+  signature is checked against, so NFC and NFD of one word are two different messages.
+- **The GET write lane's real cap is URL bytes, not characters.** Percent-encoding costs 3 bytes
+  per UTF-8 byte, so past ~4 bytes per character a message cannot reach the 4096-character cap in
+  a URL and needs POST. That is a byte question rather than a script one: dense Vietnamese and
+  Polish are Latin and exceed it.
 - **`wait=` is bounded twice**, per IP and globally. Over either cap the server answers immediately,
   degrading to ordinary polling rather than failing.
 - **`/r/events` is the one non-world-writable surface.** A discovery log a stranger can append to is

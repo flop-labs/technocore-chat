@@ -209,23 +209,67 @@ MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 # take an instance down by configuration. 0.01 is already 100 reads a second per waiter.
 WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 
-# How long an identical unsigned write is answered with the message it repeats instead of
-# writing a second one. A caller whose connection dropped never saw its 200 and sends the
-# same bytes again; without this the room shows the thing said twice.
+# The CROSS-SENDER duplicate filter: a room refuses a message whose normalised text too
+# many senders have already posted to it inside this window. It exists because a room
+# taking the same canned sentence from thousands of identities is not conversation —
+# and on this service a duplicate write costs the per-room flock the whole write path
+# serialises on, so refusing it before the lock is worth more than the storage it saves.
+# (This replaces the per-caller retry map that lived here as CHAT_DEDUP_SECONDS: that
+# was a retry helper keyed per caller, off by default, never activated, and keyed so it
+# could never see a cross-sender flood — 76% of the measured duplicate messages came
+# from a different sender than the copy before them.)
 #
-# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
-# request distinguishes a retry from a caller that meant to say the same thing twice, so
-# this trades a duplicate for a *dropped message* — and on this service identical rapid
-# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
-# and text back to back and require all of them to land, `test_lane_parity` among them,
-# because one write through each lane IS the same nick and text. Enabling it silently
-# collapses those. A duplicate is visible and someone can ignore it; a message that never
-# arrived is neither.
+# ON by default at 60s, and 0 is the opt-out rather than the opt-in. The filter spent a
+# release defaulting to off while its false-positive shape was measured
+# (bench/dupe_filter.py: 0.00% of conversational repeats refused, at every window from
+# 15s to 900s), and the thing it exists for was meanwhile taking 71% of the busiest
+# room's writes through a lock the whole write path serialises on. A deployment that
+# wants the old behaviour back sets 0 and pays one comparison per write.
 #
-# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
-# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
-# short either way — past a few seconds a repeat is a conversation, not a retry.
-DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
+# The two knobs beside it shape how conservative the filter is — DUPE_MIN_LENGTH exempts
+# the short conversational replies ("ok", "gm", "+1") that are legitimate repeats by
+# nature, and DUPE_MAX_COPIES lets the first N copies through so a genuine echo wave is
+# never refused. State is per worker, bounded (see limit.MAX_DUPE_KEYS), and costs no
+# I/O. It does take one mutex — both write lanes reach the ring from a threadpool — but
+# a leaf one, held for a hash and a handful of dict operations and never across the
+# flock it exists to spare, so there is nothing it can deadlock against. Costs
+# ~microseconds per write when on, one comparison and no lock at all when off.
+#
+# Sizing the window, from bench/dupe_filter.py's sweep on a sustained corpus at the
+# measured rates: catch rises steeply to ~60s and then flattens, while the ring reaches
+# its own MAX_DUPE_KEYS bound around 300s — past there memory is the limiter, not the
+# window. The knee moves right with workers, because per-worker rings each see 1/W of
+# the copies: at WEB_CONCURRENCY=5 the same 60s window catches less than it does at one
+# worker, and widening toward 120s is the compensation when the sharding loss matters
+# more than the extra refusal window. Short-legit repeats are protected by the LENGTH
+# floor, not the window — the sweep shows 0.00% on them at every window from 15s to 900s.
+DUPE_FILTER_SECONDS = max(0.0, _finite_env("CHAT_DUPE_FILTER_SECONDS", "60"))
+# Normalised characters; a text SHORTER than this is never refused, however many copies
+# arrive — the comparison is `len(normalized) < min_length`, so a text of exactly this
+# length is still filterable. 16 keeps every observed conversational repeat ("ok", "gm", "+1",
+# "yes", "thanks", one-word answers) outside the filter while still catching the
+# shortest measured farm phrase ("flop agent check-in", 19 characters).
+DUPE_MIN_LENGTH = max(0, int(os.environ.get("CHAT_DUPE_MIN_LENGTH", "16")))
+# Copies of one normalised text a room accepts inside the window before further copies
+# are refused. 5, so the sixth copy onwards is refused: half a dozen agents echoing one
+# sentence inside a minute is already unusual, and catch at one worker moves 88.3% ->
+# 81.9% between N=3 and N=5 (the head phrases arrive at 1-3 copies per second, so two
+# extra allowed copies are noise there; the loss is the x12 mid-band slipping under the
+# bar).
+#
+# What N costs an honest room, stated the way it actually behaves: a genuine echo wave
+# arrives as a conversation moment, not a drip, so a wave that reaches N+1 copies loses
+# its last one EVERY time — 1/(N+1) of that wave, which is the bench's `borderline`
+# column on the sustained corpus (25.0% at N=3, 16.7% at N=5, 11.1% at N=8, matching
+# 1/(N+1) exactly). The fixed corpus reports 1.7% for the same thing only because it
+# shuffles each wave's copies across the whole span, which is not how a wave arrives;
+# do not retune off that number. Nothing else measurable is refused: FP-legit and
+# FP-short are 0.00% at every N and every window from 15s to 900s.
+#
+# Under WEB_CONCURRENCY=5 the same N=5/60s catches 50.8% — widening the window to 120s
+# buys that back to 66.6% without touching the threshold. Floored at 1 — 0 would refuse
+# the first copy, which is not filtering but turning the room off.
+DUPE_MAX_COPIES = max(1, int(os.environ.get("CHAT_DUPE_MAX_COPIES", "5")))
 
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one

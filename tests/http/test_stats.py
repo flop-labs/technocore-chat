@@ -40,7 +40,7 @@ def stats_client(tmp_path, monkeypatch):
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     with config.override(  # every stats call recomputes, so a test can observe its writes
-        ROOT=tmp_path, STATS_TOKEN="s3cret", STATS_CACHE_SECONDS=0
+        ROOT=tmp_path, STATS_TOKEN="s3cret", STATS_CACHE_SECONDS=0, DUPE_FILTER_SECONDS=0
     ):
         yield TestClient(app_module.app)
 
