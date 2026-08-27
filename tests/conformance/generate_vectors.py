@@ -38,18 +38,29 @@ file that ports and one that only works in Python:
     fact about that character, not a bug, and `version_sensitive: true` marks the ones where
     that is the expected answer.
 
-The two traps these vectors exist to catch, both live in the tracker:
+The three traps these vectors exist to catch, all live in the tracker:
 
   - **Surrogates.** Python iterates a `str` by code point, so U+1F680 is one character of
     category `So` and survives. A client that iterates UTF-16 *code units* — JavaScript's
     `text.split('')`, or `for (let i = 0; i < text.length; i++)` — sees two characters of
     category `Cs` and replaces each with a space. Every astral character then signs the
     wrong bytes. `Array.from(text)` / `[...text]` is the correct iteration.
+  - **U+FFFD is kept.** The reachable half of the surrogate story, and the trap a client
+    falls into while reasoning correctly. `Cs` sweeps to a space, so `a%ED%A0%80b` looks
+    like it should store `a b` — but that is CESU-8, the server's UTF-8 decode is lossy
+    rather than fatal, and what lands is `a` + three U+FFFD + `b`, category `So`, kept.
+    Sweep the bytes that arrived; do not predict the sweep from the bytes you sent.
   - **Signature spelling.** 64 raw bytes is 86 unpadded base64url characters carrying 516
     bits, so the final 4 bits are unconstrained and every signature has SIXTEEN valid
     encodings (issue #177). `didkey.verify` accepts all of them: it pads with "==" and
     decodes. Two clients signing the same message can therefore emit different `sig` strings
-    that both verify, which anything comparing signatures as strings must know.
+    that both verify, which anything comparing signatures as strings must know. Issue #178
+    proposes requiring the canonical one; `CANONICAL_SIG_LAST_CHARS` pins the premise that
+    makes that a tightening rather than a break.
+
+One thing this file is NOT: a source of identities. The seeds are counting patterns, so the
+DIDs derived from them belong to every reader — `test_only` and `warning` say so inside the
+JSON rather than only in the README, because a fixture gets copied more often than read.
 """
 
 from __future__ import annotations
@@ -74,6 +85,12 @@ VECTORS = Path(__file__).resolve().parent / "vectors.json"
 # replica against the real thing wherever store CAN be imported, which includes CI.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 MAX_TEXT_CHARS = 4096
+
+# 64 signature bytes spell as 86 unpadded base64url characters — 516 bits of alphabet for
+# 512 bits of data — so the last character's low 4 bits carry nothing, and only four of the
+# 64 alphabet characters have them clear. A zero-filling encoder always lands on one of
+# these; see `signature_cases`, which pins it, and issue #178, which proposes requiring it.
+CANONICAL_SIG_LAST_CHARS = "AQgw"
 
 
 def sweep(text: str) -> str:
@@ -174,10 +191,22 @@ SWEEP_CASES = [
     _case(
         "lone-surrogate-Cs",
         "a\ud800b",
-        "an unpaired surrogate is Cs -> space. It has no UTF-8 encoding, so it survives here "
-        "only as the escape \\ud800 (this file is ensure_ascii=True); read in_cp rather than "
-        "in_display, because a consumer that re-encodes to UTF-8 or maps unpaired surrogates "
-        "to U+FFFD would otherwise test a different character than the one meant",
+        "an unpaired surrogate is Cs -> space. INPUT HYGIENE ONLY: no wire lane delivers one, "
+        "so a client cannot reach this row from outside — the GET lane folds it to U+FFFD "
+        "(see replacement-char-So-KEPT, which is the reachable twin) and the POST lane's "
+        "orjson refuses the escape. It survives in this file only as \\ud800 with "
+        "ensure_ascii=True, so read in_cp and not in_display: a consumer that re-encodes to "
+        "UTF-8 or folds unpaired surrogates to U+FFFD tests a different character than meant",
+    ),
+    _case(
+        "replacement-char-So-KEPT",
+        "a�b",
+        "U+FFFD is So, which is not one of the six, so it is KEPT — and unlike its Cs twin "
+        "above this row is REACHABLE, which makes it the one a client hits without trying. "
+        "GET .../say-signed/.../a%ED%A0%80b answers 200: that is CESU-8 for U+D800, the "
+        "server's UTF-8 decode is lossy rather than fatal, and it stores a + three U+FFFD + "
+        "b, all kept. A client that reasoned 'a surrogate is Cs, so it sweeps to one space' "
+        "signs `a b` and gets 403. Sweep first, then sign whatever the sweep returned",
     ),
     _case(
         "nbsp-Zs-KEPT",
@@ -292,6 +321,14 @@ def signature_cases() -> list[dict]:
         signature = base64.urlsafe_b64encode(key.sign(payload.encode("utf-8")).signature)
         signature = signature.decode().rstrip("=")
         assert len(signature) == didkey.SIG_CHARS, len(signature)
+        # Issue #178 proposes narrowing `verify` to accept only the canonical spelling. That
+        # is a safe narrowing only if nothing already emits a non-canonical one, so pin the
+        # premise rather than asserting it in prose: the stdlib encoder zero-fills the unused
+        # trailing bits, and so does Node's `Buffer.toString("base64url")`.
+        assert signature[-1] in CANONICAL_SIG_LAST_CHARS, (
+            f"{label}: encoder produced the non-canonical spelling {signature[-1]!r}, so "
+            f"#178 would be a compatibility break rather than a tightening"
+        )
         didkey.verify(did, signature, payload)  # the generator proves its own vector
         variants = sig_variants(signature)
         for spelling in variants:
@@ -351,6 +388,14 @@ def build() -> dict:
         "$comment": "GENERATED by tests/conformance/generate_vectors.py — do not hand-edit. "
         "Text is carried as code points because the swept characters include some with no "
         "UTF-8 encoding.",
+        "test_only": True,
+        "warning": "FIXTURE FILE, NOT AN IDENTITY SOURCE. Every seed_hex below is a counting "
+        "pattern (0x01 * 32, 0x02 * 32, ...), so the matching did:key is controlled by "
+        "everyone who can read this file. Never sign with these seeds outside a test, never "
+        "treat a message from one of these DIDs as authenticated, and never copy one into a "
+        "client as a default identity — whoever writes first also takes the nonce sequence, "
+        "because nonces must strictly increase per (key, room). Generate your own with "
+        "`python scripts/sign.py keygen`.",
         "provenance": {
             "unicode_version": unicodedata.unidata_version,
             "invisible_categories": list(INVISIBLE_CATEGORIES),
@@ -358,6 +403,7 @@ def build() -> dict:
             "did_pattern": didkey.DID_PATTERN,
             "sig_pattern": didkey.SIG_PATTERN,
             "nonce_pattern": didkey.NONCE_PATTERN,
+            "canonical_sig_last_chars": CANONICAL_SIG_LAST_CHARS,
         },
         "sweep_cases": SWEEP_CASES,
         "identities": identities,

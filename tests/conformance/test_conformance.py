@@ -18,11 +18,18 @@ What is deliberately NOT asserted: that another implementation agrees. That cann
 checked from inside this repo, and pretending otherwise would make these tests a claim about
 software they cannot see. `tests/conformance/runner.mjs` is where an implementation gets
 checked, and it is run by whoever owns that implementation.
+
+`verify.mjs` is the one exception, and only because it is not that claim: it re-verifies THIS
+directory's own signatures from Node's crypto rather than checking anybody's client, so
+running it here says "the vectors are real Ed25519 signatures" instead of "your client is
+right". It is skipped when no `node` binary exists, because CI is pure-Python.
 """
 
 import base64
 import importlib.util
 import json
+import shutil
+import subprocess
 import unicodedata
 from pathlib import Path
 
@@ -187,6 +194,83 @@ def test_every_recorded_spelling_of_a_signature_verifies(case):
     assert len(raw) == 1, "all sixteen must decode to the same 64 bytes"
     for spelling in spellings:
         didkey.verify(case["did"], spelling, payload)
+
+
+@pytest.mark.parametrize("case", VECTORS["signature_cases"], ids=lambda c: c["name"])
+def test_this_repos_encoder_only_ever_emits_the_canonical_spelling(case):
+    """Sixteen spellings are ACCEPTED; exactly one is ever PRODUCED.
+
+    The distinction is what makes issue #178 — require the canonical spelling — a tightening
+    rather than a compatibility break, and it is worth an assertion because the two halves
+    pull in opposite directions and it would be easy to read the test above as saying all
+    sixteen are in circulation. They are not: the unused trailing bits are zero-filled by
+    `base64.urlsafe_b64encode` and by Node's `Buffer.toString("base64url")`, so both land on
+    a last character in `AQgw`.
+
+    When #178 lands, `test_every_recorded_spelling_of_a_signature_verifies` inverts — the
+    canonical one is accepted and the other fifteen are refused on the encoding. The data
+    needed for that already exists: `sig_accepted_spellings[0]` is canonical by construction
+    and `[1:]` are the fifteen, so the flip is a change to the assertions and not a
+    regeneration.
+    """
+    canonical = case["sig_canonical"]
+    allowed = VECTORS["provenance"]["canonical_sig_last_chars"]
+    assert canonical[-1] in allowed, f"{canonical[-1]!r} not in {allowed!r}"
+    assert case["sig_accepted_spellings"][0] == canonical, "canonical must be recorded first"
+    others = case["sig_accepted_spellings"][1:]
+    assert len(others) == 15
+    assert canonical not in others
+
+
+# ------------------------------------------------------------------- it is a fixture, not a key
+
+
+def test_the_fixture_warning_travels_inside_the_file():
+    """The seeds are public, and the warning saying so has to be in the JSON.
+
+    A fixture gets copied far more often than it gets read, and a README does not travel with
+    the bytes. Every `seed_hex` here is a counting pattern, so each derived `did:key` is
+    controlled by everyone who can read the file — which makes "do not use these as an
+    identity" a property of the data rather than documentation about it.
+
+    Pinned rather than trusted because the failure is silent: a client seeded from this file
+    works perfectly, right up until someone else signs with the same key.
+    """
+    assert VECTORS["test_only"] is True
+    warning = VECTORS["warning"]
+    assert "seed_hex" in warning
+    assert "sign.py keygen" in warning, "the warning must say what to do instead"
+
+    seeds = [i["seed_hex"] for i in VECTORS["identities"]]
+    seeds += [c["seed_hex"] for c in VECTORS["signature_cases"]]
+    for seed in seeds:
+        assert len(seed) == 64
+        assert len({seed[i : i + 2] for i in range(0, 64, 2)}) == 1, (
+            f"{seed} is not obviously a fixture — a seed that looks random invites reuse, "
+            f"which is the thing `warning` is trying to prevent"
+        )
+
+
+# ----------------------------------------------------------------- a second language's crypto
+
+
+def test_node_reverifies_every_signature():
+    """Check the signatures with Node's crypto instead of this repo's.
+
+    Not a claim about anyone's client — see the module docstring. `verify.mjs` reimplements no
+    protocol rule: it derives each key from its `did:key` and verifies the recorded signature
+    over `payload_utf8_hex`. Without it, every signature in this directory is checked only by
+    the library that produced it, which is homework marked by its own author.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("no node binary; verify.mjs is for whoever has one (CI is pure-Python)")
+    script = HERE / "verify.mjs"
+    assert script.exists()
+    done = subprocess.run(
+        [node, str(script)], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert done.returncode == 0, f"verify.mjs failed:\n{done.stdout}\n{done.stderr}"
 
 
 @pytest.mark.parametrize("case", VECTORS["signature_cases"], ids=lambda c: c["name"])
