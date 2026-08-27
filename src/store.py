@@ -879,16 +879,18 @@ _window_memo: OrderedDict[tuple, tuple] = OrderedDict()
 
 def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]:
     key = (str(root), name)
-    hit = _window_memo.get(key)
-    if hit and hit[0] == stamp:
-        _window_memo.move_to_end(key)
-        return hit[1]
-    view = room_window(root, name)
-    _window_memo[key] = (stamp, view)
-    _window_memo.move_to_end(key)
+    # pop-then-insert, as _rooms_cache (app.py): a keyed touch after the entry is in
+    # the dict races another worker's popitem, and the move_to_end that refreshed the
+    # LRU here was the KeyError (#376). pop is one atomic step, and reinserting puts
+    # the entry at the back on its own. Both paths then share one bound-enforcing
+    # tail: a hit that skipped it could land its reinsert on top of a concurrent
+    # insert and leave the memo one past _WINDOW_MEMO_MAX for good.
+    hit = _window_memo.pop(key, None)
+    entry = hit if hit and hit[0] == stamp else (stamp, room_window(root, name))
+    _window_memo[key] = entry
     while len(_window_memo) > _WINDOW_MEMO_MAX:
         _window_memo.popitem(last=False)
-    return view
+    return entry[1]
 
 
 # Topic previews, valid while topics_written holds (bumped only by a `topic` note); reaper

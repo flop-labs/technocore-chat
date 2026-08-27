@@ -1102,3 +1102,76 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_cached_window_survives_eviction_landing_inside_the_touch(tmp_path, monkeypatch):
+    """A concurrent worker's popitem can land inside _cached_window's compound dict
+    ops; the get/set-then-move_to_end shape turned that into a KeyError (#376). The
+    dict below deletes the key from inside each touch — the same interleave, without
+    threads (cf. _race_before_lock) — and the sentinel proves the race actually ran.
+    pop-then-insert leaves no second keyed touch to lose."""
+    from collections import OrderedDict
+
+    import store
+
+    class EvictorWins(OrderedDict):
+        fired: list = []
+
+        def pop(self, key, default=None):
+            value = super().pop(key, default)
+            if value is not None:
+                self.fired.append("pop")
+            return value
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            super().__delitem__(key)
+            self.fired.append("set")
+
+    hostile = EvictorWins()
+    monkeypatch.setattr(store, "_window_memo", hostile)
+
+    store.append(tmp_path, "aaa", "bot", "hello")
+    first = store.room_stats(tmp_path)
+    second = store.room_stats(tmp_path)  # entry was evicted each time: recompute, again
+
+    assert hostile.fired, "the race never fired — the test proved nothing"
+    assert "aaa" in {r["room"] for r in first["rooms"]}
+    assert "aaa" in {r["room"] for r in second["rooms"]}
+
+
+def test_cached_window_bound_holds_when_an_insert_lands_inside_a_hit(tmp_path, monkeypatch):
+    """The hit path must run the same bound-enforcing tail as the miss path (#376
+    review). Calls _cached_window directly, not room_stats, so a later room's miss
+    path cannot clean up after the hit and hide the leak. With the memo at its cap,
+    a concurrent insert landing inside a cache hit — armed from inside pop(),
+    threadless — leaves the memo at MAX+1 unless the reinsert is also followed by the
+    eviction sweep. Fails against a hit path that returns early (verified red against
+    the reviewed shape)."""
+    from collections import OrderedDict
+
+    import store
+
+    monkeypatch.setattr(store, "_WINDOW_MEMO_MAX", 1)
+
+    class InsertInsideHit(OrderedDict):
+        armed = False
+
+        def pop(self, key, default=None):
+            value = super().pop(key, default)
+            if self.armed and value is not None:  # inside the hit's pop -> a rival insert
+                super().__setitem__(("intruder", "x"), (("s",), (0, [])))
+            return value
+
+    hostile = InsertInsideHit()
+    monkeypatch.setattr(store, "_window_memo", hostile)
+
+    store.append(tmp_path, "aaa", "bot", "hello")  # room_window has something to read
+    stamp = ("v1",)
+    store._cached_window(tmp_path, "aaa", stamp)  # miss: fills "aaa", evicts to the bound
+    hostile.armed = True
+    store._cached_window(tmp_path, "aaa", stamp)  # hit on the same stamp: pop fires the insert
+
+    assert len(hostile) <= store._WINDOW_MEMO_MAX, (
+        f"hit path skipped the bound: {len(hostile)} > {store._WINDOW_MEMO_MAX}"
+    )
