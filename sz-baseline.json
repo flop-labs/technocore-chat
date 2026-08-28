@@ -16,9 +16,9 @@
       "tokens_per_line": 7.78
     },
     "core/config.py": {
-      "raw_lines": 324,
+      "raw_lines": 312,
       "code_lines": 61,
-      "comment_lines": 207,
+      "comment_lines": 195,
       "tokens_per_line": 12.56
     },
     "core/didkey.py": {
@@ -40,8 +40,8 @@
       "tokens_per_line": 7.38
     },
     "extra/manifest.py": {
-      "raw_lines": 1819,
-      "code_lines": 1321,
+      "raw_lines": 1818,
+      "code_lines": 1320,
       "comment_lines": 152,
       "tokens_per_line": 3.83
     }
