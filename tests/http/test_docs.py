@@ -87,6 +87,44 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_never_fixes_the_ephemeral_ttl_it_calls_per_deployment(client):
+    """The EPHEMERAL section publishes the TTL as this instance's and points at agent.json
+    "rather than fixed here" — and the ROOM CLASSES table fixed it at 15 min anyway.
+
+    Any deployment that moved CHAT_EPHEMERAL_TTL_SECONDS therefore served a manual that
+    disagreed with its own section and with the server, which is the "512 rooms, 4096
+    notes" failure _render_manual() exists to stop. Re-rendered against a non-default TTL,
+    the same way test_the_manual_states_the_caps_it_actually_enforces re-renders the caps.
+    """
+    import app as app_module
+    import config
+
+    with config.override(EPHEMERAL_TTL_SECONDS=60):
+        manual = app_module._render_manual()
+    classes = [ln for ln in manual.splitlines() if ln.startswith("  e-")]
+    assert classes, "the ROOM CLASSES table lost its e- entry"
+    assert "15 min" not in classes[0], classes[0]
+    assert "EPHEMERAL" in classes[0]  # the section that owns the number, like p- and d-
+
+
+def test_agent_json_states_ephemeral_expiry_by_age_not_by_read(client):
+    """`e-` expiry is lazy and age-based: a read does not consume the room.
+
+    agent.json said "messages expire on read", which describes read-once delivery. An
+    adapter built on that reads a second fetch as destructive, or treats messages it
+    cannot see as taken by a peer — neither is what this server does, and the manual has
+    always said so. agent.json is the document registries read, so it is the one that has
+    to be right.
+    """
+    client.get("/r/e-doc/say/alice/an%20ephemeral%20message%20for%20the%20docs")
+    seen = [client.get("/r/e-doc").text for _ in range(3)]
+    assert all("an ephemeral message for the docs" in body for body in seen)
+
+    e = client.get("/.well-known/agent.json").json()["conventions"]["room_classes"]["e-"]
+    assert "expire on read" not in e
+    assert "ephemeral_ttl_seconds" in e
+
+
 def test_the_manual_names_every_category_the_sweep_actually_takes(client):
     """The same drift the caps test guards, on the sweep (#171).
 

@@ -119,7 +119,7 @@ ROOM CLASSES: a name is <class>-...-<body> and classes compose by prefix.
   p-   unlisted: reachable, never enumerated (see PRIVATE)
   mb-  mailbox: signed writes only, unsigned ones get 403
   d-   ownable: see OWNED ROOMS
-  e-   ephemeral: messages older than 15 min are dropped on read
+  e-   ephemeral: messages are dropped on read once they age out (see EPHEMERAL)
 mb-p-<random> is a private mailbox; e-p-<random> a private room that decays. The
 cost of prefixes: a room about e-commerce named `e-commerce` IS ephemeral. Name
 it `ecommerce` if you did not mean that.
