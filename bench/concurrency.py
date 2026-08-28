@@ -304,6 +304,39 @@ def sweep_switch_interval(cap: int, threads: int, rounds: int) -> None:
     )
 
 
+def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Refuse invocations that cannot produce a measurement, before any thread starts.
+
+    Every case below otherwise surfaces as a traceback from inside a bench — `max()` on an empty
+    sequence, or a division by a zero round count — which reads as a broken benchmark rather than
+    a bad command line. An argparse error says which it was, with a usage line and exit 2.
+    """
+    if args.cap < 1:
+        parser.error("--cap must be at least 1: a bucket of 0 tokens grants nothing to count")
+    if args.rounds < 1:
+        parser.error("--rounds must be at least 1: 0 rounds leaves no bursts to summarise")
+    if not args.threads:
+        parser.error("--threads needs at least one contention level")
+    if bad := [t for t in args.threads if t < 1]:
+        parser.error(f"--threads values must be at least 1, got {bad}")
+    if args.switch_interval is not None and args.switch_interval <= 0:
+        parser.error(
+            "--switch-interval must be greater than 0; the interpreter rejects 0 and below"
+        )
+    if args.port is not None and not 1 <= args.port <= 65535:
+        parser.error(f"--port must be in 1..65535, got {args.port}")
+    if args.sweep_switch_interval and not any(t > args.cap for t in args.threads):
+        # Not merely unmeasurable — actively misleading. Below the cap every caller is entitled
+        # to a token, so excess is 0 by construction at every interval. The sweep would print a
+        # column of zeros that looks like evidence the limiter is thread-safe, which is the exact
+        # misreading this file exists to prevent. Refuse rather than produce it.
+        parser.error(
+            f"--sweep-switch-interval needs a --threads level above --cap ({args.cap}); got "
+            f"{args.threads}. Below the cap excess is 0 by construction, so the sweep would "
+            f"report zeros at every interval and measure nothing."
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -333,11 +366,13 @@ def main() -> None:
         "--sweep-switch-interval",
         action="store_true",
         help="walk the scheduling quantum instead of the thread count, to locate the width of "
-        "the unprotected window (see the module docstring)",
+        "the unprotected window (see the module docstring). Needs a --threads level above "
+        "--cap, since below the cap there is no overshoot to find",
     )
     args = parser.parse_args()
+    _validate(parser, args)
 
-    if args.switch_interval:
+    if args.switch_interval is not None:
         sys.setswitchinterval(args.switch_interval)
     print(f"{_interpreter()}\nlimit.MAX_BUCKETS={limit.MAX_BUCKETS}  cap(under test)={args.cap}")
     if args.sweep_switch_interval:
