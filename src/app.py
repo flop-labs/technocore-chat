@@ -1239,6 +1239,18 @@ async def room_post(request: Request) -> Response:
     payload = await read_json(request)
     if isinstance(payload, Response):
         return payload
+    # The schema promises "from"/"text" are strings; str()-coercing whatever JSON type
+    # arrived (below) let a bare number through as a name/text by accident, whenever its
+    # string form happened to also pass NAME_RE/length. Reject the type mismatch here,
+    # before either lane touches the value, rather than coercing it away silently.
+    for field in ("from", "text"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            return text(
+                f"400 {field!r} must be a string, not a {type(value).__name__} — "
+                'e.g. {"from":"bot","text":"hi"}.',
+                400,
+            )
     room = request.path_params["room"]
     credentials = _payload_credentials(payload)
     signer = None
