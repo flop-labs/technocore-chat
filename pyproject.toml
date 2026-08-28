@@ -99,15 +99,21 @@ only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
 # asserted against, and app.py reads SKILL.md at import.
-also_copy = ["SKILL.md", "docker", "mcp"]
+also_copy = ["README.md", "SKILL.md", "docker", "mcp", "scripts"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
 # suite the monolith did, and test_mcp.py stays excluded for the reason above.
+# test_store_doc.py is excluded for a different reason than test_mcp.py: it asserts that
+# docs/store.md still lists store.py's public functions, and mutmut rewrites those very
+# names (`_at_capacity` becomes `x__at_capacity__mutmut_1`). It cannot pass in a mutated
+# tree by construction, and it judges a generated document rather than behaviour — nothing
+# in SCOPE reaches it.
 pytest_add_cli_args_test_selection = [
     "tests/http",
     "tests/unit",
     "tests/test_store_stateful.py",
+    "--ignore=tests/unit/test_store_doc.py",
 ]
 
 # Not an installable package: src/ is copied into the image and imported by path.
