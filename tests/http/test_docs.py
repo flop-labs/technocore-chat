@@ -825,6 +825,9 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
         ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
         ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
         ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
+        # Resolver lanes: a non-did:key is a 400; a did:key with no verified name is a 404.
+        ("/kv/resolve/{did}", "get", 400, lambda: client.get("/kv/resolve/notadid")),
+        ("/kv/resolve/{did}", "get", 404, lambda: client.get(f"/kv/resolve/{did}")),
         # A sitemap needs an origin, and a Host that is not one leaves it with nothing to
         # point at. Spaces cannot appear in a hostname, so this is never a real origin.
         (

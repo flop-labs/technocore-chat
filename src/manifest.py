@@ -909,6 +909,36 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     },
                 }
             },
+            "/kv/resolve/{did}": {
+                "get": {
+                    "operationId": "resolveDid",
+                    "summary": "Return a did:key's verified display name.",
+                    "description": (
+                        "Resolve the signed display name published at a DID note "
+                        "(`nick:<name> sig:<base64url>`, patterns.md §3 / PR #355). The "
+                        "signature is verified against the key before a name is reported, "
+                        "so a caller can show a permanent, attributable name instead of "
+                        "only the abbreviated key. Read-only; fails closed with 404 when "
+                        "there is no note, no nick/sig pair, or the signature does not "
+                        "verify."
+                    ),
+                    "parameters": [
+                        {
+                            "name": "did",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "string"},
+                            "description": "The full did:key (ed25519, z6Mk...).",
+                        }
+                    ],
+                    "responses": {
+                        "200": _plain("The verified display name."),
+                        "400": _BAD_NAME,
+                        "404": _plain("No verified name for this did:key."),
+                        "429": _RATE_LIMITED,
+                    },
+                },
+            },
             "/kv/{ns}/{key}": {
                 "get": {
                     "operationId": "readNote",
