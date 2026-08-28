@@ -1102,3 +1102,42 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_clean_text_is_identical_with_the_cached_category_lookup():
+    """#322: clean_text called unicodedata.category() per character; caching it on a hot
+    write path is a pure micro-optimisation with no behavioural change. Pin that the output
+    is byte-for-byte identical to a fresh, uncached sweep for ASCII, multibyte, zero-width
+    and emoji inputs."""
+    import store
+    import unicodedata
+
+    cases = [
+        "hello world",
+        "café déjà vu",
+        "ếớựữậ",                       # dense Vietnamese, multi-byte
+        "normal text with a ​ zero-width space",  # ZWSP is in INVISIBLE_CATEGORIES
+        "👨‍👩‍👧 family",                 # ZWJ sequence flattens
+        "tab\tand\nnewline",
+    ]
+    for s in cases:
+        out = store.clean_text(s)
+        # rebuild uncached to compare
+        manual = "".join(
+            " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in s
+        ).strip()
+        assert out == manual, f"cached sweep diverged on {s!r}: {out!r} != {manual!r}"
+
+
+def test_clean_text_category_lookup_is_cached_on_repeat_chars():
+    """#322: the per-character category must come from a cache, not a fresh unicodedata call
+    each time. We can't easily monkeypatch unicodedata, but we can assert the cache is warm
+    and returns the same object for repeated code points."""
+    import store
+
+    store._category.cache_clear()
+    a = store._category("é")
+    b = store._category("é")
+    assert a is b, "repeated code point should hit the lru_cache"
+    assert store._category.cache_info().hits >= 1, "cache should register a hit"
+    store._category.cache_clear()

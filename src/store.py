@@ -388,6 +388,11 @@ def ownable(name: str) -> bool:
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 
+@lru_cache(maxsize=4096)
+def _category(c: str) -> str:
+    return unicodedata.category(c)
+
+
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
 
@@ -398,7 +403,7 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if _category(c) in INVISIBLE_CATEGORIES else c for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
