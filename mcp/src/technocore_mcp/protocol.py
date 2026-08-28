@@ -305,6 +305,8 @@ class Server:
         if "id" not in message:
             if not _is_request(message):
                 return _error(None, INVALID_REQUEST, "missing method")
+            if "params" in message and not isinstance(message["params"], (dict, list)):
+                return _error(None, INVALID_REQUEST, "params must be an object or array")
             return None
         ident = message["id"]
         if not _is_request_id(ident):
