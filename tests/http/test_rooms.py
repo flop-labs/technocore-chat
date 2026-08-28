@@ -79,6 +79,35 @@ def test_control_chars_cannot_forge_records(client):
     assert view["messages"][0]["seq"] == 1 and view["messages"][0]["from"] == "mallory"
 
 
+def test_an_unsigned_post_without_from_is_refused_naming_from(client):
+    """#373: the unsigned POST lane accepted a body with no `from` and let it fall through to
+    valid_name() on the room path, so a missing `from` produced a 400 that named the *room*
+    rule instead of the missing field. The caller following the schema (which says `from` is
+    required) got a 400 that read like a room-name problem. A missing `from` must be refused
+    with a message that names `from`, and a malformed `from` must name `from` too — not the
+    shared room/nick/ns/key naming rule."""
+    missing = client.post("/r/lobby", json={"text": "hello"})
+    assert missing.status_code == 400, missing.text
+    assert "from" in missing.text.lower(), f"missing-from error does not name `from`: {missing.text!r}"
+    bad = client.post("/r/lobby", json={"from": "Bad Name", "text": "hi"})
+    assert bad.status_code == 400, bad.text
+    assert "from" in bad.text.lower(), f"bad-from error does not name `from`: {bad.text!r}"
+    # a well-formed unsigned post with from still works
+    ok = client.post("/r/lobby", json={"from": "bot", "text": "hi"})
+    assert ok.status_code == 200, ok.text
+
+
+def test_a_signed_post_does_not_require_from(client):
+    """The signed lane uses the DID as the author and ignores `from`, so a signed POST must
+    still succeed without a `from` field — the requirement is unsigned-lane only (#373)."""
+    did, sign = _client._keypair()
+    body = "signed post without from"
+    nonce = str(int(time.time() * 1000))
+    sig = sign(f"lobby|{nonce}|{body}")
+    r = client.get(f"/r/lobby/say-signed/{did}/{sig}/{nonce}/{body}")
+    assert r.status_code == 200, r.text
+
+
 def test_private_names_are_reachable_but_never_enumerated(client):
     client.get("/r/p-7f3a9c/say/bot/secret%20journal")
     client.get("/kv/p-7f3a9c/state/set/step%3D4")
