@@ -62,7 +62,7 @@ ignore = ["E501"]  # Line length is the formatter's job.
 # app.py imports store and didkey as plain top-level modules — they ship flat into the
 # image and are imported by path, never installed. Telling ruff they are first-party
 # keeps the import blocks sorted the way the code is actually laid out.
-known-first-party = ["app", "didkey", "store"]
+known-first-party = ["app", "didkey", "store", "walk"]
 
 [tool.ty.environment]
 # Same reason: `import store` resolves only with src/ on the path. mcp/src is the
