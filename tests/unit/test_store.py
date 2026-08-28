@@ -1102,3 +1102,52 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_a_room_idle_for_exactly_the_threshold_is_not_reapable_yet(tmp_path):
+    """The retention promise is four comparisons, and this pins two of their boundaries.
+
+    `_age` asks callers for "the threshold plus a margin", so the thresholds themselves
+    were only ever tested from outside them: `>` and `>=` behaved identically for every
+    existing caller, and an off-by-one in a retention rule does not fail — it deletes a
+    day early or keeps data a week too long, and nobody finds out from a stack trace.
+    `_reapable` takes `now` as an argument, so the boundary is exact here, not raced.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_text('{"seq":1,"ts":"t","from":"a","text":"hi"}\n', encoding="utf-8")
+    mtime = os.stat(p).st_mtime
+
+    assert store._reapable(p, mtime + store.IDLE_SECONDS, stillborn_rule=False) is None
+    assert store._reapable(p, mtime + store.IDLE_SECONDS + 1, stillborn_rule=False) == "idle"
+
+    # The stillborn rule has its own threshold and the same boundary question. One record
+    # is at STILLBORN_MESSAGES, so this file qualifies on content and only the clock decides.
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS, stillborn_rule=True) is None
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS + 1, stillborn_rule=True) == (
+        "stillborn"
+    )
+
+
+def test_a_room_holding_undecodable_bytes_is_counted_not_crashed_on(tmp_path):
+    """ "An unreadable file is not stillborn" has to survive bytes that are not text.
+
+    _stillborn opens the file in binary and lets _parse refuse a line, which is what keeps
+    a torn write from either crashing the reaper or condemning a live room. Read as text
+    instead, the same file raises UnicodeDecodeError on iteration — a ValueError, which the
+    `except OSError` here does not catch — and the reaper dies on a room it was only
+    counting. Nothing exercised that: every room a test hands the reaper is valid UTF-8.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_bytes(
+        b'{"seq":1,"ts":"t","from":"a","text":"one"}\n'
+        b"\xff\xfe not utf-8, a torn write at EOF\n"
+        b'{"seq":2,"ts":"t","from":"b","text":"two"}\n'
+    )
+    # Two real records is past STILLBORN_MESSAGES, so the room is answered, not stillborn —
+    # and reaching that answer at all is the half the binary mode buys.
+    assert store._stillborn(p) is False
+    assert store._reapable(p, os.stat(p).st_mtime, stillborn_rule=True) is None
