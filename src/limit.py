@@ -280,6 +280,7 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
         wait = 0.0
     else:
         wait = (1.0 - tokens) * 60.0 / per_min
+    _buckets.pop((ip, kind), None)
     _buckets[(ip, kind)] = (tokens, now)
     _buckets.move_to_end((ip, kind))
     while len(_buckets) > max_buckets:

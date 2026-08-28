@@ -2,7 +2,9 @@
 
 import json
 import re
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import _client
@@ -401,6 +403,96 @@ def test_junk_query_params_never_500(client):
         r = client.get(f"/r/lobby?{q}")
         assert r.status_code == 200, q
         assert "hi" in r.text, q
+
+
+class ControlledBuckets(OrderedDict):
+    def __init__(self):
+        super().__init__()
+        self.target = None
+        self.before_target_move = threading.Event()
+        self.release_target_move = threading.Event()
+        self.armed = False
+
+    def move_to_end(self, key, last=True):
+        if self.armed and key == self.target and not self.before_target_move.is_set():
+            self.before_target_move.set()
+            if not self.release_target_move.wait(timeout=2):
+                raise AssertionError("test interleaving was not released")
+        return super().move_to_end(key, last=last)
+
+
+def test_rate_limit_bucket_update_survives_lru_eviction_race():
+    """An active bucket must not vanish between update and move_to_end."""
+    import limit
+
+    buckets = ControlledBuckets()
+    limit._buckets = buckets
+
+    try:
+        cap = 4
+
+        class Client:
+            host = "203.0.113.1"
+
+        class Request:
+            client = Client()
+            headers = {}
+
+        request = Request()
+
+        for i in range(cap):
+            request.client.host = f"203.0.113.{i + 1}"
+            limit.take(
+                request,
+                "read",
+                per_min=10_000,
+                burst=10_000,
+                max_buckets=cap,
+            )
+
+        target_key = ("203.0.113.1", "read")
+        assert next(iter(buckets)) == target_key
+
+        buckets.target = target_key
+        buckets.armed = True
+
+        errors = []
+
+        def refresh_target():
+            try:
+                request.client.host = "203.0.113.1"
+                limit.take(
+                    request,
+                    "read",
+                    per_min=10_000,
+                    burst=10_000,
+                    max_buckets=cap,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        worker = threading.Thread(target=refresh_target)
+        worker.start()
+
+        assert buckets.before_target_move.wait(timeout=2)
+
+        request.client.host = "203.0.113.99"
+        limit.take(
+            request,
+            "read",
+            per_min=10_000,
+            burst=10_000,
+            max_buckets=cap,
+        )
+
+        buckets.release_target_move.set()
+        worker.join(timeout=2)
+
+        assert not worker.is_alive(), "target worker did not finish"
+        assert not errors, [repr(exc) for exc in errors]
+        assert len(buckets) <= cap
+    finally:
+        limit._buckets = OrderedDict()
 
 
 def test_rate_limit_buckets_are_bounded(client, monkeypatch):
