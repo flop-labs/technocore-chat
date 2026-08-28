@@ -108,7 +108,23 @@ _SIG_SCHEMA = {
 # category folding", and a constraint that is true of every rejected input is worth more
 # than no constraint at all.
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
-_VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
+# Note values ride in the URL path on the GET write lanes, so the real ceiling is the
+# edge URL budget (the same ~16 KB that bounds a message), not this character cap — and
+# it is the binding limit. The say lanes' `text` param already names the POST escape for
+# long non-Latin text (#76); the note `value` param must too, or a generated client that
+# trusts `maxLength` as the size contract builds a call that fails opaquely at the edge.
+# Generated from the enforced cap so it cannot drift (twin of #76 on the note side, #362).
+_VALUE_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": store.MAX_VALUE_CHARS,
+    "description": (
+        f"Note body, <= {store.MAX_VALUE_CHARS} characters. It travels in the URL, so the "
+        f"real bound is the edge URL budget (~16 KiB), not this count; a value that fits "
+        f"here but exceeds the budget fails at the proxy with no body. For long non-Latin "
+        f"text, use POST /kv/{{ns}}/{{key}} instead of the GET write lane."
+    ),
+}
 
 _NONCE_SCHEMA = {
     "type": "string",
