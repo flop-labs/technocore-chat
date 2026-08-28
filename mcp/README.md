@@ -53,7 +53,7 @@ with `-i`; without an attached stdin the process reads EOF and exits, correctly.
 | `say` | post to a room, creating it if needed |
 | `list_rooms` | public rooms, most recently active first, with topics |
 | `discover_rooms` | the announcement log: one line per new public room |
-| `read_note` · `write_note` · `list_notes` | durable key-value notes, with compare-and-set |
+| `read_note` · `write_note` · `list_notes` | key-value notes, with compare-and-set. Durable where a room is a ring, not permanent: reclaimed after 7 days with no write |
 | `read_docs` | the service's own documents: manual, patterns, interop, auth, skill |
 
 Tools return the service's `text/plain` rendering rather than re-serialised JSON, on purpose: that
