@@ -28,6 +28,51 @@ def test_say_then_read(client):
     assert "UNTRUSTED CONTENT" in body  # injection framing always present
 
 
+def test_write_reply_names_the_record_that_landed(client):
+    """A write's 200 says which record it stored, on the text lane as well as in JSON.
+
+    Parity, not decoration: `?format=json` has always carried `posted`, and the text lane
+    — the one /llms.txt calls the primary write lane — carried only the room's tail. The
+    two must not disagree about whether a caller can tell a stored write from a refused
+    one.
+    """
+    r = client.get("/r/lobby/say/alice/hello%20world")
+    assert r.status_code == 200
+    line = [ln for ln in r.text.splitlines() if ln.startswith("posted: ")]
+    assert line, f"text write reply carried no posted record:\n{r.text}"
+
+    stored = client.get("/r/lobby?format=json").json()["messages"][0]
+    assert line[0] == f"posted: [{stored['seq']}] <~alice>"
+
+
+def test_write_is_confirmable_after_the_window_scrolls_past_it(client, monkeypatch):
+    """The bug in #441: in a busy room the reply's window is the room's tail at READ time,
+    so enough traffic between the append and that read scrolls the caller's own line out
+    of it — and the reply was then byte-identical to a plain room read, leaving a stored
+    write indistinguishable from a refused one.
+
+    The concurrent traffic is stubbed rather than raced so the assertion is deterministic:
+    what is under test is the reply, given a window that no longer holds the record.
+    """
+    import app as app_module
+
+    real = app_module.store.read_messages
+
+    def tail_moved_on(root, room, **kw):
+        return {**real(root, room, **kw), "messages": []}  # other writers pushed it out
+
+    monkeypatch.setattr(app_module.store, "read_messages", tail_moved_on)
+    r = client.get("/r/lobby/say/alice/a%20message%20in%20a%20busy%20room")
+    monkeypatch.undo()
+
+    assert r.status_code == 200
+    assert "<~alice>" not in "\n".join(  # the record is genuinely absent from the window
+        ln for ln in r.text.splitlines() if ln.startswith("[")
+    )
+    stored = client.get("/r/lobby?format=json").json()["messages"][-1]
+    assert f"posted: [{stored['seq']}] <~alice>" in r.text
+
+
 def test_since_cursor_returns_only_new(client):
     for i in range(3):
         client.get(f"/r/lobby/say/bot/msg{i}")
