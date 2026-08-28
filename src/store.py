@@ -28,6 +28,7 @@ import orjson
 
 import config
 import didkey
+import walk
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -561,7 +562,7 @@ def _prune(d: Path | str) -> bool:
     try:
         with os.scandir(d) as entries:
             for e in entries:
-                if e.is_dir() and _prune(e.path):
+                if e.is_dir(follow_symlinks=False) and _prune(e.path):
                     try:
                         os.rmdir(e.path)
                         continue
@@ -1070,7 +1071,7 @@ def _reapable(path: Path | str, now: float, stillborn_rule: bool) -> str | None:
 ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
 
 
-def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: float) -> bool:
+def _guards_a_live_room(root: Path, base: str, entry: walk.FileEntry, now: float) -> bool:
     """True when `entry` is a guard note whose room is still within its own idle window.
 
     Tied to the room, not exempted outright: once the room itself is reapable the guards go
@@ -1336,68 +1337,24 @@ def _snapshot(root: Path) -> None:
 def _scan(d: Path | str, suffix: str, sized: bool = False) -> tuple[int, int]:
     """(count, total bytes) of the entries in `d` named `*suffix`, in one pass.
 
-    os.scandir rather than Path.glob, and one pass rather than two, because every caller
-    below is on a *create* path — run on the shared threadpool, so the cost is paid by
-    the caller and by every create queued behind the create gate.
-
-    That is what made it worth measuring rather than assuming. At a full store, the glob
-    it replaces cost 36 ms per new room (a counting glob, then a second one that stats)
-    and 94 ms per new note; this costs 13 ms and 19 ms. The caps could not have grown
-    tenfold on top of glob without those numbers growing with them.
-
-    `sized` is a flag rather than always-on because the byte total is the expensive half:
-    readdir hands back the name for free and never the size, so each entry costs a stat.
-    Only rooms have a byte budget to enforce.
-
-    Recursive since sharding, and it has to be: `_check_room_capacity` totals what the room
-    caps are enforced against, and a scan that stopped at the top of `rooms/` would count the
-    buckets and none of the rooms in them — a cap that reads zero is not a cap. Depth is not
-    assumed anywhere here, so one pass covers a store part-way through its migration, where
-    some names still sit flat and the rest are already bucketed.
+    Delegates to `walk.counts`: the same confinement as `_walk`, so a directory symlink
+    (or a directory swapped for one after classification) cannot inflate the room or note
+    caps with files outside the store root. Depth is not assumed, so one pass covers a
+    store part-way through its migration, where some names still sit flat and the rest are
+    already bucketed.
     """
-    count = 0
-    size = 0
-    try:
-        with os.scandir(d) as entries:
-            for e in entries:
-                if e.is_dir():  # d_type from readdir: no syscall
-                    sub_count, sub_size = _scan(e.path, suffix, sized)
-                    count += sub_count
-                    size += sub_size
-                elif e.name.endswith(suffix):
-                    count += 1
-                    if sized:
-                        try:
-                            size += e.stat().st_size
-                        except OSError:
-                            continue  # reaped between the readdir and the stat
-    except OSError:
-        pass  # nothing has been created yet; an absent directory is an empty one here
-    return count, size
+    return walk.counts(d, suffix, sized)
 
 
-def _walk(d: Path | str, suffix: str) -> Iterator[os.DirEntry[str]]:
+def _walk(d: Path | str, suffix: str) -> Iterator[walk.FileEntry]:
     """Every `*suffix` file anywhere under `d`, at any depth.
 
-    Yields the `os.DirEntry` scandir already built rather than a Path made from it. On 3.12
-    pathlib is lazily normalised — the constructor stashes the string and the parse lands on
-    the first `__fspath__`, which is `.stat()` — so `Path(e.path).stat()` costs 19.4 µs
-    against the 7.7 µs of the syscall it wraps, and the overhead hides inside the stat rather
-    than in the constructor where a reader would look for it. Over one reap pass at the live
-    caps (10,240 rooms + ~207,000 notes) that was the difference between 13.5 s and 3.6 s.
-
-    Every `os.*` spelling of the stat is the same speed — `DirEntry.stat()`, `os.stat(path)`
-    and `os.stat(name, dir_fd=)` are within 2% of each other. Only Path is slow, so this is a
-    representation change, not a cleverer syscall. `bench/dir_walk.py` is the measurement.
-
-    `e.is_dir()` reads d_type from readdir and costs no syscall. Callers that need a Path
-    build one at the point of action, which for the reaper means the branch that actually
-    unlinks — a live pass finds 0 reapable files, so the old shape built ~207,000 Paths to
-    act on none of them.
-
-    Note the asymmetry with `_scan`, which is faster still on the same directories: it only
-    ever counts and measures, so it never needs the entry after the loop body. Use that one
-    where a count is all you need.
+    Delegates to `walk.files`, which opens child directories relative to the parent fd
+    with `O_NOFOLLOW` on POSIX. That closes the check-to-open window where a real
+    directory could be replaced by a symlink after `is_dir(follow_symlinks=False)` and
+    before `scandir(e.path)`, after which `_reap` would unlink files outside the store
+    root. Yields `walk.FileEntry` rather than `os.DirEntry` so callers never receive an
+    entry whose `.path` was produced by following a substituted link.
 
     Depth-agnostic rather than the old `nested` switch, which said "exactly one level down"
     and so could only ever be right about one layout. Under sharding a room is one level
@@ -1405,15 +1362,7 @@ def _walk(d: Path | str, suffix: str) -> Iterator[os.DirEntry[str]]:
     a walk that picked a number would miss every file that had not moved yet, which for the
     reaper means idle files never reaped and for the sweeper means locks never swept.
     """
-    try:
-        with os.scandir(d) as entries:
-            for e in entries:
-                if e.is_dir():
-                    yield from _walk(e.path, suffix)
-                elif e.name.endswith(suffix):
-                    yield e
-    except OSError:
-        return  # missing or unreadable: nothing to walk, same as an empty glob
+    yield from walk.files(d, suffix)
 
 
 def _count_notes(root: Path) -> tuple[int, int]:
@@ -1425,18 +1374,7 @@ def _count_notes(root: Path) -> tuple[int, int]:
     gauge stop being a per-request walk, and it is the same pass `_ns_totals` makes for one
     namespace, so a per-namespace count costs its bytes for free too.
     """
-    total = 0
-    size = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                    total += count
-                    size += ns_bytes
-    except FileNotFoundError:
-        pass
-    return total, size
+    return _scan(root / "notes", ".txt", sized=True)
 
 
 def _write_note_count(root: Path, total: int, size: int) -> None:
