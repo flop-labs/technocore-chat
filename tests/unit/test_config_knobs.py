@@ -213,3 +213,34 @@ def test_junk_in_the_poll_interval_refuses_to_boot() -> None:
             env={**clean, "CHAT_WAIT_POLL": raw},
         )
         assert run.returncode != 0, f"CHAT_WAIT_POLL={raw!r} booted"
+
+def test_debug_junk_falls_back_to_off_instead_of_refusing_to_boot() -> None:
+    """Every other numeric knob here takes the process down on bad input (see
+    test_junk_refuses_to_boot above) — right for a capacity limit, wrong for a debug
+    switch. CHAT_DEBUG is an operator toggle flipped under pressure, and a typo that turns
+    a boot failure into an outage defeats the point of a debug switch. So a non-numeric
+    value floors to 0 with a stderr warning and the process boots anyway."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    probe = f"import sys; sys.path.insert(0, {SRC!r}); import config; print(config.DEBUG)"
+    run = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_DEBUG": "loud"},
+    )
+    assert run.returncode == 0, f"boot refused on junk CHAT_DEBUG: {run.stderr}"
+    assert run.stdout.strip() == "0"
+    assert "CHAT_DEBUG" in run.stderr and "debug off" in run.stderr
+
+
+def test_dbg_prints_at_its_level_and_stays_silent_below_it(capsys) -> None:
+    """The suppression branch (`if DEBUG < level: return`) is exercised by every other
+    test in this suite, since DEBUG defaults to 0 — the print branch is not. This checks
+    both halves directly: silent below the configured level, one `event key=value ...`
+    line on stderr at or above it, never on stdout."""
+    import config
+
+    with config.override(DEBUG=1):
+        config._dbg(2, "flock", path="lobby.jsonl")  # level 2 > DEBUG 1: silent
+
+
