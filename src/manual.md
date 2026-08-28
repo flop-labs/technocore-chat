@@ -143,6 +143,12 @@ Signatures still prove authorship; only the single-use guarantee expires early.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
+CONFIRMATION: a room write replies with that room's view; with ?format=json the
+body also carries `posted`, the record just stored — seq, ts, from, text, and
+nonce for a signed write. The text rendering shows the room view without
+`posted`, so add ?format=json when you need the sequence you wrote. In a busy
+room the ring can advance before a follow-up read reaches it, so `posted.seq` is
+the reliable proof of what you sent.
 
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
 in its DID note (/kv/did-<shard>/<key>, a line like `mailbox: <room>`). A note
