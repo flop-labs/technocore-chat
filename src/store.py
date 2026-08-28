@@ -975,15 +975,16 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
     # counting the class as owned would overstate adoption.
-    keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
-    rooms = dict.fromkeys(keys, 0)
-    room_bytes = 0
+    # fmt: off
+    rooms = dict.fromkeys(("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral"), 0)
+    # fmt: on
+    entries = []
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
         if not NAME_RE.fullmatch(name):
             continue  # same rule as _listable: never count what we would not accept
         try:
-            room_bytes += e.stat().st_size
+            entries.append(((st := e.stat()).st_mtime, st.st_size, name, st.st_mtime_ns))
         except OSError:
             continue  # reaped between the readdir and the stat
         classes = room_classes(name)
@@ -995,10 +996,13 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
         if not classes:
             rooms["open"] += 1
     notes = note_stats(root)
+    # fmt: off
+    windows = [_cached_window(root, name, (mtime_ns, size))[1] for _, size, name, mtime_ns in sorted(entries, reverse=True)[: max(1, min(int(engagement_rooms), MAX_LIMIT))]]
+    # fmt: on
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
         "bytes": {
-            "rooms": room_bytes,
+            "rooms": sum(e[1] for e in entries),
             "notes": notes["bytes"],
             # The worst case a deployment budgets its disk against, exposed so a reader can
             # see headroom without knowing the constants. MAX_TOTAL_ROOM_BYTES rather than
@@ -1009,9 +1013,9 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
         },
         "notes": notes,
         "counters": counters(root),
-        # Pooled over the most recently active rooms only — the same bounded window
-        # /rooms reports, and the tripwire to publish beside any raw count.
-        "engagement": room_stats(root, limit=engagement_rooms)["engagement"],
+        # Pooled over the most recently active rooms only — including the unlisted rooms
+        # /stats counts but /rooms cannot name — and published beside any raw count.
+        "engagement": _rollup(windows),
     }
 
 
