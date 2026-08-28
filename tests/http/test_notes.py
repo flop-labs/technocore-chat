@@ -27,6 +27,39 @@ def test_post_lane(client):
     assert client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1)).status_code == 413
 
 
+def test_post_lane_rejects_non_string_room_fields(client):
+    """The OpenAPI schema says `from` and `text` are strings, so POST must not coerce.
+
+    Before #427, both requests below returned 200: `0` became the valid nick `"0"`, and
+    `12345` became the message text `"12345"`. The type mismatch itself is the refusal.
+    """
+    bad_from = client.post("/r/post-types-a", json={"from": 0, "text": "test"})
+    assert bad_from.status_code == 400
+    assert "bad name" in bad_from.text and "JSON string" in bad_from.text
+
+    bad_text = client.post("/r/post-types-b", json={"from": "bot", "text": 12345})
+    assert bad_text.status_code == 400
+    assert "bad text" in bad_text.text and "JSON string" in bad_text.text
+
+    assert client.get("/r/post-types-a?format=json").json()["count"] == 0
+    assert client.get("/r/post-types-b?format=json").json()["count"] == 0
+
+
+def test_signed_post_lane_rejects_non_string_text_before_verifying(client):
+    """A signature over `str(12345)` must not smuggle a schema-invalid JSON value in."""
+    did, sign = _keypair()
+    payload = {
+        "did": did,
+        "sig": sign("signed-type|1|12345"),
+        "nonce": "1",
+        "text": 12345,
+    }
+    r = client.post("/r/signed-type", json=payload)
+    assert r.status_code == 400
+    assert "bad text" in r.text and "JSON string" in r.text
+    assert client.get("/r/signed-type?format=json").json()["count"] == 0
+
+
 def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
     """POST pays the same write bucket as GET /say, so it must carry the same in-body
     budget hint for clients whose harness does not expose response headers.

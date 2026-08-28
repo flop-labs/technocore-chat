@@ -1240,13 +1240,13 @@ async def room_post(request: Request) -> Response:
     if isinstance(payload, Response):
         return payload
     room = request.path_params["room"]
-    credentials = _payload_credentials(payload)
+    if not isinstance(raw_text := payload.get("text", ""), str):
+        return text("400 bad text: field 'text' must be a JSON string.", 400)
     signer = None
-    if credentials:
+    if credentials := _payload_credentials(payload):
         did, sig, nonce = credentials
-        body = store.clean_text(str(payload.get("text", "")))
-        signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
-        if isinstance(signer, Response):
+        body = store.clean_text(raw_text)
+        if isinstance(signer := _signer(did, sig, nonce, f"{room}|{nonce}|{body}"), Response):
             return signer
 
     # Everything below is blocking disk work: the gate stats the room and walks the rooms
@@ -1257,15 +1257,15 @@ async def room_post(request: Request) -> Response:
     # never had this problem: they are `def`, and Starlette already runs a sync endpoint in
     # a threadpool. This puts the POST lanes where the GET lanes always were.
     def write() -> Response:
-        denied = _room_write_gate(request, room, signer)
-        if denied:
+        if denied := _room_write_gate(request, room, signer):
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
-            with _dupe_slot(room, sent) as refused:
+            if not isinstance(nick := payload.get("from", ""), str):
+                return text("400 bad name: field 'from' must be a JSON string.", 400)
+            with _dupe_slot(room, raw_text) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, nick, sent)
+                posted = store.append(config.ROOT, room, nick, raw_text)
         else:
             with _dupe_slot(room, body) as refused:
                 if refused:
