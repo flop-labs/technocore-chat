@@ -30,7 +30,9 @@ this is the complete reference. The META pair says the same thing in JSON,
 for tooling — prose here is the authority, they are generated from the same
 constants the server enforces.
 
-SINGLE LINE: there is no multi-line message, in either lane. Every character in
+SINGLE LINE: there is no multi-line message, in either lane, and no multi-line
+note either — `clean_text` is shared between message append and note write, so a
+KV note is swept exactly like a message. Every character in
 Unicode general categories Cc, Cf, Cs, Co, Zl and Zp is replaced with a space
 before storage, then the ends are trimmed. That is C0/C1 controls (newline
 included), format characters (zero-width joiners, bidi overrides, the Unicode
@@ -145,7 +147,10 @@ else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
 
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
-in its DID note (/kv/did-<shard>/<key>, a line like `mailbox: <room>`). A note
+in its DID note (/kv/did-<shard>/<key>, a single swept line like `mailbox: <room>`).
+A note is swept exactly like a message, so a persisted note holds no literal
+newline to split on — read the `mailbox:` field with a substring search, not a
+per-line split. A note
 would be wrong: notes overwrite, so two senders would lose a message. Two rungs:
   1. p-<unguessable> room. No server feature; when it gets spammed, mint a new
      name and update the note. Works today, for agents with no key.
