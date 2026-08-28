@@ -9,10 +9,13 @@ those promises and anything a gate ran; these tests are the gate (issue #56).
 
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 import _client  # noqa: F401 (imported for the fixture alias below)
 
@@ -30,6 +33,29 @@ SEED = "aa" * 32
 def run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SIGNER), *args], capture_output=True, text=True, cwd=ROOT
+    )
+
+
+def run_without_cryptography(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the signer with a package import that fails outside Exception."""
+    blocker = tmp_path / "cryptography"
+    blocker.mkdir(parents=True)
+    (blocker / "__init__.py").write_text(
+        "class PanicException(BaseException):\n"
+        "    pass\n"
+        "raise PanicException('simulated broken cryptography wheel')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(tmp_path), env.get("PYTHONPATH", "")) if part
+    )
+    return subprocess.run(
+        [sys.executable, str(SIGNER), *args],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=env,
     )
 
 
@@ -109,3 +135,61 @@ def test_both_signed_lanes_store_the_signature(client) -> None:
 
     rec = client.get("/r/sigroom2?format=json").json()["messages"][-1]
     didkey.verify(did, rec["sig"], f"sigroom2|{rec['nonce']}|{rec['text']}")
+
+
+def test_signer_falls_back_when_cryptography_import_panics(tmp_path, client) -> None:
+    """A broken optional wheel must not strand a Python shell with no package manager.
+
+    Some pyo3 import failures inherit BaseException rather than Exception.  The
+    subprocess makes that failure real instead of merely toggling an implementation
+    flag, then proves the resulting signature through the server's verifier.
+    """
+    text = "hello\u200b世界\u2028👋"
+    out = run_without_cryptography(
+        tmp_path / "say", "say", "--seed", SEED, "fallbackroom", "7", text
+    )
+    assert out.returncode == 0, out.stderr
+    did, sig = out.stdout.splitlines()
+    response = client.get(f"/r/fallbackroom/say-signed/{did}/{sig}/7/{quote(text, safe='')}")
+    assert response.status_code == 200, response.text
+    assert "hello 世界 👋" in response.text
+
+    note = run_without_cryptography(
+        tmp_path / "set", "set", "--seed", SEED, "room-owners", "fallbackroom", "8", did
+    )
+    assert note.returncode == 0, note.stderr
+    note_did, note_sig = note.stdout.splitlines()
+    import didkey
+
+    didkey.verify(note_did, note_sig, f"room-owners|fallbackroom|8|{did}")
+
+
+def test_stdlib_backend_matches_rfc8032_vectors() -> None:
+    """The portability backend stays pinned to RFC 8032, not just one server."""
+    vectors = (
+        (
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            "",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155"
+            "5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        ),
+        (
+            "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+            "72",
+            "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+            "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+            "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+        ),
+    )
+    spec = importlib.util.spec_from_file_location(
+        "stdlib_ed25519_test", ROOT / "scripts" / "stdlib_ed25519.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    for seed, message, public, signature in vectors:
+        key = module.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
+        assert key.public_key().public_bytes_raw().hex() == public
+        assert key.sign(bytes.fromhex(message)).hex() == signature
