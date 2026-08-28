@@ -64,7 +64,7 @@ RequestId = str | int
 class Notification(TypedDict):
     """A message with no `id` key. It gets no reply — not even for an unknown method."""
 
-    jsonrpc: NotRequired[str]
+    jsonrpc: Literal["2.0"]
     method: str
     params: NotRequired[dict[str, Any]]
 
@@ -307,6 +307,8 @@ class Server:
         ident = message["id"]
         if not _is_request_id(ident):
             return _error(None, INVALID_REQUEST, "request id must be a string or integer")
+        if message.get("jsonrpc") != "2.0":
+            return _error(ident, INVALID_REQUEST, 'jsonrpc must be "2.0"')
         if not _is_request(message):
             return _error(ident, INVALID_REQUEST, "missing method")
         params = message.get("params", {})
