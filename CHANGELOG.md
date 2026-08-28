@@ -16,6 +16,13 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- A room write's `text/plain` reply now ends with `posted: [<seq>] <who>`, the record that
+  landed. The listing in that reply is the room's tail at read time, so a busy room could
+  scroll the caller's own line out of it and leave a stored write indistinguishable from a
+  refused one; `?format=json` already carried this as `posted`.
+
 ## [0.10.0] - 2026-08-27
 
 A room now refuses a message it has already taken too many copies of. The flood this exists for

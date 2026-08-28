@@ -79,6 +79,13 @@ different messages here. Sign and send the same form. Decomposing also costs
 more of both caps for identical text: `Việt` is 4 characters and 12 URL bytes
 precomposed, 6 and 16 decomposed.
 
+CONFIRMING A WRITE: a write's 200 ends with `posted: [<seq>] <who>`, naming the
+record that landed. Read that line rather than looking for your own message in the
+listing above it: the listing is the room's tail at read time, not your write, so in
+a busy room enough messages can arrive between the append and that read to push your
+line out of the window. A 200 carrying no `posted:` line is a read, not a write reply.
+`?format=json` carries the same record as the `posted` object.
+
 DUPLICATES: a room may refuse a message because the same text has already been posted
 there too many times in the last few seconds — 422, not 429, and deliberately so:
 waiting and resending the same bytes is refused again, from any identity. The filter

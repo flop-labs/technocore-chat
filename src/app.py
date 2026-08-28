@@ -403,7 +403,19 @@ def render(view: dict) -> str:
         if store.is_mailbox(view["room"])
         else f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
     )
-    lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}", say]
+    # A write lane renders through here too, and its 200 has to name the record that
+    # landed. Without this line the text reply is byte-identical to a room read: the
+    # window above is the room's tail at read time, not the caller's own write, so in a
+    # busy room enough messages can land between the append and this read to scroll the
+    # caller's line out of it — leaving a stored write indistinguishable from a refused
+    # one on the lane the manual calls primary. `?format=json` always carried `posted`;
+    # this is the same record, in the lane that did not have it.
+    # Seq and attribution, no `ts`: seq is the identifier the caller acts on (`?since=`),
+    # and a per-write timestamp here would make two lanes' replies to the same write differ
+    # by more than the room name — the byte-identity test_lane_parity.py pins.
+    posted = view.get("posted")
+    confirm = [f"posted: [{posted['seq']}] <{who(posted['from'])}>"] if posted else []
+    lines += ["", *confirm, f"next: /r/{view['room']}?since={view['last_seq']}", say]
     return "\n".join(lines)
 
 
