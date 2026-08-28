@@ -280,8 +280,15 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
         wait = 0.0
     else:
         wait = (1.0 - tokens) * 60.0 / per_min
+    # `pop` then re-insert rather than `__setitem__` + `move_to_end`: Starlette runs
+    # sync route handlers in a threadpool, so concurrent `take()` calls race on the
+    # OrderedDict. With setitem+move_to_end, another thread's `popitem(last=False)` can
+    # evict the key between the two calls, and `move_to_end` then raises KeyError -> 500
+    # (#378, same class of race as _rooms_cache #132 / _window_memo #377). pop+insert
+    # leaves no intermediate state where the key is absent while it should be present; the
+    # worst a concurrent eviction can do is a harmless cache miss (re-created next call).
+    _buckets.pop((ip, kind), None)
     _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
     while len(_buckets) > max_buckets:
         _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new
