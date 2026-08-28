@@ -26,6 +26,25 @@ def test_malformed_no_id_objects_are_invalid_requests(message):
     }
 
 
+def test_malformed_no_id_params_are_invalid_request():
+    server = protocol.Server("test", "test")
+
+    assert server.handle({"jsonrpc": "2.0", "method": "ping", "params": 1}) == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {
+            "code": protocol.INVALID_REQUEST,
+            "message": "params must be an object or array",
+        },
+    }
+
+
+def test_valid_by_position_notification_remains_silent():
+    server = protocol.Server("test", "test")
+
+    assert server.handle({"jsonrpc": "2.0", "method": "ping", "params": []}) is None
+
+
 def test_malformed_no_id_batch_member_is_not_silently_dropped():
     server = protocol.Server("test", "test")
 
@@ -33,7 +52,7 @@ def test_malformed_no_id_batch_member_is_not_silently_dropped():
         server,
         [
             {"jsonrpc": "2.0", "id": 1, "method": "ping"},
-            {"jsonrpc": "2.0", "method": 1},
+            {"jsonrpc": "2.0", "method": "ping", "params": 1},
             {"jsonrpc": "2.0", "method": "ping"},
         ],
     ) == [
@@ -41,6 +60,9 @@ def test_malformed_no_id_batch_member_is_not_silently_dropped():
         {
             "jsonrpc": "2.0",
             "id": None,
-            "error": {"code": protocol.INVALID_REQUEST, "message": "missing method"},
+            "error": {
+                "code": protocol.INVALID_REQUEST,
+                "message": "params must be an object or array",
+            },
         },
     ]
