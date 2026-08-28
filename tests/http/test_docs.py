@@ -87,6 +87,130 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_names_every_category_the_sweep_actually_takes(client):
+    """The same drift the caps test guards, on the sweep (#171).
+
+    The prose said "C0/C1 controls, format characters, zero-width joiners, bidi overrides",
+    which is `Cc` plus part of `Cf`, while `INVISIBLE_CATEGORIES` also takes Cs, Co, Zl and
+    Zp. A reader who trusted it signed text the server had already altered, then met a 403
+    naming the signature rather than the sweep. Both halves are asserted: every enforced
+    category is named, plus the four that used to be missing are present by name.
+    """
+    import store
+
+    manual = client.get("/llms.txt").text
+    swept = manual.split("SINGLE LINE:", 1)[1].split("\n\n", 1)[0]
+    for category in store.INVISIBLE_CATEGORIES:
+        assert category in swept, f"the manual does not name {category}, which the sweep takes"
+    # The regression itself: these four were enforced and unnamed.
+    for missing in ("Cs", "Co", "Zl", "Zp"):
+        assert missing in swept, missing
+
+
+def test_the_manual_states_the_url_break_even_it_actually_has(client):
+    """The GET write lane meets two ceilings, of which the character cap is not the binding one.
+
+    Percent-encoding costs 3 bytes per UTF-8 byte, so the ~16 KB a URL survives at the edge
+    divides by `MAX_TEXT_CHARS` into a bytes-per-character break-even. Above it a caller
+    cannot reach the character cap in a URL at all. The prose used to frame that as
+    "non-Latin scripts do not fit", which is the wrong axis: dense Vietnamese is Latin and
+    does not fit either. 16 KB is the edge's number rather than one this service enforces,
+    so what is pinned here is the arithmetic against our own cap.
+    """
+    import store
+
+    break_even = (16 << 10) // store.MAX_TEXT_CHARS
+    budget = client.get("/llms.txt").text.split("URL BUDGET:", 1)[1].split("\n\n", 1)[0]
+    assert f"break-even is {break_even} bytes per character" in budget
+    assert "Vietnamese" in budget  # the counterexample that makes the axis clear
+    assert "Non-Latin scripts do not" not in budget  # the framing this replaced
+
+
+def test_the_service_never_normalizes_so_a_signature_covers_the_form_you_sent(client):
+    """What the manual's NORMALIZATION paragraph promises, asserted through the surface.
+
+    Unicode composition is a caller's choice rather than a canonical form. This service takes
+    neither side: it stores the code points it was given. That has to be documented because
+    the signed lane makes it sharp. NFC and NFD of one word are different bytes, so a
+    signature over one is not a signature over the other, while the 403 that follows says
+    nothing about normalization.
+    """
+    import unicodedata
+
+    precomposed = unicodedata.normalize("NFC", "Việt")
+    decomposed = unicodedata.normalize("NFD", "Việt")
+    assert precomposed != decomposed and len(decomposed) > len(precomposed)
+
+    for form in (precomposed, decomposed):
+        posted = client.post("/r/norm?format=json", json={"from": "vi", "text": form})
+        assert posted.status_code == 200
+        assert posted.json()["posted"]["text"] == form  # stored as sent, neither folded
+
+    stored = [m["text"] for m in client.get("/r/norm?format=json").json()["messages"]]
+    assert stored == [precomposed, decomposed]  # two messages, not one deduplicated word
+
+    did, sign = _keypair()
+    signature = sign(f"norm|1|{precomposed}")
+    crossed = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": decomposed}
+    )
+    assert crossed.status_code == 403  # signed one form, sent the other
+    matched = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": precomposed}
+    )
+    assert matched.status_code == 200
+
+
+def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client):
+    """The reported bug, through the surface that reported it (#242).
+
+    RESERVED_ROOM_BYTES is the budget divided by MAX_ROOMS, so it is the one published
+    figure an operator can move: CHAT_MAX_ROOMS=10240 halves it to 512 KiB, and the old
+    `>> 20` render published that as "0 MiB" — a floor of zero reads as no floor at all,
+    the opposite of what the append path enforces. At the source default the floor lands
+    exactly on 1 MiB, which is why the manual test above never caught it.
+    """
+    import app as app_module
+    import store
+
+    assert "0 MiB per room" not in app_module._render_manual()  # the default is not broken
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(store, "MAX_ROOMS", 10240)
+        monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", store.MAX_TOTAL_ROOM_BYTES // 10240)
+        raised = app_module._render_manual()
+    finally:
+        monkeypatch.undo()
+
+    assert "512 KiB per room" in raised
+    assert "0 MiB per room" not in raised
+    assert app_module._render_manual() == app_module.MANUAL  # and it renders back the same
+
+
+def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
+    """Two ways a whole-unit shift misreports a guarantee, and the rule for each.
+
+    Falling under the unit is the reported one: `524288 >> 20` is 0. Truncating *within*
+    the unit is the quieter one — at CHAT_MAX_ROOMS=3000 the floor is 1.7 MiB and `>> 20`
+    still says "1 MiB". Rounding would fix the second and break the guarantee, since
+    1.969 MiB stated as "2.0 MiB" promises more than the store enforces, so this floors.
+    """
+    import manifest
+    import store
+
+    assert manifest.fmt_bytes(524288) == "512 KiB"  # the reported case: under the unit
+    assert manifest.fmt_bytes(1789569) == "1.7 MiB"  # the quiet case: 5 GiB // 3000
+    assert manifest.fmt_bytes(2064548) == "1.9 MiB"  # 1.969 MiB — floored, never "2.0 MiB"
+
+    # Defaults are byte-identical to the shift they replace, so no published text moves.
+    assert manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES) == "5 GiB"
+    assert manifest.fmt_bytes(store.MAX_ROOM_BYTES) == "10 MiB"
+    assert manifest.fmt_bytes(1 << 20) == "1 MiB"  # the floor at the default 5120 rooms
+    assert manifest.fmt_bytes((1 << 20) + 1) == "1 MiB"  # a whole unit gains no fake ".0"
+    assert manifest.fmt_bytes(512) == "512 B" and manifest.fmt_bytes(0) == "0 B"
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store
@@ -101,17 +225,15 @@ def test_the_room_budget_is_published_where_agents_look(client):
 
 
 def test_agent_surfaces_are_never_html(client):
+    # Cache-Control is deliberately not asserted here: it is per path and it is covered
+    # path by path in the four edge-cache tests at the end of this file. This one is about
+    # the HTML exception not spreading (docs/design.md §8), and mixing the two is what
+    # turned a widened cache rule into an edit to a test named for XSS.
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        # The two polled reads are edge-cacheable for a second (see app._edge_cacheable);
-        # every other agent surface stays no-store.
-        if path in ("/r/lobby", "/rooms"):
-            assert "public" in r.headers["cache-control"], path
-        else:
-            assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
@@ -150,6 +272,32 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     assert "/patterns.md" not in "".join(  # nothing disallows it for crawlers
         line for line in client.get("/robots.txt").text.splitlines() if "Disallow" in line
     )
+
+
+def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
+    """The bridging guide, served like the patterns it composes.
+
+    Its whole premise is that every protocol in it is a process run beside this service, so
+    the assertion that matters is the negative one: publishing the document must not turn
+    into a claim that this origin speaks any of them. The manifest still refuses A2A and MCP
+    (test_no_protocol_claims_in_the_manifest), and this checks the document says so itself.
+
+    Unlimited for a sharper reason than the manual's: a bridge author reads it precisely
+    when their bridge is being told to back off.
+    """
+    import config
+
+    page = client.get("/interop.md")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("text/plain")
+    assert "ActivityPub" in page.text and "A2A" in page.text
+    assert "speaks one protocol" in page.text  # states what this origin actually answers
+    assert "/interop.md" in client.get("/llms.txt").text  # the manual points here
+    assert "/interop.md" in client.get("/sitemap.xml").text  # crawlers are told about it
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/interop.md").status_code == 200  # never rate limited
+    assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
 
 
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
@@ -344,8 +492,8 @@ def test_every_documented_response_declares_the_body_it_returns(client):
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
-    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
-    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
+    value is published. A non-finite ceiling reaches /openapi.json and
     /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
     but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
     service answering with undiscoverable documents is worse off than one that refused to
@@ -407,7 +555,42 @@ def test_an_integral_ceiling_publishes_as_an_integer(client):
     assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
 
 
-_REFUSALS = frozenset({"400", "403", "404", "409"})
+_REFUSALS = frozenset({"400", "403", "404", "409", "422"})
+
+
+_DUPE_TEXT = "one more copy of this sentence than allowed is refused, measured"
+
+
+def _one_copy_too_many(client, lane: str):
+    """Land the allowed copies of one long text, then one more, and return its response.
+
+    The filter's knobs are pinned here rather than read off the shipped defaults - the
+    shared client fixture pins the filter OFF, so without this override there is no 422
+    to document - and `allowed` reads the pinned value, so the copy count and the
+    threshold cannot drift apart when someone tunes one of them.
+    """
+    import app as app_module
+    import config
+    import limit
+
+    limit._dupes.clear()
+    app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
+    with config.override(DUPE_FILTER_SECONDS=30, DUPE_MAX_COPIES=5, RATE_WRITE=600):
+        allowed = config.DUPE_MAX_COPIES  # the pinned 5, read so count and knob cannot drift
+        for i in range(allowed):
+            if lane == "say":
+                client.get(f"/r/dupe422/say/n{i}/{_DUPE_TEXT.replace(' ', '%20')}")
+            elif lane == "post":
+                client.post("/r/dupe422", json={"from": f"n{i}", "text": _DUPE_TEXT})
+            else:
+                did, sign = _keypair(100 + i)
+                _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
+        if lane == "say":
+            return client.get(f"/r/dupe422/say/last/{_DUPE_TEXT.replace(' ', '%20')}")
+        if lane == "post":
+            return client.post("/r/dupe422", json={"from": "last", "text": _DUPE_TEXT})
+        did, sign = _keypair(199)
+        return _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
 
 
 def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
@@ -543,6 +726,28 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             lambda: client.get(
                 f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
+        ),
+        # The cross-sender duplicate filter: one copy past the threshold, inside the
+        # window, through each write lane. Enabled per case because it is off by default and the
+        # case has to be self-contained; the ring is cleared first because it is process
+        # state that outlives any one room file.
+        (
+            "/r/{room}/say/{nick}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say"),
+        ),
+        (
+            "/r/{room}",
+            "post",
+            422,
+            lambda: _one_copy_too_many(client, "post"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say-signed"),
         ),
     ]
 
@@ -1123,7 +1328,7 @@ def test_only_the_markdown_documents_negotiate_markdown(client):
     when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
     is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
-    for path in ("/skill.md", "/patterns.md", "/auth.md"):
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
         assert got.startswith("text/markdown"), f"{path} answered {got}"
         assert client.get(path).headers["content-type"].startswith("text/plain")
@@ -1158,3 +1363,96 @@ def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+# The documents are static per release and deliberately outside the rate limiter, which
+# makes them both the cheapest thing to cache and the least defended thing not to. These
+# four tests are the fence around that: what may be held at the edge, what may never be,
+# and the exact string, so a later refactor of the shared helper cannot widen it silently.
+
+
+def test_the_static_documents_are_edge_cacheable_and_the_header_is_exact(client):
+    """Every document a crawler or an agent fetches per release, cacheable by the CDN in
+    front. `max-age=0` is what keeps this invisible to callers — they still revalidate on
+    every request; only the shared cache is allowed to hold a copy, which is the whole
+    point on the paths that have no rate limiter in front of them.
+
+    The exact string is pinned once rather than for each path: it is one helper, and the
+    value is a contract with the CDN, not an implementation detail.
+    """
+    static = "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    assert client.get("/").headers["cache-control"] == static
+
+    documents = ("/", "/llms.txt", "/skill.md", "/patterns.md", "/interop.md", "/auth.md")
+    for path in (*documents, "/robots.txt", "/.well-known/security.txt"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc, path
+        assert "no-store" not in cc, path
+
+
+def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
+    """The three that would each be a real defect if held at the edge.
+
+    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
+    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
+    rollback probe reads — a cached `ok` would let a broken release pass its own health
+    gate. /stats is token-gated and counts one worker's requests.
+    """
+    import config
+
+    for path in ("/humans", "/healthz"):
+        assert client.get(path).headers["cache-control"] == "no-store", path
+
+    # With no token configured /stats is a 404, so the gated response has to be provoked
+    # or this asserts no-store on a path that was never routed.
+    with config.override(STATS_TOKEN="t", STATS_CACHE_SECONDS=0):
+        r = client.get("/stats", headers={"x-stats-token": "t"})
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-store"
+
+
+def test_a_write_and_a_refusal_are_never_edge_cacheable(client):
+    """Writes in this protocol are GETs, so a cacheable header on one is a silently
+    swallowed write — the caller gets a 200 that never reached the store. A cached 429 is
+    the same defect pointed the other way: one caller's exhausted budget, served to
+    everyone until it expires.
+    """
+    import config
+
+    assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
+
+    with config.override(RATE_WRITE=2):
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(4)]
+        assert 429 in codes, codes
+        refused = client.get("/r/lobby/say/bot/again")
+        assert refused.status_code == 429
+        assert refused.headers["cache-control"] == "no-store"
+
+
+def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(client):
+    """The half of edge-caching the documents needed that the polled reads never did.
+
+    /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
+    labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
+    ignored Accept would hand one caller's label to the next. / and /llms.txt never
+    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+
+    And the markdown answer itself stays no-store, which is belt-and-braces on top of
+    Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
+    nobody has, the edge can still only ever hold the default representation.
+    """
+    import config
+
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
+        assert client.get(path).headers["vary"] == "Accept", path
+        negotiated = client.get(path, headers={"Accept": "text/markdown"})
+        assert negotiated.headers["content-type"].startswith("text/markdown"), path
+        assert negotiated.headers["cache-control"] == "no-store", path
+
+    for path in ("/", "/llms.txt"):
+        assert "vary" not in client.get(path).headers, path
+
+    # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
+    with config.override(STATIC_CACHE_SECONDS=0):
+        for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
+            assert client.get(path).headers["cache-control"] == "no-store", path

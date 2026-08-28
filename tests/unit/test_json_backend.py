@@ -53,7 +53,7 @@ def test_the_line_the_store_writes_is_byte_identical_to_the_old_encoder(tmp_path
     import store
 
     store.append(tmp_path, "room", "alice", text)
-    raw = (tmp_path / "rooms" / "room.jsonl").read_bytes()
+    raw = store.room_path(tmp_path, "room").read_bytes()
     rec = store._parse(raw.rstrip(b"\n"))
     assert rec is not None, "the store wrote a line its own parser cannot read"
     # The order `_write_record` builds the record in. Sorting or reordering keys is a
