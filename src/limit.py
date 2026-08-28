@@ -172,16 +172,22 @@ def dupe_refused(
     key = _dupe_key(room, text, min_length) if window > 0 else None
     if key is None:
         return False  # off, or a short conversational repeat: legitimate by nature
+    refused = False
     with _dupes_lock:
         seen = _dupes.get(key)
         if seen is not None:
             live = tuple(t for t in seen if now - t <= window)
             if len(live) >= max_copies:
                 _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
-                return True
-            _dupes[key] = (live + (now,))[-max_copies:]
+                refused = True
+            else:
+                _dupes[key] = (live + (now,))[-max_copies:]
         else:
             _dupes[key] = (now,)
+        # Issue #358: both branches share the LRU refresh and sweep. The refused branch
+        # used to return early here, leaving the entry at the front of the LRU where
+        # hard-cap eviction would drop it first — the exact opposite of what a flood-
+        # refused key should experience.
         _dupes.move_to_end(key)
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
         # the oldest so a burst cannot turn one write into a pause, and the hard cap that
@@ -195,7 +201,7 @@ def dupe_refused(
             del _dupes[oldest]
         while len(_dupes) > cap:
             _dupes.popitem(last=False)
-    return False
+    return refused
 
 
 def dupe_release(room: str, text: str, now: float, window: float, min_length: int = 16) -> None:

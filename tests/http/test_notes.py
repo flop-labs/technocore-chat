@@ -396,3 +396,16 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_if_absent_case_insensitive_falsy(client):
+    """Issue #282: _condition() should treat 'False', 'FALSE', 'no', 'off' as falsy."""
+    # Create a note
+    client.get("/kv/scratch/c1/set/val1")
+    # These should all be unconditional overwrites (not create-if-absent)
+    for falsy in ("False", "FALSE", "false", "no", "off", "0", ""):
+        resp = client.get(f"/kv/scratch/c1/set/overwritten?if_absent={falsy}")
+        assert resp.status_code == 200, f"if_absent={falsy!r} should be falsy"
+    # Only "1" and "true" should trigger create-if-absent
+    resp = client.get("/kv/scratch/c1/set/still?if_absent=1")
+    assert resp.status_code == 409  # already exists

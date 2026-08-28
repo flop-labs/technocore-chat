@@ -1102,3 +1102,17 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_ephemeral_room_last_seq_after_expiry(tmp_path, monkeypatch):
+    """Issue #287: when all messages in an ephemeral room expire, last_seq should
+    reflect the room's actual last sequence number, not reset to 0."""
+    import store
+
+    store.append(tmp_path, "e-test", "bot", "hello")
+    store.append(tmp_path, "e-test", "bot", "world")
+    # Force expiry by setting TTL to 0 so all messages are expired
+    monkeypatch.setattr(store, "EPHEMERAL_TTL_SECONDS", 0)
+    view = store.read_messages(tmp_path, "e-test")
+    assert view["messages"] == [], "all messages should be expired"
+    assert view["last_seq"] == 2, "last_seq should reflect actual sequence, not 0"

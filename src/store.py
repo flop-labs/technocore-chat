@@ -760,11 +760,14 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
                 if len(out) >= limit:
                     break
     out.reverse()
+    # Issue #287: when all messages expired (out empty) and no explicit since cursor,
+    # return the room's actual last_seq so clients don't reset their cursor to 0.
+    empty_last = since if since is not None else (last_seq(root, room) if path.exists() else 0)
     return {
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": out[-1]["seq"] if out else empty_last,
         "messages": out,
     }
 
