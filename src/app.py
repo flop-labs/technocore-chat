@@ -418,32 +418,32 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
 
 
 def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
-    """Mark a world-readable read as shareable by the CDN in front, for `secs` (`swr` is
-    stale-while-revalidate, and defaults to the 5x the polled reads have always used).
+    """Mark a world-readable read as shareable by the CDN in front for `secs`.
 
     The default window is the polled-read one: /rooms and plain room reads pass here, never
     a long-poll (one caller's cursor) or a reply carrying a budget footer (one caller's
     pacing). The documents come through _static_cacheable below — same header, longer
-    window. The CDN still needs a rule marking these paths cache-eligible.
+    window plus the explicit `swr` window. The CDN still needs a rule marking these paths
+    cache-eligible.
 
     `max-age=0` is the load-bearing half: every caller still revalidates, so nothing a
     client observes changes, and only the shared cache may hold a copy.
     """
     secs = config.EDGE_CACHE_SECONDS if secs is None else secs
     if secs:
-        resp.headers["Cache-Control"] = (
-            f"public, max-age=0, s-maxage={secs}, stale-while-revalidate={swr or secs * 5}"
-        )
+        stale = f", stale-while-revalidate={swr}" if swr is not None else ""
+        resp.headers["Cache-Control"] = f"public, max-age=0, s-maxage={secs}{stale}"
     return resp
 
 
 def _static_cacheable(resp: Response) -> Response:
     """A document: static per release, so the edge may hold it far longer than a room read.
 
-    `stale-while-revalidate` is a flat 60 rather than the 5x the polled reads use. 5x300 is
-    30 minutes of worst-case edge staleness, which is *past* the 15-minute autoupdate poll —
-    the manual could then outlive the deploy that changed it, which is the one thing this
-    window exists to prevent. 60 caps the total at 360s, comfortably under the poll.
+    `stale-while-revalidate` is a flat 60 rather than scaling with this longer window.
+    Five times the 300s default would be 30 minutes of worst-case edge staleness, which is
+    *past* the 15-minute autoupdate poll — the manual could then outlive the deploy that
+    changed it, which is the one thing this window exists to prevent. 60 caps the total at
+    360s, comfortably under the poll.
     """
     return _edge_cacheable(resp, config.STATIC_CACHE_SECONDS, 60)
 

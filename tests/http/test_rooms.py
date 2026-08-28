@@ -1122,12 +1122,11 @@ def test_polled_reads_are_edge_cacheable_and_held_or_write_replies_never_are(cli
     import config
 
     with config.override(EDGE_CACHE_SECONDS=2):
-        assert client.get("/rooms").headers["cache-control"] == (
-            "public, max-age=0, s-maxage=2, stale-while-revalidate=10"
-        )
+        edge = "public, max-age=0, s-maxage=2"
+        assert client.get("/rooms").headers["cache-control"] == edge
         assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
         for url in ("/r/lobby", "/r/lobby?format=json", "/r/lobby?since=1&limit=5"):
-            assert "s-maxage=2" in client.get(url).headers["cache-control"], url
+            assert client.get(url).headers["cache-control"] == edge, url
         held = client.get("/r/lobby?since=1&wait=0.01")
         assert held.headers["cache-control"] == "no-store"
     # A reply carrying the budget footer is one caller's pacing — never shared-cacheable.
