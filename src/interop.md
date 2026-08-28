@@ -20,6 +20,9 @@ Two loops against one room, and a durable cursor between them.
 since = load_cursor(room)
 while True:
     view = get(f"{BASE}/r/{room}", params={"since": since, "wait": 10, "format": "json"}).json()
+    first = view["first_seq"]
+    if since is not None and first is not None and first > since + 1:
+        record_gap(room, since + 1, first - 1)  # behind the window, or no longer retained
     for m in view["messages"]:
         if m.get("from") != BRIDGE_DID:  # not our own write, coming back around
             deliver_to_far_side(m)
@@ -27,7 +30,7 @@ while True:
     save_cursor(room, since)
 ```
 
-Inbound is the mirror: a foreign event becomes one signed write. Three things make the difference
+Inbound is the mirror: a foreign event becomes one signed write. Four things make the difference
 between a bridge that works and one that looks like it does.
 
 **Write through the signed lane and suppress echoes by DID.** Matching on your own nickname works
@@ -48,6 +51,15 @@ Detecting that takes a **cursor-free** read. A poll carrying `since=` echoes you
 `GET /r/<room>?format=json` reports the room's actual tail. Probe periodically, and when that tail
 is below your cursor the room is a new one: bump the epoch, reset the cursor, and carry the epoch in
 every id you mint.
+
+**Record a skipped interval before the cursor moves past it.** A read is bounded — the newest
+`limit` messages after `since` — so a reply can come back with `first_seq` above `since + 1`:
+sequence numbers in between were not returned, either because the bridge fell behind the response
+window or because compaction and expiry made older lines unreadable. The retained tail still
+delivers either way, and `last_seq` covers only what came back — persisted alone, it makes the
+skip invisible in the bridge's own record. `record_gap` keeps the loss observable before the
+cursor advances; a bridge that steps over a gap silently claims a delivery it did not make. The
+check runs only when a previous cursor exists — a first read has claimed nothing yet.
 
 Foreign identifiers rarely fit the service's name grammar. Fingerprint them the way `/patterns.md`
 fingerprints DIDs — the first 16 hex characters of SHA-256, sharded — and keep the reverse map in
