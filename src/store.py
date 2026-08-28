@@ -1093,13 +1093,14 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
     # room_path validates the stem, and the reaper walks every file on disk -- including any
     # left by an older validator or created by hand (_listable makes the same allowance for
     # listings). A stem that fails the allowlist names no room this service would accept
-    # today, so it guards nothing: room_path raises StoreError (a ValueError) for it, and
-    # catching that here treats it like a vanished room instead of letting it abort the whole
-    # reap pass and surface as a misleading "bad name" 400 on an unrelated, valid write.
+    # today, so it guards nothing: room_path raises StoreError for it, and catching that here
+    # treats it like a vanished room instead of letting it abort the whole reap pass and
+    # surface as a misleading "bad name" 400 on an unrelated, valid write. StoreError, not a
+    # bare ValueError, so an unrelated ValueError is never masked.
     try:
         room = room_path(root, entry.name.rpartition(".")[0])
         return now - room.stat().st_mtime <= IDLE_SECONDS
-    except (OSError, ValueError):
+    except (OSError, StoreError):
         return False  # no room left to guard, or a name no live room could carry
 
 
