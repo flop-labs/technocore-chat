@@ -376,6 +376,60 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     assert path.exists() and lock.exists()
 
 
+def test_cursors_survive_a_reaped_then_recreated_room(tmp_path):
+    """#139: a room that is reaped and later recreated restarts seq at 1, so every reader
+    still polling with a cursor from the old generation silently starves — reads answer 200
+    with count 0 forever. Reaping now leaves the previous generation's high-water mark in a
+    sidecar, and last_seq() consults it, so a recreated room continues the sequence and old
+    cursors see the new messages. Fails before the fix: the recreated room restarts at 1 and
+    the old cursor never sees anything again."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice" if i % 2 == 0 else "bob", f"msg {i}")
+    cursor = store.read_messages(tmp_path, "d-talk")["last_seq"]  # 6
+    assert cursor == 6
+
+    # Reap the room: age it past idle and force a reap pass (drop the .reaped marker gate).
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    # Recreate it under the same name (new generation).
+    store.append(tmp_path, "d-talk", "carol", "can anyone hear me?")
+
+    result = store.read_messages(tmp_path, "d-talk", since=cursor)
+    assert result["count"] > 0, "an old cursor must not starve on a recreated room"
+
+
+def test_a_recreated_room_reports_a_new_generation(tmp_path):
+    """#139 dir #3: a room reaped and recreated under the same name is a *different*
+    conversation. The read view must expose a generation that bumps on recreate, so a
+    stateful client can detect the discontinuity and resync instead of silently watching a
+    new conversation under the old name. The floor bump (dir #2) keeps a stateless cursor
+    fed, but only the generation tells a stateful reader the conversation changed. Fails
+    before the fix: the read view carries no generation, so the recreation is
+    indistinguishable from a continuation."""
+    import store
+
+    store.append(tmp_path, "d-talk", "alice", "first conversation")
+    before = store.read_messages(tmp_path, "d-talk")["generation"]
+    assert before == 1, "the first creation is generation 1"
+
+    # Reap the room, then recreate it under the same name.
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    store.append(tmp_path, "d-talk", "carol", "second conversation")
+    after = store.read_messages(tmp_path, "d-talk")["generation"]
+    assert after == before + 1, "recreate must bump the generation"
+
+
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
     """The reaper walks every room and note in one pass, and a racing writer or a
     permission blip on any one of them is ordinary. Skipping that entry costs nothing;
@@ -1013,15 +1067,16 @@ def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
     monkeypatch.setattr(store.os, "fsync", counted)
 
     store.append(tmp_path, "lobby", "bot", "durable")
-    # Two, not one: creating the room also appends its announcement to /r/events, and
-    # both records are on disk before the caller's 200.
-    assert len(calls) == 2
+    # Four, not two: creating the lobby room and its /r/events announcement each pay one
+    # fsync for the record and one for the seq-state metadata (generation/floor) the reaper
+    # leaves behind on a later reap (#139). The knob governs both.
+    assert len(calls) == 4
 
     with config.override(FSYNC=False):
         store.append(tmp_path, "lobby", "bot", "fast")
-        assert len(calls) == 2  # the append skipped it
+        assert len(calls) == 4  # neither the append nor a seq-state write paid one
         store._compact(store.room_path(tmp_path, "lobby"))
-        assert len(calls) == 3  # the rewrite did not
+        assert len(calls) == 5  # the rewrite did not
 
 
 def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
