@@ -935,10 +935,11 @@ def room_export(request: Request) -> Response:
     """`GET /r/<room>/export` — the retained ring, one raw JSONL download.
 
     Every other read is a tail window (newest <= MAX_LIMIT), so nothing could copy the
-    history a room still holds even though it is literally a file (docs/design.md §7.6:
-    with `sig` persisted, a dump is a bundle of portable proofs). The body is the stored
-    bytes exactly as written — see store.export_room for why re-serializing is refused
-    and how the snapshot is bounded.
+    history a room still holds even though it is literally a file (docs/design.md
+    §5.1–§5.2: a signed record re-verifies offline from the stored bytes, which is what
+    makes a dump a bundle of portable proofs). The body is the stored bytes exactly as
+    written — see store.export_room for why re-serializing is refused and how the
+    snapshot is bounded.
 
     Metadata rides in one header rather than a body prelude, so `curl ... > room.jsonl`
     yields a file that is nothing but records. Reachability is the room read's: whoever
@@ -951,8 +952,9 @@ def room_export(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     room = request.path_params["room"]
-    # One call carries both halves: the store reads the generation against the fd it just
-    # opened, so the epoch in the header is the epoch of the bytes in the body.
+    # One call carries both halves: the store reads the generation right after the open,
+    # so header and body are captured back to back — up to the residual race
+    # store.export_room's docstring accepts, never a request lifetime apart.
     generation, chunks = store.export_room(config.ROOT, room)
     return StreamingResponse(
         chunks,

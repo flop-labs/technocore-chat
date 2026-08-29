@@ -1,4 +1,4 @@
-"""GET /r/<room>/export — the retained ring as one raw JSONL download (design §7.6).
+"""GET /r/<room>/export — the retained ring as one raw JSONL download (design §5.1–§5.2).
 
 Byte-exactness is the whole contract: a signed record must re-verify from the exported
 line alone, so every test here compares against the stored file's own bytes and never

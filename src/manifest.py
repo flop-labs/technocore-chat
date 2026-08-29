@@ -516,8 +516,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "description": (
                                         "The room's conversation epoch — the same "
                                         "`generation` the JSON read view carries. 0 "
-                                        "means never existed, or reaped and not yet "
-                                        "recreated."
+                                        "means the room never existed; a reaped room "
+                                        "keeps its last generation until the name is "
+                                        "recreated, which bumps it."
                                     ),
                                 }
                             },

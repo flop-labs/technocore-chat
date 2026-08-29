@@ -110,10 +110,10 @@ def test_an_unreadable_room_raises_rather_than_impersonating_an_empty_one(tmp_pa
         store.export_room(tmp_path, "broken")
 
 
-def test_the_generation_is_read_against_the_opened_file(tmp_path):
-    """One call returns both, generation read after the open, so the epoch describes the
-    bytes the caller gets — not whatever the room was when the handler looked earlier
-    (PR #505 review)."""
+def test_the_generation_is_captured_beside_the_snapshot(tmp_path):
+    """One call returns both, the generation read from the seq state right after the
+    open — captured beside the snapshot instead of whenever the handler looked earlier;
+    the open-to-read gap is the accepted residual race (PR #505 review)."""
     _fill(tmp_path, "epoch", n=1)
     generation, chunks = store.export_room(tmp_path, "epoch")
     assert generation == store.room_generation(tmp_path, "epoch") == 1

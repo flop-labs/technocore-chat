@@ -830,8 +830,9 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
     Opened HERE, not when the first chunk is pulled, because two things must be settled
     while an error can still become a status code: a room that exists but cannot be read
     raises rather than impersonating the documented empty answer — only FileNotFoundError
-    IS that answer — and the generation is read against the fd just opened, so the epoch
-    describes the bytes the caller gets. The gap between those two syscalls is the residual
+    IS that answer — and the generation is read immediately after the open, from the seq
+    state (the fd itself carries no epoch), so the two are captured back to back instead
+    of a request lifetime apart. The gap between the open and that read is the residual
     race, accepted: closing it needs the seqstate and room locks held together, on a path
     that deliberately holds neither.
 
@@ -923,7 +924,8 @@ def room_generation(root: Path, room: str) -> int:
     name now carries a different one. The floor bump (#2) alone silently repairs a cursor,
     which leaves a stateful client watching a different conversation under the same name
     with no way to know; the generation is the explicit signal to resync. 0 = never
-    existed, or the conversation has ended (reaped, not yet recreated)."""
+    existed. A reaped room keeps its last generation — `_reap` preserves it in the seq
+    state on purpose — until the name is recreated, which bumps it."""
     entry = _read_seq_state(root).get(room)
     if entry:
         try:
