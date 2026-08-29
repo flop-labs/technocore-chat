@@ -51,12 +51,17 @@ The three traps these vectors exist to catch, all live in the tracker:
     rather than fatal, and what lands is `a` + three U+FFFD + `b`, category `So`, kept.
     Sweep the bytes that arrived; do not predict the sweep from the bytes you sent.
   - **Signature spelling.** 64 raw bytes is 86 unpadded base64url characters carrying 516
-    bits, so the final 4 bits are unconstrained and every signature has SIXTEEN valid
-    encodings (issue #177). `didkey.verify` accepts all of them: it pads with "==" and
-    decodes. Two clients signing the same message can therefore emit different `sig` strings
-    that both verify, which anything comparing signatures as strings must know. Issue #178
-    proposes requiring the canonical one; `CANONICAL_SIG_LAST_CHARS` pins the premise that
-    makes that a tightening rather than a break.
+    bits, so the final 4 bits carry no signature and SIXTEEN strings decode to the same 64
+    bytes (issue #177). Ed25519 cannot distinguish them — it never sees the encoding — which
+    is why #178 constrained the *pattern* instead: `SIG_PATTERN` now pins the last character
+    to `AQgw`, so exactly one of the sixteen is accepted and the other fifteen are refused on
+    the encoding before any crypto runs. Both halves are recorded here, because a client
+    author needs both: `sig_canonical` is the only string the server will take, and
+    `sig_same_bytes_spellings` is what makes the constraint necessary rather than arbitrary.
+    The trap this leaves is decoder-shaped — `Buffer.from(s, "base64url")` and
+    `base64.urlsafe_b64decode` both ignore the slack bits, so a client that decodes and
+    re-encodes a signature it received cannot tell it has produced a string the server will
+    now reject with a 403.
 
 One thing this file is NOT: a source of identities. The seeds are counting patterns, so the
 DIDs derived from them belong to every reader — `test_only` and `warning` say so inside the
@@ -89,7 +94,11 @@ MAX_TEXT_CHARS = 4096
 # 64 signature bytes spell as 86 unpadded base64url characters — 516 bits of alphabet for
 # 512 bits of data — so the last character's low 4 bits carry nothing, and only four of the
 # 64 alphabet characters have them clear. A zero-filling encoder always lands on one of
-# these; see `signature_cases`, which pins it, and issue #178, which proposes requiring it.
+# these; see `signature_cases`, which pins it. #178 made this the server's rule rather than
+# an observation about its encoder, so `didkey.SIG_PATTERN` now ends in exactly this set and
+# `test_this_repos_encoder_only_ever_emits_the_canonical_spelling` asserts the two agree —
+# the constraint is published in /openapi.json, so a second copy of it drifting is a bug
+# clients would find before this repo did.
 CANONICAL_SIG_LAST_CHARS = "AQgw"
 
 
@@ -286,9 +295,15 @@ def sig_variants(signature: str) -> list[str]:
     """Every base64url spelling of the same 64 bytes (issue #177).
 
     64 bytes is 21 full 3-byte groups plus one leftover byte, so the tail is 2 characters
-    holding 12 bits for 8 bits of data. The final character's low 4 bits are unused, and
-    `verify` pads with "==" and decodes without checking them — so sixteen distinct strings
-    denote one signature. Returned canonical-first.
+    holding 12 bits for 8 bits of data. The final character's low 4 bits carry no signature,
+    and every base64url decoder in circulation pads with "==" and ignores them — so sixteen
+    distinct strings denote one signature. Returned canonical-first.
+
+    This is a fact about base64, not about this server, which is why it is still generated
+    after #178 pinned `SIG_PATTERN` to the canonical spelling. The fifteen are now refused,
+    and the reason they had to be named explicitly is that the crypto cannot refuse them:
+    all sixteen decode to bytes that verify. Delete this and the constraint in `didkey` looks
+    arbitrary; keep it and the fifteen are a regression test for the refusal.
     """
     raw = base64.urlsafe_b64decode(signature + "==")
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
@@ -321,18 +336,33 @@ def signature_cases() -> list[dict]:
         signature = base64.urlsafe_b64encode(key.sign(payload.encode("utf-8")).signature)
         signature = signature.decode().rstrip("=")
         assert len(signature) == didkey.SIG_CHARS, len(signature)
-        # Issue #178 proposes narrowing `verify` to accept only the canonical spelling. That
-        # is a safe narrowing only if nothing already emits a non-canonical one, so pin the
-        # premise rather than asserting it in prose: the stdlib encoder zero-fills the unused
-        # trailing bits, and so does Node's `Buffer.toString("base64url")`.
+        # #178 narrowed `verify` to the canonical spelling. That was a safe narrowing only
+        # because nothing ever emitted a non-canonical one, so pin the premise rather than
+        # asserting it in prose: the stdlib encoder zero-fills the unused trailing bits, and
+        # so does Node's `Buffer.toString("base64url")`.
         assert signature[-1] in CANONICAL_SIG_LAST_CHARS, (
             f"{label}: encoder produced the non-canonical spelling {signature[-1]!r}, so "
-            f"#178 would be a compatibility break rather than a tightening"
+            f"#178 would have been a compatibility break rather than a tightening"
         )
         didkey.verify(did, signature, payload)  # the generator proves its own vector
         variants = sig_variants(signature)
-        for spelling in variants:
-            didkey.verify(did, spelling, payload)  # all sixteen really are accepted
+        # Both directions, because they are different claims and only one of them moved.
+        # The bytes are identical for all sixteen — that is base64, and it is why the pattern
+        # had to do the work the crypto cannot. What #178 changed is that fifteen of them are
+        # now refused, and a generator that only recorded the strings without exercising the
+        # refusal would let a later widening of SIG_PATTERN through in silence.
+        raw_bytes = base64.urlsafe_b64decode(signature + "==")
+        for spelling in variants[1:]:
+            assert base64.urlsafe_b64decode(spelling + "==") == raw_bytes
+            try:
+                didkey.verify(did, spelling, payload)
+            except didkey.DidError:
+                pass
+            else:  # pragma: no cover - only reachable if SIG_PATTERN is widened again
+                raise AssertionError(
+                    f"{label}: the non-canonical spelling {spelling[-1]!r} was accepted; "
+                    f"#178 pinned SIG_PATTERN to {CANONICAL_SIG_LAST_CHARS!r}"
+                )
         cases.append(
             {
                 "name": label,
@@ -345,7 +375,7 @@ def signature_cases() -> list[dict]:
                 "payload_display": display(payload),
                 "payload_utf8_hex": payload.encode("utf-8").hex(),
                 "sig_canonical": signature,
-                "sig_accepted_spellings": variants,
+                "sig_same_bytes_spellings": variants,
                 "note": "sign the SWEPT text. payload is <room>|<nonce>|<swept text>, UTF-8. "
                 "seq and ts are the server's and are not covered",
             }
@@ -469,8 +499,8 @@ def main() -> None:
         f"{sum(1 for c in built['sweep_cases'] if c['raises_empty'])} empty-after-sweep)\n"
         f"  {len(built['identities'])} identities  ·  "
         f"{len(built['did_invalid'])} rejected DID shapes\n"
-        f"  {len(built['signature_cases'])} signature cases × "
-        f"{len(built['signature_cases'][0]['sig_accepted_spellings'])} accepted spellings each"
+        f"  {len(built['signature_cases'])} signature cases × 1 accepted spelling + "
+        f"{len(built['signature_cases'][0]['sig_same_bytes_spellings']) - 1} refused"
     )
     if not verified:
         print("NOT WRITING: the sweep was never checked against store.clean_text.")

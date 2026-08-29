@@ -68,10 +68,12 @@ than either:
   own author. With it, a second language's crypto agrees, which is the claim your client is
   leaning on when it diffs itself against this file.
 
-It checks the canonical spelling, all sixteen accepted spellings through Node's base64url decoder
+It checks the canonical spelling, all sixteen same-bytes spellings through Node's base64url decoder
 rather than Python's, and the negative direction: that the **unswept** payload does *not* verify.
 Signatures are read from `payload_utf8_hex`, not from a JSON string field, so the check does not
-depend on how `JSON.parse` handles `U+FFFD`, NBSP, or a lone surrogate.
+depend on how `JSON.parse` handles `U+FFFD`, NBSP, or a lone surrogate. All sixteen passing is the
+correct result even after #178: it constrained the pattern, not the crypto — see the spelling
+section below for why that distinction is the load-bearing one.
 
 Carried over from [#314](https://github.com/flop-labs/technocore-chat/pull/314) — thanks to
 @Magicianhax, who offered it when that PR was closed in favour of this one.
@@ -131,19 +133,40 @@ delivers a real surrogate — the GET lane folds it here, and the POST lane's `o
 property of one pinned dependency at `src/app.py:1191`, not of JSON).
 
 **Signature spelling.** 64 raw bytes is 86 unpadded base64url characters — 516 bits of alphabet
-for 512 bits of signature — so the final character's low 4 bits are unconstrained. `verify` pads
-with `==` and decodes without checking them, so **every signature has sixteen valid encodings**
-and two conformant clients can emit different `sig` strings for the same message. All sixteen are
-recorded per case. Anything that compares, caches or deduplicates signatures as opaque strings
-has to decode them first.
+for 512 bits of signature — so the final character's low 4 bits carry no signature and **sixteen
+distinct strings decode to the same 64 bytes**. Ed25519 accepts all sixteen, because it never sees
+the encoding: it is handed the decoded bytes and they are identical. A rule about the string is
+therefore the only place a refusal can live, and
+[#178](https://github.com/flop-labs/technocore-chat/pull/178) put one there — `SIG_PATTERN` is now
+`[A-Za-z0-9_-]{85}[AQgw]`, so **exactly one spelling is accepted** and the other fifteen are
+refused with a 403 on the encoding, before verification runs.
 
-Sixteen are *accepted*; exactly one is ever *produced*. Both `base64.urlsafe_b64encode` and Node's
-`Buffer.toString("base64url")` zero-fill the unused bits, so a real signature's last character is
-always one of `AQgw` — measured across 400 signatures per encoder, zero exceptions.
-`canonical_sig_last_chars` records it and
-`test_this_repos_encoder_only_ever_emits_the_canonical_spelling` pins it, which is what makes
-[#178](https://github.com/flop-labs/technocore-chat/issues/178) — require the canonical spelling —
-a tightening rather than a compatibility break.
+All sixteen are still recorded per case, canonical first, under `sig_same_bytes_spellings`. They
+are the evidence for why the constraint is where it is, and the regression test for it: if a later
+change widens `SIG_PATTERN`, the fifteen stop being refused and
+`test_only_the_canonical_spelling_of_a_signature_is_accepted` fails here rather than turning into
+an interoperability question somewhere else.
+
+*Sixteen exist; exactly one was ever produced* — which is what made #178 a tightening rather than a
+break. Both `base64.urlsafe_b64encode` and Node's `Buffer.toString("base64url")` zero-fill the
+unused bits, so a real signature's last character was always one of `AQgw` — measured across 400
+signatures per encoder, zero exceptions. `canonical_sig_last_chars` records the set,
+`test_this_repos_encoder_only_ever_emits_the_canonical_spelling` pins it, and that test also
+asserts the recorded set and `didkey.SIG_PATTERN` still say the same thing, because the pattern is
+published in `/openapi.json` and two copies of one constraint drift.
+
+**The trap, if you are writing a client.** Emit whatever your base64url encoder gives you and none
+of this can reach you. It reaches you if you *re-encode*: every decoder in circulation ignores the
+unused bits, so a signature you decoded and re-encoded by hand verifies locally against your own
+crypto and is refused by the server, with a 403 that has nothing wrong in it. `verify.mjs`
+demonstrates exactly this — all sixteen pass Node's verifier, and fifteen of them the server will
+not take.
+
+> **If you consumed an earlier copy of this file:** the field was called `sig_accepted_spellings`
+> and fifteen of its entries are no longer accepted. It is renamed rather than corrected in place,
+> so a consumer looping over it gets a missing key — loud, and at the right line — instead of
+> fifteen signature failures that look like a crypto bug. The name now describes base64 rather than
+> server policy, which is the half that cannot move again.
 
 ## Two things about the file format
 

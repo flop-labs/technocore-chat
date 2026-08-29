@@ -86,7 +86,15 @@ for (const c of v.signature_cases) {
   // All sixteen spellings, from Node's decoder rather than Python's. `Buffer.from(s,
   // 'base64url')' ignores the unused trailing bits exactly as `base64.urlsafe_b64decode`
   // does, so a divergence here would mean the sixteen-spellings claim is Python-specific.
-  for (const spelling of c.sig_accepted_spellings) {
+  //
+  // These still pass, and they still SHOULD: #178 constrained `SIG_PATTERN`, not the crypto.
+  // Fifteen of the sixteen are now refused by the server on the encoding, and this loop is
+  // the evidence for why that refusal had to go in the pattern — Ed25519 verifies every one
+  // of them here, in a second runtime, so there is no verifier anywhere that could reject
+  // them. It also names the live trap for a JS client: if this loop is green, then decoding a
+  // received signature and re-encoding it by hand produces a string your own verifier accepts
+  // and the server answers 403 on. Send `Buffer.toString('base64url')` output unmodified.
+  for (const spelling of c.sig_same_bytes_spellings) {
     check(`${c.name} spelling ${spelling.slice(-1)}`, key, payload, spelling);
   }
   // The negative direction, which is the property clients care about: the signature is over

@@ -159,10 +159,19 @@ function checkPayload(impl, report) {
   }
 }
 
-/** Every one of the sixteen spellings of each signature must verify (issue #177). */
+/**
+ * Exactly one of the sixteen spellings is the one to send (issues #177, #178).
+ *
+ * The sixteen decode to identical bytes, so this cannot be checked with a verifier — Node's
+ * crypto says yes to all of them, which is the whole reason the server constrains the string
+ * instead. So the check here is on the *shape*: the canonical spelling must be the one whose
+ * unused trailing bits are clear, and the other fifteen must be the ones a client has to
+ * avoid emitting. `verify.mjs` covers the bytes; this covers the encoding.
+ */
 function checkSignatureSpellings() {
   let passed = 0;
   const failures = [];
+  const canonicalLast = new Set([...vectors.provenance.canonical_sig_last_chars]);
   for (const c of vectors.signature_cases) {
     const spki = Buffer.concat([
       Buffer.from("302a300506032b6570032100", "hex"), // Ed25519 SubjectPublicKeyInfo prefix
@@ -170,23 +179,46 @@ function checkSignatureSpellings() {
     ]);
     const key = createPublicKey({ key: spki, format: "der", type: "spki" });
     const msg = Buffer.from(c.payload_utf8_hex, "hex");
-    let ok = 0;
-    for (const s of c.sig_accepted_spellings) {
-      if (nodeVerify(null, msg, key, Buffer.from(s + "==", "base64url"))) ok++;
+    const spellings = c.sig_same_bytes_spellings;
+    const [canonical, ...others] = spellings;
+
+    const problems = [];
+    // The bytes are the same for all sixteen — assert that rather than assume it, because it
+    // is the premise that makes a string-level rule the only place the refusal can live.
+    const want = Buffer.from(canonical + "==", "base64url").toString("hex");
+    for (const s of spellings) {
+      if (Buffer.from(s + "==", "base64url").toString("hex") !== want) {
+        problems.push(`${s.slice(-1)} decodes to different bytes`);
+      }
     }
-    const n = c.sig_accepted_spellings.length;
-    if (ok === n) passed++;
-    else failures.push(`${c.name}: only ${ok}/${n} of the accepted spellings verified`);
+    if (!nodeVerify(null, msg, key, Buffer.from(canonical + "==", "base64url"))) {
+      problems.push("the canonical spelling does not verify");
+    }
+    if (canonical !== c.sig_canonical) problems.push("sig_canonical is not recorded first");
+    if (!canonicalLast.has(canonical.slice(-1))) {
+      problems.push(`canonical ends ${canonical.slice(-1)}, not in the canonical set`);
+    }
+    // Emit any of these and the server answers 403 on the encoding, before any crypto runs.
+    const wrong = others.filter((s) => canonicalLast.has(s.slice(-1)));
+    if (wrong.length) problems.push(`${wrong.length} of the fifteen end in the canonical set`);
+    if (others.length !== 15) problems.push(`${others.length} alternatives, expected 15`);
+
+    if (problems.length === 0) passed++;
+    else failures.push(`${c.name}: ${problems.join("; ")}`);
   }
   console.log(
-    `signature spellings: ${passed}/${vectors.signature_cases.length} cases had all ` +
-      `${vectors.signature_cases[0].sig_accepted_spellings.length} spellings verify`,
+    `signature spellings: ${passed}/${vectors.signature_cases.length} cases have one canonical ` +
+      `spelling and 15 refused alternatives`,
   );
   console.log(
     "  a signature is 64 bytes in 86 base64url characters — 516 bits for 512, so the last 4\n" +
-      "  bits are free and every signature has sixteen valid encodings. The server accepts all\n" +
-      "  of them, so two conformant clients can emit different `sig` strings for one message.\n" +
-      "  Anything that compares or caches signatures as strings has to decode them first.",
+      "  bits carry no signature and sixteen strings decode to the same bytes. Ed25519 accepts\n" +
+      "  all sixteen because it never sees the encoding, so the server constrains the string:\n" +
+      "  `sig` must end in one of `provenance.canonical_sig_last_chars` or it is refused with a\n" +
+      "  403 before verification. Emit whatever your base64url encoder produces and you are\n" +
+      "  fine — every zero-filling encoder lands on the canonical one. The trap is re-encoding:\n" +
+      "  decoders ignore the unused bits, so a signature you decoded and re-encoded by hand can\n" +
+      "  verify locally and still be refused.",
   );
   for (const f of failures) console.log(`  FAIL ${f}`);
   return failures.length > 0;
