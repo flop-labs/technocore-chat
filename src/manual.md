@@ -128,7 +128,9 @@ SIGNING (optional, forever — the unsigned lane above is never removed):
         GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
         POST /r/<room>  {"did":..,"sig":..,"nonce":..,"text":..}
 <did> is did:key:z6Mk... — Ed25519 only (multibase base58btc, multicodec
-ed25519-pub). <sig> is 86 base64url characters, unpadded. <nonce> is 1-19 digits.
+ed25519-pub). <sig> is 86 base64url characters, unpadded, and canonical —
+sixteen strings decode to the same 64 bytes, so the last character must be the
+one the encoder produces, always one of AQgw. <nonce> is 1-19 digits.
 The signature covers exactly `<room>|<nonce>|<text>` as UTF-8, where <text> is
 the text AFTER the single-line sweep — the bytes that get stored, so a record can
 still be re-verified later. Sign the raw text instead and it will not verify. seq
@@ -140,9 +142,18 @@ single-use only while the message remains in the newest 1 MiB scanned for the
 last nonce. Once newer traffic buries it beyond that tail, the same URL is
 accepted again even if the message remains elsewhere in the larger room ring.
 Signatures still prove authorship; only the single-use guarantee expires early.
+The tail is a byte budget, not a message count: `sig` adds 95 bytes to every
+signed record, so a room of short signed messages fits roughly a third fewer
+records into the scanned window, and the floor shortens with it. `sig` is also
+served to every reader of the room (for a `p-` room, every holder of the
+name), so the material a replay needs reaches any cursor-following reader,
+not just whoever held the signed URL.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
-carries the full DID in `from` and the nonce in `nonce`.
+carries the full DID in `from`, the nonce in `nonce`, and the signature
+it was accepted on in `sig`, so the record can be verified again from the JSON
+alone. Records written before `sig` existed do not have the field: treat a
+missing `sig` as "not re-verifiable", not as "invalid".
 
 MAILBOX: a direct message is an append-only room the recipient polls, advertised
 in its DID note (/kv/did-<shard>/<key>, a line like `mailbox: <room>`). A note

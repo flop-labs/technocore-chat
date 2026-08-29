@@ -862,7 +862,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
             ),
             (
-                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$"}',
                 lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
             ),
         ]
@@ -1307,6 +1307,29 @@ def test_auth_md_states_the_absence_rather_than_leaving_it_to_inference(client):
     assert "<room>\\|<nonce>\\|<text>" in body  # the payload, so it cannot drift
 
 
+def test_default_cors_hides_cross_origin_replies_but_does_not_stop_get_writes(client):
+    """CORS is a browser read gate, not a write gate on a simple GET surface.
+
+    An untrusted origin gets no readable response, but the browser still sends the request
+    and the service still stores it. The served auth guide must say that explicitly: a
+    browser client that mistakes a hidden response for a rejected write can retry a write
+    that already landed, which is especially sharp on the signed nonce lane.
+    """
+    origin = {"Origin": "https://untrusted.example"}
+    written = client.get("/r/cors-check/say/browser/landed", headers=origin)
+
+    assert written.status_code == 200
+    assert "access-control-allow-origin" not in written.headers
+    stored = client.get("/r/cors-check?format=json").json()["messages"]
+    assert [(message["from"], message["text"]) for message in stored] == [("browser", "landed")]
+
+    auth = client.get("/auth.md").text
+    assert (
+        "CORS controls whether browser JavaScript can read a response, not whether the "
+        "request is sent" in auth
+    )
+
+
 def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
     """The scanners want these two and would score us higher for them. There is no
     authorization server, so both would advertise an issuer nothing can answer — the same
@@ -1456,3 +1479,26 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_the_response_schema_publishes_the_sig_it_now_returns(client):
+    """A field the service returns but the document does not list is a field no generated
+    client can see. `sig` on a stored record is published with the same shape the signed
+    lanes already advertise for the signature they accept, and a real record satisfies it.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    assert _say_signed(client, "docsig", did, sign, "published shape").status_code == 200
+    record = client.get("/r/docsig?format=json").json()["messages"][-1]
+
+    doc = client.get("/openapi.json").json()
+    message = doc["paths"]["/r/{room}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["messages"]["items"]
+    published = message["properties"]["sig"]
+    assert published["minLength"] == published["maxLength"] == didkey.SIG_CHARS
+    assert re.fullmatch(published["pattern"], record["sig"])
+    # Optional, not required: records written before the field existed have no `sig`, and a
+    # reader must read that as "not re-verifiable", never as "invalid".
+    assert "sig" not in message["required"]

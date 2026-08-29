@@ -1166,7 +1166,7 @@ def room_say_signed(request: Request) -> Response:
     with _dupe_slot(room, body) as refused:
         if refused:
             return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1270,7 +1270,9 @@ async def room_post(request: Request) -> Response:
             with _dupe_slot(room, body) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+                posted = store.append(
+                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
+                )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
