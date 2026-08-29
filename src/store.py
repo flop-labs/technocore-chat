@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -770,13 +770,9 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     }
 
 
-def _seq_state_path(root: Path) -> Path:
-    return root / ".seqstate"
-
-
 def _read_seq_state(root: Path) -> dict:
     try:
-        return orjson.loads(_seq_state_path(root).read_bytes())
+        return orjson.loads((root / ".seqstate").read_bytes())
     except (OSError, orjson.JSONDecodeError):
         return {}
 
@@ -785,9 +781,25 @@ def _write_seq_state(root: Path, state: dict) -> None:
     # Atomic rewrite so concurrent readers never see a torn map. Best-effort: if the store
     # is read-only or the write fails, the floor/generation is a nice-to-have, not a gate.
     try:
-        _replace(_seq_state_path(root), orjson.dumps(state), fsync=config.FSYNC)
+        _replace(root / ".seqstate", orjson.dumps(state), fsync=config.FSYNC)
     except OSError:
         pass
+
+
+def _seq_state_int(root: Path, room: str, field: str) -> int:
+    try:
+        return int(_read_seq_state(root).get(room, {}).get(field, 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sweep_seq_state(root: Path, now: float) -> None:
+    """Retire timestamped state after the same grace period as an idle room."""
+    with suppress(OSError), _locked(root / ".seqstate"):
+        state = _read_seq_state(root)
+        kept = {k: v for k, v in state.items() if v.get("reaped_at", now) >= now - IDLE_SECONDS}
+        if len(kept) != len(state):
+            _write_seq_state(root, kept)
 
 
 def last_seq(root: Path, room: str) -> int:
@@ -805,13 +817,7 @@ def last_seq(root: Path, room: str) -> int:
     # reader's `since` stays below the new first_seq, so the new messages are not silently
     # invisible. Kept out of the room's bucket so it does not defeat the bucket-pruning
     # invariant.
-    entry = _read_seq_state(root).get(room)
-    if entry:
-        try:
-            return int(entry.get("floor", 0))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return _seq_state_int(root, room, "floor")
 
 
 def room_generation(root: Path, room: str) -> int:
@@ -822,13 +828,7 @@ def room_generation(root: Path, room: str) -> int:
     which leaves a stateful client watching a different conversation under the same name
     with no way to know; the generation is the explicit signal to resync. 0 = never
     existed, or the conversation has ended (reaped, not yet recreated)."""
-    entry = _read_seq_state(root).get(room)
-    if entry:
-        try:
-            return int(entry.get("gen", 0))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    return _seq_state_int(root, room, "gen")
 
 
 # Engagement tripwires (docs/research/moltbook-adoption-analysis.md §II.2.2) are computed from
@@ -1307,6 +1307,7 @@ def _reap(root: Path) -> None:
                                 state[room] = {
                                     "floor": hwm if hwm > 0 else 0,
                                     "gen": state.get(room, {}).get("gen", 0),
+                                    "reaped_at": now,
                                 }
                                 _write_seq_state(root, state)
                         p.unlink(missing_ok=True)
@@ -1328,6 +1329,7 @@ def _reap(root: Path) -> None:
     _reconcile_note_count(root)
     _sweep_orphan_locks(root, now)
     _drop_emptied_namespaces(root)
+    _sweep_seq_state(root, now)
     # Room buckets, once their locks have gone with the sweep above. Under the create gate for
     # the reason `_drop_emptied_namespaces` spells out: `_locked` makes a room's bucket one
     # mkdir before it opens the lock inside it, and removing the directory in that gap fails
