@@ -15,6 +15,7 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 import time
 import unicodedata
 from collections import OrderedDict
@@ -1030,38 +1031,76 @@ def list_rooms(root: Path) -> list[str]:
 
 # (top, nicks) per room, validated against the (mtime_ns, size) stat the overview walk
 # already does — so a walk re-reads only the rooms a write actually changed. LRU-bounded.
+#
+# room_stats is reached through a sync `def` route (`rooms` in app.py), which Starlette
+# runs in a threadpool — so concurrent /rooms callers can be in this function on different
+# OS threads at once. Every mutation of _window_memo (get + move_to_end + insert + the
+# eviction loop) is a compound sequence, not one atomic operation, so it is guarded by a
+# lock. The lock is released before the actual tail read (room_window), which is the
+# expensive part: two threads racing on the same cold key both pay that cost once each
+# (redundant, not wrong) rather than one blocking on the other's disk IO.
 _WINDOW_MEMO_MAX = 512
+_window_lock = threading.Lock()
 _window_memo: OrderedDict[tuple, tuple] = OrderedDict()
 
 
 def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]:
     key = (str(root), name)
-    hit = _window_memo.get(key)
-    if hit and hit[0] == stamp:
-        _window_memo.move_to_end(key)
-        return hit[1]
+    with _window_lock:
+        hit = _window_memo.get(key)
+        if hit and hit[0] == stamp:
+            _window_memo.move_to_end(key)
+            return hit[1]
     view = room_window(root, name)
-    _window_memo[key] = (stamp, view)
-    _window_memo.move_to_end(key)
-    while len(_window_memo) > _WINDOW_MEMO_MAX:
-        _window_memo.popitem(last=False)
+    with _window_lock:
+        _window_memo[key] = (stamp, view)
+        _window_memo.move_to_end(key)
+        while len(_window_memo) > _WINDOW_MEMO_MAX:
+            _window_memo.popitem(last=False)
     return view
 
 
 # Topic previews, valid while topics_written holds (bumped only by a `topic` note); reaper
 # deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py.
-_topics_memo: tuple = ((), 0.0, {})
+#
+# Keyed by stamp, LRU-bounded — not a single mutable slot. room_stats runs concurrently
+# across threads (see _window_memo above), and a single slot that gets unconditionally
+# replaced whenever a caller's stamp does not match the one currently sitting in it has a
+# real failure mode here, not just a missed optimization: two /rooms calls straddling one
+# `/kv/topic/<room>` write see different stamps, and because each call makes ~50 of these
+# lookups (one per shown room) rather than one, they do not just miss each other's cache
+# once — every remaining lookup in both loops re-triggers the reset, so the note reads this
+# cache exists to bound happen on every call instead of once. Keying by stamp lets the two
+# generations coexist instead of fighting over one slot; the bound keeps old generations
+# from accumulating if topics are written often.
+_TOPICS_MEMO_MAX = 4
+_topics_lock = threading.Lock()
+_topics_memo: OrderedDict[tuple, tuple[float, dict]] = OrderedDict()
 
 
 def _cached_topic(root: Path, room: str, stamp: tuple, now: float) -> str | None:
-    global _topics_memo
     ttl = config.NOTE_STATS_CACHE_SECONDS  # per call, so 0 disables an existing entry too
-    if ttl <= 0 or _topics_memo[0] != stamp or now >= _topics_memo[1]:
-        _topics_memo = (stamp, now + ttl, {})
-    cache = _topics_memo[2]
-    if room not in cache:
-        cache[room] = topic(root, room)
-    return cache[room]
+    if ttl <= 0:
+        return topic(root, room)
+    with _topics_lock:
+        entry = _topics_memo.get(stamp)
+        if entry is None or now >= entry[0]:
+            entry = (now + ttl, {})
+            _topics_memo[stamp] = entry
+        _topics_memo.move_to_end(stamp)
+        cache = entry[1]
+        if room in cache:
+            return cache[room]
+    value = topic(root, room)
+    with _topics_lock:
+        # Store only if this generation is still the one live under `stamp`: if it aged
+        # out or was evicted while topic() ran, the value returned above is still correct,
+        # it is just not memoized — a miss next time, never a wrong answer.
+        if _topics_memo.get(stamp) is entry:
+            cache[room] = value
+        while len(_topics_memo) > _TOPICS_MEMO_MAX:
+            _topics_memo.popitem(last=False)
+    return value
 
 
 def room_stats(root: Path, limit: int = 50) -> dict:

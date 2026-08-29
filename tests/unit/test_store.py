@@ -1128,6 +1128,51 @@ def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
         assert topics()["aaa"] is None  # visible once the clock (here: disabled) expires
 
 
+def test_cached_topic_survives_interleaved_generations_without_thrashing(tmp_path, monkeypatch):
+    """room_stats is reached through a sync `def` route that Starlette runs in a
+    threadpool, so two /rooms callers straddling one topic write are not a hypothetical:
+    they see different stamps and their per-room lookups can land on the cache in any
+    order relative to each other. Before this cache was keyed per stamp, it was a single
+    mutable slot any mismatched stamp reset unconditionally — so two interleaved
+    generations did not just miss each other's entries once, every remaining lookup in
+    both loops re-triggered a reset, and the note reads this cache exists to bound
+    happened on every call instead of once per (stamp, room).
+
+    This reproduces the interleaving directly (no real threads needed: the bug is in the
+    cache's logic, not in the GIL) and checks the discriminating property — a second,
+    identical pass over both generations must be served entirely from cache. Revert
+    _cached_topic to a single slot and this fails: the second pass re-reads everything,
+    because the two generations were still fighting over one slot.
+    """
+    import store
+
+    reads = []
+
+    def counted_topic(root, room):
+        reads.append(room)
+        return f"topic-for-{room}"
+
+    monkeypatch.setattr(store, "topic", counted_topic)
+    store._topics_memo.clear()
+
+    rooms = [f"room{i}" for i in range(5)]
+    stamp_a, stamp_b = ((1,), str(tmp_path)), ((2,), str(tmp_path))
+    now = 1_000_000.0
+
+    # Two /rooms loops, interleaved room-by-room — the order a threadpool executing both
+    # requests concurrently can produce.
+    for room in rooms:
+        store._cached_topic(tmp_path, room, stamp_a, now)
+        store._cached_topic(tmp_path, room, stamp_b, now)
+    assert len(reads) == len(rooms) * 2  # first pass: everything is a genuine miss
+
+    reads.clear()
+    for room in rooms:
+        store._cached_topic(tmp_path, room, stamp_a, now)
+        store._cached_topic(tmp_path, room, stamp_b, now)
+    assert reads == [], "a second identical pass over both generations must hit cache"
+
+
 def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path):
     """The stated boundary of `_last_nonce`'s bytes-level reject, not a wish.
 
