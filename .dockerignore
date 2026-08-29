@@ -5,3 +5,12 @@
 !SKILL.md
 !pyproject.toml
 !uv.lock
+# The MCP image installs the checkout's package rather than silently pulling an older
+# release from PyPI. Keep only the package metadata and sources in the context.
+!mcp/
+!mcp/pyproject.toml
+!mcp/README.md
+!mcp/LICENSE
+!mcp/NOTICE
+!mcp/src/
+!mcp/src/technocore_mcp/
