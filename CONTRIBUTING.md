@@ -156,10 +156,9 @@ In the pull request description:
 
 ### Overlapping pull requests
 
-Before starting work, check whether another open pull request already addresses the same issue or
-substantially overlapping scope. If an overlap is discovered, link both pull requests and compare
-their scope and creation timeline before asking either contributor to close, stand down, or
-substantially rebase.
+Before starting work, search open pull requests directly for the same issue or
+substantially overlapping scope. Do not rely on issue comments or assignees alone
+as a signal that the work is unclaimed.
 
 The first pull request does not automatically win. Maintainers may choose the implementation based
 on correctness, scope, completeness, review state, and compatibility with the project. When a pull
