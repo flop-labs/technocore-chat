@@ -151,9 +151,39 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
+        # A room is (re)created every time it appears from empty, and this bumps then. A
+        # stateful client can compare across polls to detect that the same name now carries
+        # a different conversation — an explicit resync signal a naive cursor cannot see
+        # (the seq floor from a reaped generation is preserved, so cursors do not starve).
+        # 0 means never existed, or reaped and not yet recreated.
+        "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Conversation epoch. Bumps each time the room is (re)created; 0 while it "
+                "has never existed or is between a reap and its next write. A change under "
+                "the same name means resync, not merely a new message."
+            ),
+        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
+        # Present only on write responses (`say`, `saySigned`, `postMessage`): the record
+        # this call appended, so a client learns its own `seq`/`ts` without diffing the
+        # `messages` array. Not required, because the read lanes that share this schema
+        # (`readRoom`, `discoverRooms`) never return it.
+        "posted": {
+            **_MESSAGE_SCHEMA,
+            "description": (
+                "The message just appended. Present on write responses only — the read "
+                "lanes that share this schema do not return it."
+            ),
+        },
     },
-    "required": ["room", "count", "last_seq", "messages"],
+    "required": ["room", "count", "last_seq", "generation", "messages"],
+    # Every field the server emits is declared above. Closed so a future addition here
+    # (a new counter, a new signal) has to land in the same change that ships the code
+    # returning it — the drift `generation` and `posted` sat under for a release, silent
+    # because the shared cache and schema-driven clients both accepted extra keys.
+    "additionalProperties": False,
 }
 
 
