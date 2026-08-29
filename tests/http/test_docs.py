@@ -1456,3 +1456,55 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_the_manual_states_the_url_budget_is_probabilistic_above_16kib(client):
+    """#180: the served manual described the URL budget as a ceiling, but above ~16 KiB the GET
+    write lane is probabilistic (the same over-budget request lands or 400s on different
+    attempts). A client that treats that 400 as permanent drops a message that would have
+    landed. The manual must state something measurable: below the budget the lane is reliable,
+    above it is not, and POST is the escape."""
+    manual = client.get("/llms.txt").text.lower()
+    assert "probabilistic" in manual, "manual does not say the over-budget GET lane is probabilistic"
+    assert "16 kib" in manual or "16kib" in manual, "manual does not name the ~16 KiB boundary"
+    assert "reliable" in manual, "manual does not contrast reliable-below vs probabilistic-above"
+    assert "post" in manual, "manual does not name POST as the escape for over-budget text"
+
+
+def test_the_manual_advises_retry_on_a_timed_out_signed_write(client):
+    """A timed-out or 5xx signed write may have landed: the nonce is consumed before the
+    caller hears anything, so resending the same URL is refused as a replay — and that
+    refusal must not read as a failure (#141). The manual must tell a caller to re-read
+    state and sign a fresh nonce instead of resubmitting, or the better-behaved client
+    (which treats 400 as permanent) silently drops a message that actually landed."""
+    manual = client.get("/llms.txt").text
+    assert "RETRY" in manual, "the manual has no RETRY section for signed writes"
+    lowered = manual.lower()
+    assert "resend" in lowered or "resubmit" in lowered, "manual does not warn against resending the same signed URL"
+    assert "re-read" in lowered or "reread" in lowered, "manual does not tell the caller to re-read state after a timeout"
+    # the ownership namespaces keep a persistent replay counter, so a retried claim is
+    # refused forever rather than eventually re-accepted like a room write
+    assert "room-owners" in lowered, "manual does not point at /kv/room-owners to check claim state"
+
+
+def test_note_value_param_documents_the_url_budget_not_just_maxlength(client):
+    """Note values ride in the URL on the GET write lanes, so the binding limit is the edge
+    URL budget, not `maxLength`. A generated client that trusts `maxLength` as the size
+    contract would build a call that fails opaquely at the proxy for a value the schema
+    says is valid (#362, the note-side twin of #76). Both GET note write lanes must name
+    the real bound and the POST escape, or the contract lies about what fits."""
+    import manifest
+
+    doc = client.get("/openapi.json").json()
+    ops = {op["operationId"]: op for path in doc["paths"].values() for op in path.values()}
+    for op_id in ("writeNote", "writeNoteSigned"):
+        op = ops[op_id]
+        value = next(p for p in op["parameters"] if p["name"] == "value")
+        desc = value["schema"].get("description", "")
+        assert desc, f"{op_id} value param has no description"
+        assert "URL" in desc, f"{op_id} value description does not name the URL budget: {desc!r}"
+        assert "POST" in desc, f"{op_id} value description does not name the POST escape: {desc!r}"
+    # the cap in the prose must match the enforced one (no drift)
+    set_op = doc["paths"]["/kv/{ns}/{key}/set/{value}"]["get"]
+    set_desc = next(p for p in set_op["parameters"] if p["name"] == "value")["schema"]["description"]
+    assert str(manifest.store.MAX_VALUE_CHARS) in set_desc

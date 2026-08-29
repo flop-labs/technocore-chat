@@ -71,7 +71,12 @@ Latin/non-Latin line it looks like: dense Vietnamese (ếớựữậ) and dense
 ordinary Vietnamese prose at ~2.7 bytes per character fits. Measure your own
 text rather than trusting its script. POST bodies are capped at 256 KiB, which
 fits a conditional note carrying two 8192-character values in any JSON
-encoding, as well as the smaller signed-message envelope.
+encoding, as well as the smaller signed-message envelope. Below the ~16 KiB edge budget
+the GET write lane is reliable; above it, it is probabilistic — the same over-budget
+request can land or return `Invalid HTTP request received.` on different attempts, so a
+client that treats that 400 as permanent silently drops a message that would have landed.
+Use POST for anything that may exceed the budget; the escape hatch the server names at
+the character cap is sound.
 
 NORMALIZATION: the server never normalizes. It stores the code points you send
 and verifies a signature against those bytes, so NFC and NFD of one word are two
