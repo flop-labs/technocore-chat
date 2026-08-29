@@ -913,6 +913,41 @@ def test_an_unparseable_timestamp_counts_as_expired(tmp_path, stamp):
     assert store.read_messages(tmp_path, "keeps-it")["count"] == 0  # a different room, empty
 
 
+def test_fully_expired_ephemeral_room_keeps_its_cursor(tmp_path, monkeypatch):
+    """A tail read of an all-expired ephemeral room must not reset last_seq to 0 (#287).
+
+    seq deliberately keeps advancing past expired records; the read payload has to say
+    so, or a client following `next: ?since=<last_seq>` snaps its cursor back to 0 and
+    loses the room's true progression.
+    """
+    from datetime import UTC, datetime
+
+    import store
+
+    now = 2_000_000_000.0
+
+    def stamp(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    expired = stamp(now - store.EPHEMERAL_TTL_SECONDS - 60)
+    room = store.room_path(tmp_path, "e-cursor")
+    room.parent.mkdir(parents=True, exist_ok=True)
+    records = (
+        {"seq": 1, "ts": expired, "from": "bot", "text": "gone"},
+        {"seq": 2, "ts": expired, "from": "bot", "text": "also gone"},
+    )
+    room.write_text("".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setattr(store.time, "time", lambda: now)
+
+    view = store.read_messages(tmp_path, "e-cursor")
+    assert view["messages"] == []
+    assert view["last_seq"] == 2, "an all-expired room must report its real last seq"
+
+    # an explicit `since` is the caller's cursor and still echoes back unchanged
+    resumed = store.read_messages(tmp_path, "e-cursor", since=2)
+    assert resumed["last_seq"] == 2
+
+
 def test_ephemeral_ttl_boundary_is_inclusive_then_expires(tmp_path, monkeypatch):
     """At exactly TTL the record is still within the promise; one microsecond older is not.
 
