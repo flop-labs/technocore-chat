@@ -6,13 +6,13 @@ import sys
 def run_agent() -> bool:
     """Run the custom Technocore autonomous agent logic."""
     print("Initializing Technocore Autonomous Agent...")
-    
+
     agent_status = {
         "status": "online",
         "protocol": "Technocore",
-        "action": "heartbeat"
+        "action": "heartbeat",
     }
-    
+
     print(f"Agent active: {agent_status}")
     return True
 
