@@ -1204,3 +1204,19 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_walk_skips_suffixed_directory_symlink(tmp_path):
+    import store
+
+    # Regression: a directory symlink named like a room file (e.g. fake.jsonl)
+    # passed is_dir(follow_symlinks=False) as false and was yielded as a room,
+    # 500-ing /rooms via open(). It must be skipped; real room files stay.
+    rooms = tmp_path / "rooms"
+    rooms.mkdir()
+    (tmp_path / "real_dir").mkdir()
+    (rooms / "fake.jsonl").symlink_to(tmp_path / "real_dir", target_is_directory=True)
+    (rooms / "real.jsonl").write_text("")
+    names = [e.name for e in store._walk(str(rooms), ".jsonl")]
+    assert "real.jsonl" in names
+    assert "fake.jsonl" not in names

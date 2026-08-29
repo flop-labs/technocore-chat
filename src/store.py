@@ -1488,7 +1488,7 @@ def _walk(d: Path | str, suffix: str) -> Iterator[os.DirEntry[str]]:
                 # keeps the reaper's unlink from resolving through one to a file outside root.
                 if e.is_dir(follow_symlinks=False):
                     yield from _walk(e.path, suffix)
-                elif e.name.endswith(suffix):
+                elif e.name.endswith(suffix) and e.is_file(follow_symlinks=False):
                     yield e
     except OSError:
         return  # missing or unreadable: nothing to walk, same as an empty glob
