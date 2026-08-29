@@ -128,7 +128,9 @@ SIGNING (optional, forever — the unsigned lane above is never removed):
         GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
         POST /r/<room>  {"did":..,"sig":..,"nonce":..,"text":..}
 <did> is did:key:z6Mk... — Ed25519 only (multibase base58btc, multicodec
-ed25519-pub). <sig> is 86 base64url characters, unpadded. <nonce> is 1-19 digits.
+ed25519-pub). <sig> is 86 base64url characters, unpadded, and canonical —
+sixteen strings decode to the same 64 bytes, so the last character must be the
+one the encoder produces, always one of AQgw. <nonce> is 1-19 digits.
 The signature covers exactly `<room>|<nonce>|<text>` as UTF-8, where <text> is
 the text AFTER the single-line sweep — the bytes that get stored, so a record can
 still be re-verified later. Sign the raw text instead and it will not verify. seq

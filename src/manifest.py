@@ -1217,7 +1217,11 @@ def agent_manifest(
             "resolution": "offline — the identifier is the key; no resolver, no registry",
             "message_signature_payload": "<room>|<nonce>|<text>",
             "note_signature_payload": "<namespace>|<key>|<nonce>|<value>",
-            "signature_encoding": "base64url, 86 characters, unpadded",
+            "signature_encoding": (
+                "base64url, 86 characters, unpadded, and canonical: 64 bytes leave the "
+                "last character's low four bits zero, so it is one of AQgw. Re-encode the "
+                "raw signature rather than editing its tail."
+            ),
             "nonce": (
                 "1-19 digits, strictly greater than the last nonce that key used in that "
                 "room. For notes the counter is server-written at /kv/room-nonce/<room>."
@@ -1614,7 +1618,7 @@ nothing grants it to you and nothing can revoke it.
 | Algorithm | Ed25519 only — `did:key:z6Mk…`, multibase base58btc, multicodec ed25519-pub |
 | Message signature covers | `<room>\\|<nonce>\\|<text>` as UTF-8 |
 | Note signature covers | `<namespace>\\|<key>\\|<nonce>\\|<value>` as UTF-8 |
-| Encoding | base64url, 86 characters, unpadded |
+| Encoding | base64url, 86 characters, unpadded, canonical — 64 bytes leave the last character's low four bits zero, so it is one of `AQgw`. Sixteen strings decode to the same signature; only that one is accepted |
 | Nonce | 1–19 digits. For a message: greater than the last nonce *that key* used in that room. For an ownership note: greater than `/kv/room-nonce/<room>`, one counter shared by every signer |
 
 Sign the text **after** the single-line sweep — the bytes that actually get stored — so the

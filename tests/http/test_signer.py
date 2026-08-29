@@ -16,6 +16,8 @@ from pathlib import Path
 
 import _client  # noqa: F401 (imported for the fixture alias below)
 
+import didkey
+
 client = _client.client  # the shared TestClient fixture
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,7 +67,9 @@ def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
     assert good.returncode == 0
     did, sig = good.stdout.splitlines()
     assert did.startswith("did:key:z6Mk")
-    assert re.fullmatch(r"[A-Za-z0-9_-]{86}", sig)
+    # The server's own pattern, not a copy of it: a stale copy here would pass a
+    # signature the signed lane refuses, which is the gap these tests exist to close.
+    assert re.fullmatch(didkey.SIG_PATTERN, sig)
 
 
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:

@@ -862,7 +862,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
             ),
             (
-                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$"}',
                 lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
             ),
         ]
