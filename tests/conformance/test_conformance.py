@@ -173,51 +173,74 @@ def test_canonical_payload_and_signature(case):
 
 
 @pytest.mark.parametrize("case", VECTORS["signature_cases"], ids=lambda c: c["name"])
-def test_every_recorded_spelling_of_a_signature_verifies(case):
-    """One signature, sixteen accepted encodings.
+def test_only_the_canonical_spelling_of_a_signature_is_accepted(case):
+    """One signature, sixteen strings, one of them accepted.
 
     64 raw bytes is 86 unpadded base64url characters — 516 bits of alphabet for 512 bits of
-    signature — so the final character's low 4 bits are unused, and `verify` pads with "=="
-    and decodes without checking them. Every spelling below is therefore a valid `sig` for
-    the same message, and two conformant clients can legitimately emit different ones.
+    signature — so the final character's low 4 bits carry no signature and sixteen distinct
+    strings decode to the same bytes. Ed25519 cannot tell them apart, because it never sees
+    the encoding: it is handed the decoded bytes and they are identical. So the refusal
+    cannot come from the crypto, and #178 put it in `SIG_PATTERN` instead, pinning the last
+    character to the four values whose low bits are zero.
 
-    Pinned because anything that treats a signature as an opaque string — deduplicating,
-    caching, or comparing one against another — is relying on an assumption this refutes.
-    Narrowing `verify` to one spelling would be a compatibility break, so it needs to be a
-    deliberate decision rather than something a later reader tightens by accident.
+    Both halves are asserted here because they are different claims and only one of them
+    moved. The bytes are still identical — that is base64, and it is *why* the pattern has to
+    do this work. What changed is that fifteen of the sixteen are now refused on the encoding
+    before any verification runs.
+
+    The direction worth a client author's attention is the second one. Every base64url
+    decoder in circulation ignores the slack bits, so a client that decodes a signature and
+    re-encodes it gets bytes that verify and a string the server refuses — a 403 with nothing
+    wrong in it. Emit what `base64.urlsafe_b64encode` or `Buffer.toString("base64url")`
+    produce and this cannot happen; hand-roll the encoder and it can.
     """
     payload = bytes.fromhex(case["payload_utf8_hex"]).decode("utf-8")
-    spellings = case["sig_accepted_spellings"]
+    spellings = case["sig_same_bytes_spellings"]
     assert len(spellings) == 16
     assert len(set(spellings)) == 16
     raw = {base64.urlsafe_b64decode(s + "==") for s in spellings}
     assert len(raw) == 1, "all sixteen must decode to the same 64 bytes"
-    for spelling in spellings:
-        didkey.verify(case["did"], spelling, payload)
+
+    canonical, others = spellings[0], spellings[1:]
+    assert canonical == case["sig_canonical"], "canonical must be recorded first"
+    didkey.verify(case["did"], canonical, payload)
+    for spelling in others:
+        with pytest.raises(didkey.DidError, match="signature encoding"):
+            didkey.verify(case["did"], spelling, payload)
 
 
 @pytest.mark.parametrize("case", VECTORS["signature_cases"], ids=lambda c: c["name"])
 def test_this_repos_encoder_only_ever_emits_the_canonical_spelling(case):
-    """Sixteen spellings are ACCEPTED; exactly one is ever PRODUCED.
+    """Sixteen spellings exist; exactly one is ever PRODUCED — which is why #178 was safe.
 
-    The distinction is what makes issue #178 — require the canonical spelling — a tightening
-    rather than a compatibility break, and it is worth an assertion because the two halves
-    pull in opposite directions and it would be easy to read the test above as saying all
-    sixteen are in circulation. They are not: the unused trailing bits are zero-filled by
-    `base64.urlsafe_b64encode` and by Node's `Buffer.toString("base64url")`, so both land on
-    a last character in `AQgw`.
+    This is the assertion that made the tightening in #178 a tightening rather than a
+    compatibility break, and it is the one to keep pointing at now that #178 has landed
+    (`SIG_PATTERN` = 85 free characters + `[AQgw]`, `src/didkey.py`). Narrowing an accepted
+    set is only safe if nothing in circulation was relying on the part removed, and the way to
+    know that is not to reason about it: the unused trailing bits are zero-filled by
+    `base64.urlsafe_b64encode` and by Node's `Buffer.toString("base64url")`, so every
+    signature either encoder has ever produced already ended in `AQgw`.
 
-    When #178 lands, `test_every_recorded_spelling_of_a_signature_verifies` inverts — the
-    canonical one is accepted and the other fifteen are refused on the encoding. The data
-    needed for that already exists: `sig_accepted_spellings[0]` is canonical by construction
-    and `[1:]` are the fifteen, so the flip is a change to the assertions and not a
-    regeneration.
+    Kept after the flip rather than folded into the test above, because it checks the opposite
+    direction. That test asserts the server refuses the fifteen; this one asserts nobody was
+    emitting them, and it is the second claim that answers "did anything break". If a future
+    change makes the encoder emit a non-canonical spelling, this fails here rather than as a
+    403 in a client that did everything right.
     """
     canonical = case["sig_canonical"]
     allowed = VECTORS["provenance"]["canonical_sig_last_chars"]
     assert canonical[-1] in allowed, f"{canonical[-1]!r} not in {allowed!r}"
-    assert case["sig_accepted_spellings"][0] == canonical, "canonical must be recorded first"
-    others = case["sig_accepted_spellings"][1:]
+    assert allowed == "".join(sorted(set(allowed))), "the canonical set is a sorted, unique set"
+    # The published pattern and the recorded set have to be the same statement. Two copies of
+    # a constraint drift, and this one is drifting in `/openapi.json` where clients read it.
+    # `test_vectors_are_not_stale` would also catch this by regenerating — but only on the
+    # Unicode version the file was built under, and it skips everywhere else. This does not,
+    # so a widened SIG_PATTERN is caught on 3.13 and 3.14 too.
+    assert didkey.SIG_RE.pattern.endswith(f"[{allowed}]"), (
+        f"vectors record {allowed!r} as canonical but SIG_PATTERN is {didkey.SIG_PATTERN!r}"
+    )
+    assert case["sig_same_bytes_spellings"][0] == canonical, "canonical must be recorded first"
+    others = case["sig_same_bytes_spellings"][1:]
     assert len(others) == 15
     assert canonical not in others
 
