@@ -1315,11 +1315,14 @@ def _condition(source: dict) -> tuple[str | None, bool]:
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
     the separate flag rather than a sentinel.
     """
-    flag = source.get("if_absent")
-    if flag is not None and str(flag).lower() not in ("", "0", "false"):
+    raw = source.get("if_absent")
+    # Two halves, both load-bearing. The identity tuple keeps every value that was
+    # already falsy here falsy — including JSON numeric zero, which compares equal to
+    # False and would otherwise stringify to "0.0" and read as truthy. The case-folded
+    # set then adds the spellings a serializer or a human actually emits (#282).
+    if raw not in (None, "", False, 0) and str(raw).lower() not in ("0", "false", "no", "off"):
         return None, True
-    expect = source.get("if")
-    return (str(expect) if expect is not None else None), False
+    return (str(x) if (x := source.get("if")) is not None else None), False
 
 
 def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:

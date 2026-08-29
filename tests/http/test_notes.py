@@ -131,9 +131,29 @@ def test_capitalized_falsy_if_absent_is_not_a_condition(client):
     # "False"/"FALSE" must read as falsy, not as "only if absent" (#282):
     # a capitalized spelling turned an unconditional replace into a spurious 409.
     assert client.get("/kv/coord/cap/set/a").status_code == 200
-    assert client.post("/kv/coord/cap", json={"value": "b", "if_absent": "False"}).status_code == 200
+    assert (
+        client.post("/kv/coord/cap", json={"value": "b", "if_absent": "False"}).status_code == 200
+    )
     assert client.get("/kv/coord/cap/set/c?if_absent=FALSE").status_code == 200
     assert "c" in client.get("/kv/coord/cap").text
+
+
+def test_if_absent_falsy_spellings_and_numeric_zero(client):
+    """#282 names no/off beside false, case-insensitively; numeric zero must stay falsy.
+
+    JSON booleans serialize as "False"/"FALSE" in several languages, and a numeric 0
+    compared equal to False before this changed — both have to keep meaning "no
+    condition", or an unconditional replace answers 409 the moment the note exists.
+    """
+    assert client.get("/kv/coord/spell/set/a").status_code == 200
+    for spelling in ("no", "NO", "off", "OFF", "false", "False", "FALSE", "0"):
+        r = client.get(f"/kv/coord/spell/set/x?if_absent={spelling}")
+        assert r.status_code == 200, f"{spelling!r} should not set a condition"
+    for zero in (0, 0.0, -0.0, False):
+        r = client.post("/kv/coord/spell", json={"value": "y", "if_absent": zero})
+        assert r.status_code == 200, f"{zero!r} should not set a condition"
+    # the truthy side still binds: a real condition on an existing note conflicts
+    assert client.get("/kv/coord/spell/set/z?if_absent=1").status_code == 409
 
 
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
