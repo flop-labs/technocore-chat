@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 import types
 from collections.abc import Callable
@@ -169,6 +170,14 @@ def fragment(annotation: Any) -> dict[str, Any]:
         for note in notes:
             if isinstance(note, str):
                 described["description"] = note
+            elif isinstance(note, re.Pattern):
+                # A regex note is a constraint the same as `Literal`'s enum: it is
+                # part of what the handler accepts, so it must reach the schema or
+                # `tools/list` and `tools/call` disagree about the call — exactly
+                # the drift this module is built to end. `Room`'s name regex is the
+                # example: advertised as a bare `string`, a client validates a bad
+                # name locally, sends it, and gets a `-32602` it could have caught.
+                described["pattern"] = note.pattern
         return described
     if origin is Union or origin is types.UnionType:
         arms = [arm for arm in get_args(annotation) if arm is not type(None)]
@@ -247,6 +256,14 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
         if "enum" in expected and value not in expected["enum"]:
             allowed = ", ".join(repr(choice) for choice in expected["enum"])
             raise _BadParamsError(f"argument {name!r} must be one of: {allowed}")
+        # Patterns only attach to `str`-typed annotations; `_CHECKS` has already refused a
+        # non-string by the time we reach here, so the guard also tells the type checker
+        # `value` is a `str` for the next call.
+        if "pattern" in expected and isinstance(value, str):
+            if not re.fullmatch(expected["pattern"], value):
+                raise _BadParamsError(
+                    f"argument {name!r} does not match the required pattern {expected['pattern']!r}"
+                )
         checked[name] = value
     return checked
 

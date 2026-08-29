@@ -261,12 +261,15 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
 
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     """The point of `Annotated` here: the sentence lives next to the parameter, and one
-    room description is shared by the four tools that take a room."""
+    room description is shared by the four tools that take a room. The room name regex is
+    now published as a `pattern`, not embedded in the prose (#488)."""
     server, _ = mcp
     tools = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
     schemas = {t["name"]: t["inputSchema"] for t in tools}
     for name in ("read_room", "wait_for_message", "say"):
-        assert schemas[name]["properties"]["room"]["description"].startswith("Room name, ^[a-z0-9]")
+        room_schema = schemas[name]["properties"]["room"]
+        assert room_schema["description"] == "Room name."
+        assert room_schema["pattern"] == r"^[a-z0-9][a-z0-9_-]{0,47}$"
     assert "4096" in schemas["say"]["properties"]["text"]["description"]
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
 
@@ -491,11 +494,14 @@ def test_malformed_tool_calls_name_the_shape_the_client_must_send(mcp):
         assert "object `arguments`" in reply["error"]["message"]
 
 
-def test_a_rejected_name_comes_back_as_the_services_own_explanation(mcp):
-    server, _ = mcp
+def test_a_rejected_name_is_a_caller_error_not_a_tool_error(mcp):
+    """A room name the service would refuse must be caught at `_validate` as a protocol
+    `-32602` (the caller's mistake), not surfaced as an `isError` tool result after a
+    network round-trip to a 400. The regex now rides in the advertised schema (#488)."""
+    server, protocol = mcp
     reply = call(server, "read_room", {"room": "Not A Room"})
-    assert reply["result"]["isError"] is True
-    assert "400" in text_of(reply)
+    assert reply["error"]["code"] == protocol.INVALID_PARAMS
+    assert "pattern" in reply["error"]["message"]
 
 
 def test_a_network_failure_becomes_an_actionable_tool_result(mcp, monkeypatch):
