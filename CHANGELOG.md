@@ -16,6 +16,16 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to
+  `32 * CHAT_MAX_ROOMS` (the derivation it replaces, so an instance that sets nothing does not
+  move) and floored at `4 * CHAT_MAX_ROOMS` so every room can still carry a topic and an
+  owner. **Deployer note:** a store whose notes fill before its rooms no longer has to raise
+  `CHAT_MAX_ROOMS` — which doubles the O(cap) room walks and halves the per-room byte floor —
+  to buy note headroom. The configured figure publishes at `/config` as `max_notes_total`, and
+  raising it raises the disk a deployment must provision, at up to 32 KiB per note.
+
 ## [0.10.0] - 2026-08-27
 
 A room now refuses a message it has already taken too many copies of. The flood this exists for
