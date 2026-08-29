@@ -355,7 +355,7 @@ def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(clie
     obeying it literally must all be heard. Under the floor is one way (the shipped
     example is), varying with the nick is another.
     """
-    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
+    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
     example = re.search(r"`GET (/r/lobby/say/yourname/\S+?)`", skill)
     assert example, "SKILL.md no longer prescribes a first action in the form this gate reads"
     with _filter_on():

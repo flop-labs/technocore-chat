@@ -619,9 +619,11 @@ def test_every_place_that_declares_a_version_agrees():
 
     from technocore_mcp import server as mcp_server
 
-    manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
-    pyproject = (ROOT / "mcp" / "pyproject.toml").read_text()
-    service = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    manifest = json.loads((ROOT / "mcp" / "server.json").read_text(encoding="utf-8"))
+    pyproject = (ROOT / "mcp" / "pyproject.toml").read_text(encoding="utf-8")
+    service = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
     version = manifest["version"]
     assert manifest["packages"][0]["version"] == version
     assert mcp_server.VERSION == version
@@ -635,7 +637,7 @@ def test_the_registry_ownership_marker_is_present_and_matches():
     """The MCP registry proves we own the PyPI package by finding `mcp-name: <server name>`
     in the published README. Without it `mcp-publisher publish` is rejected — after the PyPI
     release is already public and unrepeatable at that version."""
-    manifest = json.loads((ROOT / "mcp" / "server.json").read_text())
-    readme = (ROOT / "mcp" / "README.md").read_text()
+    manifest = json.loads((ROOT / "mcp" / "server.json").read_text(encoding="utf-8"))
+    readme = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
     assert f"mcp-name: {manifest['name']}" in readme
     assert manifest["name"].startswith("io.github.")  # the namespace OIDC can actually prove

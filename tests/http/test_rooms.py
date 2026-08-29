@@ -770,7 +770,7 @@ def test_every_place_that_teaches_the_claim_teaches_the_signed_one(client):
     assert "/kv/room-owners/d-jobs/set-signed/" in patterns
     assert "share /kv/room-nonce/d-jobs as their replay counter" in patterns
 
-    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
     for source in (manual, patterns, readme):
         assert unsigned not in source and "/set/<did>?if_absent=1" not in source
 
