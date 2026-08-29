@@ -1249,6 +1249,24 @@ def _drop_emptied_namespaces(root: Path) -> None:
             continue
 
 
+def _sweep_seq_state(root: Path, now: float) -> None:
+    """Drop floor/generation entries whose room has been gone longer than IDLE_SECONDS —
+    the same retention every other reaped resource gets. Without this, a lifetime count of
+    every room name this instance has ever reaped accumulates in one file forever, under one
+    service-wide lock (#489)."""
+    try:
+        with _locked(root / ".seqstate"):
+            state = _read_seq_state(root)
+            pruned = {
+                k: v for k, v in state.items()
+                if now - v.get("reaped_at", now) <= IDLE_SECONDS
+            }
+            if len(pruned) != len(state):
+                _write_seq_state(root, pruned)
+    except OSError:
+        pass
+
+
 def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
@@ -1307,6 +1325,7 @@ def _reap(root: Path) -> None:
                                 state[room] = {
                                     "floor": hwm if hwm > 0 else 0,
                                     "gen": state.get(room, {}).get("gen", 0),
+                                    "reaped_at": now,
                                 }
                                 _write_seq_state(root, state)
                         p.unlink(missing_ok=True)
@@ -1328,6 +1347,7 @@ def _reap(root: Path) -> None:
     _reconcile_note_count(root)
     _sweep_orphan_locks(root, now)
     _drop_emptied_namespaces(root)
+    _sweep_seq_state(root, now)
     # Room buckets, once their locks have gone with the sweep above. Under the create gate for
     # the reason `_drop_emptied_namespaces` spells out: `_locked` makes a room's bucket one
     # mkdir before it opens the lock inside it, and removing the directory in that gap fails
