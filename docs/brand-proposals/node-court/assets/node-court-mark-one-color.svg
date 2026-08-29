@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Technocore NODE COURT mark light</title>
+  <desc id="desc">A D4-symmetric modular Technocore mark.</desc>
+  <rect width="512" height="512" fill="#F5F7FA"/>
+  <defs><rect id="module" width="40" height="40" rx="8"/></defs>
+  <g transform="translate(60 60)">
+    <use href="#module" x="0" y="0" fill="#0A1128"/>
+    <use href="#module" x="44" y="0" fill="#0A1128"/>
+    <use href="#module" x="88" y="0" fill="#0A1128"/>
+    <use href="#module" x="132" y="0" fill="#0A1128"/>
+    <use href="#module" x="220" y="0" fill="#0A1128"/>
+    <use href="#module" x="264" y="0" fill="#0A1128"/>
+    <use href="#module" x="308" y="0" fill="#0A1128"/>
+    <use href="#module" x="352" y="0" fill="#0A1128"/>
+    <use href="#module" x="0" y="44" fill="#0A1128"/>
+    <use href="#module" x="352" y="44" fill="#0A1128"/>
+    <use href="#module" x="0" y="88" fill="#0A1128"/>
+    <use href="#module" x="176" y="88" fill="#0A1128"/>
+    <use href="#module" x="352" y="88" fill="#0A1128"/>
+    <use href="#module" x="0" y="132" fill="#0A1128"/>
+    <use href="#module" x="132" y="132" fill="#0A1128"/>
+    <use href="#module" x="220" y="132" fill="#0A1128"/>
+    <use href="#module" x="352" y="132" fill="#0A1128"/>
+    <use href="#module" x="88" y="176" fill="#0A1128"/>
+    <use href="#module" x="176" y="176" fill="#0A1128"/>
+    <use href="#module" x="264" y="176" fill="#0A1128"/>
+    <use href="#module" x="0" y="220" fill="#0A1128"/>
+    <use href="#module" x="132" y="220" fill="#0A1128"/>
+    <use href="#module" x="220" y="220" fill="#0A1128"/>
+    <use href="#module" x="352" y="220" fill="#0A1128"/>
+    <use href="#module" x="0" y="264" fill="#0A1128"/>
+    <use href="#module" x="176" y="264" fill="#0A1128"/>
+    <use href="#module" x="352" y="264" fill="#0A1128"/>
+    <use href="#module" x="0" y="308" fill="#0A1128"/>
+    <use href="#module" x="352" y="308" fill="#0A1128"/>
+    <use href="#module" x="0" y="352" fill="#0A1128"/>
+    <use href="#module" x="44" y="352" fill="#0A1128"/>
+    <use href="#module" x="88" y="352" fill="#0A1128"/>
+    <use href="#module" x="132" y="352" fill="#0A1128"/>
+    <use href="#module" x="220" y="352" fill="#0A1128"/>
+    <use href="#module" x="264" y="352" fill="#0A1128"/>
+    <use href="#module" x="308" y="352" fill="#0A1128"/>
+    <use href="#module" x="352" y="352" fill="#0A1128"/>
+  </g>
+</svg>

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 220" role="img" aria-labelledby="title desc">
+  <title id="title">Technocore NODE COURT horizontal dark</title>
+  <desc id="desc">Technocore wordmark with the NODE COURT symbol.</desc>
+  <rect width="1000" height="220" fill="#0A1128"/>
+  <defs><rect id="module" width="40" height="40" rx="8"/></defs>
+  <g transform="translate(72 71.5) scale(0.196429)">
+    <use href="#module" x="0" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="44" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="88" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="132" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="220" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="264" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="308" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="0" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="44" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="44" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="88" fill="#F5F7FA"/>
+    <use href="#module" x="176" y="88" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="88" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="132" fill="#F5F7FA"/>
+    <use href="#module" x="132" y="132" fill="#F5F7FA"/>
+    <use href="#module" x="220" y="132" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="132" fill="#F5F7FA"/>
+    <use href="#module" x="88" y="176" fill="#F5F7FA"/>
+    <use href="#module" x="176" y="176" fill="#00B4D8"/>
+    <use href="#module" x="264" y="176" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="220" fill="#F5F7FA"/>
+    <use href="#module" x="132" y="220" fill="#F5F7FA"/>
+    <use href="#module" x="220" y="220" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="220" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="264" fill="#F5F7FA"/>
+    <use href="#module" x="176" y="264" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="264" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="308" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="308" fill="#F5F7FA"/>
+    <use href="#module" x="0" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="44" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="88" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="132" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="220" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="264" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="308" y="352" fill="#F5F7FA"/>
+    <use href="#module" x="352" y="352" fill="#F5F7FA"/>
+  </g>
+  <text x="165" y="145" fill="#F5F7FA" font-family="'Space Mono', 'Ubuntu Sans Mono', monospace" font-size="96" font-weight="700" letter-spacing="-0.5">TECHNOCORE</text>
+</svg>

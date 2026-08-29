@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" role="img" aria-labelledby="title desc">
+  <title id="title">Technocore community contribution seal</title>
+  <desc id="desc">The Layered Court ceremonial seal for Technocore community contributions.</desc>
+  <rect width="600" height="600" fill="#F5F7FA"/>
+  <defs><rect id="module" width="40" height="40" rx="8"/></defs>
+  <g transform="translate(190 92) scale(0.561224)">
+    <use href="#module" x="0" y="0" fill="#0A1128"/>
+    <use href="#module" x="44" y="0" fill="#0A1128"/>
+    <use href="#module" x="88" y="0" fill="#0A1128"/>
+    <use href="#module" x="132" y="0" fill="#0A1128"/>
+    <use href="#module" x="220" y="0" fill="#0A1128"/>
+    <use href="#module" x="264" y="0" fill="#0A1128"/>
+    <use href="#module" x="308" y="0" fill="#0A1128"/>
+    <use href="#module" x="352" y="0" fill="#0A1128"/>
+    <use href="#module" x="0" y="44" fill="#0A1128"/>
+    <use href="#module" x="352" y="44" fill="#0A1128"/>
+    <use href="#module" x="0" y="88" fill="#0A1128"/>
+    <use href="#module" x="88" y="88" fill="#0A1128"/>
+    <use href="#module" x="132" y="88" fill="#0A1128"/>
+    <use href="#module" x="220" y="88" fill="#0A1128"/>
+    <use href="#module" x="264" y="88" fill="#0A1128"/>
+    <use href="#module" x="352" y="88" fill="#0A1128"/>
+    <use href="#module" x="0" y="132" fill="#0A1128"/>
+    <use href="#module" x="88" y="132" fill="#0A1128"/>
+    <use href="#module" x="264" y="132" fill="#0A1128"/>
+    <use href="#module" x="352" y="132" fill="#0A1128"/>
+    <use href="#module" x="176" y="176" fill="#00B4D8"/>
+    <use href="#module" x="0" y="220" fill="#0A1128"/>
+    <use href="#module" x="88" y="220" fill="#0A1128"/>
+    <use href="#module" x="264" y="220" fill="#0A1128"/>
+    <use href="#module" x="352" y="220" fill="#0A1128"/>
+    <use href="#module" x="0" y="264" fill="#0A1128"/>
+    <use href="#module" x="88" y="264" fill="#0A1128"/>
+    <use href="#module" x="132" y="264" fill="#0A1128"/>
+    <use href="#module" x="220" y="264" fill="#0A1128"/>
+    <use href="#module" x="264" y="264" fill="#0A1128"/>
+    <use href="#module" x="352" y="264" fill="#0A1128"/>
+    <use href="#module" x="0" y="308" fill="#0A1128"/>
+    <use href="#module" x="352" y="308" fill="#0A1128"/>
+    <use href="#module" x="0" y="352" fill="#0A1128"/>
+    <use href="#module" x="44" y="352" fill="#0A1128"/>
+    <use href="#module" x="88" y="352" fill="#0A1128"/>
+    <use href="#module" x="132" y="352" fill="#0A1128"/>
+    <use href="#module" x="220" y="352" fill="#0A1128"/>
+    <use href="#module" x="264" y="352" fill="#0A1128"/>
+    <use href="#module" x="308" y="352" fill="#0A1128"/>
+    <use href="#module" x="352" y="352" fill="#0A1128"/>
+  </g>
+  <text x="300" y="404" text-anchor="middle" fill="#0A1128" font-family="'Space Mono', 'Ubuntu Sans Mono', monospace" font-size="50" font-weight="700">TECHNOCORE</text>
+  <text x="300" y="452" text-anchor="middle" fill="#00B4D8" font-family="'Space Mono', 'Ubuntu Sans Mono', monospace" font-size="18" font-weight="700" letter-spacing="2">COMMUNITY CONTRIBUTION</text>
+</svg>
