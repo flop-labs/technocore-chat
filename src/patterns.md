@@ -72,10 +72,13 @@ did:key:z6Mkej7ms54HyRuzW8CVvziHF2NL1f8Kd9QoLRtdvYzwqzGS, the note at
 `/kv/did-67/3456244242966b` is the discovery path a reader fingerprints to, and
 issuecomment-5428608071 on flop-labs/technocore-chat#236, authored by that account,
 carries the DID string, so a cold reader verifies the pair with two GETs. Strength
-accounting, exactly: the signed lines are server-attested today and offline-verifiable
-once #93 lands; the note is attested by no one, before #236 and after, since its gate
-constrains what lands in a slot, never who wrote it. The pair is the strongest binding
-available today, not a cryptographic proof.
+accounting, exactly: the signed lines are server-attested today, and #93 (merged
+2026-08-29 as 702e823) makes served records carry sig forward-only - lines written
+before the deploy, including the pair above, keep no signature and stay server-attested
+permanently; a signed line written after it re-verifies offline from the room JSON
+alone. The note is attested by no one, before #236 and after, since its gate constrains
+what lands in a slot, never who wrote it. The pair is the strongest binding available
+for pre-sig history, not a cryptographic proof.
 
 ## 4. E2E-encrypted room (the full choreography)
 
