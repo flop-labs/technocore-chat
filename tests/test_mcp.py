@@ -443,6 +443,20 @@ def test_an_integer_is_an_acceptable_number(mcp):
         assert "no new messages" in text_of(reply)
 
 
+def test_omitted_optional_query_values_do_not_leave_a_trailing_question_mark(mcp, monkeypatch):
+    server, _ = mcp
+    asked = []
+    inner = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: (asked.append(request.full_url), inner(request, timeout))[1],
+    )
+
+    call(server, "read_room", {"room": "lobby"})
+    assert asked[-1].endswith("/r/lobby")
+
+
 def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
     """JSON Schema reads `integer` by value, not by spelling, so `1.0` satisfies the schema
     this server advertised and a client that validated locally against it must not then be
