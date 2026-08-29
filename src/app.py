@@ -17,6 +17,7 @@ import secrets
 import time
 import tomllib
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 
 import orjson
@@ -96,7 +97,6 @@ def _asset(name: str) -> str:
 
 
 HUMANS = _asset("humans.html")
-PATTERNS = _asset("patterns.md")
 # The published API version, read from the one file that already declares it. A version
 # in a manifest is a claim a machine reader acts on, so it is not worth a second copy that
 # can lag a release by exactly one commit.
@@ -108,6 +108,20 @@ SKILL = _asset("SKILL.md")
 # serves rather than by reading the file again: an installer checks the digest to know it
 # fetched the skill it was promised, so the only correct source is the served string.
 SKILL_DIGEST = "sha256:" + hashlib.sha256(SKILL.encode("utf-8")).hexdigest()
+
+# The static markdown documents, keyed by the path each is served at. A table rather than a
+# handler apiece, because that is all they ever were: bytes read once at import and returned
+# with the same headers. Adding one is an entry here — the routes are built from the keys.
+#
+# /skill.md is in here for its bytes and nowhere else for its meaning: it is the repo's
+# SKILL.md byte-for-byte, so "read <host>/skill.md and follow it" is a whole onboarding
+# instruction and the installable skill can never drift from the fetched one. That identity
+# is why SKILL is read separately above — SKILL_DIGEST must hash the string actually served.
+_DOCS = {
+    "/skill.md": SKILL,
+    "/patterns.md": _asset("patterns.md"),
+    "/interop.md": _asset("interop.md"),
+}
 
 BANNER = (
     "!! UNTRUSTED CONTENT — the lines below were written by other agents or by "
@@ -142,8 +156,11 @@ LISTING_BANNER = (
 # call time and passed into limit as parameters, exactly as per_min/burst already were.
 MAX_BUCKETS, CHARGED_CREATION = limit.MAX_BUCKETS, limit.CHARGED_CREATION
 MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP = limit.MAX_WAITERS_TOTAL, limit.MAX_WAITERS_PER_IP
-DEDUP_SECONDS = config.DEDUP_SECONDS
-MAX_RECENT_WRITES = limit.MAX_RECENT_WRITES
+DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES = (
+    config.DUPE_FILTER_SECONDS,
+    config.DUPE_MIN_LENGTH,
+    config.DUPE_MAX_COPIES,
+)
 FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
 _requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
 # _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
@@ -170,11 +187,13 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     left, wait = limit.take(
         request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
     )
-    # The /rooms cache is dropped here — the fast path, not the guarantee: it runs
-    # *before* the store write, so `_rooms_stamp` (which covers note writes too, via
-    # notes_written) is what closes the race against a concurrent walker.
-    if kind == "write":
-        _rooms_cache.clear()
+    # Deliberately no /rooms cache clear here. It was only ever the fast path — it runs
+    # *before* the store write, so `_rooms_stamp` is what closes the race against a
+    # concurrent walker — and every structural write it caught moves a counter that stamp
+    # reads anyway. What was left of it was invalidation on *message* writes, in this
+    # worker, which is the exact cost `messages` left the stamp to stop paying: a local
+    # clear on a worker taking its share of ~24 messages/second empties the cache as
+    # reliably as a stamp turning over 72 times per window did.
     return left, wait
 
 
@@ -325,11 +344,31 @@ def _markdown_wanted(request: Request) -> bool:
 
 
 def _document_text(request: Request, body: str, *, markdown: bool = False) -> Response:
-    """A public document: indexable, and carrying the RFC 8288 pointers to the rest."""
-    media = "text/markdown" if markdown and _markdown_wanted(request) else "text/plain"
-    response = text(body, index=True, media_type=media)
+    """A public document: indexable, edge-cacheable, and carrying the RFC 8288 pointers.
+
+    Two names because they are two questions: `markdown` is whether this *route* negotiates,
+    `md` whether this *response* came out as markdown. A negotiating route says `Vary:
+    Accept` however it answered, or a shared cache hands one caller's label to the next; /
+    and /llms.txt never negotiate, so Vary there would only fragment the busiest cache key.
+
+    Only the plain answer is marked cacheable, which is belt-and-braces on top of Vary —
+    Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where nobody
+    has, the edge can still only hold the default representation. A markdown caller then
+    gets the plain label on identical bytes; never the reverse, poisoning the common path.
+
+    Be clear about what that leaves, because `no-store` on the markdown answer does not
+    close it: where the rule ignores Vary, one plain request warms the edge and the next
+    `Accept: text/markdown` is served from it without ever reaching this function. The
+    residual is a wrong Content-Type on identical bytes for one window — negotiation here
+    relabels, it never reformats — and it is the deployment's to fix, in the cache key, not
+    the origin's. Named in the CHAT_STATIC_CACHE_SECONDS row of README's config table.
+    """
+    md = markdown and _markdown_wanted(request)
+    media = "text/markdown" if md else "text/plain"
+    vary = {"Vary": "Accept"} if markdown else None
+    response = text(body, index=True, media_type=media, extra_headers=vary)
     response.headers["Link"] = manifest.link_header(_base_url(request))
-    return response
+    return response if md else _static_cacheable(response)
 
 
 def who(name: str) -> str:
@@ -378,53 +417,64 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
     return text((body_text if body_text is not None else render(view)) + note)
 
 
-def _edge_cacheable(resp: Response) -> Response:
-    """Mark a world-readable read as briefly shareable by the CDN in front. Only /rooms
-    and plain room reads pass here — never a long-poll (one caller's cursor) or a reply
-    carrying a budget footer (one caller's pacing). The CDN still needs a rule marking
-    these paths cache-eligible."""
-    seconds = config.EDGE_CACHE_SECONDS
-    if seconds:
+def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
+    """Mark a world-readable read as shareable by the CDN in front, for `secs` (`swr` is
+    stale-while-revalidate, and defaults to the 5x the polled reads have always used).
+
+    The default window is the polled-read one: /rooms and plain room reads pass here, never
+    a long-poll (one caller's cursor) or a reply carrying a budget footer (one caller's
+    pacing). The documents come through _static_cacheable below — same header, longer
+    window. The CDN still needs a rule marking these paths cache-eligible.
+
+    `max-age=0` is the load-bearing half: every caller still revalidates, so nothing a
+    client observes changes, and only the shared cache may hold a copy.
+    """
+    secs = config.EDGE_CACHE_SECONDS if secs is None else secs
+    if secs:
         resp.headers["Cache-Control"] = (
-            f"public, max-age=0, s-maxage={seconds}, stale-while-revalidate={seconds * 5}"
+            f"public, max-age=0, s-maxage={secs}, stale-while-revalidate={swr or secs * 5}"
         )
     return resp
+
+
+def _static_cacheable(resp: Response) -> Response:
+    """A document: static per release, so the edge may hold it far longer than a room read.
+
+    `stale-while-revalidate` is a flat 60 rather than the 5x the polled reads use. 5x300 is
+    30 minutes of worst-case edge staleness, which is *past* the 15-minute autoupdate poll —
+    the manual could then outlive the deploy that changed it, which is the one thing this
+    window exists to prevent. 60 caps the total at 360s, comfortably under the poll.
+    """
+    return _edge_cacheable(resp, config.STATIC_CACHE_SECONDS, 60)
 
 
 # --------------------------------------------------------------------------- routes
 
 
-def index(request: Request) -> Response:
-    """The manual, always text/plain — see _markdown_wanted for why it does not negotiate."""
-    return _document_text(request, MANUAL)
-
-
 def llms_txt(request: Request) -> Response:
-    """The full API reference. Outside the rate limiter, because rate-limiting the page
-    that explains rate limiting is a deadlock. Plain text, not rendered markdown: the
-    transport is lossy and plain text survives it (design §0)."""
+    """The full API reference, served at both `/` and `/llms.txt`.
+
+    One handler for two paths because the two answers were always the same bytes: `/` is
+    where an agent lands and `/llms.txt` is where a harness looks, and a manual that
+    differed by which name you used would be a second document to keep in step.
+
+    Outside the rate limiter, because rate-limiting the page that explains rate limiting is
+    a deadlock. Always text/plain and never negotiated — see _markdown_wanted: the
+    transport is lossy and plain text survives it (design §0).
+    """
     return _document_text(request, MANUAL)
 
 
-def skill_md(request: Request) -> Response:
-    """The repo's SKILL.md, byte-for-byte, so "read <host>/skill.md and follow it" is a
-    whole onboarding instruction — and so the installable skill and the fetched one can
-    never drift apart. Shorter than the manual on purpose: it teaches the four operations
-    and the pitfalls, and points at /llms.txt for the full surface. Unlimited, same as the
-    manual.
+def doc_md(request: Request) -> Response:
+    """Every static markdown document, served from `_DOCS` by the path that matched.
 
-    Byte-for-byte matters twice now: /.well-known/agent-skills/index.json publishes a
-    digest of these bytes, and a skill whose digest does not match what it serves is a
-    skill an installer is right to refuse.
+    They live in their own files so the manual stays one clean fetch, and the manual points
+    at each: `/skill.md` is the onboarding skill, `/patterns.md` the worked choreographies,
+    `/interop.md` how to bridge this service to protocols it does not speak. Unlimited for
+    the same reason the manual is — documentation an agent may need while throttled, and a
+    bridge author reads /interop.md precisely when their bridge is being told to back off.
     """
-    return _document_text(request, SKILL, markdown=True)
-
-
-def patterns(request: Request) -> Response:
-    """Worked examples (E2E choreography, mailboxes, key passing) live in their own file
-    so the manual stays one clean fetch; the manual points here. Unlimited for the same
-    reason the manual is: documentation an agent may need while throttled."""
-    return _document_text(request, PATTERNS, markdown=True)
+    return _document_text(request, _DOCS[request.url.path], markdown=True)
 
 
 def auth_md(request: Request) -> Response:
@@ -444,13 +494,19 @@ def _base_url(request: Request) -> str:
     )
 
 
-def _document(doc: dict) -> Response:
+def _document(doc: dict, media_type: str = "application/json") -> Response:
     """JSON with a short cache. The other JSON on this service is no-store because it is
-    room content that changes per second; these two describe the *shape* of the service,
-    which changes per release, and registries and crawlers refetch them on a schedule."""
+    room content that changes per second; these describe the *shape* of the service — or,
+    for /config, the settings of the process serving it — which changes per release or per
+    deploy, and registries and crawlers refetch them on a schedule.
+
+    `media_type` is for the one document that is JSON under a more specific label
+    (`application/linkset+json`). Declared here rather than overwritten on the response
+    afterwards: two fewer lines, and one fewer place a response's content type is decided.
+    """
     return Response(
         json.dumps(doc, ensure_ascii=False, indent=1) + "\n",
-        media_type="application/json",
+        media_type=media_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
@@ -479,9 +535,7 @@ def agent_json(request: Request) -> Response:
 def api_catalog(request: Request) -> Response:
     """`/.well-known/api-catalog` — RFC 9727. One API, so one linkset entry, and every
     link in it is a path this origin actually answers."""
-    response = _document(manifest.api_catalog_document(_base_url(request)))
-    response.headers["Content-Type"] = "application/linkset+json"
-    return response
+    return _document(manifest.api_catalog_document(_base_url(request)), "application/linkset+json")
 
 
 def ai_catalog(request: Request) -> Response:
@@ -491,6 +545,22 @@ def ai_catalog(request: Request) -> Response:
     card, because it publishes neither. A catalog exists to resolve to real things.
     """
     return _document(manifest.ai_catalog_document(_base_url(request)))
+
+
+def config_json(request: Request) -> Response:
+    """`/config` — the CHAT_* knobs this process is running with, and the withheld ones.
+
+    The caps were already published (agent.json's limits block, the 429 body, the `wait`
+    bound in the spec); the rest of the deployment's observable behaviour was not — dedup,
+    wake latency, waiter slots, fsync, how stale a cached listing may be. A caller that
+    cannot read those adapts by experiment, which costs the service more requests than
+    answering does.
+
+    Unlimited and unauthenticated, like the manual and the spec: the built document holds
+    no credential and no host detail (manifest._WITHHELD is the enumerated reason for each
+    one it leaves out), and rate-limiting the description of the rate limit is a deadlock.
+    """
+    return _document(manifest.config_document(VERSION))
 
 
 def agent_skills(request: Request) -> Response:
@@ -586,23 +656,57 @@ _rooms_cache: OrderedDict[int, tuple[tuple, float, dict]] = OrderedDict()
 MAX_ROOMS_CACHE = 64
 
 
+# Spelt out rather than taken as store.COUNTER_KEYS: this tuple is the definition of what
+# /rooms is allowed to be stale about, so a counter added to the store later must be
+# considered here on purpose instead of silently joining a correctness-sensitive value.
+# `messages` is the one deliberately absent — see _rooms_stamp.
+ROOMS_STAMP_KEYS = ("rooms_created", "reaped_idle", "reaped_stillborn", "topics_written")
+
+
 def _rooms_stamp() -> tuple:
-    """A cheap value that changes whenever the room list does. One small file read against
-    a ~46k-file walk.
+    """A cheap value that changes whenever the room list changes *structurally*. One small
+    file read against a ~46k-file walk.
 
-    This is what makes the cache correct rather than merely quick. Clearing on write (see
-    `take`) is not enough on its own: the clear happens *before* the store write, so a
-    /rooms request that arrives while the writer is still in fsync, the reaper or the
-    create lock can walk the pre-write state and cache it — and nothing clears it again
-    afterwards. Validating against a stamp has no such ordering: store.append bumps these
-    counters *after* the record is on disk, so a stamp read before the walk can never be
-    newer than the data the walk sees. A stale entry is therefore always detected, whatever
-    order the two requests interleaved in.
+    This is what makes the cache correct rather than merely quick, and the ordering is the
+    whole argument: store.append, the create path and the reaper all bump these counters
+    *after* the record is on disk (or gone from it), so a stamp read before the walk can
+    never be newer than the data the walk sees. A stale entry is therefore always detected,
+    whatever order two concurrent requests interleaved in — a /rooms request that walks the
+    pre-write state while a writer is still in fsync, the reaper or the create lock caches
+    that view under the *old* stamp and the next request rejects it. Nothing has to
+    invalidate anything for that to hold, which is why it survives a second worker.
 
-    notes_written makes note and topic writes invalidate too, from any worker.
+    That argument holds for every key here, and `messages` is deliberately not one of them.
+    It is a single global lifetime counter, not per-room, so one message anywhere aged out
+    every listing: measured at ~24 messages/second against a 3s window, the stamp turned
+    over ~72 times per window, the hit rate was 0, and every /rooms request walked all
+    10,240 rooms — which made newfstatat the busiest syscall on the box by an order of
+    magnitude. What that precision bought was discarded immediately downstream anyway:
+    ROOMS_CACHE_SECONDS already declares 3s of staleness acceptable and the CDN serves the
+    result up to EDGE_CACHE_SECONDS stale on top of it.
+
+    So the split is structural-exact, recency-bounded. A room appearing (rooms_created),
+    a room disappearing (reaped_idle, reaped_stillborn) and a topic change (topics_written,
+    bumped only by a write to the one namespace this listing shows) are still reflected at
+    once, from any worker, and
+    so is `total`. Everything else the walk measures now lags by up to ROOMS_CACHE_SECONDS,
+    with the clock as its bound rather than the stamp: `idle_seconds`, `last_seq`, the
+    recency order, the engagement aggregates, and the byte figures — an append moves a
+    room's size as surely as its recency, and both come off the one stat. That is the right
+    split for an endpoint whose job is showing what is active rather than reporting a
+    message count, and CHAT_ROOMS_CACHE_SECONDS=0 remains the escape hatch for a caller
+    that needs a message reflected on the very next request.
+
+    The clock is also the backstop under a lying stamp. `_bump` is best effort by design —
+    an unwritable .counters must never fail a write that already landed — so a bump can go
+    missing, and a hit needs the stamp to match AND the entry to be inside the window. A
+    lost bump therefore costs at most one window, never a permanently stale listing.
     """
     counted = store.counters(config.ROOT)
-    return tuple(counted[key] for key in store.COUNTER_KEYS)
+    # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
+    # `limit` alone, so nothing else would stop a view walked under one root being served
+    # under another. Production never moves it; a test fixture and a reconfigured reload do.
+    return (config.ROOT, *(counted[key] for key in ROOMS_STAMP_KEYS))
 
 
 # One entry — the note gauge does not depend on `limit`. Stamped on ROOT and the on-disk
@@ -661,8 +765,14 @@ def _rooms_view(limit: int) -> dict:
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
     if config.ROOMS_CACHE_SECONDS > 0:
+        # pop-then-insert, not move_to_end: assigning an existing key leaves the entry
+        # where it already was, which may be the front, and a concurrent evictor's popitem
+        # takes it from there — turning the move_to_end that used to follow into a
+        # KeyError. Reachable now that entries outlive a write: a caller cycling ?limit=
+        # keeps the cache full, so the evictor runs while another request is re-walking,
+        # and /rooms is sync, so two of them overlap in Starlette's threadpool.
+        _rooms_cache.pop(limit, None)
         _rooms_cache[limit] = (stamp, now, view)
-        _rooms_cache.move_to_end(limit)
         while len(_rooms_cache) > MAX_ROOMS_CACHE:
             _rooms_cache.popitem(last=False)
     return view
@@ -739,7 +849,7 @@ def rooms(request: Request) -> Response:
 # where the knob now lives) is aliased so tests that probe it keep calling app._finite_env.
 _finite_env = config._finite_env
 MAX_WAIT = config.MAX_WAIT
-WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
+WAIT_POLL = config.WAIT_POLL  # CHAT_WAIT_POLL; the useful ?wait= floor is this value
 
 
 def _waiter_slot(ip: str):
@@ -794,6 +904,15 @@ async def _await_messages(
     fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
     two tail reads a second per waiter, bounded by MAX_WAITERS_TOTAL — cheaper in total
     than the busy-polling it replaces, which is the entire point.
+
+    It is also what makes ?wait= work under --workers N, which is not obvious and has been
+    read as a bug more than once. The poll re-reads the room *file*, so a write from any
+    worker is seen by a waiter parked on every other one; there is no per-worker event
+    registry to be isolated, and none is needed. What the process boundary costs is
+    latency, not delivery — one WAIT_POLL at worst — and CHAT_WAIT_POLL is the dial for it.
+    A cross-process wakeup bus would buy the rest of that interval for a background task, a
+    lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
+    reader consumes each byte, so N-1 workers miss it).
     """
     with _waiter_slot(client_ip(request)) as granted:
         if not granted:
@@ -948,42 +1067,60 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     return did
 
 
-def _retry_key(request: Request, room: str, nick: str, body: str) -> tuple:
-    """What makes two unsigned writes the same write. The text is digested rather than
-    kept, so the key is a fixed size whatever the caller sent.
+def _dupe_refusal(request: Request, room: str) -> Response:
+    """422 for a text this room has already taken inside the window.
 
-    The client is part of the key and has to be: behind a CDN that this deployment is not
-    configured to read a header from, every caller shares one address (see the
-    client_identity block in /stats), and a key without it would let one agent's "ok"
-    swallow another's. Including it can only ever make the key more specific.
+    Not 200 — a 200 on a write lane carries the record that landed, and there is no
+    record of the refuser's to return: their message did not land. Not 429 — this is not
+    a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
+    automate into an identical resend. Not 409 — that is the CAS answer and carries the
+    current value; there is no value to merge here. 422 says the request was
+    well-formed and understood, and names the two things that actually work.
+
+    The write gate above may have charged this caller a room-creation token on the way
+    here, and that budget is a *daily* one: settling it with no record hands it straight
+    back, because nothing was created. Every other exit from a write lane already does
+    this — a refusal must not be the one that quietly spends a day's allowance.
     """
-    digest = hashlib.blake2b(body.encode("utf-8"), digest_size=16).digest()
-    return (client_ip(request), room, nick, digest)
+    limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    return text(
+        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
+        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
+        "are refused until that window passes.\n"
+        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
+        "— short replies are never filtered. This is not a rate limit and not a retry "
+        "signal: the same bytes will be refused again, from any identity — the filter "
+        "counts copies, not senders.\n"
+        "the enforced window, threshold and length floor are published at /config under "
+        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        422,
+    )
 
 
-def _already_written(request: Request, key: tuple, room: str, left: int) -> Response | None:
-    """The reply an identical write got moments ago, or None to go ahead and write it.
+@contextmanager
+def _dupe_slot(room: str, body: str):
+    """Reserve one copy of `body` in `room`'s ring for the append that follows, yielding
+    True when the room has already taken enough copies and the caller must refuse.
 
-    Answering with the original record rather than an error is the whole point: a retry
-    means the caller never saw its 200, so a refusal would report failure for a write that
-    succeeded. It gets the seq its message actually has.
+    Knobs read HERE at call time so config.override() and monkeypatch.setattr(app, ...)
+    keep reaching the ring — the same contract take() already follows.
 
-    The record is recovered from the room view this reply carries anyway, so a hit costs
-    one read and skips the append entirely — no flock, no fsync, no reaper. If the seq has
-    already left the window (a busy room, or compaction), there is nothing to answer with
-    and the write goes ahead: a duplicate is the safe direction, not a dropped message.
+    A context manager rather than a bare call because the reservation has to be undone
+    when the append refuses the write: store.append validates the nick, the nonce and
+    the room's capacity, so DUPE_MAX_COPIES malformed requests would otherwise spend a
+    room's whole window on a text nothing ever stored. Returning (the refusal, or the
+    200 path) releases nothing; only an exception does.
     """
-    if DEDUP_SECONDS <= 0:
-        return None
-    seq = limit.recent_write(key, time.monotonic(), DEDUP_SECONDS)
-    if seq is None:
-        return None
-    view = store.read_messages(config.ROOT, room, limit=20)
-    posted = next((m for m in view["messages"] if m.get("seq") == seq), None)
-    if posted is None:
-        return None
-    config._dbg(3, "retry", room=room, seq=seq)
-    return respond(request, {**view, "posted": posted}, note=budget_note("write", left, RATE_WRITE))
+    now = time.monotonic()
+    refused = limit.dupe_refused(
+        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
+    )
+    try:
+        yield refused
+    except BaseException:
+        if not refused:
+            limit.dupe_release(room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH)
+        raise
 
 
 def room_say(request: Request) -> Response:
@@ -995,12 +1132,10 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    key = _retry_key(request, room, nick, body)
-    replay = _already_written(request, key, room, left)
-    if replay is not None:
-        return replay
-    rec = store.append(config.ROOT, room, nick, body)
-    limit.remember_write(key, rec["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES)
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, nick, body)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1028,7 +1163,10 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1124,16 +1262,17 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
-            key = _retry_key(request, room, nick, sent)
-            replay = _already_written(request, key, room, left)
-            if replay is not None:
-                return replay
-            posted = store.append(config.ROOT, room, nick, sent)
-            limit.remember_write(
-                key, posted["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES
-            )
+            with _dupe_slot(room, sent) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(config.ROOT, room, nick, sent)
         else:
-            posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+            with _dupe_slot(room, body) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(
+                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
+                )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
@@ -1459,21 +1598,25 @@ def robots(request: Request) -> Response:
 
     Generated per request rather than held as a constant because the Sitemap directive
     takes an absolute URL, which is only known once the origin is.
+
+    Edge-cacheable like the documents it points at, and the one path here a CDN treats as
+    cache-eligible without a rule — so this is the one that starts hitting on the header
+    alone. It does not negotiate, so no Vary.
     """
-    return text(manifest.robots_txt(_base_url(request)), index=True)
+    return _static_cacheable(text(manifest.robots_txt(_base_url(request)), index=True))
 
 
 def security_txt(request: Request) -> Response:
     """`/.well-known/security.txt` — RFC 9116, the place a researcher and an automated
     scanner both look before opening a public issue.
 
-    Indexed like the other documentation: the whole point is to be found, and it names a
-    reporting channel rather than anything a room wrote.
+    Indexed and edge-cacheable like the other documentation: the whole point is to be found,
+    and it names a reporting channel rather than anything a room wrote. Cached on the same
+    terms as /robots.txt — the asymmetry of caching one and not its sibling would read as an
+    oversight, and a scanner fetching both is exactly the traffic this is for.
     """
-    return text(
-        manifest.security_txt(_base_url(request), config.SECURITY_CONTACT),
-        index=True,
-    )
+    body = manifest.security_txt(_base_url(request), config.SECURITY_CONTACT)
+    return _static_cacheable(text(body, index=True))
 
 
 def healthz(request: Request) -> Response:
@@ -1671,31 +1814,52 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
 
 # The manual's prose lives in manual.md, beside the other served files and shipped the
 # same way (COPY src/ ./). Tokens stay unsubstituted there; only the numbers are code.
-MANUAL = _asset("manual.md")
+_MANUAL_TEMPLATE = _asset("manual.md")
+
 
 # Substituted rather than typed out, because this document is what agents are told is the
 # complete protocol — a number here that disagrees with the enforced constant is worse than
 # no number at all. Prose said "512 rooms, 4096 notes" for a full release after the caps
-# changed underneath it; nothing catches that but generating it.
-MANUAL = (
-    MANUAL.replace("__FREE_PATHS__", FREE_PATHS)
-    .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
-    .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
-    .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
-    .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
-    .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
-    .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
-    .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
-)
+# changed underneath it; nothing catches that but generating it. A function rather than a
+# module-level expression so a test can re-render it against a non-default CHAT_MAX_ROOMS,
+# which is the only way the floor's formatting is observable at all.
+def _render_manual() -> str:
+    return (
+        _MANUAL_TEMPLATE.replace("__FREE_PATHS__", FREE_PATHS)
+        .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
+        .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
+        .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
+        .replace("__ROOM_BYTES_TOTAL__", manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES))
+        .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
+        .replace("__ROOM_RING__", manifest.fmt_bytes(store.MAX_ROOM_BYTES))
+        .replace("__ROOM_FLOOR__", manifest.fmt_bytes(store.RESERVED_ROOM_BYTES))
+    )
+
+
+MANUAL = _render_manual()
+
+
+def _get_write(path: str, endpoint) -> Route:
+    """A GET-shaped mutation, without the HEAD that Starlette gives every GET route.
+
+    Route adds HEAD to any GET, including when methods=["GET"] is passed, so it is
+    dropped after init. `matches()` reads this set, so a HEAD misses the route before
+    the endpoint runs rather than running it and discarding the body; allowed_methods()
+    reads it too, so the 405 that lands says `Allow: GET`.
+    """
+    route = Route(path, endpoint)
+    route.methods = {"GET"}
+    return route
+
 
 app = Starlette(
     routes=[
-        Route("/", index),
-        Route("/llms.txt", llms_txt),
-        Route("/skill.md", skill_md),
-        Route("/patterns.md", patterns),
+        # Two paths, one handler — see llms_txt: the bytes were always the same.
+        *[Route(path, llms_txt) for path in ("/", "/llms.txt")],
+        *[Route(path, doc_md) for path in _DOCS],
         Route("/auth.md", auth_md),
         Route("/openapi.json", openapi),
+        Route("/config", config_json),
         Route("/sitemap.xml", sitemap),
         Route("/.well-known/agent.json", agent_json),
         Route("/.well-known/api-catalog", api_catalog),
@@ -1709,13 +1873,13 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
-        Route("/r/{room}/say/{nick}/{text:path}", room_say),
-        Route("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
+        _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
+        _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
-        Route("/kv/{ns}/{key}/set/{value:path}", note_write),
-        Route("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
+        _get_write("/kv/{ns}/{key}/set/{value:path}", note_write),
+        _get_write("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value:path}", note_write_signed),
     ],
     middleware=[
         Middleware(HeaderLimits),

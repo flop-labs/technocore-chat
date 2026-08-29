@@ -37,7 +37,7 @@ def mcp(tmp_path, monkeypatch):
     app_module._rooms_cache.clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
-    with config.override(ROOT=tmp_path):
+    with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
         from technocore_mcp import protocol
         from technocore_mcp import server as mcp_server
 

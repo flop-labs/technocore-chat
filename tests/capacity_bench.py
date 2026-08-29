@@ -58,8 +58,9 @@ the cost that change removed rather than a cost anyone still pays:
   http (every figure here is measured through `curl`, so ~6 ms of process spawn is the
   floor — the /healthz rows below measure that floor as much as anything):
     GET /rooms cold                     ~171 ms
-    GET /rooms cached                     ~7 ms   i.e. at the floor. ROOMS_CACHE_SECONDS,
-                                                  and writes invalidate it immediately
+    GET /rooms cached                     ~7 ms   i.e. at the floor. ROOMS_CACHE_SECONDS.
+                                                  A message no longer ends the window; a
+                                                  create, reap or topic still does
     event loop unserved during one write:
       GET  /r/<room>/say/...             ~25 ms   sync endpoint: Starlette threadpools it
       POST /r/<room>                     ~11 ms   was ~385 ms before it was threadpooled
@@ -100,6 +101,39 @@ own room and ignores --scale, so these do not move with the caps:
     parse every    26% _parse · 23% the scan loop · 21% orjson.loads · 11% dict.get
     bytes reject   63% the scan loop · 17% reverse_lines · 14% bytes.split · 3% read
   The parse leaves the profile; what remains is reading the window.
+
+Measured 2026-08-25 for the /rooms stamp change, same container (tmpfs), 10,240 rooms, at
+production's mix — 24 messages/second and 2.85 /rooms/second — over a 20s window, before and
+after in one session so host drift cancels. `newfstatat` is counted with `strace -f -c` on
+the worker (no bpftrace in this container; it counts the same syscall), and a "walk" is a
+/rooms response over 50 ms, which an uncached one is by an order of magnitude:
+
+                                     before     after
+    /rooms requests served               58        58
+    of those, walks                      50         6    one per ROOMS_CACHE_SECONDS
+                                                         rather than one per request
+    median /rooms latency           52.6 ms    2.5 ms
+    newfstatat per /rooms request    12,389     1,807    under strace, which serves fewer
+                                                         requests but stats the same per walk
+
+  The after figures are set by the clock and not by the traffic: the walk rate is capped at
+  1/ROOMS_CACHE_SECONDS whatever the request rate, so the ratio keeps falling the harder
+  /rooms is polled, and what is left of it is the write path (~58 stats per append) rather
+  than the walk. Before, `messages` was in the cache stamp — at 24 messages/second it turned
+  over ~72 times per 3s window, so the cache was correct, never hit, and every request walked
+  every room.
+
+  `rooms_cache_bench` below is the same measurement without a server: it counts the walk at
+  the call rather than inferring it from a syscall total or a latency, and runs both stamps
+  back to back in one process. Same container, 10,240 rooms, the same mix over 10s:
+
+    messages in the stamp    29 walks / 29 requests   1.00   62.4 ms mean  58.66 ms median
+    structural stamp only     4 walks / 29 requests   0.14    8.7 ms mean   0.21 ms median
+
+  Four walks in ten seconds is ceil(10 / ROOMS_CACHE_SECONDS) — the clock, exactly. The
+  median is the answer to "what does a /rooms request cost now": 0.21 ms, one counter read,
+  because 25 of the 29 hit. The mean is those four walks amortised over all of them. The
+  walk count is stable run to run; the milliseconds move ~10% with the host, as above.
 
 The two numbers worth watching are the last pair. A sync handler costs the loop nothing
 because Starlette runs it in a threadpool; an `async def` handler that calls blocking store
@@ -166,13 +200,13 @@ def store_bench(root: Path) -> None:
 
     def room_gate() -> None:
         try:
-            store._check_room_capacity(fresh_room)
+            store._check_room_capacity(root, fresh_room)
         except store.StoreError:
             pass  # at the cap the refusal is the answer; the walk is what we are timing
 
     def note_gate() -> None:
         try:
-            store._check_note_capacity(root, fresh_note)
+            store._check_note_capacity(root, root / "notes" / "ns0", fresh_note)
         except store.StoreError:
             pass
 
@@ -190,7 +224,7 @@ def store_bench(root: Path) -> None:
     bench("glob  rooms/*.jsonl", lambda: _drain(root.glob("rooms/*.jsonl")))
     bench("_walk rooms .jsonl", lambda: _drain(store._walk(root / "rooms", ".jsonl")))
     bench("glob  notes/*/*.txt", lambda: _drain(root.glob("notes/*/*.txt")))
-    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt", True)))
+    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt")))
     bench("_scan notes .txt (count only)", lambda: _scan_notes(root))
 
 
@@ -275,6 +309,90 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
+    """Walks per /rooms request under write load, with and without `messages` in the cache
+    stamp. Both halves run back to back in one process against one store, so host drift
+    cancels — the same shape as the 0.9.1/0.9.2 comparison above.
+
+    The axis is the write rate, which is why no other bench here finds this: `room_stats`
+    costs the same either way, and what changed is how often /rooms has to call it. A walk
+    is counted at the call, not inferred from a latency, so the figure is exact.
+
+    It drives `app._rooms_view` rather than the route, so it measures the stamp alone. The
+    `_rooms_cache.clear()` that used to run on every write in `take` cost the same thing
+    per worker, and is gone for the same reason; a server-level run (`--port`) is what shows
+    the two together.
+    """
+    import app
+    import config
+
+    # technocore.chat under live load. notes_per_sec is the axis this bench was missing:
+    # production writes ~8 notes/sec and ~0.05 of them are topics, so a stamp that keys on
+    # notes_written turns over ~24x per 3s window even with `messages` already out of it.
+    messages_per_sec, rooms_per_sec, notes_per_sec = 24.0, 2.85, 8.0
+    pool = min(512, _drain((root / "rooms").glob("r*.jsonl"))) or 1
+
+    def run(label: str, keys: tuple) -> None:
+        walks, latencies, sent, served, noted = 0, [], 0, 0, 0
+        last: dict | None = None
+        app._rooms_cache.clear()
+        app.ROOMS_STAMP_KEYS = keys
+        start = time.monotonic()
+        while (now := time.monotonic() - start) < seconds:
+            if sent / messages_per_sec <= now:
+                store.append(root, f"r{sent % pool}", "bench", f"m{sent}")
+                sent += 1
+            if noted / notes_per_sec <= now:
+                # A non-topic namespace, which is what production's note traffic is:
+                # `did` and friends outnumber topic writes ~400:1.
+                store.note_set(root, "did", f"k{noted % 4096:04x}", f"v{noted}")
+                noted += 1
+            if served / rooms_per_sec <= now:
+                at = time.perf_counter()
+                view = app._rooms_view(50)
+                latencies.append((time.perf_counter() - at) * 1000)
+                # Identity, not a wrapper around room_stats: a walk builds a fresh dict and
+                # a hit returns the cached one, so this counts walks without patching the
+                # store out from under the thing being measured.
+                walks += view is not last
+                last, served = view, served + 1
+            time.sleep(0.001)
+        # Median as well as mean: with the cache working most requests are hits, so the
+        # median IS the hit — one counter read — and the mean is the few walks amortised.
+        mid = statistics.median(latencies) if latencies else 0.0
+        mean = sum(latencies) / len(latencies) if latencies else 0.0
+        print(
+            f"  {label:<30} {walks:3d} walks / {served:3d} requests   "
+            f"{walks / max(served, 1):.2f} per request   {mean:5.1f} ms mean, "
+            f"{mid:5.2f} ms median"
+        )
+
+    print(
+        f"\n/rooms cache — {seconds:.0f}s at {messages_per_sec:g} messages/s into {pool} rooms "
+        f"and {rooms_per_sec:g} /rooms/s, ROOMS_CACHE_SECONDS={config.ROOMS_CACHE_SECONDS:g}"
+    )
+    stamped = app.ROOMS_STAMP_KEYS
+    # The periodic passes are throttled off these two markers. A reap inside one append
+    # would land its 630 ms and its counter bump in one half of a six-second window.
+    (root / ".reaped").touch()
+    (root / store.SNAPSHOTS_FILE).touch()
+    try:
+        # config.ROOT is bound at import, and this script imports store (hence config) long
+        # before it knows where the store is. Without this both halves walk /data.
+        with config.override(ROOT=root):
+            structural = ("rooms_created", "reaped_idle", "reaped_stillborn")
+            run("0.9.3: messages + notes", ("messages", *structural, "notes_written"))
+            run("0.9.4: notes_written", (*structural, "notes_written"))
+            run("proposed: topics_written", (*structural, "topics_written"))
+    finally:
+        app.ROOMS_STAMP_KEYS = stamped
+    print(
+        "  the second row is set by the clock, not the traffic: one walk per "
+        "ROOMS_CACHE_SECONDS\n  however hard /rooms is polled, so it falls further the "
+        "busier the service gets"
+    )
+
+
 def _drain(iterator) -> int:
     return sum(1 for _ in iterator)
 
@@ -301,7 +419,9 @@ def http_bench(port: int, room: str) -> None:
     # this should time regardless: the reap runs inside append either way, and appending is
     # what the service spends its life doing.
     subprocess.run(["curl", "-s", "-o", "/dev/null", f"{base}/r/{room}/say/b/hi"], check=False)
-    print(f"  {'GET /rooms cold (after a write)':<38} {_get(base + '/rooms'):7.1f} ms")
+    # Cold because nothing has asked yet, not because of the write above: a message does not
+    # end the cache window any more (see app._rooms_stamp). Run this against a fresh server.
+    print(f"  {'GET /rooms cold':<38} {_get(base + '/rooms'):7.1f} ms")
     cached = min(_get(base + "/rooms") for _ in range(3))
     print(f"  {'GET /rooms cached':<38} {cached:7.1f} ms")
 
@@ -346,6 +466,9 @@ def main() -> None:
     parser.add_argument(
         "--records", type=int, default=8255, help="records in the room the nonce scan reads"
     )
+    parser.add_argument(
+        "--seconds", type=float, default=6.0, help="window each /rooms cache half is driven for"
+    )
     parser.add_argument("--port", type=int, help="also measure a server already on this port")
     parser.add_argument("--room", default="r0", help="an EXISTING room for --port to write to")
     args = parser.parse_args()
@@ -359,6 +482,7 @@ def main() -> None:
         if not (root / "rooms").exists():
             build(root, args.scale)
         store_bench(root)
+        rooms_cache_bench(root, args.seconds)
         nonce_bench(root, args.records)
         if args.port:
             http_bench(args.port, args.room)

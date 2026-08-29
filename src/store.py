@@ -11,8 +11,10 @@ Design constraints (see docs/design.md):
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
+import tempfile
 import time
 import unicodedata
 from collections import OrderedDict
@@ -115,17 +117,22 @@ USAGE_FILE = ".usage"
 # deletes (there is no delete route — the manual says so), so between reaps the note count
 # only grows, and the single grower is the create path that writes this file. `_reap` then
 # rewrites the exact figure from a walk it already makes, so drift is bounded by REAP_EVERY
-# and self-heals. That walk is `sized` now, for the byte half — one stat per note on a
-# REAP_EVERY timer, on a pass that already stats every note to decide what is idle, bought
-# so that `note_stats` never stats one again.
+# and self-heals. That rewrite takes `.notes-create` too — being the only deleter makes the
+# walk exact against *deletions* and nothing else; a create counted but not yet written is
+# invisible to it, so the creates have to be held still for the figure to be true.
+#
+# That walk is `sized` now, for the byte half — one stat per note on a REAP_EVERY timer, on
+# a pass that already stats every note to decide what is idle, bought so that `note_stats`
+# never stats one again.
 #
 # Fail-closed three ways. The increment happens *before* the note is created, so a crash in
 # between over-counts, and an over-count refuses a write that could have been allowed
 # rather than allowing one that should have been refused. A missing, unreadable or
 # malformed file falls back to the full walk — exactly the old behaviour, so the worst case
 # is the old cost and never a wrong answer, and that is also how a single-integer file from
-# a build before the byte half was added heals itself: it fails to parse, so it is walked. And it is read under `.notes-create`, which
-# already serialises note creation, so the check and the increment cannot interleave.
+# a build before the byte half was added heals itself: it fails to parse, so it is walked.
+# And it is read under `.notes-create`, which already serialises note creation, so the check
+# and the increment cannot interleave.
 #
 # What it does not survive: an unclean shutdown under CHAT_FSYNC=0 can lose the last write,
 # leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
@@ -199,7 +206,14 @@ EVENTS_NICK = "server"
 # files. Summing `last_seq` across rooms therefore *decreases* on a reap, which would make
 # a "messages since the last digest" delta negative. These four only ever go up.
 COUNTERS_FILE = ".counters"
-COUNTER_KEYS = ("messages", "rooms_created", "reaped_idle", "reaped_stillborn", "notes_written")
+COUNTER_KEYS = (
+    "messages",
+    "rooms_created",
+    "reaped_idle",
+    "reaped_stillborn",
+    "notes_written",
+    "topics_written",
+)
 # Periodic aggregate samples, so growth over a window is answerable at all: the counters
 # above say what the totals are *now*, and nothing but a stored history says what they were
 # a day ago. Kept here rather than in the reader because the service is the only thing that
@@ -409,12 +423,154 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
 # --------------------------------------------------------------------------- paths
 
 
+# One level of 256, and a name's bucket is computed rather than looked up: every process
+# resolves the same path from the string alone, with no index to keep in sync and nothing to
+# consult before a read.
+#
+# blake2b and NOT the builtin `hash()`: str hashing is salted per process by PYTHONHASHSEED,
+# so the same room would land in a different bucket after every restart — the one property a
+# path resolver may not have. digest_size=1 is exactly the 8 bits 256 buckets need, so the
+# whole digest IS the component: no slice, no mask, and nothing computed and thrown away.
+#
+# 256 and not 65,536, because the two are not the same trade at this store's shape. What
+# sharding has to fix is one enormous directory — a namespace at the per-namespace cap is
+# 200,000 entries counting sidecar locks, and that is what every create in it scans. 256
+# buckets cut that to ~780, which readdir does not care about. Two levels cut it to ~4 and
+# cost ~840,000 directories to do it, because ~1,000 of this store's namespaces hold five
+# notes or fewer and each one still pays for its own bucket tree: measured against the live
+# distribution, two levels put MORE directories under notes/ than there are notes. 512 was
+# measured too (a 9-bit mask, unbiased since 512 divides 65536) and halves an already-small
+# bucket for twice the directories. See bench/shard.py.
+#
+# This function is an on-disk format: changing the width or the hash puts every existing file
+# in the wrong bucket. The dual read below makes that survivable — a re-shard is the same
+# lazy migration this one is — but it is not free, so it is frozen deliberately here.
+#
+# Unkeyed, deliberately. Bucket membership is derivable by anyone who can run blake2b, so the
+# layout leaks nothing the name does not: an unlisted `p-` room is a capability URL whose
+# secret is the entropy in the name itself (see `unlisted`), never where the file sits, and a
+# secret that guarded only the directory would be protecting a fact the room name already
+# gives away. `key` stays on the signature so an instance that ever wants per-deployment
+# buckets has the hook — it is a blake2b keyword, passed straight through.
+#
+# Memoized because the resolver is on every read path and the answer is a pure function of
+# the string: 350 ns of hashing becomes a 36 ns cache hit, which is how the whole resolution
+# lands under the budget rather than over it. Sized like `_listable`, and for the same reason
+# — names are caller-supplied, so a flood of fresh ones must cost misses and never memory.
+@lru_cache(maxsize=MAX_ROOMS)
+def _shard(name: str, key: bytes | None = None) -> str:
+    """The directory component `name` hashes into — two hex characters, `00` to `ff`."""
+    return hashlib.blake2b(name.encode("utf-8"), digest_size=1, key=key or b"").hexdigest()
+
+
+def _migrate(legacy: Path, sharded: Path) -> None:
+    """Move a pre-sharding file into its bucket. The data only — deliberately NOT the lock.
+
+    Moving the sidecar too looked tidier and was a lock-domain bug. Between testing that the
+    destination is free and replacing it, another worker that already sees the migrated data
+    can create and flock that very path, and the replace then unlinks the inode it is holding.
+    The next writer opens the inode that arrived instead, so two workers hold what both
+    believe is the room lock — and `seq` is assigned under it, as are the nonce check and CAS.
+    Reproduced before it was removed: a third opener took the lock while the second still held
+    it. There is no check-then-replace that closes this; not replacing is what closes it.
+
+    Nothing is lost by leaving the stray, because nothing can be holding it. `_locked` is only
+    ever called on a path `_resolve` handed out, and `_resolve` hands out the legacy path only
+    while the file is still there — so the lock a live writer holds is always the one beside
+    the file it is writing. `_sweep_orphan_locks` already exists for precisely this shape (a
+    lock whose data file is gone) and reclaims it once it has been idle as long as any reaped
+    room.
+
+    The reaper is the one caller that can hold a legacy lock, because it locks what its walk
+    found rather than what a resolver returned. It only ever unlinks, and it re-stats by path
+    under the lock, so a file migrated out from under it fails that stat and is skipped rather
+    than deleted.
+    """
+    try:
+        sharded.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(legacy, sharded)
+    except OSError:
+        return  # lost the race, or cannot write: `_resolve` falls back to what is on disk
+
+
+def _resolve(d: Path, name: str, suffix: str) -> Path:
+    """Where `name` lives right now, moving a pre-sharding file into its bucket on the way.
+
+    The property that matters is that every caller gets the SAME answer, not that the answer
+    is always the bucket. A resolver handing the legacy path to readers and the bucket to
+    writers forks a live room in two — the old file keeps the history, the new one restarts at
+    `seq` 1, and reads see only the new one because they check the bucket first. So this
+    returns one path per name per instant, and it is the file that actually exists.
+
+    Which is why a migration that could not run falls back to the legacy path rather than
+    returning a bucket with nothing in it. A read-only volume, or a restore whose ownership
+    was never fixed, would otherwise turn every unmigrated room into an empty one and every
+    note into a missing one — silently, because an absent file is how this store spells "no
+    such room". Serving the data that is plainly there is strictly better than hiding it, and
+    it is not the fork above: readers and writers still agree, since the fallback is only
+    taken while the legacy file is the only copy in existence.
+
+    Two resolvers racing the same unmigrated name both reach `_migrate`; the first
+    `os.replace` wins, the second fails ENOENT on a source already gone, and both then see the
+    legacy file absent and return the same bucketed path.
+
+    The cost in steady state is one `stat` — the bucket probe — since a name that resolved
+    once is found there and the legacy probe never runs. That is the price of never needing a
+    migration window, a flag day, or an operator step.
+    """
+    filename = f"{name}{suffix}"
+    sharded = d / _shard(name) / filename
+    if sharded.exists():
+        return sharded
+    if (legacy := d / filename).exists():
+        _migrate(legacy, sharded)
+        if legacy.exists():  # the move could not run; the data is still readable there
+            return legacy
+    return sharded
+
+
 def room_path(root: Path, room: str) -> Path:
-    return root / "rooms" / f"{valid_name(room)}.jsonl"
+    """Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`."""
+    return _resolve(root / "rooms", valid_name(room), ".jsonl")
+
+
+def _note_ns_dir(root: Path, ns: str) -> Path:
+    """A namespace's own directory, which is the level its count file and its caps live at
+    and NOT the bucket a given key lands in."""
+    return root / "notes" / valid_name(ns)
 
 
 def note_path(root: Path, ns: str, key: str) -> Path:
-    return root / "notes" / valid_name(ns) / f"{valid_name(key)}.txt"
+    """Where a note lives — `notes/<ns>/<shard>/<key>.txt`."""
+    return _resolve(_note_ns_dir(root, ns), valid_name(key), ".txt")
+
+
+def _prune(d: Path | str) -> bool:
+    """Drop empty directories under `d`, deepest first; True when `d` itself is now empty.
+
+    Sharding turns an emptied bucket into litter that never goes away on its own: a reaped
+    room leaves `rooms/<shard>/` behind, and every later walk pays to open it and find
+    nothing. Left alone that is a new unbounded resource — bounded only by the 256 buckets —
+    and it is also what would stop `_drop_emptied_namespaces` working at all, since a
+    namespace holding nothing but empty buckets is not an empty directory to rmdir.
+
+    Never removes `d` itself: the caller owns that decision, because for a namespace it is
+    the last step and for `rooms/` it must not happen at all.
+    """
+    empty = True
+    try:
+        with os.scandir(d) as entries:
+            for e in entries:
+                if e.is_dir() and _prune(e.path):
+                    try:
+                        os.rmdir(e.path)
+                        continue
+                    except OSError:
+                        pass  # refilled under us: not empty after all, and not ours to force
+                empty = False
+    except OSError:
+        return False
+    return empty
 
 
 @contextmanager
@@ -430,6 +586,49 @@ def _locked(target: Path):
             yield
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
+    """Put `data` at `path` atomically, staging through a name no other writer can hold.
+
+    `os.replace` is the atomic half, and it was always here; the staging name was the half
+    that was not. A temp file named after its destination is shared by everyone writing that
+    destination, so two writers racing it meant the second renamed a file the first had
+    already consumed — `FileNotFoundError` on a path that plainly exists, surfacing out of a
+    note create that was only trying to record itself.
+
+    Unique per *writer* rather than per process: sync handlers overlap in the thread pool, so
+    a pid alone still collides inside one worker.
+
+    Uniqueness rather than a lock, because the writers that meet here are deliberately
+    unlocked — `_note_totals` persists a rebuild without one and `_reap` rewrites the count
+    from its walk — and serialising them would need a single lock spanning every count file
+    in the store, on the read path the count file exists to keep cheap.
+
+    Every non-append write in the core comes through here — counters, both note counts, the
+    usage gauge, the snapshot ring, a note's own value, and a compacted room. Only the last
+    needs `fsync`: a room that loses its compaction has lost its whole retained ring, which
+    is why CHAT_FSYNC trades away an append's fsync and never that one. Everything else is
+    a figure the next reap rewrites anyway.
+
+    mkstemp opens 0600; the writes this replaces went through `write_text` and `open("wb")`
+    and landed 0644 under the default umask, so the mode is restored explicitly rather than
+    quietly narrowed under anything else that reads the store — rooms included, now that a
+    compacted `*.jsonl` is staged here too.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o644)
+            f.write(data)
+            if fsync:  # compaction only: see the knob, which never applied to this one
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
+        raise
 
 
 def _now() -> str:
@@ -476,9 +675,7 @@ def _bump(root: Path, **deltas: int) -> None:
             current = counters(root)
             for key, delta in deltas.items():
                 current[key] = current.get(key, 0) + delta
-            tmp = path.parent / f"{path.name}.tmp"
-            tmp.write_bytes(orjson.dumps(current))
-            os.replace(tmp, path)  # atomic: readers never see a half-written file
+            _replace(path, orjson.dumps(current))
     except OSError:
         pass
 
@@ -568,19 +765,69 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
         "last_seq": out[-1]["seq"] if out else (since or 0),
+        "generation": room_generation(root, room),
         "messages": out,
     }
 
 
+def _seq_state_path(root: Path) -> Path:
+    return root / ".seqstate"
+
+
+def _read_seq_state(root: Path) -> dict:
+    try:
+        return orjson.loads(_seq_state_path(root).read_bytes())
+    except (OSError, orjson.JSONDecodeError):
+        return {}
+
+
+def _write_seq_state(root: Path, state: dict) -> None:
+    # Atomic rewrite so concurrent readers never see a torn map. Best-effort: if the store
+    # is read-only or the write fails, the floor/generation is a nice-to-have, not a gate.
+    try:
+        _replace(_seq_state_path(root), orjson.dumps(state), fsync=config.FSYNC)
+    except OSError:
+        pass
+
+
 def last_seq(root: Path, room: str) -> int:
     path = room_path(root, room)
-    if not path.exists():
+    if path.exists():
+        with path.open("rb") as f:
+            for raw in reverse_lines(f, max_bytes=65536):
+                rec = _parse(raw)
+                if rec is not None:
+                    return rec["seq"]
         return 0
-    with path.open("rb") as f:
-        for raw in reverse_lines(f, max_bytes=65536):
-            rec = _parse(raw)
-            if rec is not None:
-                return rec["seq"]
+    # The room file is gone (reaped). A recreated room carries the previous generation's
+    # high-water mark in a root-level floor map so cursors from the old generation keep
+    # seeing new messages instead of starving on a restarted sequence (#139 dir #2): a
+    # reader's `since` stays below the new first_seq, so the new messages are not silently
+    # invisible. Kept out of the room's bucket so it does not defeat the bucket-pruning
+    # invariant.
+    entry = _read_seq_state(root).get(room)
+    if entry:
+        try:
+            return int(entry.get("floor", 0))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def room_generation(root: Path, room: str) -> int:
+    """The conversation epoch of a room, bumping each time it is (re)created (#139 dir #3).
+
+    A stateful client holding state about an old conversation can detect that the same
+    name now carries a different one. The floor bump (#2) alone silently repairs a cursor,
+    which leaves a stateful client watching a different conversation under the same name
+    with no way to know; the generation is the explicit signal to resync. 0 = never
+    existed, or the conversation has ended (reaped, not yet recreated)."""
+    entry = _read_seq_state(root).get(room)
+    if entry:
+        try:
+            return int(entry.get("gen", 0))
+        except (TypeError, ValueError):
+            return 0
     return 0
 
 
@@ -670,10 +917,8 @@ def _rollup(windows: list[list[str]]) -> dict:
 
 
 def list_rooms(root: Path) -> list[str]:
-    d = root / "rooms"
-    if not d.is_dir():
-        return []
-    return sorted(p.stem for p in d.glob("*.jsonl") if _listable(p.stem))
+    names = (e.name[: -len(".jsonl")] for e in _walk(root / "rooms", ".jsonl"))
+    return sorted(n for n in names if _listable(n))
 
 
 # (top, nicks) per room, validated against the (mtime_ns, size) stat the overview walk
@@ -696,7 +941,7 @@ def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]
     return view
 
 
-# Topic previews, valid while notes_written holds (a topic set is a note write); reaper
+# Topic previews, valid while topics_written holds (bumped only by a `topic` note); reaper
 # deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py.
 _topics_memo: tuple = ((), 0.0, {})
 
@@ -720,28 +965,21 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     memoized against that same stat — so a walk re-reads only rooms that changed since
     the last one. See WINDOW_BYTES for the per-room worst-case bound.
     """
-    d = root / "rooms"
     now = time.time()
     entries = []
-    try:
-        with os.scandir(d) as rooms:
-            for e in rooms:
-                if not e.name.endswith(".jsonl"):
-                    continue
-                name = e.name[: -len(".jsonl")]
-                if not _listable(name):
-                    continue
-                try:
-                    st = e.stat()
-                except OSError:
-                    continue  # reaped between the readdir and the stat
-                entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    except FileNotFoundError:
-        pass
+    for e in _walk(root / "rooms", ".jsonl"):
+        name = e.name[: -len(".jsonl")]
+        if not _listable(name):
+            continue
+        try:
+            st = e.stat()
+        except OSError:
+            continue  # reaped between the readdir and the stat
+        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     entries.sort(reverse=True)
     shown = []
     windows = []
-    topics_stamp = (counters(root)["notes_written"], str(root))
+    topics_stamp = (counters(root)["topics_written"], str(root))
     mono = time.monotonic()
     for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
         top, nicks = _cached_window(root, name, (mtime_ns, size))
@@ -790,24 +1028,22 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
     rooms = dict.fromkeys(keys, 0)
     room_bytes = 0
-    d = root / "rooms"
-    if d.is_dir():
-        for p in d.glob("*.jsonl"):
-            name = p.stem
-            if not NAME_RE.fullmatch(name):
-                continue  # same rule as _listable: never count what we would not accept
-            try:
-                room_bytes += p.stat().st_size
-            except OSError:
-                continue  # reaped between glob and stat
-            classes = room_classes(name)
-            rooms["total"] += 1
-            rooms["unlisted" if "p" in classes else "listed"] += 1
-            for marker, key in (("mb", "mailbox"), ("d", "ownable"), ("e", "ephemeral")):
-                if marker in classes:
-                    rooms[key] += 1
-            if not classes:
-                rooms["open"] += 1
+    for e in _walk(root / "rooms", ".jsonl"):
+        name = e.name[: -len(".jsonl")]
+        if not NAME_RE.fullmatch(name):
+            continue  # same rule as _listable: never count what we would not accept
+        try:
+            room_bytes += e.stat().st_size
+        except OSError:
+            continue  # reaped between the readdir and the stat
+        classes = room_classes(name)
+        rooms["total"] += 1
+        rooms["unlisted" if "p" in classes else "listed"] += 1
+        for marker, key in (("mb", "mailbox"), ("d", "ownable"), ("e", "ephemeral")):
+            if marker in classes:
+                rooms[key] += 1
+        if not classes:
+            rooms["open"] += 1
     notes = note_stats(root)
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
@@ -832,7 +1068,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
 # --------------------------------------------------------------------------- writing
 
 
-def _stillborn(path: Path) -> bool:
+def _stillborn(path: Path | str) -> bool:
     """True if a room file holds no more than STILLBORN_MESSAGES records.
 
     Reads from the head and stops at the first record past the limit, so an answered room
@@ -841,7 +1077,7 @@ def _stillborn(path: Path) -> bool:
     """
     seen = 0
     try:
-        with path.open("rb") as f:
+        with open(path, "rb") as f:
             for line in f:
                 if _parse(line) is None:
                     continue
@@ -853,15 +1089,21 @@ def _stillborn(path: Path) -> bool:
     return True
 
 
-def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
+def _reapable(path: Path | str, now: float, stillborn_rule: bool) -> str | None:
     """Which threshold retires `path`, or None if neither does yet.
 
     Returns the reason rather than a bool so the caller can count the two rules apart:
     a wave of stillborn reaps means openers nobody answered, a wave of idle reaps means
     conversations that ended, and the digest is only useful if it can tell them apart.
     Both values are truthy, so `if not _reapable(...)` reads exactly as it did.
+
+    Takes a path and stats it, deliberately never an `os.DirEntry`. `_reap` calls this a
+    second time under the lock precisely to catch a writer that refreshed the file since the
+    first call, and `DirEntry.stat()` caches — handing one in would make that recheck return
+    the pre-lock answer and unlink a room somebody had just written to. Passing a path is
+    what makes the stale read unrepresentable rather than merely avoided.
     """
-    idle = now - path.stat().st_mtime
+    idle = now - os.stat(path).st_mtime
     if idle > IDLE_SECONDS:
         return "idle"
     if stillborn_rule and idle > STILLBORN_SECONDS and _stillborn(path):
@@ -878,20 +1120,133 @@ def _reapable(path: Path, now: float, stillborn_rule: bool) -> str | None:
 ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
 
 
-def _guards_a_live_room(root: Path, path: Path, now: float) -> bool:
-    """True when `path` is a guard note whose room is still within its own idle window.
+def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: float) -> bool:
+    """True when `entry` is a guard note whose room is still within its own idle window.
 
     Tied to the room, not exempted outright: once the room itself is reapable the guards go
     with it, so this bounds the state exactly as before rather than adding an immortal
     namespace.
+
+    The namespace is the FIRST component under `base`, never the parent directory. That was
+    the same thing before sharding and is not now: a bucketed note's parent is `ab`, so a
+    parent-name test would recognise no guard at all and the reaper would delete the owner,
+    allow-list and nonce notes of rooms that are still busy — silently, on the plain idle
+    rule, taking write access and replay protection with them. Slicing a known prefix instead
+    of `os.path.relpath` because this runs once per note per reap pass, where relpath's
+    normalisation would cost more than the walk it rides on.
+
+    `rpartition` is `.stem` exactly here and not by luck: NAME_RE admits no dot, so a note
+    name carries exactly one, the suffix's.
     """
-    if path.parent.name not in ROOM_GUARD_NS:
+    if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
         return False
-    room = room_path(root, path.stem)
+    room = room_path(root, entry.name.rpartition(".")[0])
     try:
         return now - room.stat().st_mtime <= IDLE_SECONDS
     except OSError:
         return False  # no room left to guard
+
+
+def _reconcile_note_count(root: Path) -> None:
+    """Rewrite the note count from a walk, under the create gate. Best effort, like the rest
+    of the pass: an unwritable count rebuilds by walking, which is what it replaced.
+
+    Runs after the deletions, so the figure reflects the disk as it now is — and the gate is
+    what makes that "as it now is" true rather than nearly true. A create writes its `+1`
+    reservation and its note at two different moments, both inside `.notes-create`, and a
+    walk landing between them sees neither the note nor any reason to expect one. It then
+    rewrites the count *low*, and a low count admits a note the cap should refuse. Being the
+    only deleter makes the walk exact against deletions and nothing else; the creates have to
+    be standing still too, and this gate is the only thing that holds them.
+
+    `_replace` settles which writer may stage a file. This settles which one wins.
+
+    The cost is the walk: ~450 ms at a completely full store and linear in occupancy below
+    that, on a pass that already costs half a second. `_reap` is throttled to once per
+    REAP_EVERY per process and every write path calls it — `note_set` before it knows whether
+    it has a create or an overwrite, `_write_record` on every room message — so the pass that
+    crosses the interval pays this wherever it arrives from, and a note create arriving while
+    it runs waits on the gate. Bought because a cap that can be breached is not a cap.
+    """
+    try:
+        with _locked(root / ".notes-create"):
+            _write_note_count(root, *_count_notes(root))
+    except OSError:
+        pass
+
+
+def _sweep_orphan_locks(root: Path, now: float) -> None:
+    """Unlink sidecar locks whose data file is gone and that have been idle as long as any
+    reaped room. `now` is the caller's, so every reapability decision in one pass is made
+    against one instant rather than a clock that moves through it.
+
+    Sidecar locks are deliberately *not* removed with their data file: unlinking one a writer
+    holds splits the lock domain, and the next writer locks a fresh inode. Sweeping the
+    orphans instead keeps directory entries bounded while never touching the lock of a room
+    anyone still writes to. Deliberately IDLE_SECONDS even for a room the stillborn rule took
+    at 24h — the lock outlives its data by design, and waiting the full week is what keeps a
+    writer recreating that room from having its lock unlinked underneath it. The drift is
+    bounded by the room cap: at most a week of churn in empty files.
+    """
+    for sub, suffix in (("rooms", ".jsonl.lock"), ("notes", ".txt.lock")):
+        for entry in _walk(root / sub, suffix):
+            try:
+                # Slicing `.lock` off the name is `Path.with_suffix("")` without the Path,
+                # and os.access is `.exists()` without the stat_result it throws away: 26.0
+                # µs per lock as it was, 3.6 µs now, over 12,079 room locks. os.access asks
+                # about the real uid rather than the effective one — this image runs as one
+                # non-root uid so the two agree, and nothing here is setuid.
+                #
+                # Deliberately not the dir_fd form: os.stat(name, dir_fd=) measures 96.6 ms
+                # against os.stat(path)'s 94.6 ms over the same tree, so threading a
+                # directory fd out of the walk would buy a rounding error and cost an fd
+                # lifetime per namespace. The Path was the expense, not the syscall.
+                data = entry.path[: -len(".lock")]
+                if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
+                    continue
+                os.unlink(entry.path)
+            except OSError:
+                continue
+
+
+def _drop_emptied_namespaces(root: Path) -> None:
+    """Drop each per-namespace count, and then the namespace itself if that leaves it empty.
+
+    Runs after `_sweep_orphan_locks`, which is what puts a namespace back to notes and locks
+    only and so lets the rmdir here reach an emptied one.
+
+    The counts go unconditionally. This pass is the only thing that deletes notes, so it is
+    also the only thing those counts can be wrong about — dropping them means a count file
+    never outlives a deletion, and the next create in that namespace pays one scan to rebuild
+    it and none after. Re-establishing each figure from the walk would work too and is
+    strictly more code to be wrong in; an unlink cannot be off by one.
+
+    Under the create gate, for a nearer reason than the count's. A create makes its namespace
+    directory inside `_locked`, one `mkdir` before the `open` that creates the sidecar lock in
+    it, and the directory is still empty in between — precisely what this rmdir looks for.
+    Removing it in that gap does not merely lose a race, it fails the create: creating a file
+    in a directory being removed is EINVAL on APFS, measured here and needing O_CREAT to
+    reproduce at all, where a directory merely *gone* gives the ENOENT POSIX specifies — the
+    errno this was expected to be and never was. Either way the note write dies on a path it
+    had just made.
+
+    Per namespace rather than once around the loop: a create only ever needs the directory it
+    is entering to stand still, so holding the gate across all 32 of them at the cap would
+    queue creates behind namespaces they have nothing to do with. Inside the `try` for the
+    reason this whole tail is best effort — `_reap` runs on the request path, and a pass that
+    cannot take the gate must skip a cleanup, never fail the create that triggered it.
+    """
+    for d in (root / "notes").glob("*"):
+        try:
+            with _locked(root / ".notes-create"):
+                (d / NOTES_FILE).unlink(missing_ok=True)
+                # Buckets first: since sharding a namespace's notes sit a level further down,
+                # so a drained namespace holds empty directories, and rmdir refuses those
+                # exactly as it refuses notes. Without this the namespace below never goes.
+                _prune(d)
+                d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
+        except OSError:
+            continue
 
 
 def _reap(root: Path) -> None:
@@ -915,23 +1270,45 @@ def _reap(root: Path) -> None:
     # Rooms only: the stillborn rule is a room rule, so folding reaped notes into the same
     # two counters would make "idle" mean two different things in one number.
     reaped = {"reaped_idle": 0, "reaped_stillborn": 0}
-    for sub, nested, suffix, stillborn_rule in (
-        ("rooms", False, ".jsonl", True),
-        ("notes", True, ".txt", False),
-    ):
-        for p in _walk(root / sub, suffix, nested):
+    for sub, suffix, stillborn_rule in (("rooms", ".jsonl", True), ("notes", ".txt", False)):
+        base = f"{root / sub}{os.sep}"
+        for entry in _walk(root / sub, suffix):
             try:
-                if _guards_a_live_room(root, p, now):
+                if _guards_a_live_room(root, base, entry, now):
                     continue
-                if not _reapable(p, now, stillborn_rule):
+                if not _reapable(entry.path, now, stillborn_rule):
                     continue
+                # The Path is built here and not in the walk: everything above this line
+                # works on the entry scandir already had, and a live pass reaches this
+                # branch for 0 of ~207,000 files. Paying pathlib for the ones we delete
+                # costs nothing; paying it for the ones we keep was most of the pass.
+                p = Path(entry.path)
                 # Recheck under the lock: a writer may have refreshed the file since the
                 # stat above, and deleting a just-written room would lose live messages.
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
+                # It re-stats by path, never through the entry — see _reapable.
                 with _locked(p):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
+                        if stillborn_rule:
+                            # Leave the previous generation's high-water mark behind so a
+                            # recreated room continues the sequence instead of restarting at 1
+                            # and stranding every cursor pointing past it (#139 dir #2). Stored
+                            # in a root-level map under the seq-state lock. Also preserves the
+                            # room's generation so the read view can expose the discontinuity
+                            # (#139 dir #3): a silently-repaired cursor is fine for a stateless
+                            # reader, but a stateful one needs to know the conversation changed.
+                            # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
+                            room = p.name[: -len(".jsonl")]
+                            with _locked(root / ".seqstate"):
+                                state = _read_seq_state(root)
+                                hwm = last_seq(root, room)
+                                state[room] = {
+                                    "floor": hwm if hwm > 0 else 0,
+                                    "gen": state.get(room, {}).get("gen", 0),
+                                }
+                                _write_seq_state(root, state)
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -945,46 +1322,21 @@ def _reap(root: Path) -> None:
     # bought because the alternative is walking it on every append instead.
     try:
         used = _scan(root / "rooms", ".jsonl", sized=True)[1]
-        usage_tmp = root / f"{USAGE_FILE}.tmp"
-        usage_tmp.write_text(str(used), encoding="utf-8")
-        os.replace(usage_tmp, root / USAGE_FILE)
+        _replace(root / USAGE_FILE, str(used).encode())
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
-    # Deletions are done and this is the only thing that deletes, so the walk below is
-    # exact as of now — which is what bounds the create path's drift to one reap interval.
+    _reconcile_note_count(root)
+    _sweep_orphan_locks(root, now)
+    _drop_emptied_namespaces(root)
+    # Room buckets, once their locks have gone with the sweep above. Under the create gate for
+    # the reason `_drop_emptied_namespaces` spells out: `_locked` makes a room's bucket one
+    # mkdir before it opens the lock inside it, and removing the directory in that gap fails
+    # the write rather than merely losing a race. Best effort, like the rest of the tail.
     try:
-        _write_note_count(root, *_count_notes(root))
+        with _locked(root / ".rooms-create"):
+            _prune(root / "rooms")
     except OSError:
-        pass  # an unwritable count rebuilds by walking, which is what it replaced
-    # Sidecar locks are deliberately *not* removed with their data file: unlinking one a
-    # writer holds splits the lock domain (the next writer locks a fresh inode). Instead
-    # sweep the orphans — a lock with no data file, idle as long as any reaped room — so
-    # directory entries stay bounded and the lock of a room anyone still writes to is
-    # never touched. Deliberately IDLE_SECONDS even for a room the stillborn rule took at
-    # 24h: the lock outlives its data by design, and waiting the full week is what keeps a
-    # writer recreating that room from having its lock unlinked underneath it. The drift is
-    # bounded by the room cap — at most a week of churn in empty files.
-    for sub, nested, suffix in (("rooms", False, ".jsonl.lock"), ("notes", True, ".txt.lock")):
-        for p in _walk(root / sub, suffix, nested):
-            try:
-                if p.with_suffix("").exists() or now - p.stat().st_mtime <= IDLE_SECONDS:
-                    continue
-                p.unlink(missing_ok=True)
-            except OSError:
-                continue
-    # Every per-namespace count goes with them, unconditionally. This pass is the only
-    # thing that deletes notes, so it is also the only thing those counts can be wrong
-    # about — dropping them here means a count file never outlives a deletion, and the next
-    # create in that namespace pays one scan to rebuild it and none after. Re-establishing
-    # each figure from the walk above would work too and is strictly more code to be wrong
-    # in; an unlink cannot be off by one. It also puts the directory back to notes and locks
-    # only, which is what makes the rmdir below reach an emptied namespace.
-    for d in (root / "notes").glob("*"):
-        try:
-            (d / NOTES_FILE).unlink(missing_ok=True)
-            d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
-        except OSError:
-            continue
+        pass
 
 
 def snapshots(root: Path) -> list[dict]:
@@ -1044,14 +1396,12 @@ def _snapshot(root: Path) -> None:
                 pass
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
-            tmp = marker.parent / f"{marker.name}.tmp"
-            tmp.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in kept))
-            os.replace(tmp, marker)
+            _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
     except OSError:
         pass
 
 
-def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
+def _scan(d: Path | str, suffix: str, sized: bool = False) -> tuple[int, int]:
     """(count, total bytes) of the entries in `d` named `*suffix`, in one pass.
 
     os.scandir rather than Path.glob, and one pass rather than two, because every caller
@@ -1066,46 +1416,70 @@ def _scan(d: Path, suffix: str, sized: bool = False) -> tuple[int, int]:
     `sized` is a flag rather than always-on because the byte total is the expensive half:
     readdir hands back the name for free and never the size, so each entry costs a stat.
     Only rooms have a byte budget to enforce.
+
+    Recursive since sharding, and it has to be: `_check_room_capacity` totals what the room
+    caps are enforced against, and a scan that stopped at the top of `rooms/` would count the
+    buckets and none of the rooms in them — a cap that reads zero is not a cap. Depth is not
+    assumed anywhere here, so one pass covers a store part-way through its migration, where
+    some names still sit flat and the rest are already bucketed.
     """
     count = 0
     size = 0
     try:
         with os.scandir(d) as entries:
             for e in entries:
-                if not e.name.endswith(suffix):
-                    continue
-                count += 1
-                if sized:
-                    try:
-                        size += e.stat().st_size
-                    except OSError:
-                        continue  # reaped between the readdir and the stat
-    except FileNotFoundError:
+                if e.is_dir():  # d_type from readdir: no syscall
+                    sub_count, sub_size = _scan(e.path, suffix, sized)
+                    count += sub_count
+                    size += sub_size
+                elif e.name.endswith(suffix):
+                    count += 1
+                    if sized:
+                        try:
+                            size += e.stat().st_size
+                        except OSError:
+                            continue  # reaped between the readdir and the stat
+    except OSError:
         pass  # nothing has been created yet; an absent directory is an empty one here
     return count, size
 
 
-def _walk(d: Path, suffix: str, nested: bool = False) -> Iterator[Path]:
-    """Every `*suffix` file directly in `d` (or one level down, when `nested`).
+def _walk(d: Path | str, suffix: str) -> Iterator[os.DirEntry[str]]:
+    """Every `*suffix` file anywhere under `d`, at any depth.
 
-    Same syscalls as the `rooms/*.jsonl` and `notes/*/*.txt` globs it replaces, and less
-    Python around them: measured back to back on one full store, the nested notes pass went
-    95 ms -> 66 ms and the flat rooms pass 11 ms -> 8 ms. Worth having because the reaper
-    makes four of these passes on the write path, but it is the smaller half of that cost —
-    the rest is one stat() per file in `_reapable`, which no walk can avoid.
+    Yields the `os.DirEntry` scandir already built rather than a Path made from it. On 3.12
+    pathlib is lazily normalised — the constructor stashes the string and the parse lands on
+    the first `__fspath__`, which is `.stat()` — so `Path(e.path).stat()` costs 19.4 µs
+    against the 7.7 µs of the syscall it wraps, and the overhead hides inside the stat rather
+    than in the constructor where a reader would look for it. Over one reap pass at the live
+    caps (10,240 rooms + ~207,000 notes) that was the difference between 13.5 s and 3.6 s.
 
-    Note the asymmetry with `_scan`, which is much faster still on the same directories:
-    it only ever counts and measures, so it never allocates a Path per entry. Use that one
+    Every `os.*` spelling of the stat is the same speed — `DirEntry.stat()`, `os.stat(path)`
+    and `os.stat(name, dir_fd=)` are within 2% of each other. Only Path is slow, so this is a
+    representation change, not a cleverer syscall. `bench/dir_walk.py` is the measurement.
+
+    `e.is_dir()` reads d_type from readdir and costs no syscall. Callers that need a Path
+    build one at the point of action, which for the reaper means the branch that actually
+    unlinks — a live pass finds 0 reapable files, so the old shape built ~207,000 Paths to
+    act on none of them.
+
+    Note the asymmetry with `_scan`, which is faster still on the same directories: it only
+    ever counts and measures, so it never needs the entry after the loop body. Use that one
     where a count is all you need.
+
+    Depth-agnostic rather than the old `nested` switch, which said "exactly one level down"
+    and so could only ever be right about one layout. Under sharding a room is one level
+    deeper and a note two, and during the lazy migration BOTH depths are occupied at once —
+    a walk that picked a number would miss every file that had not moved yet, which for the
+    reaper means idle files never reaped and for the sweeper means locks never swept.
     """
     try:
         with os.scandir(d) as entries:
             for e in entries:
-                if nested:
-                    if e.is_dir():
-                        yield from _walk(Path(e.path), suffix)
+                if e.is_dir():
+                    yield from _walk(e.path, suffix)
                 elif e.name.endswith(suffix):
-                    yield Path(e.path)
+                    yield e
     except OSError:
         return  # missing or unreadable: nothing to walk, same as an empty glob
 
@@ -1125,7 +1499,7 @@ def _count_notes(root: Path) -> tuple[int, int]:
         with os.scandir(root / "notes") as namespaces:
             for ns in namespaces:
                 if ns.is_dir():
-                    count, ns_bytes = _scan(Path(ns.path), ".txt", sized=True)
+                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
                     total += count
                     size += ns_bytes
     except FileNotFoundError:
@@ -1142,11 +1516,7 @@ def _write_note_count(root: Path, total: int, size: int) -> None:
     never coexisted. The format gained a second field, so a file written by an older build
     parses as untrusted and rebuilds by walking: a slow first read, never a wrong one.
     """
-    path = root / NOTES_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(f"{total} {size}", encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    _replace(root / NOTES_FILE, f"{total} {size}".encode())
 
 
 def _ns_totals(d: Path) -> tuple[int, int]:
@@ -1155,7 +1525,7 @@ def _ns_totals(d: Path) -> tuple[int, int]:
     return _scan(d, ".txt", sized=True)
 
 
-def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
+def _note_totals(d: Path, rebuild=_count_notes, persist: bool = False) -> tuple[int, int]:
     """(notes, bytes) without walking — or by walking, when the file cannot be trusted.
 
     The same file in two places, because the two caps have the same shape: `d` is the store
@@ -1163,9 +1533,14 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     `rebuild` is the walk that re-establishes whichever was asked for.
 
     Read without the lock, like `counters`: replacement is atomic, so a reader sees the old
-    bytes or the new ones. The rebuild is best effort; if it cannot be persisted the caller
-    still gets the counted truth and the next create counts again. That is the old cost,
-    which is the point — this degrades to what it replaced.
+    bytes or the new ones. Reading is safe unserialised; *persisting* what the read rebuilt
+    is not, so `persist` is off by default and only `_check_note_capacity` turns it on —
+    that one runs inside `.notes-create`, and every other write of a count file is under the
+    same gate. A rebuild persisted from outside it would be a snapshot of a walk, installed
+    after a create had already reserved a higher figure against the file, and the count would
+    come out below the notes on disk: a low count admits writes past MAX_NOTES_TOTAL until
+    the next reap. Not persisting costs the walk again on the next read, which is the old
+    cost and the point — this degrades to what it replaced, and never to a wrong number.
 
     A zero is never persisted, and that is load-bearing rather than an optimization:
     `_write_note_count` creates the directory it writes into, so persisting the zero a
@@ -1180,11 +1555,11 @@ def _note_totals(d: Path, rebuild=_count_notes) -> tuple[int, int]:
     except (OSError, ValueError):
         pass
     totals = rebuild(d)
-    try:
-        if totals[0]:
+    if persist and totals[0]:
+        try:
             _write_note_count(d, *totals)
-    except OSError:
-        pass
+        except OSError:
+            pass
     return totals
 
 
@@ -1246,7 +1621,7 @@ def _ring_limit(root: Path) -> int:
     return RESERVED_ROOM_BYTES
 
 
-def _check_room_capacity(path: Path) -> None:
+def _check_room_capacity(root: Path, path: Path) -> None:
     """Fail closed on a *new* room past either bound — the count, or the disk budget.
 
     Two caps because they bound two different things (see MAX_TOTAL_ROOM_BYTES): the count
@@ -1268,7 +1643,11 @@ def _check_room_capacity(path: Path) -> None:
     """
     if path.exists():
         return
-    count, used = _scan(path.parent, ".jsonl", sized=True)
+    # `root / "rooms"` and NOT `path.parent`, which since sharding is the room's own bucket:
+    # counting one bucket would report ~1 room where the cap wants all of them, and both
+    # MAX_ROOMS and MAX_TOTAL_ROOM_BYTES would stop being enforced on a world-writable
+    # service. `_scan` recurses, so this is the whole tree either way.
+    count, used = _scan(root / "rooms", ".jsonl", sized=True)
     if count >= MAX_ROOMS:
         raise _at_capacity(MAX_ROOMS, "room")
     if used >= MAX_TOTAL_ROOM_BYTES:
@@ -1300,7 +1679,7 @@ def _check_note_total(root: Path) -> None:
         )
 
 
-def _check_note_capacity(root: Path, path: Path) -> None:
+def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     """Both note caps, neither of which walks any more. Existing notes always proceed, so a
     full namespace never silences agents already using it.
 
@@ -1313,7 +1692,10 @@ def _check_note_capacity(root: Path, path: Path) -> None:
     """
     if path.exists():
         return
-    if _note_totals(path.parent, _ns_totals)[0] >= MAX_NOTES_PER_NS:
+    # The namespace directory, passed in rather than taken from the note: `path.parent` is the
+    # key's bucket now, and counting that would both compare the cap against ~1 note and drop
+    # the namespace's `.notes-count` two levels below where every other reader looks for it.
+    if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     _check_note_total(root)
 
@@ -1373,6 +1755,7 @@ def append(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    sig: str | None = None,
 ) -> dict:
     """Append a message, and announce the room the first time it appears.
 
@@ -1389,7 +1772,7 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
-    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce)
+    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
     # counts what callers wrote, which is what "new messages" has to mean.
@@ -1458,6 +1841,7 @@ def _write_record(
     text: str,
     did: str | None = None,
     nonce: int | None = None,
+    sig: str | None = None,
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
@@ -1476,16 +1860,24 @@ def _write_record(
                 "or a millisecond clock both work"
             )
         rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
+        # The signature the caller was accepted on, kept so the record can be checked
+        # again later by anyone holding the room JSON. `room|nonce|text` is rebuildable
+        # from the record itself, and the text here is the swept text that was signed,
+        # so a reader needs nothing this file does not already serve. Written only when
+        # the caller supplies it: records stored before this existed have no `sig`, and
+        # a missing one means "not re-verifiable", never "invalid".
+        if sig is not None:
+            rec["sig"] = sig
     _reap(root)
     # Checked before the gate as well as under it: taking the gate serialises the caller
     # behind every other create, and a rotating room name flooding rejections should not
     # queue up behind them. The check inside the gate stays authoritative.
-    _check_room_capacity(path)
+    _check_room_capacity(root, path)
     with (
         _create_gate(
             root / ".rooms-create",
             path,
-            lambda: _check_room_capacity(path),
+            lambda: _check_room_capacity(root, path),
         ),
         _locked(path),
     ):
@@ -1530,6 +1922,17 @@ def _write_record(
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
+    if created:
+        # Bump the room's generation: a (re)created room is a new conversation, and the read
+        # view exposes the old generation's number so a stateful client can detect the
+        # discontinuity and resync instead of silently watching a different conversation
+        # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
+        # has taken up the sequence where the old one left off, so it must not be reused.
+        with _locked(root / ".seqstate"):
+            state = _read_seq_state(root)
+            gen = int(state.get(room, {}).get("gen", 0)) + 1
+            state[room] = {"floor": 0, "gen": gen}
+            _write_seq_state(root, state)
     return rec, created
 
 
@@ -1569,14 +1972,9 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
                     break
             kept.append(line)
     kept.reverse()
-    tmp = path.with_suffix(".jsonl.tmp")
-    with tmp.open("wb") as f:
-        # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing,
-        # and join would leave a stray newline behind instead of an empty file.
-        f.write(b"".join(line + b"\n" for line in kept))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and
+    # join would leave a stray newline behind instead of an empty file.
+    _replace(path, b"".join(line + b"\n" for line in kept), fsync=True)
     config._dbg(2, "compact", room=path.name, kept=len(kept), bytes=total)
 
 
@@ -1602,6 +2000,7 @@ def note_set(
     side effects those writes describe.
     """
     path = note_path(root, ns, key)
+    ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
     _reap(root)
     # The global half only, and only for a create. This used to be the whole check, which
@@ -1616,8 +2015,8 @@ def note_set(
         _create_gate(
             root / ".notes-create",
             path,
-            lambda: _check_note_capacity(root, path),
-            lambda d: _count_new_note(root, path.parent, len(value.encode("utf-8")), d),
+            lambda: _check_note_capacity(root, ns_dir, path),
+            lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
         ),
         _locked(path),
     ):
@@ -1629,12 +2028,16 @@ def note_set(
             if expect is not None and current != expect:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(value, encoding="utf-8")
-        os.replace(tmp, path)
+        _replace(path, value.encode("utf-8"))
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
-    _bump(root, notes_written=1)
+    #
+    # topics_written is the same signal narrowed to what /rooms actually displays. A topic
+    # IS an ordinary note, so notes_written still counts it and the note gauge still keys
+    # on that — but the listing shows only this one namespace, and keying it on every note
+    # meant a `did` or `kv` write aged out the room walk. Measured on technocore.chat
+    # 2026-08-26: 1,281 note writes a minute, 3 of them topics.
+    _bump(root, notes_written=1, **({"topics_written": 1} if ns == TOPIC_NS else {}))
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 
 
@@ -1691,6 +2094,6 @@ def note_stats(root: Path) -> dict:
 
 
 def list_notes(root: Path, ns: str) -> list[str]:
-    d = root / "notes" / valid_name(ns)
     keep = _listable.__wrapped__  # not the cache: see _listable
-    return sorted(p.stem for p in d.glob("*.txt") if keep(p.stem)) if d.is_dir() else []
+    names = (e.name[: -len(".txt")] for e in _walk(_note_ns_dir(root, ns), ".txt"))
+    return sorted(n for n in names if keep(n))

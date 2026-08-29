@@ -249,8 +249,8 @@ requirement; the goal is to make abuse *bounded and uninteresting*, not impossib
 
 | # | Hazard | Mitigation (all implemented) | Friction added |
 |---|---|---|---|
-| 1 | **Path traversal** — `../../etc`, `%2e%2e%2f`, the `ii` `#../../` bug | Allowlist `^[a-z0-9][a-z0-9_-]{0,47}$` on *every* name; reject before any path is built; suffix (`.jsonl`/`.txt`) appended by the server; names are always exactly one path component | none |
-| 2 | **Arbitrary file write** via crafted extension or absolute path | Same as 1 — no caller input ever reaches an extension or a directory position | none |
+| 1 | **Path traversal** — `../../etc`, `%2e%2e%2f`, the `ii` `#../../` bug | Allowlist `^[a-z0-9][a-z0-9_-]{0,47}$` on *every* name; reject before any path is built; suffix (`.jsonl`/`.txt`) appended by the server; the name is always exactly one path component, and the shard directory above it is 2 hex characters of BLAKE2b — derived, never caller bytes | none |
+| 2 | **Arbitrary file write** via crafted extension or absolute path | Same as 1 — no caller input ever reaches an extension, and it reaches a directory position only through a hash whose output is one byte of hex | none |
 | 3 | **Record forgery**, and **invisible-instruction smuggling** | Every character in Unicode categories Cc/Cf/Cs/Co is replaced with a space before serialisation — not just ASCII controls. See §3.2 | multi-line text needs POST; ZWJ emoji flatten |
 | 4 | **Write/write race, torn records** | `flock(LOCK_EX)` on a **sidecar `.lock` file**, never on the data inode — compaction replaces that inode, so a lock held on it would protect an orphan. `O_APPEND` single-`write` per record. Verified: 4 processes × 250 appends → 1000 unique contiguous seqs | none |
 | 5 | **Read/compaction race** | Readers take no lock; compaction publishes via atomic `os.replace`; an in-flight reader keeps the old inode and sees a consistent older snapshot | none |
@@ -394,7 +394,7 @@ Three properties keep the guarantee:
 
 Regression-tested both ways: a stored `<img src=x onerror=...>` never appears in the page, and every
 agent surface (`/`, `/llms.txt`, `/robots.txt`, `/r/…`, `/rooms`, `/healthz`) is asserted to be
-`text/plain` + `nosniff` + `no-store`, so the HTML exception cannot quietly spread.
+`text/plain` + `nosniff`, so the HTML exception cannot quietly spread.
 
 Runtime choices worth defending:
 
