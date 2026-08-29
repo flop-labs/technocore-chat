@@ -792,15 +792,48 @@ def _snapshot_bytes(f) -> int:
     return 0
 
 
-def export_room(root: Path, room: str) -> Iterator[bytes]:
-    """The room's stored JSONL, bytes as written, snapshotted at open.
+def _export_start(f, cutoff: float | None, end: int) -> int:
+    """Where the export begins: 0, or just past an `e-` room's expired prefix.
+
+    Ephemeral expiry is drop-on-read and a raw dump is a read: streaming records the class
+    promises have stopped being readable would make export the one lane that ignores the
+    TTL. Records are append-ordered, so the expired records are a prefix, and the export
+    starts at the first line whose record is still readable — judged by the same `_expired`
+    the tail read uses, unparsable `ts` failing closed with it. Costs one forward parse of
+    the bytes being dropped, on the `e-` class only; every other room starts at 0 for free.
+    """
+    if cutoff is None:
+        return 0
+    f.seek(0)
+    pos = 0
+    while pos < end:
+        line = f.readline()
+        rec = _parse(line)
+        if rec is not None and not _expired(rec, cutoff):
+            return pos
+        pos += len(line)
+    return end
+
+
+def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
+    """The room's stored JSONL, bytes as written, snapshotted at open — and the room
+    generation that snapshot belongs to.
 
     Byte-exact because verifiability demands it: a signed record re-verifies only against
     the stored `text` bytes exactly as `clean_text` wrote them, so re-serializing — even a
     round trip through the same encoder — is a way to corrupt proofs, not a formatting
     choice. The bound is one fstat when the file is opened, truncated to the last complete
     line (`_snapshot_bytes`), so an append landing mid-export is simply outside the
-    snapshot rather than a torn record inside it.
+    snapshot rather than a torn record inside it. An `e-` room's expired prefix is outside
+    it too (`_export_start`): expiry is drop-on-read, and export is a read.
+
+    Opened HERE, not when the first chunk is pulled, because two things must be settled
+    while an error can still become a status code: a room that exists but cannot be read
+    raises rather than impersonating the documented empty answer — only FileNotFoundError
+    IS that answer — and the generation is read against the fd just opened, so the epoch
+    describes the bytes the caller gets. The gap between those two syscalls is the residual
+    race, accepted: closing it needs the seqstate and room locks held together, on a path
+    that deliberately holds neither.
 
     No lock, held or taken. An append past the snapshot is invisible by the bound above,
     and compaction replaces the file atomically (`_replace`), so the fd opened here keeps
@@ -813,15 +846,22 @@ def export_room(root: Path, room: str) -> Iterator[bytes]:
     iterator is handed out, so a bad name refuses up front instead of mid-stream.
     """
     path = room_path(root, room)
+    try:
+        f = path.open("rb")
+    except FileNotFoundError:
+        return room_generation(root, room), iter(())
+    try:
+        end = _snapshot_bytes(f)
+        start = _export_start(f, _cutoff(room), end)
+        generation = room_generation(root, room)
+    except BaseException:
+        f.close()
+        raise
 
     def chunks() -> Iterator[bytes]:
-        try:
-            f = path.open("rb")
-        except OSError:
-            return  # absent, or reaped mid-request: the empty room exports as empty
         with f:
-            remaining = _snapshot_bytes(f)
-            f.seek(0)
+            f.seek(start)
+            remaining = end - start
             while remaining > 0:
                 block = f.read(min(EXPORT_CHUNK, remaining))
                 if not block:
@@ -829,7 +869,7 @@ def export_room(root: Path, room: str) -> Iterator[bytes]:
                 remaining -= len(block)
                 yield block
 
-    return chunks()
+    return generation, chunks()
 
 
 def _seq_state_path(root: Path) -> Path:

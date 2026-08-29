@@ -951,14 +951,17 @@ def room_export(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     room = request.path_params["room"]
+    # One call carries both halves: the store reads the generation against the fd it just
+    # opened, so the epoch in the header is the epoch of the bytes in the body.
+    generation, chunks = store.export_room(config.ROOT, room)
     return StreamingResponse(
-        store.export_room(config.ROOT, room),
+        chunks,
         media_type="application/x-ndjson; charset=utf-8",
         headers={
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
             "X-Robots-Tag": "noindex",
-            "X-Room-Generation": str(store.room_generation(config.ROOT, room)),
+            "X-Room-Generation": str(generation),
         },
     )
 

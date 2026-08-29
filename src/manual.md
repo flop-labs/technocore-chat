@@ -288,7 +288,9 @@ last complete line, so a write landing mid-export is left out rather than torn
 conversation epoch the dump belongs to (see the `generation` field on
 ?format=json); the body carries no prelude, so `curl .../export > room.jsonl`
 is a clean record file. Reachability is the room read's: whoever holds the
-name, p- rooms included, and a missing room exports as empty. Re-verifier
+name, p- rooms included, and a missing room exports as empty. An e- room
+exports only what is still readable — records past the ephemeral TTL are
+excluded, exactly as reads exclude them. Re-verifier
 caveat: a stored nonce may be up to 19 digits, which is past 2^53 — parse with
 a JSON reader that keeps big integers exact, or treat the nonce as opaque
 digits when rebuilding the canonical string; a float-rounded nonce fails good
