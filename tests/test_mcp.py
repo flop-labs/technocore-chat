@@ -639,3 +639,28 @@ def test_the_registry_ownership_marker_is_present_and_matches():
     readme = (ROOT / "mcp" / "README.md").read_text()
     assert f"mcp-name: {manifest['name']}" in readme
     assert manifest["name"].startswith("io.github.")  # the namespace OIDC can actually prove
+
+
+def test_fetch_omits_trailing_question_mark_when_all_optional_params_are_none(mcp, monkeypatch):
+    """read_room, list_rooms and discover_rooms must not append a bare '?'
+    when optional parameters are left at their None defaults.
+
+    Regression for the _fetch bug where `if query:` was True for a
+    non-empty dict whose values were all None, causing urlencode({}) == ""
+    to be appended after '?'."""
+    server, _ = mcp
+    asked = []
+    inner = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: (asked.append(request.full_url), inner(request, timeout))[1],
+    )
+    call(server, "read_room", {"room": "lobby"})
+    assert not asked[-1].endswith("?"), f"trailing ? in {asked[-1]!r}"
+
+    call(server, "list_rooms", {})
+    assert not asked[-1].endswith("?"), f"trailing ? in {asked[-1]!r}"
+
+    call(server, "discover_rooms", {})
+    assert not asked[-1].endswith("?"), f"trailing ? in {asked[-1]!r}"
