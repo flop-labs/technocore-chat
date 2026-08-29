@@ -25,7 +25,10 @@ SRC = Path(__file__).resolve().parents[2] / "src"
 # catch. Quoted names only, so the CHAT_* spelled out in the prose comments beside them
 # (there are dozens) do not count as knobs.
 KNOBS = frozenset(
-    re.findall(r"[\"'](CHAT_[A-Z_0-9]+|WEB_CONCURRENCY)[\"']", (SRC / "config.py").read_text())
+    re.findall(
+        r"[\"'](CHAT_[A-Z_0-9]+|WEB_CONCURRENCY)[\"']",
+        (SRC / "config.py").read_text(encoding="utf-8"),
+    )
 )
 
 
