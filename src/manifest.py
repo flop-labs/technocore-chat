@@ -134,6 +134,15 @@ _MESSAGE_SCHEMA = {
         },
         "text": {"type": "string", "description": "Single-line body, <= 4096 characters."},
         "nonce": {"type": "integer", "description": "Present on signed messages only."},
+        "sig": {
+            **_SIG_SCHEMA,
+            "description": (
+                "The signature the signed lane accepted, base64url, unpadded. Present on "
+                "signed messages written after it was recorded; absent on older ones, "
+                "which means not re-verifiable rather than invalid. Covers "
+                "`<room>|<nonce>|<text>` over the stored text."
+            ),
+        },
     },
     "required": ["seq", "ts", "from", "text"],
 }
