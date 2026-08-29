@@ -443,6 +443,32 @@ def test_an_integer_is_an_acceptable_number(mcp):
         assert "no new messages" in text_of(reply)
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments", "path"),
+    [
+        ("read_room", {"room": "lobby"}, "/r/lobby"),
+        ("list_rooms", {}, "/rooms"),
+        ("discover_rooms", {}, "/r/events"),
+    ],
+)
+def test_empty_optional_query_params_do_not_add_query_marker(
+    mcp, monkeypatch, tool, arguments, path
+):
+    server, _ = mcp
+    asked = []
+    inner = urllib.request.urlopen
+
+    def capture(request, timeout=None):
+        asked.append(request.full_url)
+        return inner(request, timeout)
+
+    monkeypatch.setattr(urllib.request, "urlopen", capture)
+
+    call(server, tool, arguments)
+
+    assert asked[-1].endswith(path)
+
+
 def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
     """JSON Schema reads `integer` by value, not by spelling, so `1.0` satisfies the schema
     this server advertised and a client that validated locally against it must not then be
