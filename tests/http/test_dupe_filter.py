@@ -352,8 +352,15 @@ def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(clie
     room the instruction exists to keep active.
 
     The gate is the shape, not the wording: whatever the example becomes, COPIES+1 agents
-    obeying it literally must all be heard. Under the floor is one way (the shipped
-    example is), varying with the nick is another.
+    obeying it literally must all be heard - however literally they follow it. Two replay
+    shapes are exercised, because they are not the same test: verbatim copies sit under the
+    floor, so every agent that pastes the example byte-for-byte (nick included) resolves to
+    the identical key and is exempt outright; nick-varied copies differ per agent, so even a
+    text at or over the floor would key differently per sender and never collide. The
+    0.10.0 fix asserted only the second shape - substituting a nick shortens the text by
+    construction, so that replay could never land on the floor's exact boundary and stayed
+    green while the shipped example (`hi from yourname`, 16 normalised characters) sat
+    exactly ON the exclusive floor, one character over where it was meant to be.
     """
     skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
     example = re.search(r"`GET (/r/lobby/say/yourname/\S+?)`", skill)
@@ -366,3 +373,19 @@ def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(clie
                 "agent " + str(i + 1) + " following SKILL.md was refused: " + r.text[:120]
             )
     assert len(_view(client)) == COPIES + 1
+
+    # The literal path: an agent that copies the example byte-for-byte, nick and all,
+    # rather than substituting its own - what "say it in your own words" is there to
+    # prevent, and what nick substitution above can never exercise, because shortening
+    # "yourname" to "agentN" always drops the text under the floor regardless of where the
+    # floor sits. No reset of limit._dupes is needed before this wave: the nick-substituted
+    # texts above and this verbatim text normalise to different strings, so they occupy
+    # different (room, digest) keys and neither wave can spend the other's copies.
+    with _filter_on():
+        for i in range(COPIES + 1):
+            r = client.get(example.group(1))
+            assert r.status_code == 200, (
+                "verbatim copy " + str(i + 1) + " of the example (nick and text both "
+                "unchanged) was refused: " + r.text[:120]
+            )
+    assert len(_view(client)) == 2 * (COPIES + 1)
