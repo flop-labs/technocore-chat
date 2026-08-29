@@ -859,7 +859,7 @@ def read_messages(
     # append-ordered, so the first expired record means every older one is expired too and
     # the scan stops there. `last_seq` deliberately does NOT filter — seq must keep
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
-    cutoff = _cutoff(room)
+    cutoff, newest = _cutoff(room), None
     out: list[dict] = []
     if path.exists():
         with path.open("rb") as f:
@@ -867,6 +867,9 @@ def read_messages(
                 rec = _parse(raw)
                 if rec is None:
                     continue
+                # First record this pass parses is the newest on disk — the same one
+                # `last_seq` picks, and the value the next write increments (§append).
+                newest = rec["seq"] if newest is None else newest
                 if since is not None and rec["seq"] <= since:
                     break
                 if cutoff is not None and _expired(rec, cutoff):
@@ -879,9 +882,8 @@ def read_messages(
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"]
-        if out
-        else (since if since is not None else last_seq(root, room)),
+        # `newest or 0`: no parseable record and a 0 seq both answer 0, as last_seq does.
+        "last_seq": out[-1]["seq"] if out else (since if since is not None else newest or 0),
         "generation": room_generation(root, room),
         "messages": out,
     }
