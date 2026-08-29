@@ -1227,12 +1227,8 @@ def _reapable(path: Path | str, now: float, stillborn_rule: bool) -> str | None:
 ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
 
 
-def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: float) -> bool:
-    """True when `entry` is a guard note whose room is still within its own idle window.
-
-    Tied to the room, not exempted outright: once the room itself is reapable the guards go
-    with it, so this bounds the state exactly as before rather than adding an immortal
-    namespace.
+def _guard_note_room(root: Path, base: str, entry: os.DirEntry[str]) -> Path | None:
+    """The room `entry` guards, or None when `entry` is not a guard note at all.
 
     The namespace is the FIRST component under `base`, never the parent directory. That was
     the same thing before sharding and is not now: a bucketed note's parent is `ab`, so a
@@ -1246,12 +1242,46 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
     name carries exactly one, the suffix's.
     """
     if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
-        return False
-    room = room_path(root, entry.name.rpartition(".")[0])
+        return None
+    return room_path(root, entry.name.rpartition(".")[0])
+
+
+def _guard_orphaned(room: Path, now: float) -> bool:
+    """True once the room a guard note names is gone, or is itself reapable — by either
+    rule, idle or stillborn.
+
+    A guard's whole job is to outlive the room it protects until the room itself goes, so
+    checking it against `_reapable` (both rules) rather than a bare mtime comparison against
+    IDLE_SECONDS is what actually ties its lifetime to the room's: a room on the stillborn
+    rule is gone at STILLBORN_SECONDS, and a guard note that kept waiting out IDLE_SECONDS on
+    its own — up to six more days — would sit there long after the room it names is unlinked,
+    still reporting the room "owned" to `_room_write_gate` and blocking the very recreation
+    the reap made room for (room_generation, #139). `_reap` deletes the room this same pass
+    (rooms are walked before notes) so by the time a guard note is checked its room is
+    already gone in the common case; reapable-but-not-yet-unlinked is handled the same way so
+    this holds regardless of walk order.
+    """
     try:
-        return now - room.stat().st_mtime <= IDLE_SECONDS
+        return _reapable(room, now, True) is not None
     except OSError:
-        return False  # no room left to guard
+        return True  # no room left to guard
+
+
+def _reap_reason(
+    path: Path | str, guard_room: Path | None, now: float, stillborn_rule: bool
+) -> str | None:
+    """Why `_reap` would take this entry, or None while it stays. One call covers both
+    the pre-lock check and the post-lock recheck, on a path or a guard room respectively —
+    the same split `_reapable` documents, for the same reason: a cached stat must never
+    stand in for the recheck.
+
+    A guard note (`guard_room` not None) is reasoned about via the room it names, never its
+    own path: `_guard_orphaned` is the whole point of the split, and mixing in `_reapable`
+    on the note's own mtime here would resurrect exactly the bug this replaced.
+    """
+    if guard_room is not None:
+        return "orphaned" if _guard_orphaned(guard_room, now) else None
+    return _reapable(path, now, stillborn_rule)
 
 
 def _reconcile_note_count(root: Path) -> None:
@@ -1381,9 +1411,13 @@ def _reap(root: Path) -> None:
         base = f"{root / sub}{os.sep}"
         for entry in _walk(root / sub, suffix):
             try:
-                if _guards_a_live_room(root, base, entry, now):
-                    continue
-                if not _reapable(entry.path, now, stillborn_rule):
+                # A guard note is reapable exactly when the room it names is gone or is
+                # itself reapable -- never on its own IDLE_SECONDS clock, which is what let
+                # a stillborn-reaped room's owner note survive the room by up to six days.
+                # An ordinary note (guard_room is None) keeps the plain per-note idle check.
+                # See _reap_reason.
+                guard_room = _guard_note_room(root, base, entry)
+                if not _reap_reason(entry.path, guard_room, now, stillborn_rule):
                     continue
                 # The Path is built here and not in the walk: everything above this line
                 # works on the entry scandir already had, and a live pass reaches this
@@ -1394,9 +1428,11 @@ def _reap(root: Path) -> None:
                 # stat above, and deleting a just-written room would lose live messages.
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
-                # It re-stats by path, never through the entry — see _reapable.
+                # It re-stats by path, never through the entry — see _reapable. A guard note
+                # rechecks its room the same way, under the same lock, for the same reason:
+                # the room could have been recreated in the gap since the check above.
                 with _locked(p):
-                    reason = _reapable(p, now, stillborn_rule)
+                    reason = _reap_reason(p, guard_room, now, stillborn_rule)
                     if reason:
                         if stillborn_rule:
                             # Leave the previous generation's high-water mark behind so a

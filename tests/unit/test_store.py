@@ -870,6 +870,36 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
+def test_ownership_guards_do_not_outlive_a_stillborn_room(tmp_path):
+    """A room nobody answered is reaped at STILLBORN_SECONDS (a day) — far short of the
+    IDLE_SECONDS (a week) an ordinary room gets. A guard note that only ever checked its
+    OWN age against IDLE_SECONDS (as this store did before) would survive the room by up
+    to six days, still reporting /r/d-orphan "owned" to _room_write_gate and blocking the
+    very recreation the reap made room for (room_generation, #139)."""
+    import store
+
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    store.append(tmp_path, "d-orphan", "opener", "anyone home?")  # one message: stillborn
+    for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "1")):
+        store.note_set(tmp_path, ns, "d-orphan", value)
+
+    # Past STILLBORN_SECONDS — the room is reapable — but nowhere near IDLE_SECONDS, where
+    # the notes' own (irrelevant) idle clock would otherwise sit for six more days.
+    for path in (
+        store.room_path(tmp_path, "d-orphan"),
+        store.note_path(tmp_path, store.OWNERS_NS, "d-orphan"),
+        store.note_path(tmp_path, store.ALLOW_NS, "d-orphan"),
+        store.note_path(tmp_path, store.NONCE_NS, "d-orphan"),
+    ):
+        _age(path, store.STILLBORN_SECONDS + 60)
+
+    _reap_now(tmp_path)
+
+    assert not store.room_path(tmp_path, "d-orphan").exists()
+    for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
+        assert store.note_get(tmp_path, ns, "d-orphan") is None, ns
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 
