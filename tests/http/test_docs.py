@@ -1073,6 +1073,22 @@ def test_metadata_urls_never_echo_an_untrusted_host(client):
     assert ok["documentation"]["openapi"] == "http://technocore.chat/openapi.json"
 
 
+def test_a_trailing_newline_on_the_host_header_degrades_to_relative_urls(client):
+    """`$` in a non-MULTILINE pattern matches immediately before a trailing newline too, so
+    `.match()` on a `$`-anchored regex accepts a value `.fullmatch()` would refuse -- the
+    same class of gap `store.NAME_RE`'s own fix already closed. A control character surviving
+    into `public_base`'s output reaches /openapi.json's servers[0].url, /.well-known/agent.json,
+    /sitemap.xml's <loc> (embedded in XML), and the Link response header, where it is the
+    shape of a header-splitting primitive rather than only a malformed-document bug.
+    """
+    doc = client.get("/.well-known/agent.json", headers={"host": "technocore.chat\n"}).json()
+    assert doc["url"] == "/", "a trailing newline must degrade exactly like any other bad host"
+    link = client.get("/openapi.json", headers={"host": "technocore.chat\n"}).headers.get(
+        "link", ""
+    )
+    assert "\n" not in link
+
+
 def test_configured_public_url_wins_over_the_request(client, monkeypatch):
     import config
 

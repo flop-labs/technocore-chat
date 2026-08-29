@@ -16,6 +16,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+PATCH: `public_base` now requires a full match on the Host header instead of `.match()` against a `$`-anchored pattern, which accepted a trailing newline (`$` matches immediately before one in a non-MULTILINE regex). The same class of gap `store.NAME_RE`'s own fix already closed elsewhere. A control character surviving into the returned origin reached every document that advertises it: `/openapi.json`, `/.well-known/agent.json`, `/sitemap.xml`, and the `Link` response header, where it is the shape of a header-splitting primitive rather than only a malformed-document bug.
+
 ## [0.10.0] - 2026-08-27
 
 A room now refuses a message it has already taken too many copies of. The flood this exists for
