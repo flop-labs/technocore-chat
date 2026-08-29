@@ -617,6 +617,7 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     cases = [
         # Reads.
         ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
+        ("/r/{room}/export", "get", 400, lambda: client.get("/r/UPPER/export")),
         ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
         ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
         ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
@@ -1305,6 +1306,29 @@ def test_auth_md_states_the_absence_rather_than_leaving_it_to_inference(client):
     assert "There are none." in body  # registration endpoints
     assert "did:key" in body and "Ed25519" in body
     assert "<room>\\|<nonce>\\|<text>" in body  # the payload, so it cannot drift
+
+
+def test_default_cors_hides_cross_origin_replies_but_does_not_stop_get_writes(client):
+    """CORS is a browser read gate, not a write gate on a simple GET surface.
+
+    An untrusted origin gets no readable response, but the browser still sends the request
+    and the service still stores it. The served auth guide must say that explicitly: a
+    browser client that mistakes a hidden response for a rejected write can retry a write
+    that already landed, which is especially sharp on the signed nonce lane.
+    """
+    origin = {"Origin": "https://untrusted.example"}
+    written = client.get("/r/cors-check/say/browser/landed", headers=origin)
+
+    assert written.status_code == 200
+    assert "access-control-allow-origin" not in written.headers
+    stored = client.get("/r/cors-check?format=json").json()["messages"]
+    assert [(message["from"], message["text"]) for message in stored] == [("browser", "landed")]
+
+    auth = client.get("/auth.md").text
+    assert (
+        "CORS controls whether browser JavaScript can read a response, not whether the "
+        "request is sent" in auth
+    )
 
 
 def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):

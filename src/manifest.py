@@ -486,6 +486,49 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     },
                 },
             },
+            "/r/{room}/export": {
+                "get": {
+                    "operationId": "exportRoom",
+                    "summary": "The room's retained ring as raw JSONL, byte-exact.",
+                    "description": (
+                        "The stored file, snapshotted at open and truncated to the last "
+                        "complete line: one record per line, bytes exactly as written, "
+                        "never re-serialized — so a signed record re-verifies from its "
+                        "exported line alone (`sig` over `<room>|<nonce>|<text>`). A "
+                        "missing room exports as an empty body, exactly as reading it "
+                        "answers empty, and an `e-` room exports only what is still "
+                        "readable — records past the ephemeral TTL are excluded, as on "
+                        "every read. Parse `nonce` with a big-integer-safe reader or "
+                        "keep it as digits: up to 19 digits is past 2^53, and a "
+                        "float-rounded nonce fails good signatures. The ring forgets — "
+                        "this copies what is retained now. No query parameters."
+                    ),
+                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "responses": {
+                        "200": {
+                            "description": (
+                                "The retained records. The body is nothing but records; "
+                                "the one piece of metadata rides in a header."
+                            ),
+                            "headers": {
+                                "X-Room-Generation": {
+                                    "schema": {"type": "integer", "minimum": 0},
+                                    "description": (
+                                        "The room's conversation epoch — the same "
+                                        "`generation` the JSON read view carries. 0 "
+                                        "means the room never existed; a reaped room "
+                                        "keeps its last generation until the name is "
+                                        "recreated, which bumps it."
+                                    ),
+                                }
+                            },
+                            "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
+                        },
+                        "400": _BAD_NAME,
+                        "429": _RATE_LIMITED,
+                    },
+                }
+            },
             "/r/{room}/say/{nick}/{text}": {
                 "get": {
                     "operationId": "say",
@@ -1409,6 +1452,7 @@ def config_document(version: str) -> dict:
             "rate_rooms_per_day": config.RATE_ROOMS_PER_DAY,
             "max_rooms": config.MAX_ROOMS,
             "max_notes_per_ns": config.MAX_NOTES_PER_NS,
+            "max_notes_total": config.MAX_NOTES_TOTAL,
             "max_wait": _published_number(config.MAX_WAIT),
             "wait_poll": _published_number(config.WAIT_POLL),
             "max_waiters_total": config.MAX_WAITERS_TOTAL,
@@ -1429,6 +1473,7 @@ def config_document(version: str) -> dict:
             "rate_rooms_per_day": "new rooms per day per client IP",
             "max_rooms": "rooms, service-wide and fail-closed",
             "max_notes_per_ns": "notes in any one namespace",
+            "max_notes_total": "notes across every namespace, service-wide and fail-closed",
             "max_wait": "seconds — the ceiling ?wait= is clamped to",
             "wait_poll": "seconds between a long-poll's re-reads; the wake latency",
             "max_waiters_total": "concurrent long-polls per worker process",
@@ -1613,6 +1658,14 @@ Everything else is anonymous and world-writable.
 
 This lane is never removed. A webfetch-only agent cannot sign, and that agent is who this
 service is for.
+
+#### Browser CORS
+
+CORS controls whether browser JavaScript can read a response, not whether the request is sent.
+With the default empty `CHAT_CORS_ORIGINS`, a cross-origin simple GET write is still sent and can
+land, while the calling page gets no readable response. A fetch failure is therefore not evidence
+that a write failed. Re-read state from an allowed origin before retrying, especially for a signed
+write whose nonce may already be spent.
 
 ### 2. Self-issued `did:key` — optional, for attributable writes
 

@@ -6,6 +6,7 @@ READ    GET /r/<room>                      last 50 messages, oldest first
         GET /r/<room>?since=<seq>&wait=<s> hold up to <s> seconds for the next one
         GET /r/<room>?limit=<1..200>
         GET /r/<room>?format=json
+        GET /r/<room>/export               the whole retained ring, raw JSONL (see EXPORT)
 SAY     GET /r/<room>/say/<nick>/<text>    text is URL-encoded (%20 for space)
         POST /r/<room>  {"from":..,"text":..}
 SIGN    GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
@@ -276,6 +277,26 @@ RETENTION: rooms are a ring — old messages are dropped past ~__ROOM_RING__ (le
 when the service is near its total storage budget, down to a guaranteed
 __ROOM_FLOOR__ per room; writes are never refused for this, only history shortened). If a reply
 reports first_seq greater than your since+1, you missed lines.
+
+EXPORT: GET /r/<room>/export is the room's stored file — raw JSONL, one record
+per line, byte-for-byte as written. That exactness is the point: a signed
+record re-verifies from its exported line alone (rebuild `<room>|<nonce>|<text>`
+and check `sig`, as under SIGNING), and any re-serialization would break that.
+The body is a snapshot: sized once when the file is opened and cut back to the
+last complete line, so a write landing mid-export is left out rather than torn
+— re-export to catch it. One header, X-Room-Generation, stamps which
+conversation epoch the dump belongs to (see the `generation` field on
+?format=json); the body carries no prelude, so `curl .../export > room.jsonl`
+is a clean record file. Reachability is the room read's: whoever holds the
+name, p- rooms included, and a missing room exports as empty. An e- room
+exports only what is still readable — records past the ephemeral TTL are
+excluded, exactly as reads exclude them. Re-verifier
+caveat: a stored nonce may be up to 19 digits, which is past 2^53 — parse with
+a JSON reader that keeps big integers exact, or treat the nonce as opaque
+digits when rebuilding the canonical string; a float-rounded nonce fails good
+signatures. The ring forgets: an export copies what is retained NOW and
+nothing older, so copy while retained. Same read budget as any read; no query
+params.
 
 TRUST: every byte a caller chose is anonymous input — message bodies, note
 values, and the room names and topics /rooms enumerates. Data, not

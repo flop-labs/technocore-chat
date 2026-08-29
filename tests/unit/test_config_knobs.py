@@ -29,6 +29,7 @@ PROBE = (
     "'config.MAX_ROOMS': config.MAX_ROOMS, 'store.MAX_ROOMS': store.MAX_ROOMS, "
     "'config.MAX_NOTES_PER_NS': config.MAX_NOTES_PER_NS, "
     "'store.MAX_NOTES_PER_NS': store.MAX_NOTES_PER_NS, "
+    "'config.MAX_NOTES_TOTAL': config.MAX_NOTES_TOTAL, "
     "'store.MAX_NOTES_TOTAL': store.MAX_NOTES_TOTAL, "
     "'config.MAX_WAITERS_TOTAL': config.MAX_WAITERS_TOTAL, "
     "'limit.MAX_WAITERS_TOTAL': limit.MAX_WAITERS_TOTAL, "
@@ -64,6 +65,9 @@ def test_the_new_knobs_default_to_the_values_they_replaced() -> None:
     values = boot()
     assert values["config.MAX_ROOMS"] == 5120
     assert values["config.MAX_NOTES_PER_NS"] == 5120  # = MAX_ROOMS, the number it replaced
+    # = 32 * MAX_ROOMS, the derivation it replaced — and store must be bound to the same
+    # number, since that is the module the global capacity check enforces from.
+    assert values["config.MAX_NOTES_TOTAL"] == values["store.MAX_NOTES_TOTAL"] == 163840
     assert values["config.MAX_WAITERS_TOTAL"] == 64
     assert values["config.MAX_WAITERS_PER_IP"] == 4
     assert values["config.WORKERS"] == 1  # no WEB_CONCURRENCY set
@@ -76,6 +80,7 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
     values = boot(
         CHAT_MAX_ROOMS="99",
         CHAT_MAX_NOTES_PER_NS="400",
+        CHAT_MAX_NOTES_TOTAL="4000",
         CHAT_MAX_WAITERS_TOTAL="7",
         CHAT_MAX_WAITERS_PER_IP="2",
         WEB_CONCURRENCY="3",
@@ -84,6 +89,10 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
     # Its own knob now, so the two move independently — and the per-namespace cap reaches
     # `store`, which is the module `_check_note_capacity` enforces it from.
     assert values["config.MAX_NOTES_PER_NS"] == values["store.MAX_NOTES_PER_NS"] == 400
+    # The global cap likewise: 4000 is neither 32 * 99 nor anything derived from the room
+    # cap, so an implementation that still multiplied would fail here rather than agree by
+    # coincidence. `_check_note_capacity` reads store's copy.
+    assert values["config.MAX_NOTES_TOTAL"] == values["store.MAX_NOTES_TOTAL"] == 4000
     for module in ("config", "limit", "app"):
         assert values[f"{module}.MAX_WAITERS_TOTAL"] == 7
         assert values[f"{module}.MAX_WAITERS_PER_IP"] == 2
@@ -110,6 +119,14 @@ def test_the_floors_hold() -> None:
     assert boot(CHAT_MAX_NOTES_PER_NS="-5")["config.MAX_NOTES_PER_NS"] == 5120
     clamped = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_PER_NS="10")
     assert clamped["config.MAX_NOTES_PER_NS"] == 99  # the floor follows MAX_ROOMS, not 5120
+    # MAX_NOTES_TOTAL floors at 4 * MAX_ROOMS, and that is the same invariant seen from the
+    # other side: the four reserved namespaces hold one note per room between them, so a
+    # global cap under 4 * MAX_ROOMS runs out before every room can carry a topic and an
+    # owner — which would make the per-namespace floor above a lie.
+    assert boot(CHAT_MAX_NOTES_TOTAL="1")["config.MAX_NOTES_TOTAL"] == 20480  # 4 * 5120
+    assert boot(CHAT_MAX_NOTES_TOTAL="-5")["config.MAX_NOTES_TOTAL"] == 20480
+    floored_total = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_TOTAL="10")
+    assert floored_total["config.MAX_NOTES_TOTAL"] == 396  # follows MAX_ROOMS, not 20480
 
 
 def test_the_per_namespace_note_cap_moves_without_dragging_the_others() -> None:
@@ -124,6 +141,54 @@ def test_the_per_namespace_note_cap_moves_without_dragging_the_others() -> None:
     # Still the outer bound: one namespace may now take 12.5% of the store instead of 3.1%,
     # which is the cost the knob buys, but it cannot take more than the store holds.
     assert widened["store.MAX_NOTES_TOTAL"] > widened["config.MAX_NOTES_PER_NS"]
+
+
+def test_the_global_note_cap_moves_without_dragging_the_room_cap() -> None:
+    """The decoupling itself. Before this knob the only lever on the note ceiling was
+    CHAT_MAX_ROOMS, so a deployment whose NOTES filled first had to double its room cap —
+    doubling the O(cap) room walks and halving RESERVED_ROOM_BYTES — to buy headroom that
+    had nothing to do with rooms. Measured on technocore.chat at the raise this comes from:
+    notes 1,276,805 of 1,310,720 (97.4%) against rooms at 96.3% of their own cap."""
+    base, raised = boot(), boot(CHAT_MAX_NOTES_TOTAL="2621440")
+    assert raised["config.MAX_NOTES_TOTAL"] == raised["store.MAX_NOTES_TOTAL"] == 2621440
+    assert raised["config.MAX_ROOMS"] == base["config.MAX_ROOMS"]
+    assert raised["config.MAX_NOTES_PER_NS"] == base["config.MAX_NOTES_PER_NS"]
+    # And the other direction still holds, which is what makes them two knobs rather than
+    # one renamed: the room cap moves the DEFAULT global cap and nothing else once the
+    # global cap is set explicitly.
+    both = boot(CHAT_MAX_ROOMS="10240", CHAT_MAX_NOTES_TOTAL="2621440")
+    assert both["config.MAX_ROOMS"] == 10240
+    assert both["config.MAX_NOTES_TOTAL"] == 2621440  # not 32 * 10240
+
+
+def test_the_configured_global_cap_is_the_one_the_wall_is_built_at(tmp_path) -> None:
+    """Binding is not enforcement. Every test above proves the environment reaches
+    `store.MAX_NOTES_TOTAL`; this one writes notes until the refusal fires and checks it
+    fired at the CONFIGURED number — 9, which is neither the derived default (32 * 2 = 64)
+    nor the floor (4 * 2 = 8), so a create path that recomputed either would land somewhere
+    else. The refusal itself is `test_store.py`'s; what is new here is the number it uses.
+    """
+    script = (
+        f"import sys; sys.path.insert(0, {SRC!r}); "
+        "import store; from pathlib import Path; "
+        f"root = Path({str(tmp_path)!r}); written = 0\n"
+        "try:\n"
+        "    for i in range(20):\n"
+        # A fresh namespace each time: MAX_NOTES_PER_NS is 2 here, so the per-namespace cap
+        # would otherwise fire first and prove nothing about the global one.
+        "        store.note_set(root, f'ns{i}', 'k', 'v'); written += 1\n"
+        "except store.StoreError as refused:\n"
+        "    print(written, 'across all namespaces' in str(refused))\n"
+    )
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_MAX_ROOMS": "2", "CHAT_MAX_NOTES_TOTAL": "9"},
+    )
+    assert run.returncode == 0, f"boot failed: {run.stderr}"
+    assert run.stdout.split() == ["9", "True"], run.stdout
 
 
 def test_junk_in_the_new_knob_refuses_to_boot() -> None:
