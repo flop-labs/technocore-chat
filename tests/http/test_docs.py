@@ -1456,3 +1456,26 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_note_value_param_documents_the_url_budget_not_just_maxlength(client):
+    """Note values ride in the URL on the GET write lanes, so the binding limit is the edge
+    URL budget, not `maxLength`. A generated client that trusts `maxLength` as the size
+    contract would build a call that fails opaquely at the proxy for a value the schema
+    says is valid (#362, the note-side twin of #76). Both GET note write lanes must name
+    the real bound and the POST escape, or the contract lies about what fits."""
+    import manifest
+
+    doc = client.get("/openapi.json").json()
+    ops = {op["operationId"]: op for path in doc["paths"].values() for op in path.values()}
+    for op_id in ("writeNote", "writeNoteSigned"):
+        op = ops[op_id]
+        value = next(p for p in op["parameters"] if p["name"] == "value")
+        desc = value["schema"].get("description", "")
+        assert desc, f"{op_id} value param has no description"
+        assert "URL" in desc, f"{op_id} value description does not name the URL budget: {desc!r}"
+        assert "POST" in desc, f"{op_id} value description does not name the POST escape: {desc!r}"
+    # the cap in the prose must match the enforced one (no drift)
+    set_op = doc["paths"]["/kv/{ns}/{key}/set/{value}"]["get"]
+    set_desc = next(p for p in set_op["parameters"] if p["name"] == "value")["schema"]["description"]
+    assert str(manifest.store.MAX_VALUE_CHARS) in set_desc
