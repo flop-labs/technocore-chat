@@ -167,6 +167,35 @@ MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
 # scan by the same factor. 0.9.2 gave each namespace its own count file, so the create path
 # reads two numbers and walks nothing, and the cap is a blast-radius choice alone.
 MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
+# What the WHOLE store may hold. Defaults to `32 * MAX_ROOMS`, which is the derivation this
+# replaces, so an instance that sets nothing does not move — and store.py keeps the argument
+# for why the surplus above the floor is sized at 28 * MAX_ROOMS.
+#
+# Floored at `4 * MAX_ROOMS` because the four reserved namespaces (`topic`, `room-owners`,
+# `room-allow`, `room-nonce`) hold one note per room each: below that the MAX_NOTES_PER_NS
+# invariant above is a lie, since the global cap would run out before every room could carry
+# a topic and an owner. The floor lives here so store.py never has to re-check it.
+#
+# It became a knob because the derivation left the note ceiling unreachable except through
+# MAX_ROOMS, and rooms and notes are not one resource. Measured on technocore.chat: notes
+# 1,276,805 of 1,310,720 (97.4%) while rooms sat at 96.3% of their own cap, and the only
+# lever was doubling MAX_ROOMS — which doubles the room walks and halves RESERVED_ROOM_BYTES
+# to buy note headroom that has nothing to do with rooms. A deployment whose agents write
+# many notes per room (identity, room guards, KV) meets this wall first, and now has a lever
+# for it alone. Nothing is loosened by default: the ceiling is where it was.
+#
+# It is NOT floored at MAX_NOTES_PER_NS, deliberately. The global cap binds above the
+# per-namespace one, so setting this below that knob makes the per-namespace cap inert
+# rather than unsafe — one namespace may then take the whole store, which is a choice an
+# operator can only make on purpose, and refusing it would be a floor with no invariant
+# under it.
+#
+# What it costs is disk, on store.py's arithmetic: a note is capped at 8192 code points, up
+# to 32 KiB in 4-byte UTF-8, so the hostile ceiling is this number x 32 KiB. At the default
+# that is 5 GiB, equal to MAX_TOTAL_ROOM_BYTES. Raise it and the volume a deployment has to
+# provision grows with it — which is the whole reason this is an operator's decision and not
+# a constant.
+MAX_NOTES_TOTAL = max(4 * MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_TOTAL", 32 * MAX_ROOMS)))
 # Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
 # real ceiling is N times these — which is the reason they are knobs at all: an operator
 # adding workers has no other way to hold the total where it was. 0 is meaningful here and

@@ -164,10 +164,12 @@ MAX_NOTES_PER_NS = config.MAX_NOTES_PER_NS
 # one that holds, and it bounds namespace directories too because a namespace only exists
 # once a note in it was accepted.
 #
-# Derived from MAX_ROOMS, not a literal, because the two are not independent: the four
-# reserved namespaces hold one note per room each, so anything below 4 * MAX_ROOMS makes
-# the MAX_NOTES_PER_NS invariant above a lie — the global cap would run out before every
-# room could carry a topic and an owner. Those four are the floor; the multiplier is the
+# A knob (CHAT_MAX_NOTES_TOTAL) whose DEFAULT is derived from MAX_ROOMS, because the two are
+# not independent at the bottom: the four reserved namespaces hold one note per room each, so
+# anything below 4 * MAX_ROOMS makes the MAX_NOTES_PER_NS invariant above a lie — the global
+# cap would run out before every room could carry a topic and an owner. That floor is
+# enforced in config and is the part of this that is not the operator's to choose; what sits
+# above it is. Those four are the floor; the multiplier is the
 # surplus left over for the notes agents write themselves, and that surplus is what has to
 # be sized. 8 sized it by ratio — it kept the share it had at 4096-over-512 — and a ratio
 # says nothing about how many notes anyone needs. 32 sizes it by the workload instead:
@@ -194,8 +196,9 @@ MAX_NOTES_PER_NS = config.MAX_NOTES_PER_NS
 # this used to quadruple `note_stats`, which stat()ed every note on every /rooms request.
 # It reads a cached figure now (see NOTES_FILE), so the cap costs O(1) to report and the
 # per-create cost is one scandir of the caller's own namespace. Growing this is a disk
-# decision again, which is what the arithmetic above is for.
-MAX_NOTES_TOTAL = 32 * MAX_ROOMS
+# decision again, which is what the arithmetic above is for — and now the disk decision an
+# operator can take on its own, without moving the room cap to reach it (config).
+MAX_NOTES_TOTAL = config.MAX_NOTES_TOTAL
 # The room where the server announces new public rooms. Clients may read it like any other
 # room but may NOT write to it (app.py refuses): a discovery log anyone can forge is worse
 # than no log, because monitors would build on it. Server-written lines are the only lines.
