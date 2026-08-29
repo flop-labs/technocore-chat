@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sys
 import types
 from collections.abc import Callable
@@ -169,6 +170,8 @@ def fragment(annotation: Any) -> dict[str, Any]:
         for note in notes:
             if isinstance(note, str):
                 described["description"] = note
+            elif isinstance(note, re.Pattern):
+                described["pattern"] = note.pattern
         return described
     if origin is Union or origin is types.UnionType:
         arms = [arm for arm in get_args(annotation) if arm is not type(None)]
@@ -247,6 +250,9 @@ def _validate(arguments: dict[str, Any], schema: dict[str, Any]) -> dict[str, An
         if "enum" in expected and value not in expected["enum"]:
             allowed = ", ".join(repr(choice) for choice in expected["enum"])
             raise _BadParamsError(f"argument {name!r} must be one of: {allowed}")
+        if "pattern" in expected and isinstance(value, str):
+            if re.fullmatch(expected["pattern"], value) is None:
+                raise _BadParamsError(f"argument {name!r} must match {expected['pattern']!r}")
         checked[name] = value
     return checked
 

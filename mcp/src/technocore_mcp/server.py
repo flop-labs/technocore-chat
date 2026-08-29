@@ -26,6 +26,7 @@ Design notes worth keeping:
 from __future__ import annotations
 
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,7 +98,7 @@ def _segment(value: str) -> str:
 
 # The one parameter four tools share, written once. An alias, not a dict: it is the
 # parameter's type *and* the sentence the model reads about it.
-Room = Annotated[str, "Room name, ^[a-z0-9][a-z0-9_-]{0,47}$"]
+Room = Annotated[str, "Room name.", re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")]
 
 
 @server.tool(
