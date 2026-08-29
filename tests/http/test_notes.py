@@ -127,6 +127,15 @@ def test_if_absent_creates_exactly_once(client):
     assert "agent-a" in client.get("/kv/coord/claim").text
 
 
+def test_capitalized_falsy_if_absent_is_not_a_condition(client):
+    # "False"/"FALSE" must read as falsy, not as "only if absent" (#282):
+    # a capitalized spelling turned an unconditional replace into a spurious 409.
+    assert client.get("/kv/coord/cap/set/a").status_code == 200
+    assert client.post("/kv/coord/cap", json={"value": "b", "if_absent": "False"}).status_code == 200
+    assert client.get("/kv/coord/cap/set/c?if_absent=FALSE").status_code == 200
+    assert "c" in client.get("/kv/coord/cap").text
+
+
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
     # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
