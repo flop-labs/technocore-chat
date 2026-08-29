@@ -822,13 +822,17 @@ def room_generation(root: Path, room: str) -> int:
     which leaves a stateful client watching a different conversation under the same name
     with no way to know; the generation is the explicit signal to resync. 0 = never
     existed, or the conversation has ended (reaped, not yet recreated)."""
-    entry = _read_seq_state(root).get(room)
-    if entry:
+    if entry := _read_seq_state(root).get(room):
         try:
-            return int(entry.get("gen", 0))
+            generation, floor = int(entry.get("gen", 0)), int(entry.get("floor", 0))
         except (TypeError, ValueError):
             return 0
-    return 0
+        # A non-zero floor overlaps the room file at two publication boundaries: while the
+        # reaper still exposes the old record (last_seq == floor), and after recreation has
+        # exposed its first new record (last_seq > floor). Distinguish them without a lock.
+        return generation + int(floor > 0 and last_seq(root, room) > floor)
+    # First creation exposes its room file just before publishing the initial seq-state.
+    return int(room_path(root, room).exists())
 
 
 # Engagement tripwires (docs/research/moltbook-adoption-analysis.md §II.2.2) are computed from
