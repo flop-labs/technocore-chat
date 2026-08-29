@@ -864,11 +864,10 @@ def read_messages(
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
-                rec = _parse(raw)
-                if rec is None:
-                    continue
                 # First record this pass parses is the newest on disk — the same one
                 # `last_seq` picks, and the value the next write increments (§append).
+                if (rec := _parse(raw)) is None:
+                    continue
                 newest = rec["seq"] if newest is None else newest
                 if since is not None and rec["seq"] <= since:
                     break
