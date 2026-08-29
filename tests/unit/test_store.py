@@ -430,6 +430,29 @@ def test_a_recreated_room_reports_a_new_generation(tmp_path):
     assert after == before + 1, "recreate must bump the generation"
 
 
+def test_reaped_room_sequence_state_expires_after_the_idle_grace(tmp_path):
+    """#489: retired room names must not make the root-level state map grow forever."""
+    import store
+
+    store.append(tmp_path, "retired", "alice", "first conversation")
+    store.append(tmp_path, "active", "bob", "still here")
+    path = store.room_path(tmp_path, "retired")
+    _age(path, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
+
+    state = store._read_seq_state(tmp_path)
+    assert state["retired"]["reaped_at"] <= time.time()
+    state["retired"]["reaped_at"] = time.time() - store.IDLE_SECONDS - 60
+    state["legacy"] = {"floor": 3, "gen": 1}
+    store._write_seq_state(tmp_path, state)
+
+    _reap_now(tmp_path)
+    state = store._read_seq_state(tmp_path)
+    assert "retired" not in state
+    assert state["active"] == {"floor": 0, "gen": 1}
+    assert state["legacy"] == {"floor": 3, "gen": 1}
+
+
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
     """The reaper walks every room and note in one pass, and a racing writer or a
     permission blip on any one of them is ordinary. Skipping that entry costs nothing;
