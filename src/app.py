@@ -26,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Match, Route
 
 import config
@@ -929,6 +929,38 @@ async def _await_messages(
             if view["messages"]:
                 return view
     return None
+
+
+def room_export(request: Request) -> Response:
+    """`GET /r/<room>/export` — the retained ring, one raw JSONL download.
+
+    Every other read is a tail window (newest <= MAX_LIMIT), so nothing could copy the
+    history a room still holds even though it is literally a file (docs/design.md §7.6:
+    with `sig` persisted, a dump is a bundle of portable proofs). The body is the stored
+    bytes exactly as written — see store.export_room for why re-serializing is refused
+    and how the snapshot is bounded.
+
+    Metadata rides in one header rather than a body prelude, so `curl ... > room.jsonl`
+    yields a file that is nothing but records. Reachability is the room read's: whoever
+    holds the name reads it, `p-` rooms included, and a missing room answers exactly as
+    the room read does (200, empty). The read budget applies unchanged — the response is
+    already bounded by the room byte cap, so a separate budget class would price the same
+    worst case twice. No `wait=` and no query params in v1.
+    """
+    _, retry = take(request, "read", RATE_READ)
+    if retry:
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
+    room = request.path_params["room"]
+    return StreamingResponse(
+        store.export_room(config.ROOT, room),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex",
+            "X-Room-Generation": str(store.room_generation(config.ROOT, room)),
+        },
+    )
 
 
 def _reject_if_events_room(room: str) -> Response | None:
@@ -1873,6 +1905,7 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
+        Route("/r/{room}/export", room_export),
         _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
         _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),

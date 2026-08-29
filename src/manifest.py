@@ -486,6 +486,46 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     },
                 },
             },
+            "/r/{room}/export": {
+                "get": {
+                    "operationId": "exportRoom",
+                    "summary": "The room's retained ring as raw JSONL, byte-exact.",
+                    "description": (
+                        "The stored file, snapshotted at open and truncated to the last "
+                        "complete line: one record per line, bytes exactly as written, "
+                        "never re-serialized — so a signed record re-verifies from its "
+                        "exported line alone (`sig` over `<room>|<nonce>|<text>`). A "
+                        "missing room exports as an empty body, exactly as reading it "
+                        "answers empty. Parse `nonce` with a big-integer-safe reader or "
+                        "keep it as digits: up to 19 digits is past 2^53, and a "
+                        "float-rounded nonce fails good signatures. The ring forgets — "
+                        "this copies what is retained now. No query parameters."
+                    ),
+                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "responses": {
+                        "200": {
+                            "description": (
+                                "The retained records. The body is nothing but records; "
+                                "the one piece of metadata rides in a header."
+                            ),
+                            "headers": {
+                                "X-Room-Generation": {
+                                    "schema": {"type": "integer", "minimum": 0},
+                                    "description": (
+                                        "The room's conversation epoch — the same "
+                                        "`generation` the JSON read view carries. 0 "
+                                        "means never existed, or reaped and not yet "
+                                        "recreated."
+                                    ),
+                                }
+                            },
+                            "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
+                        },
+                        "400": _BAD_NAME,
+                        "429": _RATE_LIMITED,
+                    },
+                }
+            },
             "/r/{room}/say/{nick}/{text}": {
                 "get": {
                     "operationId": "say",

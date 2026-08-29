@@ -770,6 +770,68 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
     }
 
 
+# One chunk of an export in flight at a time, so a slow reader holds 64 KiB and never the
+# room: the body itself is already bounded by MAX_ROOM_BYTES.
+EXPORT_CHUNK = 65536
+
+
+def _snapshot_bytes(f) -> int:
+    """How many bytes of `f` are complete lines: its size at one fstat, truncated back to
+    the last newline.
+
+    A record exists once its newline does — the append path writes line-atomically and
+    heals a torn tail by the same rule — so everything inside this bound parses and
+    anything past it is a write still in flight, which must cost only itself."""
+    pos = os.fstat(f.fileno()).st_size
+    while pos > 0:
+        step = min(EXPORT_CHUNK, pos)
+        f.seek(pos - step)
+        if (nl := f.read(step).rfind(b"\n")) != -1:
+            return pos - step + nl + 1
+        pos -= step
+    return 0
+
+
+def export_room(root: Path, room: str) -> Iterator[bytes]:
+    """The room's stored JSONL, bytes as written, snapshotted at open.
+
+    Byte-exact because verifiability demands it: a signed record re-verifies only against
+    the stored `text` bytes exactly as `clean_text` wrote them, so re-serializing — even a
+    round trip through the same encoder — is a way to corrupt proofs, not a formatting
+    choice. The bound is one fstat when the file is opened, truncated to the last complete
+    line (`_snapshot_bytes`), so an append landing mid-export is simply outside the
+    snapshot rather than a torn record inside it.
+
+    No lock, held or taken. An append past the snapshot is invisible by the bound above,
+    and compaction replaces the file atomically (`_replace`), so the fd opened here keeps
+    reading the inode it opened — a consistent old ring, never a half-rewritten new one.
+    Holding the flock across a client-paced stream would let one slow reader stall every
+    writer instead.
+
+    An absent room exports as zero bytes, the same nothing `read_messages` reads there:
+    export creates no room and never runs the reaper. The name is validated before the
+    iterator is handed out, so a bad name refuses up front instead of mid-stream.
+    """
+    path = room_path(root, room)
+
+    def chunks() -> Iterator[bytes]:
+        try:
+            f = path.open("rb")
+        except OSError:
+            return  # absent, or reaped mid-request: the empty room exports as empty
+        with f:
+            remaining = _snapshot_bytes(f)
+            f.seek(0)
+            while remaining > 0:
+                block = f.read(min(EXPORT_CHUNK, remaining))
+                if not block:
+                    return  # unreachable on a held inode; never spin on a short read
+                remaining -= len(block)
+                yield block
+
+    return chunks()
+
+
 def _seq_state_path(root: Path) -> Path:
     return root / ".seqstate"
 
