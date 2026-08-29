@@ -1240,11 +1240,17 @@ async def room_post(request: Request) -> Response:
     if isinstance(payload, Response):
         return payload
     room = request.path_params["room"]
+    nick = payload.get("from", "")
+    sent = payload.get("text", "")
+    if not isinstance(nick, str):
+        return text("400 `from` must be a string", 400)
+    if not isinstance(sent, str):
+        return text("400 `text` must be a string", 400)
     credentials = _payload_credentials(payload)
     signer = None
     if credentials:
         did, sig, nonce = credentials
-        body = store.clean_text(str(payload.get("text", "")))
+        body = store.clean_text(sent)
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
@@ -1261,7 +1267,6 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)

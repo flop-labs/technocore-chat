@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import _client
+import pytest
 from starlette.testclient import TestClient
 
 client = _client.client  # the shared TestClient fixture
@@ -593,6 +594,19 @@ def test_malformed_payload_shapes_are_400_not_500(client):
         assert r.status_code == 400, body
     assert client.post("/r/lobby", content=b"{not json").status_code == 400
     assert client.post("/r/lobby", json={}).status_code == 400  # empty from/text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("from", 0), ("from", True), ("text", 12345), ("text", ["hello"])],
+)
+def test_room_post_rejects_non_string_fields_instead_of_coercing(client, field, value):
+    payload = {"from": "agent", "text": "hello"}
+    payload[field] = value
+    response = client.post("/r/type-check", json=payload)
+    assert response.status_code == 400
+    assert f"`{field}` must be a string" in response.text
+    assert client.get("/r/type-check?format=json").json()["messages"] == []
 
 
 def test_a_malformed_note_post_names_the_note_shape_to_send_next(client):
