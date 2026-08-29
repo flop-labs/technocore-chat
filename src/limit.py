@@ -53,6 +53,13 @@ FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /ope
 # limiter state — which is why the authoritative limit belongs in the proxy (see README).
 MAX_BUCKETS = 20_000
 _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+# Guards every read-modify-write on _buckets, in take() and in refund(): unlike a lost
+# update on _dupes (a fraction of a token, see below), a burst of concurrent callers on
+# one (ip, kind) can each read the same un-decremented balance and each grant
+# independently — the over-admission scales with concurrency, not with a fixed fraction.
+# A leaf lock, same discipline as _dupes_lock: held for a handful of dict operations,
+# never across client_ip(), the debug log, or any I/O.
+_buckets_lock = threading.Lock()
 
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
@@ -267,23 +274,35 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     the capacity is the whole day's allowance and `per_min` is only the rate that hands it
     back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
+
+    The balance is read, updated and written back under `_buckets_lock`: every write lane
+    reaches here from a threadpool, so an unlocked read-modify-write lets a burst of
+    concurrent callers on one (ip, kind) each read the same balance and each grant —
+    admitting more than the bucket ever held. `refund()` takes the same lock for the
+    same reason.
     """
     ip = client_ip(request, ip_header)
     if len(_identities) < MAX_IDENTITIES:
         _identities.add(ip)
     now = time.monotonic()
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, now))
-    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
-    if tokens >= 1.0:  # granted: no wait, even when this was the last token
-        tokens -= 1.0
-        wait = 0.0
-    else:
-        wait = (1.0 - tokens) * 60.0 / per_min
-    _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
-    while len(_buckets) > max_buckets:
-        _buckets.popitem(last=False)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, now))
+        tokens = min(cap, tokens + (now - last) * per_min / 60.0)
+        if tokens >= 1.0:  # granted: no wait, even when this was the last token
+            tokens -= 1.0
+            wait = 0.0
+        else:
+            wait = (1.0 - tokens) * 60.0 / per_min
+        # pop-then-insert, not move_to_end: assigning an existing key leaves the entry
+        # where it already was, and a concurrent evictor's popitem could take it from
+        # there, turning a plain move_to_end into a KeyError (#378). Redundant now that
+        # the lock rules that interleaving out, but keeps this block correct on its own
+        # if the lock is ever narrowed further.
+        _buckets.pop((ip, kind), None)
+        _buckets[(ip, kind)] = (tokens, now)
+        while len(_buckets) > max_buckets:
+            _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
@@ -299,11 +318,16 @@ def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
 
     `last` is deliberately left alone: it is the refill clock, and moving it would either
     grant free time or discard earned time. Only the balance changes.
+
+    Takes `_buckets_lock`, the same one `take()` holds: this is a read-modify-write on the
+    same dict, and without the same lock a refund racing a take() on one (ip, kind) can
+    lose either side's update the same way two concurrent take() calls can.
     """
     ip = client_ip(request, ip_header)
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
+        _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
     config._dbg(1, "refund", ip=ip, kind=kind)
 
 
