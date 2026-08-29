@@ -3,7 +3,7 @@
   "checkpoint_id": "01M172BX5DG1X20P461T1762JB",
   "strategy": "manual-commit",
   "branch": "feat/max-notes-total-knob",
-  "checkpoints_count": 5,
+  "checkpoints_count": 7,
   "files_touched": [
     "mcp/src/technocore_mcp/server.py"
   ],
@@ -14,6 +14,13 @@
       "compact_transcript": "/0/transcript.jsonl",
       "content_hash": "/0/content_hash.txt",
       "prompt": "/0/prompt.txt"
+    },
+    {
+      "metadata": "/1/metadata.json",
+      "transcript": "/1/full.jsonl",
+      "compact_transcript": "/1/transcript.jsonl",
+      "content_hash": "/1/content_hash.txt",
+      "prompt": "/1/prompt.txt"
     }
   ],
   "token_usage": {

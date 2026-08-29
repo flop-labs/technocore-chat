@@ -1,0 +1,40 @@
+{
+  "cli_version": "0.10.2",
+  "checkpoint_id": "01M172BX5DG1X20P461T1762JB",
+  "session_id": "cd1d8a9e-361c-46ba-b206-80447124cae8",
+  "strategy": "manual-commit",
+  "created_at": "2026-08-29T15:31:47.123618Z",
+  "branch": "feat/max-notes-total-knob",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "mcp/src/technocore_mcp/server.py"
+  ],
+  "agent": "Claude Code",
+  "model": "claude-sonnet-5",
+  "turn_id": "735bb7711c6c",
+  "checkpoint_transcript_start": 291,
+  "transcript_lines_at_start": 291,
+  "compact_transcript_start": 57,
+  "token_usage": {
+    "input_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0,
+    "output_tokens": 0,
+    "api_call_count": 0
+  },
+  "session_metrics": {
+    "turn_count": 2
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-08-29T15:31:47.068242Z",
+    "agent_lines": 0,
+    "agent_removed": 0,
+    "human_added": 102,
+    "human_modified": 1,
+    "human_removed": 0,
+    "total_committed": 102,
+    "total_lines_changed": 123,
+    "agent_percentage": 0,
+    "metric_version": 2
+  }
+}
