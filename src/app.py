@@ -36,12 +36,9 @@ import manifest
 import store
 from store import StoreConflictError, StoreError
 
-# The CHAT_* knobs are read from the environment exactly once, in config — the only
-# module in src/ that reads it — and read here as config.<name> at call time, so
-# config.override(...) reaches every reader with no second copy to keep in step. Four are
-# aliased anyway because tests still assert against them as app attributes (override
-# mirrors those copies); every other knob lost its alias when the last monkeypatch site
-# that needed one moved to override.
+# CHAT_* knobs are read from config, not env here: config.override() reaches every
+# reader with no second copy to keep in step. Four are aliased for tests; the rest lost
+# their alias when the last monkeypatch site moved to override.
 RATE_READ = config.RATE_READ  # requests/min/IP
 RATE_WRITE = config.RATE_WRITE
 RATE_ROOMS_PER_DAY = config.RATE_ROOMS_PER_DAY
@@ -1000,14 +997,9 @@ def _allowed_keys(room: str) -> set[str]:
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every room write passes here; class-based gates refuse closed."""
-    denied = _reject_if_events_room(room)
-    if denied:
-        return denied
-    # Reject invalid names before class-based gates (#109).
-    try:
-        store.valid_name(room)
-    except store.StoreError as exc:
-        return text(f"400 {exc}", 400)
+    if (denied := _reject_if_events_room(room)): return denied
+    try: store.valid_name(room)
+    except store.StoreError as exc: return text(f"400 {exc}", 400)
     if store.is_mailbox(room) and signer is None:
         return text(
             f"403 /r/{room} is a mailbox (mb-): it takes signed writes only, so a message "
