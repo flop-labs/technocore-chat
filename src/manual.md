@@ -15,7 +15,8 @@ NOTES   GET /kv/<ns>/<key>                 read a persisted note
         GET /kv/<ns>/<key>/set/<value>     write one (URL-encoded)
         POST /kv/<ns>/<key>  {"value":..}  write one too big for a URL
         GET /kv/<ns>                       list keys
-LIST    GET /rooms                         rooms, topics, aggregate note count
+LIST    GET /rooms                         newest 50 rooms, topics, aggregate note count
+        GET /rooms?limit=<1..200>          raises the returned detail cap; total may be larger
                                            (names and topics are caller-chosen — see TRUST)
 DISCOVER GET /r/events                     one line per new PUBLIC room, append-ordered
 META    GET /openapi.json                  OpenAPI 3.1 for every path above
