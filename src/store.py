@@ -1855,7 +1855,9 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
 
 @contextmanager
 def _create_gate(gate: Path, path: Path, check, counted=None):
-    """Serialise *creation* so a cap counted across files is exact, not merely likely.
+    """Lock one object and serialise its creation so shared caps stay exact.
+
+    Yields whether the protected write creates the object.
 
     A per-file lock cannot enforce a cap over other files: two concurrent creates of
     different names each pass their own lock, each count `cap - 1`, and both write, so
@@ -1877,28 +1879,36 @@ def _create_gate(gate: Path, path: Path, check, counted=None):
         hence the second `path.exists()`, which is not the one above it: that one runs
         before the wait, this one after.
     """
+    # Keep ordinary overwrites off the shared gate, but recheck under their own lock: the
+    # reaper can delete the file between this first look and the lock acquisition. Such a
+    # write is a create again and must take the shared gate below.
     if path.exists():
-        yield
-        return
+        with _locked(path):
+            if path.exists():
+                yield False
+                return
     with _locked(gate):
-        if path.exists():  # created while we waited: this is an overwrite now, not a create
-            yield
-            return
-        check()  # authoritative: nothing else can create between this count and the write
-        if counted is not None:
-            # Before the write, not after: a crash in between leaves the count one too
-            # high, which refuses a create that was allowed. The other order leaves it one
-            # too low, which allows one that should have been refused.
-            counted(1)
-        try:
-            yield
-        finally:
-            # Exact rather than merely fail-closed: a reservation nothing was written
-            # against is given back. Keyed on the file rather than on whether the body
-            # raised, because "was a note created" is the question, and the file is the
-            # only thing that answers it.
-            if counted is not None and not path.exists():
-                counted(-1)
+        existed = path.exists()  # it may have been created while we waited for the gate
+        if not existed:
+            check()  # refuse a truly new name before its sidecar lock can be created
+        with _locked(path):
+            creating = not path.exists()
+            if creating and existed:  # the reaper won the second gate-to-object gap
+                check()
+            if creating and counted is not None:
+                # Before the write, not after: a crash in between leaves the count one too
+                # high, which refuses a create that was allowed. The other order leaves it
+                # one too low, which allows one that should have been refused.
+                counted(1)
+            try:
+                yield creating
+            finally:
+                # Exact rather than merely fail-closed: a reservation nothing was written
+                # against is given back. Keyed on the file rather than on whether the body
+                # raised, because "was a note created" is the question, and the file is the
+                # only thing that answers it.
+                if creating and counted is not None and not path.exists():
+                    counted(-1)
 
 
 def append(
@@ -2026,17 +2036,13 @@ def _write_record(
     # behind every other create, and a rotating room name flooding rejections should not
     # queue up behind them. The check inside the gate stays authoritative.
     _check_room_capacity(root, path)
-    with (
-        _create_gate(
-            root / ".rooms-create",
-            path,
-            lambda: _check_room_capacity(root, path),
-        ),
-        _locked(path),
-    ):
+    with _create_gate(
+        root / ".rooms-create",
+        path,
+        lambda: _check_room_capacity(root, path),
+    ) as created:
         # Under the lock, before the write: two concurrent first-writers must not both
         # decide they created the room and announce it twice.
-        created = not path.exists()
         # Also under the lock, or two concurrent replays of one captured URL would both
         # read the same "last nonce" and both write.
         if did is not None:
@@ -2158,20 +2164,17 @@ def note_set(
     _reap(root)
     # The global half only, and only for a create. This used to be the whole check, which
     # meant every create scanned its namespace twice — once here and once as the gate's
-    # own check — to buy a property the gate already has: its check runs in `__enter__`,
-    # strictly before `_locked(path)` is entered, so a refusal never leaves a sidecar lock
-    # or a namespace directory behind either way. What this call is actually worth is
+    # own check — to buy a property the gate already has: its check refuses a genuinely new
+    # name before taking its object lock, so the refusal leaves no sidecar or namespace.
+    # What this call is actually worth is
     # shedding a full store's worth of refusals without queueing for the gate first.
     if not path.exists():
         _check_note_total(root)
-    with (
-        _create_gate(
-            root / ".notes-create",
-            path,
-            lambda: _check_note_capacity(root, ns_dir, path),
-            lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
-        ),
-        _locked(path),
+    with _create_gate(
+        root / ".notes-create",
+        path,
+        lambda: _check_note_capacity(root, ns_dir, path),
+        lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
     ):
         if expect_absent or expect is not None:
             current = path.read_text(encoding="utf-8") if path.exists() else None

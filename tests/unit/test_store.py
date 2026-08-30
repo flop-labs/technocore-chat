@@ -186,6 +186,58 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_reaped_room_overwrite_reenters_the_creation_gate(tmp_path, monkeypatch):
+    """A room that vanishes before its object lock is a create again, not an overwrite.
+
+    The overwrite fast path used to skip the shared creation gate before taking the room
+    lock. The reaper could delete that room in the gap, another caller could fill the freed
+    slot, and the stalled writer would then recreate its room past the hard cap.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    old = store.room_path(tmp_path, "p-old")
+    store.append(tmp_path, "p-old", "bot", "first")
+    _age(old, store.IDLE_SECONDS + 60)
+
+    def reap_and_fill_slot():
+        _reap_now(tmp_path)
+        assert not old.exists()
+        store.append(tmp_path, "p-new", "bot", "replacement")
+
+    raced = _race_before_lock(monkeypatch, store, old, reap_and_fill_slot)
+    with pytest.raises(store.StoreError, match="room limit"):
+        store.append(tmp_path, "p-old", "bot", "late overwrite")
+
+    assert raced, "the room never vanished in the overwrite-to-lock gap"
+    assert store.room_path(tmp_path, "p-new").exists()
+    assert store._scan(tmp_path / "rooms", ".jsonl")[0] == 1
+
+
+def test_reaped_note_overwrite_reenters_the_creation_gate(tmp_path, monkeypatch):
+    """A reaped note cannot recreate outside the cap and its cached count."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 1)
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    old = store.note_path(tmp_path, "plans", "old")
+    store.note_set(tmp_path, "plans", "old", "first")
+    _age(old, store.IDLE_SECONDS + 60)
+
+    def reap_and_fill_slot():
+        _reap_now(tmp_path)
+        assert not old.exists()
+        store.note_set(tmp_path, "plans", "new", "replacement")
+
+    raced = _race_before_lock(monkeypatch, store, old, reap_and_fill_slot)
+    with pytest.raises(store.StoreError, match="note limit"):
+        store.note_set(tmp_path, "plans", "old", "late overwrite")
+
+    assert raced, "the note never vanished in the overwrite-to-lock gap"
+    assert store.list_notes(tmp_path, "plans") == ["new"]
+    assert store.note_stats(tmp_path)["total"] == 1
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the
