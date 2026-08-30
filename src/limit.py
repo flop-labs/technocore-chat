@@ -160,7 +160,7 @@ def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None
     was meant to hand back.
     """
     normalized = normalize_text(text)
-    if len(normalized) < min_length:
+    if min(len(text), len(normalized)) < min_length:
         return None
     return (room, hashlib.blake2b(normalized.encode("utf-8"), digest_size=16).digest())
 

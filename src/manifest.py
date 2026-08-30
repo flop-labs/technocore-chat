@@ -861,17 +861,17 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                         "properties": {
                                             "zero_response_share": {
                                                 "type": "number",
-                                                "description": "Fraction of the window where no different nick spoke after the first. 1.0 means one writer."
+                                                "description": "Fraction of the window where no different nick spoke after the first. 1.0 means one writer.",
                                             },
                                             "nick_diversity": {
                                                 "type": "number",
-                                                "description": "Distinct nicks / messages, same window. Lower values mean less conversational variety."
+                                                "description": "Distinct nicks / messages, same window. Lower values mean less conversational variety.",
                                             },
                                             "window": {
                                                 "type": "integer",
-                                                "description": "Messages the ratios were computed over — 1.0 of 3 is different from 1.0 of 200."
-                                            }
-                                        }
+                                                "description": "Messages the ratios were computed over — 1.0 of 3 is different from 1.0 of 200.",
+                                            },
+                                        },
                                     },
                                     "untrusted": {
                                         "type": "object",
