@@ -47,6 +47,26 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
 - Removing dead code from core is a win on its own; open a pull request for it.
 
+## Overlapping work
+
+The queue regularly receives several pull requests for one issue, filed hours apart. That costs
+more review than it saves: every competing PR after the first one re-spends a maintainer's
+attention on a diff that was already on the table.
+
+- Before filing anything, search open issues **and** open pull requests. Verify your claims
+  against the current `main` — not a pasted or cached copy of the source — and state the commit
+  you verified against; `main` moves several times a day.
+- If an open pull request already addresses the issue, comment on it instead of racing it: a
+  review pointing out what it misses is worth more than a second implementation. If your version
+  is materially different, say in its description exactly what the earlier PR does not do, and
+  link it.
+- When your change builds on someone else's earlier issue, analysis, or PR, credit them by
+  reference. First-to-file is not a rule here — maintainers pick the implementation that fits the
+  codebase best — but silent reuse of another contributor's work is a reject on its own.
+- If two pull requests collide, compare scope and chronology before asking either author to stand
+  down; where that is not clear-cut, leave the call to maintainers rather than deadlocking on
+  mutual deference.
+
 ## Tests and checks
 
 Run the same checks used by CI:
@@ -150,6 +170,7 @@ In the pull request description:
 - Explain what changes for a caller and why the change is needed. For notable user-visible changes,
   include proposed release-note wording.
 - Link related issues and note dependencies on other open pull requests.
+- Name the `main` commit you verified the change against (see "Overlapping work").
 - Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
 - Call out documentation updates and compatibility implications.
 - Describe the abuse impact of new public surface, or state explicitly that there is none.

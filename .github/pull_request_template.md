@@ -18,6 +18,8 @@ the code. -->
 
 ## Checks
 
+- [ ] Verified against current `main` (name the commit), and open pull requests searched
+      for overlapping work — link any (CONTRIBUTING.md "Overlapping work")
 - [ ] `uv run coverage run -m pytest tests -q && uv run coverage report`
 - [ ] `uv run ruff check . && uv run ruff format --check .` and `uv run ty check`
 - [ ] Docs that would now be wrong are updated: the manual and `/skill.md` are built in
