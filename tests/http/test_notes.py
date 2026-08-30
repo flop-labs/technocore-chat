@@ -43,15 +43,35 @@ def test_post_lane_reports_write_budget_like_get_writes(client, monkeypatch):
 
 def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client):
     """The manual promises a 409 lets you rebase without re-reading, and the page's tool
-    lane stopped truncating error bodies so write_note can keep that promise. Pin where
-    the value actually is: the first line is the sentence, the value is the last line.
+    lane stopped truncating error bodies so write_note can keep that promise. The body
+    now names the advertised section explicitly and keeps it machine-readable so a
+    caller can extract it and reuse it as ?if= without stripping banner text first.
     """
     client.get("/kv/plans/next/set/world")
     lost = client.get("/kv/plans/next/set/nope?if=stale")
     assert lost.status_code == 409
-    lines = lost.text.rstrip("\n").split("\n")
+    lines = lost.text.split("\n")
     assert lines[0].startswith("409") and "world" not in lines[0]
-    assert lines[-1] == "world"
+    assert "current value follows (5 chars):" in lost.text
+    assert lost.text.endswith("\nend of current value\n")
+    # The only line that is exactly the stored value is the one after the marker.
+    value_line = next(line for line in lines if line == "world")
+    marker_idx = next(i for i, line in enumerate(lines) if line == "current value follows (5 chars):")
+    assert lines[marker_idx + 1] == "world"
+
+
+def test_409_current_value_can_be_reused_as_if(client):
+    """A caller that treats the advertised current-value section as the exact value
+    should be able to reuse it as ?if= and win. This is the CAS round-trip the
+    on_conflict handler exists to preserve.
+    """
+    client.get("/kv/plans/next/set/world")
+    lost = client.get("/kv/plans/next/set/nope?if=stale")
+    assert lost.status_code == 409
+    current = next(line for line in lost.text.split("\n") if line == "world")
+    merged = client.get(f"/kv/plans/next/set/merged?if={current}")
+    assert merged.status_code == 200
+    assert merged.text.startswith("ok plans/next")
 
 
 def test_webmcp_tool_results_carry_the_whole_server_reply(client):
