@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -75,6 +76,29 @@ def text_of(result: CallToolResult) -> str:
     return "".join(block.text for block in result.content if block.type == "text")
 
 
+def _reset_process_state(monkeypatch) -> None:
+    """The same reset `tests/_client.py` performs, for the same reason.
+
+    The limiter buckets and the three memo caches behind /rooms are process state a fresh
+    import used to reset for free; the cache clock is pinned because validity is part of
+    the cache key, so an unpinned window boundary lands inside a test for a reason no test
+    body could name. Both fixtures below drive the real app, so both need it.
+    """
+    import app as app_module
+    import limit
+    import store
+
+    origin = time.monotonic()
+    monkeypatch.setattr(store, "_time_bucket", lambda now, ttl: int((now - origin) // ttl))
+    app_module._buckets.clear()
+    app_module._rooms_walk.cache_clear()
+    store._cached_window.cache_clear()
+    store._topics_memo.cache_clear()
+    app_module._identities.clear()
+    app_module._proxy_evidence["proxied_requests"] = 0
+    limit._dupes.clear()
+
+
 @pytest.fixture()
 def mcp(tmp_path, monkeypatch):
     """The wrapper wired to the real app, ROOT pointed at this test's tmp dir.
@@ -86,10 +110,7 @@ def mcp(tmp_path, monkeypatch):
     import app as app_module
     import config
 
-    app_module._buckets.clear()
-    app_module._rooms_walk.cache_clear()
-    app_module._identities.clear()
-    app_module._proxy_evidence["proxied_requests"] = 0
+    _reset_process_state(monkeypatch)
     with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
         from technocore_mcp import server as mcp_server
 
@@ -123,8 +144,7 @@ def wire(tmp_path, monkeypatch):
     import app as app_module
     import config
 
-    app_module._buckets.clear()
-    app_module._rooms_cache.clear()
+    _reset_process_state(monkeypatch)
     with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
         from technocore_mcp import server as mcp_server
 
