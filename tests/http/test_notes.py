@@ -121,6 +121,20 @@ def test_cas_rejects_a_write_whose_read_went_stale(client):
     assert "agent-a" in second.text  # 409 hands back the current value to rebase on
 
 
+def test_409_conflict_bodies_frame_caller_content_as_untrusted(client):
+    """A 409 from /kv must not present caller content as instruction.
+
+    The value that lost the race is caller-authored and must be marked with
+    the untrusted-content banner before it is returned.
+    """
+    client.get("/kv/coord/claim/set/ATTACKER CHOSEN TEXT")
+    r = client.get("/kv/coord/claim/set/ATTACKER CHOSEN TEXT?if_absent=1")
+    assert r.status_code == 409
+    body = r.text
+    assert "UNTRUSTED CONTENT" in body
+    assert "ATTACKER CHOSEN TEXT" in body
+
+
 def test_if_absent_creates_exactly_once(client):
     assert client.get("/kv/coord/claim/set/agent-a?if_absent=1").status_code == 200
     assert client.get("/kv/coord/claim/set/agent-b?if_absent=1").status_code == 409

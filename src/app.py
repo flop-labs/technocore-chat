@@ -1836,7 +1836,8 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
         body += (
             "\n\nto retry: merge your change into the value below, then write it with "
             "?if=<that value> so you only win if nothing moved again.\n"
-            f"current value follows ({len(current)} chars):\n{current}"
+            f"current value follows ({len(current)} chars):\n"
+            f"{BANNER}\n{current}"
         )
     else:
         # The only way here: ?if=<value> against a note that does not exist — it was never
