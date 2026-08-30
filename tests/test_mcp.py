@@ -19,6 +19,7 @@ Run: uv run python -m pytest tests/test_mcp.py -q
 
 from __future__ import annotations
 
+import hmac
 import json
 import sys
 import time
@@ -1294,3 +1295,76 @@ def test_an_unrecognised_argument_is_refused_rather_than_ignored(monkeypatch, ca
     monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--help"])
     mcp_server.main()
     assert "TECHNOCORE_NICK" in capsys.readouterr().out
+
+
+def test_the_claim_challenge_never_hands_back_a_string_that_cannot_be_signed(mcp):
+    """`claim_room` is the one signed tool whose canonical embeds the signer's own did.
+
+    Every other signed tool can show an external signer the exact bytes to sign, because
+    the free-form field is an argument the caller already passed. Here the value IS the
+    did:key, which is precisely what a server with no identity does not know — so a
+    challenge built the usual way would contain a placeholder, and a signer following the
+    instruction literally would sign the placeholder and collect a 403 from a service that
+    built its canonical from the did actually sent.
+
+    So the refusal has to say "substitute", not "sign exactly this". This asserts the
+    instruction is the honest one and, more importantly, that the placeholder never appears
+    behind a "must cover exactly this string" promise.
+    """
+    reply = mcp.call("claim_room", {"room": "zz-challenge"})
+    assert reply.is_error is True
+    message = text_of(reply)
+    assert "<your did:key>" in message
+    assert "replace <your did:key> with your own" in message
+    # The lie the old challenge told, in the words _resolve_signature uses to tell it.
+    assert "must cover exactly this string" not in message
+
+
+def test_http_refuses_to_serve_a_signing_key_off_loopback(monkeypatch):
+    """The Worker's 503 rule, applied to the transport this module serves itself.
+
+    A signing key behind an endpoint that asks nobody for credentials is a public signing
+    oracle: whoever finds the URL posts as that identity. The Worker guards it with a
+    bearer token and refuses to start without one. `--http` has no token to offer, so its
+    wall is the bind address — loopback with a key is fine and is the default, and binding
+    outward with a key is refused rather than warned about, because a warning scrolls past
+    and the exposure does not.
+    """
+    from technocore_mcp import server as mcp_server
+    from technocore_mcp import signing
+
+    monkeypatch.setattr(
+        mcp_server.server, "run", lambda *a, **k: pytest.fail("served the key anyway")
+    )
+    monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))
+    monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--http"])
+
+    monkeypatch.setenv("HOST", "0.0.0.0")  # noqa: S104 - the address under test
+    with pytest.raises(SystemExit) as refused:
+        mcp_server.main()
+    assert "public signing" in str(refused.value)
+
+    # ...and the same key on loopback is exactly the case this must not break.
+    ran = []
+    monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k.get("host")))
+    for host in ("127.0.0.1", "localhost", "::1"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+    assert ran == ["127.0.0.1", "localhost", "::1"]
+
+
+def test_the_worker_token_check_answers_a_non_ascii_header_rather_than_crashing():
+    """`hmac.compare_digest` raises TypeError on two non-ASCII `str`s instead of returning
+    False, so an attacker-controlled `Authorization: Bearer café` would take out the auth
+    gate with an unhandled exception — a 500 where a 401 belongs. Comparing bytes is the
+    fix; this pins that the comparison is written that way, since the Worker's own gates
+    cannot be executed off the Cloudflare runtime.
+    """
+    source = (
+        Path(__file__).resolve().parents[1] / "mcp" / "worker" / "src" / "worker.py"
+    ).read_text()
+    assert "compare_digest(presented.strip().encode(), str(token).encode())" in source
+    # And the property that motivates it, asserted against the stdlib rather than assumed.
+    with pytest.raises(TypeError):
+        hmac.compare_digest("café", "cafe")
+    assert hmac.compare_digest("café".encode(), "café".encode()) is True

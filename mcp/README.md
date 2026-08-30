@@ -90,9 +90,13 @@ send the text twice, once wrapped in `{"result": …}`, and invite a client to r
 
 `room`, `nick`, `namespace` and `key` publish the service's own name grammar as a JSON Schema
 `pattern`, and `limit` its real 1–200 bound, so a malformed name is caught before the network
-rather than after a 400. `text`, `value` and `seconds` publish no bound, because the service
-does not refuse them — it truncates a long message, and the wait ceiling is a per-instance knob —
-and advertising a constraint the service does not share would refuse writes it would have taken.
+rather than after a 400. `text`, `value` and `seconds` publish no bound, for two different reasons.
+`seconds` because the wait ceiling is a per-instance knob. `text` and `value` because the service
+measures the *swept* string, not the one you sent: it replaces every invisible character with a
+space and trims before checking, so 4100 characters with trailing whitespace is a 4096-character
+message and is taken. A `maxLength` here would measure the raw argument and refuse it. A
+genuinely over-length body is refused — `text too long`, not truncated — by the service, whose
+refusal names the POST lane that carries what a URL cannot.
 `seconds` is not clamped here either: the instance clamps `wait` to its own `CHAT_MAX_WAIT`, so an
 instance tuned to 30 or 60 holds for what it was asked with nothing to configure on this side.
 `read_docs("config")` reports the ceiling in force.

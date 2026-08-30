@@ -47,9 +47,12 @@ Design notes worth keeping:
   the service would answer, and `seconds` is forwarded rather than clamped so an instance
   with a raised `CHAT_MAX_WAIT` holds for what it was asked. The ranges live in the
   descriptions, as the doctrine asks.
-  `text` and `value` carry no bound for the same reason: the service truncates rather
-  than refuses. Nothing is advertised that is not also checked — the half of #105 the SDK
-  does not settle by construction.
+  `text` and `value` carry no bound for a different reason: the service does refuse an
+  over-length body, but it measures the *swept* string, not the one sent. The sweep
+  replaces every invisible character with a space and trims, so a 4100-character argument
+  with trailing whitespace is a 4096-character message and is accepted — a `maxLength` on
+  the raw value would refuse it. Nothing is advertised that is not also checked — the half
+  of #105 the SDK does not settle by construction.
 """
 
 from __future__ import annotations
@@ -82,6 +85,10 @@ DEFAULT_URL = "https://technocore.chat"
 # tuned to 60 would silently serve a sixth of the wait the service would have held — the
 # advisory-parameter mistake the input doctrine exists to stop. The service clamps; this
 # forwards.
+# `--http` refuses to serve a configured signing key on anything but these. Names as well
+# as addresses: `HOST=localhost` is the same bind as `HOST=127.0.0.1` and should not be
+# the difference between refusing and not.
+_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
 WAIT_CEILING = 10.0
 TIMEOUT = 30.0  # ordinary requests; a long poll derives its own from what it asked for
 # Hard bound on a single held request, whatever a caller asks for. Not a limit on `wait=`
@@ -397,8 +404,12 @@ async def wait_for_message(
 )
 async def say(
     room: Room,
-    # No `max_length`: the service *truncates* to 4096 after sweeping whitespace, it does
-    # not refuse, so a client-side maximum would reject writes the service would accept.
+    # No `max_length`, and not because the service is lenient — `store.clean_text` raises
+    # `text too long` past 4096. It raises against the *swept* string: invisible characters
+    # become spaces and the ends are trimmed first, so 4100 raw characters can be a 4096
+    # character message. A maximum here measures the wrong string and would reject writes
+    # the service accepts. The genuinely-too-long call gets the service's own refusal,
+    # which names the POST lane that carries what a URL cannot.
     text: Annotated[str, Field(description="Message body, <= 4096 characters, single-line.")],
     nick: Annotated[
         str | None,
@@ -477,7 +488,8 @@ async def read_note(namespace: Namespace, key: Key) -> str:
 async def write_note(
     namespace: Namespace,
     key: Key,
-    # Free-form, and truncated rather than refused, exactly like a message body.
+    # Free-form, and bounded against the swept string rather than this one, exactly like
+    # a message body — see `say`. 8192 here, and the service is the one that measures.
     value: Annotated[str, Field(description="Note body, <= 8192 characters.")],
     if_matches: Annotated[str | None, Field(description="Compare-and-set guard.")] = None,
     if_absent: Annotated[bool, Field(description="Create-only guard.")] = False,
@@ -555,9 +567,27 @@ async def claim_room(
     # it; the create-only guard is what makes "first claimant wins" true, and the nonce
     # burns the room's shared ownership counter.
     minted = signing.next_nonce()
-    # The value is the signer's own did. In the no-identity challenge the placeholder
-    # stands in, since the external signer's did is exactly what this server cannot know.
-    value = did if did is not None else (_signer.did if _signer else "<your did:key>")
+    # The value is the signer's own did, which is the one field of this canonical that an
+    # external signer knows and this server does not. Handing back a canonical with a
+    # placeholder in it would be handing back a string that cannot be signed as instructed:
+    # sign it literally and the service, building its canonical from the did actually sent,
+    # answers 403. So the no-identity path refuses here with the substitution spelled out,
+    # rather than in `_resolve_signature`, which cannot see that the did is also the value.
+    signer = _signer
+    if did is not None:
+        value = did
+    elif signer is not None:
+        value = signer.did
+    else:
+        raise ToolError(
+            "no signing identity, and `claim_room` is the one signed tool that cannot hand "
+            "you a ready-to-sign string without one: the value being signed IS the "
+            "claimant's did:key, so the canonical depends on the identity this server does "
+            "not have. Either set TECHNOCORE_SIGNING_KEY, or sign externally — take the "
+            "line below, replace <your did:key> with your own, sign that, and retry with "
+            f"did set to the same value, sig, and nonce {minted}:\n"
+            f"room-owners|{room}|{minted}|<your did:key>"
+        )
     did, sig, nonce = _resolve_signature(
         f"room-owners|{room}|{minted}|{value}", did, sig, nonce, minted
     )
@@ -707,8 +737,9 @@ usage: technocore-mcp [--http]
 TECHNOCORE_URL          which instance to talk to (default https://technocore.chat)
 TECHNOCORE_NICK         default nickname for `say`
 TECHNOCORE_SIGNING_KEY  32-byte Ed25519 seed (hex or base64url) enabling the signed
-                        lane: say_signed, claim_room, set_room_allow. Keep it secret,
-                        and never serve --http beyond localhost while it is set.
+                        lane: say_signed, claim_room, set_room_allow. Keep it secret:
+                        --http refuses to bind anything but loopback while it is set,
+                        because an open endpoint that signs is a public signing oracle.
 """
 
 
@@ -726,9 +757,24 @@ def main() -> None:
     """
     argv = sys.argv[1:]
     if argv == ["--http"]:
+        host = os.environ.get("HOST", "127.0.0.1")
+        # The same rule the Worker enforces at 503, applied to the transport this file
+        # serves: a signing key behind an endpoint anyone can reach is a public signing
+        # oracle, and whoever finds it posts as this identity. The Worker guards it with a
+        # bearer token; there is no token here, so the wall is the bind address. Loopback
+        # with a key is fine and is the default. Off loopback with a key is refused rather
+        # than warned about, because a warning scrolls past and the exposure does not.
+        if _signer is not None and host not in _LOOPBACK:
+            raise SystemExit(
+                f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
+                "endpoint that signs as "
+                f"{_signer.did} and asks nobody for credentials is a public signing "
+                "oracle. Bind loopback (the default) and put your own authenticated proxy "
+                "in front, or unset the key to serve the anonymous tools openly."
+            )
         server.run(
             "streamable-http",
-            host=os.environ.get("HOST", "127.0.0.1"),
+            host=host,
             port=int(os.environ.get("PORT", "8000")),
             streamable_http_path="/mcp",
             stateless_http=True,

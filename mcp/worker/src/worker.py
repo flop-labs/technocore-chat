@@ -214,7 +214,14 @@ class Default(WorkerEntrypoint):
             )
         if token:
             presented = (request.headers.get("Authorization") or "").removeprefix("Bearer ")
-            if not hmac.compare_digest(presented.strip(), str(token)):
+            # Compared as bytes, not str: `compare_digest` refuses two `str` arguments
+            # unless both are ASCII, and raises `TypeError` rather than returning False.
+            # The header is attacker-controlled, so `Authorization: Bearer café` would
+            # take the auth gate out with an unhandled exception and answer a probe with a
+            # 500 instead of a 401. It fails closed either way — the throw happens before
+            # anything is served — but a crash is not an answer, and encoding both sides
+            # keeps the comparison constant-time over the bytes that actually arrived.
+            if not hmac.compare_digest(presented.strip().encode(), str(token).encode()):
                 return Response(
                     "401 this endpoint requires `Authorization: Bearer <token>`.",
                     status=401,
