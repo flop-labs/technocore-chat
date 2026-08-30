@@ -132,7 +132,7 @@ def test_the_wrapper_imports_only_stdlib_itself_and_what_the_wheel_declares():
 
 def test_the_wrapper_builds_its_remote_app_with_no_uvicorn_installed():
     """The Cloudflare guard. Everything the Worker actually runs — importing the package,
-    registering nine tools, building the streamable-HTTP app — has to work on a runtime
+    registering the tools, building the streamable-HTTP app — has to work on a runtime
     where the ASGI *server* does not exist, because there the platform is the server."""
     proc = subprocess.run(
         [sys.executable, "-I", "-c", _NO_UVICORN_PROBE, str(ROOT / "mcp" / "src")],
