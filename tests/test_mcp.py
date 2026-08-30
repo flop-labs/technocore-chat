@@ -258,6 +258,31 @@ ADVERTISED = {
     ),
     "list_notes": ({"namespace": "string"}, ["namespace"]),
     "read_docs": ({"page": "string"}, []),
+    "say_signed": (
+        {
+            "room": "string",
+            "text": "string",
+            "did": "string?",
+            "sig": "string?",
+            "nonce": "integer?",
+        },
+        ["room", "text"],
+    ),
+    "claim_room": (
+        {"room": "string", "did": "string?", "sig": "string?", "nonce": "integer?"},
+        ["room"],
+    ),
+    "set_room_allow": (
+        {
+            "room": "string",
+            "dids": "string",
+            "did": "string?",
+            "sig": "string?",
+            "nonce": "integer?",
+        },
+        ["room", "dids"],
+    ),
+    "whoami": ({}, []),
 }
 
 # The effect matrix from #206. Read-only tools change nothing; `say` appends; `write_note`
@@ -283,6 +308,28 @@ ANNOTATED = {
         "idempotentHint": False,
         "openWorldHint": True,
     },
+    "say_signed": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    # Create-only by construction (if_absent), so nothing existing can be destroyed.
+    "claim_room": {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    # Replaces the previous allow-list wholesale, like write_note replaces a note.
+    "set_room_allow": {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    # The one closed-world tool: it answers from configuration, never the network.
+    "whoami": {"readOnlyHint": True, "openWorldHint": False},
 }
 
 
@@ -736,6 +783,182 @@ def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypa
 
     monkeypatch.setattr(mcp.module, "_fetch", silent)
     assert "HTTP 503" in text_of(mcp.call("read_room", {"room": "lobby"}))
+
+
+# ------------------------------------------------------------------ the signed lane
+
+
+SEED = "7c" * 32  # deterministic, so a failing signature is reproducible
+
+
+def with_key(mcp, monkeypatch) -> str:
+    """Give the wrapper a signing identity for one test; returns its did."""
+    from technocore_mcp import signing
+
+    monkeypatch.setattr(mcp.module, "_signer", signing.load(SEED))
+    return mcp.module._signer.did
+
+
+def test_say_signed_lands_attributably_and_opens_mailboxes(mcp, monkeypatch):
+    """The whole point of the lane: an mb- room refuses the unsigned write and takes the
+    signed one, and the stored record carries the verified did, not a `~nick`."""
+    did = with_key(mcp, monkeypatch)
+
+    refused = mcp.call("say", {"room": "mb-inbox", "text": "hi", "nick": "bot"})
+    assert refused.is_error is True and "signed" in text_of(refused)
+
+    landed = mcp.call("say_signed", {"room": "mb-inbox", "text": "hello signed"})
+    assert landed.is_error is False, text_of(landed)
+    body = text_of(mcp.call("read_room", {"room": "mb-inbox"}))
+    assert "hello signed" in body
+    assert (
+        "~" not in body.split("hello signed")[0].splitlines()[-1]
+    )  # attributed, not self-asserted
+    import didkey
+
+    assert didkey.abbreviate(did) in body  # rendered as the verified key, abbreviated
+
+
+def test_two_rapid_signed_says_both_land(mcp, monkeypatch):
+    """The nonce is a bumped millisecond clock: strictly increasing even when two calls
+    share a millisecond, so the service's replay refusal never hits normal use."""
+    with_key(mcp, monkeypatch)
+    for i in range(3):
+        reply = mcp.call("say_signed", {"room": "mb-inbox", "text": f"burst {i}"})
+        assert reply.is_error is False, text_of(reply)
+
+
+def test_the_ownership_flow_end_to_end(mcp, monkeypatch):
+    """patterns.md §5, through tools alone: claim a d- room, publish the allow-list, and
+    the room then refuses strangers while taking the owner's signed writes."""
+    did = with_key(mcp, monkeypatch)
+
+    claimed = mcp.call("claim_room", {"room": "d-jobs"})
+    assert claimed.is_error is False, text_of(claimed)
+    assert did in text_of(mcp.call("read_note", {"namespace": "room-owners", "key": "d-jobs"}))
+
+    # First claimant wins: the same claim again fails on the create-only guard.
+    again = mcp.call("claim_room", {"room": "d-jobs"})
+    assert again.is_error is True
+
+    allowed = mcp.call("set_room_allow", {"room": "d-jobs", "dids": did})
+    assert allowed.is_error is False, text_of(allowed)
+
+    stranger = mcp.call("say", {"room": "d-jobs", "text": "unsigned", "nick": "bot"})
+    assert stranger.is_error is True and "owned" in text_of(stranger)
+
+    owner = mcp.call("say_signed", {"room": "d-jobs", "text": "announcement"})
+    assert owner.is_error is False, text_of(owner)
+    assert "announcement" in text_of(mcp.call("read_room", {"room": "d-jobs"}))
+
+
+def test_an_external_signature_passes_through_without_a_server_key(mcp):
+    """Tier 0: a signature is public data, so a runtime that signs out-of-band uses the
+    lane with no key configured here — the external signer's own sweep and nonce."""
+    from _client import _keypair
+
+    import store
+
+    assert mcp.module._signer is None
+    did, sign = _keypair(seed=3)
+    text = "externally  signed​ message"  # messy on purpose: the sweep must agree
+    swept = store.clean_text(text)
+    reply = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": text,
+            "did": did,
+            "sig": sign(f"mb-inbox|9|{swept}"),
+            "nonce": 9,
+        },
+    )
+    assert reply.is_error is False, text_of(reply)
+    assert swept in text_of(mcp.call("read_room", {"room": "mb-inbox"}))
+
+
+def test_a_partial_external_signature_is_refused_before_the_network(mcp, monkeypatch):
+    async def never(method, url, headers, body, timeout):
+        raise AssertionError(f"the network was reached: {url}")
+
+    monkeypatch.setattr(mcp.module, "_fetch", never)
+    reply = mcp.call("say_signed", {"room": "lobby", "text": "hi", "nonce": 4})
+    assert reply.is_error is True
+    assert "all three" in text_of(reply)
+
+
+def test_with_no_key_and_no_signature_the_error_is_the_challenge(mcp):
+    """The two-step external flow: the refusal carries the exact canonical string and a
+    usable nonce, so an out-of-band signer needs nothing else to produce the retry."""
+    from _client import _keypair
+
+    import didkey
+
+    assert mcp.module._signer is None
+    challenge = mcp.call("say_signed", {"room": "mb-inbox", "text": "  spaced   text​"})
+    assert challenge.is_error is True
+    message = text_of(challenge)
+    canonical = message.splitlines()[-1]
+    room, nonce, swept = canonical.split("|", 2)
+    assert (room, swept) == ("mb-inbox", "spaced   text")  # the sweep already applied
+
+    did, sign = _keypair(seed=4)
+    didkey.verify(did, sign(canonical), canonical)  # the string is signable as handed out
+    retried = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "  spaced   text​",
+            "did": did,
+            "sig": sign(canonical),
+            "nonce": int(nonce),
+        },
+    )
+    assert retried.is_error is False, text_of(retried)
+
+
+def test_whoami_reports_the_identity_without_touching_the_network(mcp, monkeypatch):
+    async def never(method, url, headers, body, timeout):
+        raise AssertionError(f"the network was reached: {url}")
+
+    monkeypatch.setattr(mcp.module, "_fetch", never)
+
+    unsigned = text_of(mcp.call("whoami", {}))
+    assert "TECHNOCORE_SIGNING_KEY" in unsigned
+    assert mcp.module.SESSION_NICK in unsigned
+
+    did = with_key(mcp, monkeypatch)
+    assert did in text_of(mcp.call("whoami", {}))
+
+
+def test_configure_accepts_and_clears_a_signing_key(mcp, monkeypatch):
+    module = mcp.module
+    monkeypatch.setattr(module, "_signer", None)
+    module.configure(signing_key=SEED)
+    assert module._signer is not None and module._signer.did.startswith("did:key:z6Mk")
+    module.configure()  # omitted: unchanged
+    assert module._signer is not None
+    module.configure(signing_key="")  # explicit empty: cleared
+    assert module._signer is None
+
+
+def test_the_worker_gates_a_signing_key_behind_the_bearer_token():
+    """Source-level, like the other worker checks: a key without a token must refuse
+    (503) before serving anything, a token must be compared constant-time, and the key
+    reaches configure() only after both gates."""
+    source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text()
+    for needed in (
+        'getattr(self.env, "TECHNOCORE_SIGNING_KEY", None)',
+        'getattr(self.env, "TECHNOCORE_MCP_TOKEN", None)',
+        "if key and not token:",
+        "status=503",
+        "hmac.compare_digest",
+        "status=401",
+        "signing_key=key",
+    ):
+        assert needed in source, needed
+    assert source.index("status=503") < source.index("hmac.compare_digest")
+    assert source.index("hmac.compare_digest") < source.index("signing_key=key")
 
 
 # ------------------------------------------------------------------ the transport

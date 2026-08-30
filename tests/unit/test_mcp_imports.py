@@ -39,11 +39,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "mcp" / "src" / "technocore_mcp"
 
-# The wrapper imports the SDK, and the SDK's own direct requirements are fair game with
-# it: `pydantic` builds the schemas, `starlette` is the type of the app the SDK returns,
-# `anyio` is the concurrency the SDK runs on. Anything past that first ring is the SDK's
-# transitive graph — not something this wheel's dependency line promises a user.
-_ROOT_DEPENDENCY = "mcp"
+# The wrapper imports what it declares, and each declared dependency's own direct
+# requirements are fair game with it: `pydantic` builds the schemas, `starlette` is the
+# type of the app the SDK returns, `anyio` is the concurrency the SDK runs on. Anything
+# past that first ring is a transitive graph — not something this wheel's dependency line
+# promises a user.
+_ROOT_DEPENDENCIES = {"mcp", "cryptography"}
 
 # `import x` where the module and its distribution are not named alike.
 _EXTRA_TOP_LEVEL = {"mcp": {"mcp", "mcp_types"}}
@@ -92,7 +93,7 @@ def _allowed_roots() -> set[str]:
         requirement.split("[")[0].split(">")[0].split("<")[0].split("=")[0].strip()
         for requirement in declared["project"]["dependencies"]
     }
-    assert names == {_ROOT_DEPENDENCY}, f"unreviewed wrapper dependencies: {names}"
+    assert names == _ROOT_DEPENDENCIES, f"unreviewed wrapper dependencies: {names}"
 
     owners = packages_distributions()
     by_distribution: dict[str, set[str]] = {}
@@ -101,10 +102,11 @@ def _allowed_roots() -> set[str]:
             by_distribution.setdefault(name.lower().replace("_", "-"), set()).add(module)
 
     allowed = {"technocore_mcp"}
-    for name in [_ROOT_DEPENDENCY, *_direct_requirements(_ROOT_DEPENDENCY)]:
-        key = name.lower().replace("_", "-")
-        allowed |= by_distribution.get(key, set())
-        allowed |= _EXTRA_TOP_LEVEL.get(key, set())
+    for root in _ROOT_DEPENDENCIES:
+        for name in [root, *_direct_requirements(root)]:
+            key = name.lower().replace("_", "-")
+            allowed |= by_distribution.get(key, set())
+            allowed |= _EXTRA_TOP_LEVEL.get(key, set())
     return allowed
 
 

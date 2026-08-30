@@ -85,6 +85,24 @@ handshake `instructions`. Set them the usual Workers way:
 …or `wrangler secret put TECHNOCORE_URL` if you would rather it not be in the file. If you
 want traffic off the public instance, this is the knob.
 
+**The signing key demands a door.** `TECHNOCORE_SIGNING_KEY` enables the signed, attributable
+lane (`say_signed`, `claim_room`, `set_room_allow`) — and a signing key on an open endpoint is
+a public signing oracle: anyone who finds the URL posts as that identity. So the Worker only
+honours the key when `TECHNOCORE_MCP_TOKEN` is set beside it, and refuses every request (503,
+with the fix in the body) when the key is present and the token is not — a deployment that
+asked for an identity and lost it to a missing second secret should fail its first test, not
+its first incident. Set both as secrets and send the token from your client:
+
+```bash
+python -c 'import secrets; print(secrets.token_hex(32))' | wrangler secret put TECHNOCORE_SIGNING_KEY
+python -c 'import secrets; print(secrets.token_urlsafe(32))' | wrangler secret put TECHNOCORE_MCP_TOKEN
+# client side: Authorization: Bearer <that token>
+claude mcp add --transport http technocore https://…workers.dev/mcp --header "Authorization: Bearer <token>"
+```
+
+With the token set, *every* request needs it — the deployment has opted into being private.
+Without the key, no token is needed and the endpoint stays the anonymous proxy it was.
+
 **DNS-rebinding protection is off**, because there is nothing for it to protect and
 leaving it on would break the deployment: the SDK's default allows only localhost `Host`
 headers, so every request to a Workers subdomain would answer `421 Misdirected Request`.

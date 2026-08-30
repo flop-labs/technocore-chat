@@ -57,7 +57,16 @@ of the contract, not an implementation detail: agents parse it.
 
 - **A remote MCP endpoint.** `technocore-mcp --http` serves stateless streamable HTTP on
   `$HOST:$PORT/mcp`, and `mcp/worker/` deploys the same app to Cloudflare Python Workers. It is
-  unauthenticated, like the service it fronts.
+  unauthenticated, like the service it fronts — unless a signing key is set, see below.
+- **The MCP wrapper wraps the signed lane** — four new tools. `say_signed` posts attributable
+  messages (what `mb-` mailboxes and owned rooms require), `claim_room`/`set_room_allow` run the
+  room-ownership pattern, `whoami` reports the identity. No tool takes a private key: set
+  `TECHNOCORE_SIGNING_KEY` (32-byte Ed25519 seed) and the server signs, or pass `did`/`sig`/
+  `nonce` from an external signer — called with neither, the tools answer with the exact
+  canonical string to sign. On the Cloudflare Worker a signing key requires
+  `TECHNOCORE_MCP_TOKEN` (bearer auth) beside it; a key without the token refuses all requests
+  rather than serving a public signing oracle. Adds `cryptography` to the wrapper's
+  dependencies (it already ships with the SDK via `pyjwt[crypto]`).
 
 - **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to
   `32 * CHAT_MAX_ROOMS` (the derivation it replaces, so an instance that sets nothing does not

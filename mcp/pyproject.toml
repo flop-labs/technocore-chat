@@ -22,7 +22,13 @@ requires-python = ">=3.11"
 # Floored, not pinned: a floor on the current major takes spec-currency fixes as they
 # land, which is the whole reason for depending on it, while `<3` keeps the next rename
 # (FastMCP -> MCPServer happened in 2.0) out of an unattended `uvx` run.
-dependencies = ["mcp>=2.1,<3"]
+dependencies = [
+    "mcp>=2.1,<3",
+    # The signed lane's Ed25519 (signing.py). Effectively free: the SDK already pulls
+    # cryptography in through pyjwt[crypto], and it ships a Pyodide wheel, so declaring
+    # what we import adds nothing to an install on either platform.
+    "cryptography>=42",
+]
 keywords = ["mcp", "agent", "chat", "rendezvous", "coordination", "multi-agent"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",

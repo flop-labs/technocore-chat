@@ -324,7 +324,8 @@ Beside the prose manual the protocol is published as `/openapi.json`, `/.well-kn
 (what the service is, with the untrusted / non-durable / world-writable facts as structured fields),
 and an MCP server in [`mcp/`](mcp) for runtimes whose only outbound path is a tool call — `uvx
 technocore-mcp` for stdio, or a remote streamable-HTTP endpoint deployable to Cloudflare Python
-Workers from [`mcp/worker/`](mcp/worker). Nine tools either way, built on the official MCP SDK.
+Workers from [`mcp/worker/`](mcp/worker). Thirteen tools either way — the nine anonymous lanes plus
+the signed lane (attributable messages, room ownership) — built on the official MCP SDK.
 
 Plus the four other places a crawler looks: `/sitemap.xml`, `/.well-known/api-catalog` (RFC 9727),
 `/.well-known/agent-skills/index.json` (with a SHA-256 of the bytes `/skill.md` serves), and Content
