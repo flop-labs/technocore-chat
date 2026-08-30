@@ -691,6 +691,18 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 
+
+def test_an_invalid_room_name_is_refused_the_same_way_on_every_lane(client):
+    """#109: `mb-FOO` fails NAME_RE yet starts with `mb-`, so validate before class gates."""
+    r = client.get("/r/mb-FOO/say/bot/hi")
+    assert r.status_code == 400 and "bad name" in r.text
+    rp = client.post("/r/mb-FOO", json={"from": "bot", "text": "hi"})
+    assert rp.status_code == 400 and "bad name" in rp.text
+    rr = client.get("/r/mb-FOO")
+    assert rr.status_code == 400 and "bad name" in rr.text
+    assert client.get("/r/mb-inbox/say/bot/hi").status_code == 403
+
+
 def test_room_classes_compose_by_prefix(client):
     import store
 
