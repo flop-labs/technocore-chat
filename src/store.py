@@ -17,8 +17,7 @@ import re
 import tempfile
 import time
 import unicodedata
-from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -974,7 +973,7 @@ def room_window(root: Path, room: str) -> tuple[int, list[str]]:
     return top, nicks
 
 
-def _unanswered(nicks: list[str]) -> int:
+def _unanswered(nicks: Sequence[str]) -> int:
     """How many of a window's messages nobody else spoke after (`nicks` is newest-first).
 
     A message is answered when some *later* message in the window carries a different nick.
@@ -988,7 +987,7 @@ def _unanswered(nicks: list[str]) -> int:
     return run
 
 
-def _engagement(nicks: list[str]) -> dict:
+def _engagement(nicks: Sequence[str]) -> dict:
     """Per-room §II.2.2 aggregates over one scanned window. `window` is how many messages the
     ratios are over, so a reader can tell 1.0-of-3 from 1.0-of-200."""
     n = len(nicks)
@@ -1001,7 +1000,7 @@ def _engagement(nicks: list[str]) -> dict:
     }
 
 
-def _rollup(windows: list[list[str]]) -> dict:
+def _rollup(windows: list[Sequence[str]]) -> dict:
     """Service-level §II.2.2 aggregates: one ratio pooled over every scanned window, not a mean
     of per-room ratios, so a three-message room cannot outweigh a two-hundred-message one.
     Nicks are pooled globally too — one bot talking to itself in forty rooms should read as low
@@ -1028,40 +1027,86 @@ def list_rooms(root: Path) -> list[str]:
     return sorted(n for n in names if _listable(n))
 
 
-# (top, nicks) per room, validated against the (mtime_ns, size) stat the overview walk
-# already does — so a walk re-reads only the rooms a write actually changed. LRU-bounded.
+def _time_bucket(now: float, ttl: float) -> int:
+    """A coarse clock for a cache whose validity window is part of its key.
+
+    The memo caches here and in app.py all answer "is this entry still good?" — and the way
+    they answer it is to put the answer in the key: an entry that is no longer valid is not
+    an entry that has to be found and invalidated, it is a key nobody asks for any more.
+    A stamp does that for structural change; this does it for a TTL. An entry keyed on
+    `int(now // ttl)` is valid until the next multiple of `ttl`, so it expires at or before
+    `now + ttl` and never after it: an entry that carried its own expiry got the whole
+    window measured from its own insertion, this one gets the tail of the window it landed
+    in. So the published staleness bound (ROOMS_CACHE_SECONDS, NOTE_STATS_CACHE_SECONDS)
+    still holds — a boundary can only move an expiry earlier, which costs a walk, never
+    later, which would cost correctness. What it costs is that an entry made just before a
+    boundary is thrown away almost at once: averaged over where insertions fall, an entry
+    lives half a window rather than a whole one. That is why the bucket is the whole window
+    and not a subdivision of it — halving the hit rate is the price already paid, and a
+    finer bucket would only pay it again for staleness nothing here asked to be tighter.
+
+    `ttl <= 0` is not this function's case: zero means "no cache at all", which every caller
+    handles by bypassing its cache entirely rather than by asking for a bucket here. Passing
+    it would be a division by zero, and that is deliberate — a caller that reaches this with
+    a disabled TTL has a bug, and a silent 0 would hand it one shared eternal bucket.
+    """
+    return int(now // ttl)
+
+
+# (top, nicks) per room, keyed on the (mtime_ns, size) stat the overview walk already does —
+# so a walk re-reads only the rooms a write actually changed.
+#
+# The stat is part of the KEY, not a stamp stored beside the value and checked against it.
+# That is what retires this cache's bug class (#376, #229): there is no get-then-promote and
+# no read-modify-write for a concurrent eviction to fall into, so no interleaving of two
+# threadpool threads can raise, lose an update, or serve a value against the wrong stat.
+# functools.lru_cache is documented threadsafe — its bookkeeping stays coherent under
+# concurrent calls — and nothing here relies on GIL scheduling for that.
+#
+# The accepted cost: an entry whose stat is dead is never deleted, only stopped being asked
+# for, so it lingers until the LRU evicts it. That is bounded by maxsize — the bound this
+# cache always needed — so a churning store holds up to _WINDOW_MEMO_MAX windows, live and
+# dead mixed, and never more. `root` is a str for the reason the old key stringified it: a
+# Path hashes case-insensitively on some platforms, and two stores must never share an entry.
 _WINDOW_MEMO_MAX = 512
-_window_memo: OrderedDict[tuple, tuple] = OrderedDict()
 
 
-def _cached_window(root: Path, name: str, stamp: tuple) -> tuple[int, list[str]]:
-    key = (str(root), name)
-    hit = _window_memo.get(key)
-    if hit and hit[0] == stamp:
-        _window_memo.move_to_end(key)
-        return hit[1]
-    view = room_window(root, name)
-    _window_memo[key] = (stamp, view)
-    _window_memo.move_to_end(key)
-    while len(_window_memo) > _WINDOW_MEMO_MAX:
-        _window_memo.popitem(last=False)
-    return view
+@lru_cache(maxsize=_WINDOW_MEMO_MAX)
+def _cached_window(root: str, name: str, stamp: tuple) -> tuple[int, tuple[str, ...]]:
+    top, nicks = room_window(Path(root), name)
+    # A tuple, not the list room_window builds: one entry is handed to every thread that
+    # asks for it and outlives all of them, so it must not be something a caller can mutate.
+    return top, tuple(nicks)
 
 
 # Topic previews, valid while topics_written holds (bumped only by a `topic` note); reaper
-# deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py.
-_topics_memo: tuple = ((), 0.0, {})
+# deletions age out with NOTE_STATS_CACHE_SECONDS, like the note gauge in app.py — as a
+# bucket in the key, so validity is once again the key rather than a slot to be reset.
+#
+# One entry per room, where this was a single dict slot shared by every caller. The slot was
+# reset unconditionally by any caller whose stamp or expiry did not match, so two /rooms
+# requests straddling one topic write did not merely miss each other once: each of them
+# makes one lookup per shown room, and every one of those lookups reset the other's slot
+# again, so neither ever hit and both re-read all ~50 topics (#515). Per-room keys under one
+# LRU cannot thrash that way — a stamp the other caller is not using is a key it never
+# touches — and the bound is the same order the slot held, one walk's worth of rooms.
+_TOPICS_MEMO_MAX = 512
 
 
-def _cached_topic(root: Path, room: str, stamp: tuple, now: float) -> str | None:
-    global _topics_memo
+@lru_cache(maxsize=_TOPICS_MEMO_MAX)
+def _topics_memo(root: str, room: str, stamp: tuple, bucket: int) -> str | None:
+    return topic(Path(root), room)
+
+
+def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     ttl = config.NOTE_STATS_CACHE_SECONDS  # per call, so 0 disables an existing entry too
-    if ttl <= 0 or _topics_memo[0] != stamp or now >= _topics_memo[1]:
-        _topics_memo = (stamp, now + ttl, {})
-    cache = _topics_memo[2]
-    if room not in cache:
-        cache[room] = topic(root, room)
-    return cache[room]
+    # ...and disables it by going round the cache, not by emptying it: an entry made while
+    # the knob was positive is never served once it is zero, which is the documented
+    # behaviour of reading the knob per call. Nothing is evicted for that, so flipping the
+    # knob back does not pay for a re-read either.
+    if ttl <= 0:
+        return topic(Path(root), room)
+    return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
 def room_stats(root: Path, limit: int = 50) -> dict:
@@ -1086,10 +1131,11 @@ def room_stats(root: Path, limit: int = 50) -> dict:
     entries.sort(reverse=True)
     shown = []
     windows = []
-    topics_stamp = (counters(root)["topics_written"], str(root))
+    root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
+    topics_stamp = (counters(root)["topics_written"], root_key)
     mono = time.monotonic()
     for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
-        top, nicks = _cached_window(root, name, (mtime_ns, size))
+        top, nicks = _cached_window(root_key, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
             {
@@ -1097,7 +1143,7 @@ def room_stats(root: Path, limit: int = 50) -> dict:
                 "last_seq": top,
                 "bytes": size,
                 "idle_seconds": max(0, int(now - mtime)),
-                "topic": _cached_topic(root, name, topics_stamp, mono),
+                "topic": _cached_topic(root_key, name, topics_stamp, mono),
                 **_engagement(nicks),
             }
         )

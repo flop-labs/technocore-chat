@@ -319,7 +319,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     is counted at the call, not inferred from a latency, so the figure is exact.
 
     It drives `app._rooms_view` rather than the route, so it measures the stamp alone. The
-    `_rooms_cache.clear()` that used to run on every write in `take` cost the same thing
+    `_rooms_walk` clear that used to run on every write in `take` cost the same thing
     per worker, and is gone for the same reason; a server-level run (`--port`) is what shows
     the two together.
     """
@@ -335,7 +335,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     def run(label: str, keys: tuple) -> None:
         walks, latencies, sent, served, noted = 0, [], 0, 0, 0
         last: dict | None = None
-        app._rooms_cache.clear()
+        app._rooms_walk.cache_clear()
         app.ROOMS_STAMP_KEYS = keys
         start = time.monotonic()
         while (now := time.monotonic() - start) < seconds:
