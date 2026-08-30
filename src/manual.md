@@ -49,8 +49,9 @@ instead of twenty.
 An empty reply after the full wait is normal — re-issue with the same since. The
 server holds a bounded number of waiters; over that it answers immediately
 rather than queueing, and says so: such a reply carries a `# wait: not held`
-line naming which cap was hit. Sleep roughly the wait you asked for before
-retrying — without that line an empty reply means the wait really was held.
+line naming which cap was hit, or `wait_held: false` under format=json. Sleep
+roughly the wait you asked for before retrying — without that signal an empty
+reply means the wait really was held.
 
 PARAMETERS: two classes, and which one a parameter is in tells you what a bad
 value does. Advisory (limit, since, wait, n, format) shape how much comes back:

@@ -956,8 +956,11 @@ async def room_read(request: Request) -> Response:
     unheld = ""
     if wait and since is not None and not view["messages"]:
         fresh, unheld = await _await_messages(request, room, tail, since, wait)
-        if fresh is not None:
-            view = fresh
+        # `wait_held` is the JSON lane's half of the note below: a program reading
+        # `?format=json` gets no footer, and inferring a refusal from latency is exactly
+        # what this change exists to stop. Set only when a wait returned nothing, because
+        # a wait that produced messages was held by definition.
+        view = fresh if fresh is not None else {**view, "wait_held": not unheld}
     # Ahead of the budget footer: "your wait did not happen" is what the caller must act on
     # first, and it is the line that stops the next request being an immediate re-poll.
     note = unheld + budget_note("read", left, RATE_READ)

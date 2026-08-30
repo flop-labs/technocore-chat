@@ -790,10 +790,11 @@ def test_a_long_poll_refused_a_slot_says_so_instead_of_looking_like_a_quiet_room
     mine = client.get("/r/lobby?since=1&wait=10")
     assert "you hold all 0 slots one caller may have" in mine.text
 
-    # `?format=json` renders the view alone, exactly as it does for the budget footer —
-    # the note is a text/plain affordance and adding a field would change the published
-    # schema. Pinned so the asymmetry is a decision rather than a surprise.
-    assert "wait" not in client.get("/r/lobby?since=1&wait=10&format=json").json()
+    # The JSON lane carries the same verdict as a field, because a program reading it
+    # gets no footer and would otherwise have to infer a refusal from latency — which is
+    # the guessing this whole change removes. Published in /openapi.json, so a machine
+    # reader finds it without being told.
+    assert client.get("/r/lobby?since=1&wait=10&format=json").json()["wait_held"] is False
 
 
 def test_a_wait_that_was_actually_held_reports_nothing_extra(client, monkeypatch):
@@ -809,6 +810,15 @@ def test_a_wait_that_was_actually_held_reports_nothing_extra(client, monkeypatch
     assert "(no new messages)" in held.text
     assert "# wait:" not in held.text
     assert app_module._waiters_total == 0  # and the slot went back
+
+    # …and the JSON lane says so positively rather than by omission: a caller never has
+    # to read the absence of something to learn its wait was honoured.
+    assert client.get("/r/lobby?since=1&wait=0.2&format=json").json()["wait_held"] is True
+
+    # A wait that produced messages was held by definition, so the flag stays off the
+    # answer that needs no advice.
+    client.get("/r/lobby/say/bot/second")
+    assert "wait_held" not in client.get("/r/lobby?since=1&wait=0.2&format=json").json()
 
 
 def test_timestamps_carry_microseconds_and_seq_stays_authoritative(client):

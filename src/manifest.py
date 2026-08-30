@@ -213,6 +213,17 @@ _ROOM_VIEW_SCHEMA = {
         },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
+        "wait_held": {
+            "type": "boolean",
+            "description": (
+                "Present only on a `wait=` read that returned no messages. True means the "
+                "wait was held and the room stayed quiet — poll again. False means no "
+                "long-poll slot was free, so the reply is immediate rather than waited: "
+                "sleep about the wait you asked for first, or you will re-read for nothing "
+                "and spend your read budget. The text/plain lane says the same in a "
+                "`# wait: not held` footer."
+            ),
+        },
     },
     "required": ["room", "count", "last_seq", "messages"],
 }
