@@ -48,6 +48,20 @@ the deployment is for: `` Package `technocore-mcp` can't be installed because it
 as `--no-build` but has no binary distribution ``. Re-run it after every change to
 `mcp/src`, too — the Worker serves the wheel you last built, not the files on disk.
 
+**And rebuilding the wheel is not enough on its own.** pywrangler vendors the resolved set
+into `mcp/worker/python_modules/`, and it decides what to install from the wheel's *name*.
+A rebuild during development produces the same name — `technocore_mcp-0.10.0-py3-none-any.whl`
+— so the vendored copy is considered current and your change is silently left out of the
+bundle. Nothing fails; you deploy, the Worker runs, and it runs the old code. Clear the
+vendor directory whenever you change `mcp/src` without bumping the version:
+
+```bash
+rm -rf mcp/worker/python_modules mcp/worker/pylock.toml
+```
+
+CI does not need this — it checks out fresh, so there is nothing stale to find — which is
+also why CI cannot warn you about it.
+
 Point a client at it:
 
 ```bash
