@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime, timedelta
+from xml.sax.saxutils import escape as _xml_escape
 
 import config
 import didkey
@@ -1995,7 +1996,7 @@ def sitemap_xml(base: str) -> str:
     cannot fall back to relative paths. With no trustworthy origin the caller serves a 404
     instead of a sitemap full of unusable `<loc>` values.
     """
-    locs = "".join(f"  <url><loc>{_url(base, p)}</loc></url>\n" for p in SITEMAP_PATHS)
+    locs = "".join(f"  <url><loc>{_xml_escape(_url(base, p))}</loc></url>\n" for p in SITEMAP_PATHS)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'

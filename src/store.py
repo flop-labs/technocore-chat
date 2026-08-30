@@ -83,6 +83,12 @@ MAX_TOTAL_ROOM_BYTES = 5 << 30
 # = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: the floor times the cap is the budget, so
 # even the worst case — every room at its floor — lands exactly on the number.
 RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
+if RESERVED_ROOM_BYTES == 0:
+    raise ValueError(
+        f"CHAT_MAX_ROOMS={MAX_ROOMS} exceeds MAX_TOTAL_ROOM_BYTES="
+        f"{MAX_TOTAL_ROOM_BYTES}; RESERVED_ROOM_BYTES would be 0 "
+        "— refusing to boot"
+    )
 # How many rooms exist and how many bytes they occupy — "count bytes", the same two-integer
 # format and the same machinery as NOTES_FILE below, so one atomic replace keeps both halves
 # describing the same store.
