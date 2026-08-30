@@ -152,6 +152,14 @@ def test_newlines_are_flattened_in_both_write_lanes(client):
     assert "no multi-line message" in manual
 
 
+def test_capacity_refusal_note_message_does_not_mention_rooms():
+    import store
+    msg = str(store._at_capacity(store.MAX_NOTES_PER_NS, "note"))
+    assert "GET /rooms" not in msg
+    assert "still on its first message" not in msg
+    assert "overwrite a note you already own" in msg
+
+
 def test_full_length_signed_message_is_postable_with_escaped_json(client):
     import json
 
