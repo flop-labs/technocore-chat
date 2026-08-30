@@ -357,7 +357,18 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     assert view["total"] == 3 and view["capacity"] == store.MAX_ROOMS and view["bytes"] > 0
 
     body = client.get("/rooms").text
-    assert "3 of 3 rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+    assert "3 of 3 listed rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+
+
+def test_rooms_header_names_listed_rooms_when_unlisted_rooms_exist(client):
+    """#260: when the store holds unlisted rooms alongside listed ones, the /rooms head
+    must say 'listed rooms' so the count cannot be misread as the population the cap
+    enforces."""
+    client.get("/r/p-only/say/bot/hi")
+    client.get("/r/listed/say/bot/hi")
+    body = client.get("/rooms").text
+    assert "listed rooms" in body
+    assert "(cap " in body
 
 
 def test_rooms_marks_the_caller_chosen_name_and_topic_as_untrusted(client):

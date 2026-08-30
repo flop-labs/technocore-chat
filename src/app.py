@@ -801,7 +801,9 @@ def rooms(request: Request) -> Response:
         head = (
             # Both caps, because either can be the one that refuses the next room and an
             # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
+            # `view['total']` is the listed population; the cap counts every room file,
+            # including unlisted ones, so name both figures so the units cannot be misread.
+            f"# {len(view['rooms'])} of {view['total']} listed rooms "
             f"(cap {view['capacity']}, {_size(view['bytes'])} of "
             f"{_size(view['bytes_capacity'])} stored), newest first"
         )
