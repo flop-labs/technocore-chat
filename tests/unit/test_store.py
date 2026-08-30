@@ -1223,6 +1223,7 @@ def test_a_room_holding_undecodable_bytes_is_counted_not_crashed_on(tmp_path):
     assert store._reapable(p, os.stat(p).st_mtime, stillborn_rule=True) is None
 
 
+
 def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path):
     """Retention is the byte budget, at every record size.
 
@@ -1266,3 +1267,16 @@ def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path)
     assert len(data) <= store.COMPACT_KEEP_BYTES
     assert seqs == sorted(seqs), "compaction must leave the file ascending by seq"
     assert seqs[-1] == written, "the newest record must survive compaction"
+
+
+def test_a_cursor_past_the_room_head_clamps_so_text_polling_can_progress(tmp_path):
+    """A future cursor must settle on the room's actual head, or the text lane keeps
+    printing a dead next: URL forever (#565)."""
+    import store
+
+    store.append(tmp_path, "cursor", "bot", "one")
+
+    view = store.read_messages(tmp_path, "cursor", since=999)
+
+    assert view["count"] == 0
+    assert view["last_seq"] == 1

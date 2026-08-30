@@ -861,12 +861,14 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    head_seq = 0
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
                 rec = _parse(raw)
                 if rec is None:
                     continue
+                head_seq = head_seq or rec["seq"]
                 if since is not None and rec["seq"] <= since:
                     break
                 if cutoff is not None and _expired(rec, cutoff):
@@ -879,7 +881,7 @@ def read_messages(
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
         "generation": room_generation(root, room),
         "messages": out,
     }

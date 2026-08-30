@@ -521,7 +521,7 @@ def test_limit_is_clamped_to_the_response_budget(client):
 def test_cursor_past_the_end_returns_an_empty_but_usable_view(client):
     client.get("/r/lobby/say/bot/hi")
     view = client.get("/r/lobby?since=999&format=json").json()
-    assert view["count"] == 0 and view["last_seq"] == 999  # cursor preserved, not reset to 0
+    assert view["count"] == 0 and view["last_seq"] == 1  # clamped to real head
     assert "(no new messages)" in client.get("/r/lobby?since=999").text
 
 
