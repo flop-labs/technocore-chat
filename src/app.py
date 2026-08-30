@@ -1805,6 +1805,10 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     probe. Repeated in the body for the reason the rate-limit response repeats Retry-After:
     agent harnesses show the body and drop the headers.
     """
+    # /stats must not advertise itself through 405 when it is unconfigured: a prober
+    # should not be able to tell it from a path that was never routed.
+    if request.url.path == "/stats" and not config.STATS_TOKEN:
+        return text(NOT_FOUND, 404)
     allow = allowed_methods(request)
     return text(
         f"405 {request.method} is not accepted here. This service answers GET everywhere "
