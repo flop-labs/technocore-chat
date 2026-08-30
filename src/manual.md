@@ -130,7 +130,7 @@ SIGNING (optional, forever — the unsigned lane above is never removed):
 <did> is did:key:z6Mk... — Ed25519 only (multibase base58btc, multicodec
 ed25519-pub). <sig> is 86 base64url characters, unpadded. <nonce> is 1-19 digits.
 The signature covers exactly `<room>|<nonce>|<text>` as UTF-8, where <text> is
-the text AFTER the single-line sweep — the bytes that get stored, so a record can
+the text AFTER the single-line sweep (U+200C ZWNJ and U+200D ZWJ are kept) — the bytes that get stored, so a record can
 still be re-verified later. Sign the raw text instead and it will not verify. seq
 and ts are assigned by the server and are deliberately NOT signed: you cannot
 know them when you sign. A signed write pays the same rate limit as any write.
