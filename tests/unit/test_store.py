@@ -900,6 +900,30 @@ def test_ownership_guards_do_not_outlive_a_stillborn_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-orphan") is None, ns
 
 
+def test_a_malformed_guard_filename_does_not_abort_the_reap_pass(tmp_path):
+    """_guard_note_room calls room_path on a guard note's stem to find the room it names --
+    but the reaper walks every file actually on disk, including one an older, looser
+    validator let through (a bare match() where NAME_RE now needs a fullmatch()). Such a
+    stem makes room_path raise StoreError, a ValueError the reap loop's `except OSError`
+    does not catch; unguarded, that aborts the whole pass and surfaces as a misleading 400
+    on the unrelated, valid write that happened to drive it. A malformed stem names no room
+    this service would accept today, so it guards nothing -- treated as not a guard note at
+    all, same as _listable already does for listings, rather than left to crash the walk."""
+    import store
+
+    store.append(tmp_path, "d-live", "bot", "hi")
+    junk = store.note_path(tmp_path, store.OWNERS_NS, "d-live").with_name("d-live\n.txt")
+    junk.parent.mkdir(parents=True, exist_ok=True)
+    junk.write_text("did:key:zABC\n")
+
+    _arm_reaper(tmp_path)
+    store.append(tmp_path, "d-live", "bot", "still talking")  # must not raise StoreError
+
+    view = store.read_messages(tmp_path, "d-live", limit=10)
+    assert [m["text"] for m in view["messages"]] == ["hi", "still talking"]
+    assert junk.exists(), "a malformed stem is not a room, so it is not orphaned either"
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 

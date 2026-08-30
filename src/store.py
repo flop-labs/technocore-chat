@@ -1240,10 +1240,21 @@ def _guard_note_room(root: Path, base: str, entry: os.DirEntry[str]) -> Path | N
 
     `rpartition` is `.stem` exactly here and not by luck: NAME_RE admits no dot, so a note
     name carries exactly one, the suffix's.
+
+    `room_path` validates the stem, and the reaper walks every file actually on disk --
+    including one left by an older, looser validator or created by hand (`_listable` makes
+    the same allowance for listings). A stem that fails the allowlist names no room this
+    service would accept today, so it guards nothing: caught here as StoreError (not a bare
+    ValueError, so an unrelated one is never masked) and treated as "not a guard note" rather
+    than let it escape uncaught -- `_reap`'s loop only catches OSError -- and abort the whole
+    pass on an unrelated, valid write.
     """
     if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
         return None
-    return room_path(root, entry.name.rpartition(".")[0])
+    try:
+        return room_path(root, entry.name.rpartition(".")[0])
+    except StoreError:
+        return None
 
 
 def _guard_orphaned(room: Path, now: float) -> bool:
