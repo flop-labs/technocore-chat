@@ -2,7 +2,8 @@
 
 The same nine tools as the stdio server, over streamable HTTP, on Cloudflare Python
 Workers. One implementation in Python serves both: this directory is a platform adapter —
-`src/worker.py` is under forty lines and holds no tool logic.
+`src/worker.py` holds no tool logic, and is mostly an explanation of the four things
+the platform forces on it.
 
 **You still probably do not need this.** A remote MCP server is worth deploying when your
 client cannot run a local process (a hosted agent, a browser client, a team pointing many
@@ -12,6 +13,7 @@ fetch a URL at all, skip both and read <https://technocore.chat/skill.md>.
 ## Run it locally
 
 ```bash
+uv build --wheel -o dist --project mcp   # from the repo root; see below
 cd mcp/worker
 uv run pywrangler dev          # serves http://localhost:8787/mcp
 ```
@@ -20,6 +22,14 @@ uv run pywrangler dev          # serves http://localhost:8787/mcp
 dependencies against the Pyodide wheel index for the interpreter the compatibility flags
 select, writes `pylock.toml`, and bundles the result into the Worker. The first run
 downloads a Pyodide toolchain and takes a while; later runs are fast.
+
+**The `uv build` is not optional, and it is the step people skip.** pywrangler installs
+only prebuilt wheels — it passes `--no-build`, because building a Pyodide-platformed wheel
+fails — so the wrapper has to exist as a wheel in `mcp/dist` before the Worker can bundle
+it. Skip it and the resolve runs all the way to the end and then stops on the one package
+the deployment is for: `` Package `technocore-mcp` can't be installed because it is marked
+as `--no-build` but has no binary distribution ``. Re-run it after every change to
+`mcp/src`, too — the Worker serves the wheel you last built, not the files on disk.
 
 Point a client at it:
 
@@ -40,6 +50,7 @@ async with Client("http://localhost:8787/mcp") as client:
 ## Deploy it
 
 ```bash
+uv build --wheel -o dist --project mcp   # the same prerequisite as `dev`
 cd mcp/worker
 uv run pywrangler deploy
 ```
@@ -48,13 +59,13 @@ That needs a Cloudflare account and `wrangler login`; the endpoint lands at
 `https://technocore-mcp.<your-subdomain>.workers.dev/mcp`. Rename it in `wrangler.jsonc`
 first if you would rather it were called something else.
 
-To serve a release rather than this checkout, replace the `technocore-mcp` path source in
-`pyproject.toml` with the published wheel:
+To serve a published release rather than this checkout, drop the `find-links` line from
+`[tool.uv]` in `pyproject.toml`. The dependency is already an ordinary `technocore-mcp>=0.10`,
+so with nothing pointing at `mcp/dist` the resolve takes the wheel from PyPI instead — and
+`uv build` stops being a prerequisite, because there is no local wheel in the picture.
 
-```toml
-dependencies = ["technocore-mcp>=0.10", "mcp>=2.1,<3"]
-# and delete the [tool.uv.sources] block
-```
+Note that `>=0.10` is what currently forces the local build: PyPI's newest is 0.9.4, so
+until 0.10.0 is published the constraint can only be satisfied from `mcp/dist`.
 
 ## Things worth knowing before you deploy
 

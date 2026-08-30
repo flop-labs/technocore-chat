@@ -1,7 +1,7 @@
 """technocore-mcp as a remote MCP server on Cloudflare Python Workers.
 
 The tools are `technocore_mcp`'s, unmodified: this file is the platform adapter and
-nothing else. Three things differ from the stdio build, and only three.
+nothing else. Four things differ from the stdio build, and only four.
 
 **The fetch.** Python Workers run on Pyodide, which has no raw sockets — `urllib` there
 does not fail at import, it fails at connect, in production. Outbound HTTP is the
@@ -21,6 +21,14 @@ The signing key additionally requires `TECHNOCORE_MCP_TOKEN`; see `Default` belo
 owns it. `uvicorn` is not installed and is not installable (the SDK marks it
 `sys_platform != "emscripten"`), which is why nothing here calls `run()`.
 
+**The lifecycle.** Both halves of it are the platform's, not a preference. The package is
+imported inside a request rather than at module scope, because the runtime forbids the
+entropy the MCP SDK's import chain draws before the snapshot is taken — see
+`_technocore()`. And the ASGI app is rebuilt per request rather than cached, because
+`asgi.fetch` runs a full lifespan startup and shutdown around every call and the SDK's
+session manager refuses to start twice — see `Default`. Between them these are the
+difference between a Worker that serves and one that 500s, so neither is tidiable away.
+
 The endpoint is stateless streamable HTTP at `/mcp`. Stateless is not a compromise: every
 tool call is one independent GET against the origin, nothing is held between them, and an
 edge runtime may put the next request in a different isolate anyway. SSE is deprecated and
@@ -34,11 +42,43 @@ where it already is. The one thing worth a wall is a signing key — see `Defaul
 
 import hmac
 
-from technocore_mcp import server as technocore
-
 # `workers` is the runtime SDK Cloudflare injects; it exists only inside a Python Worker
 # and is not installable on CPython, so nothing outside that runtime can resolve it.
 from workers import Response, WorkerEntrypoint, asgi, fetch  # ty: ignore[unresolved-import]
+
+# `technocore_mcp` is NOT imported here, and the reason is a platform rule rather than a
+# style preference — see `_technocore()`.
+
+
+def _technocore():
+    """Import `technocore_mcp` inside a request, because it cannot be imported outside one.
+
+    Python Workers snapshot the interpreter after top-level module execution and restore
+    that snapshot per isolate, which is what makes cold starts fast. A snapshot taken
+    after something drew random bytes would freeze those bytes into every future isolate,
+    so the platform seeds the PRNG with a deliberate "poison seed" pre-snapshot and makes
+    every entropy API raise until a request is being served. `os.urandom` outside a
+    request context is therefore not a bug to work around; it is the platform refusing to
+    hand out numbers it knows would be identical forever.
+
+    The MCP SDK trips it at import: `mcp.server.lowlevel.server` imports
+    `mcp.server._otel`, which imports `opentelemetry.context`, which calls `uuid4()` at
+    module scope to mint a context key. Nothing in this repo asks for that entropy and
+    nothing can decline it — one `import` three levels down is enough. With the import at
+    top level the Worker does not start at all:
+
+        OSError: [Errno 29] Cannot get entropy outside of request context
+
+    and the failure is total rather than partial: it happens while the module is being
+    executed, so there is no handler yet to return a 500 and every request 500s.
+
+    Deferring the import to the first request costs a slower first response in each
+    isolate — the SDK is imported after the snapshot rather than baked into it — and buys
+    a Worker that runs. `Default._app` below is what keeps it to the *first* request.
+    """
+    from technocore_mcp import server as technocore
+
+    return technocore
 
 
 async def workers_fetch(
@@ -72,12 +112,27 @@ async def workers_fetch(
 
 
 class Default(WorkerEntrypoint):
-    """The Worker. Built once per isolate, on the first request that reaches it.
+    """The Worker. Configured once per isolate, on the first request that reaches it.
 
     Not at import, because that is the whole point: `self.env` is the only place a Worker's
-    configuration exists, and it does not exist yet when this module is executed. Cached on
-    the class rather than rebuilt per request, because building it registers the tools and
-    the configuration cannot change within an isolate's life.
+    configuration exists, and it does not exist yet when this module is executed.
+
+    The *configuration* is cached on the class; the ASGI app is not, and that asymmetry is
+    forced by the platform. `asgi.fetch` runs the app's full ASGI lifespan — startup before
+    the request, shutdown after it — on every call, so it wants an app that has never been
+    started. The MCP SDK's app starts a `StreamableHTTPSessionManager` in its lifespan, and
+    that object refuses to be started twice:
+
+        RuntimeError: StreamableHTTPSessionManager .run() can only be called once per
+        instance. Create a new instance if you need to run again.
+
+    A cached app therefore serves exactly one request per isolate and 500s on every one
+    after it — the kind of bug that passes a smoke test and fails a second click. So the
+    app is rebuilt per request, which is cheap and safe here: `streamable_http_app()`
+    constructs a fresh session manager each call, and the expensive half — importing the
+    package and registering the nine tools — happens once at module import and is held in
+    `sys.modules` regardless. Stateless mode is what makes this free of consequence: there
+    is no session state for a new app instance to have forgotten.
 
     The signing key changes the deployment's nature, so it changes the access rule with it.
     Without TECHNOCORE_SIGNING_KEY the endpoint proxies operations anyone can already make
@@ -89,7 +144,7 @@ class Default(WorkerEntrypoint):
     second secret should fail its first test, not its first incident.
     """
 
-    _app = None
+    _configured = False
 
     async def fetch(self, request):
         key = getattr(self.env, "TECHNOCORE_SIGNING_KEY", None)
@@ -110,12 +165,13 @@ class Default(WorkerEntrypoint):
                     "401 this endpoint requires `Authorization: Bearer <token>`.",
                     status=401,
                 )
-        if Default._app is None:
+        technocore = _technocore()
+        if not Default._configured:
             technocore.configure(
                 base_url=getattr(self.env, "TECHNOCORE_URL", None),
                 nick=getattr(self.env, "TECHNOCORE_NICK", None),
                 signing_key=key,
             )
             technocore.use_fetch(workers_fetch)
-            Default._app = technocore.streamable_http_app()
-        return await asgi.fetch(Default._app, request, self.env, self.ctx)
+            Default._configured = True
+        return await asgi.fetch(technocore.streamable_http_app(), request, self.env, self.ctx)
