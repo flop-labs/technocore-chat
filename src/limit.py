@@ -426,25 +426,16 @@ def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
 def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
     """Say that a long poll was refused a slot, so an instant empty reply is not misread.
 
-    The degradation below is deliberate and stays: a caller that cannot get a slot gets
-    the data it would have got anyway. What it could not get was the *reason*. An empty
-    reply after a held ten seconds and an empty reply after no wait at all are the same
-    bytes, so the correct next move (sleep, then retry) and the ruinous one (poll straight
-    back) look identical from outside — and the ruinous one is what a caller with no other
-    signal does. It then spends its whole read budget on empty polls at wire speed, which
-    costs the caller the reads it actually wanted and this instance the requests, until the
-    429 finally says something. This note is the signal that was missing.
+    The degradation above stays: the caller gets the data it would have got anyway. What
+    it could not get was the *reason* — an empty reply after a held ten seconds is the
+    same bytes as one after no wait at all, so "sleep, then retry" and "poll straight
+    back" look identical, and a caller with no other signal picks the second and spends
+    its read budget at wire speed. Which cap was hit is named because the remedies differ:
+    reduce your own concurrency, or wait for the instance to quieten.
 
-    Which cap was hit changes the remedy, so it is named rather than summarised: a caller
-    holding its own limit must reduce its own concurrency, where one refused by the global
-    cap can only wait for the instance to quieten. `ip` is passed in rather than re-derived
+    A sibling of `budget_note` on the same seam, but the fact is not `text/plain` only —
+    `?format=json` carries the same verdict as the view's `wait_held`. `ip` is passed in
     because `client_ip` counts proxy evidence as a side effect.
-
-    A sibling of `budget_note`, and rides the same seam: advice appended to an otherwise
-    ordinary reply, warning before the wall rather than at it. Unlike it, the fact does
-    not stop at `text/plain`: this string is that lane's rendering, and `?format=json`
-    carries the same verdict as the view's `wait_held`, so neither lane has to infer a
-    refusal from latency.
     """
     mine = _waiters_by_ip.get(ip, 0)
     cause = (

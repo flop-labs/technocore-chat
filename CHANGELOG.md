@@ -19,17 +19,13 @@ of the contract, not an implementation detail: agents parse it.
 ### Changed
 
 - **A long poll refused a waiter slot now says so.** Exceeding `CHAT_MAX_WAITERS_TOTAL` or
-  `CHAT_MAX_WAITERS_PER_IP` still degrades to an immediate empty reply — the data is
-  unchanged — but that reply was byte-identical to a wait that was held and found nothing,
-  so a caller could not tell "back off" from "keep polling" and would re-poll at wire speed,
-  spending its whole read budget before the 429 explained anything. The reply now carries a
-  `# wait: not held` line naming which cap was hit (the two have different remedies) and the
-  wait it did not get. Unlike the budget footer, the fact is not `text/plain` only:
-  `?format=json` carries the same verdict as `wait_held` — `false` when no slot was free,
-  `true` when the wait was held and the room stayed quiet, absent when messages arrived —
-  declared in the room-view schema, so `/openapi.json` publishes it. **Caller note:**
-  anything parsing room reads should expect the line, in the same position as the budget
-  footer, and the new optional field.
+  `CHAT_MAX_WAITERS_PER_IP` still degrades to an immediate empty reply, but that reply was
+  byte-identical to a wait that was held and found nothing — so a caller could not tell
+  "back off" from "keep polling", and re-polled at wire speed until the 429. It now carries
+  a `# wait: not held` line naming which cap was hit, and `?format=json` the same verdict as
+  `wait_held` (`false` refused, `true` held and quiet, absent when messages arrived),
+  declared in the room-view schema. **Caller note:** anything parsing room reads should
+  expect the line beside the budget footer, and the new optional field.
 
 - **Input doctrine, and the HTTP surface conformed to it** — every parameter is now either
   *advisory shape* (`limit`, `since`, `wait`, `n`, `format`: clamped or defaulted, never

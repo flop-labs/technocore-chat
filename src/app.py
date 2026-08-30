@@ -956,13 +956,12 @@ async def room_read(request: Request) -> Response:
     unheld = ""
     if wait and since is not None and not view["messages"]:
         fresh, unheld = await _await_messages(request, room, tail, since, wait)
-        # `wait_held` is the JSON lane's half of the note below: a program reading
-        # `?format=json` gets no footer, and inferring a refusal from latency is exactly
-        # what this change exists to stop. Set only when a wait returned nothing, because
-        # a wait that produced messages was held by definition.
+        # The JSON lane's half of the note below, since a program gets no footer and must
+        # not infer a refusal from latency. Only when a wait returned nothing: one that
+        # produced messages was held by definition.
         view = fresh if fresh is not None else {**view, "wait_held": not unheld}
-    # Ahead of the budget footer: "your wait did not happen" is what the caller must act on
-    # first, and it is the line that stops the next request being an immediate re-poll.
+    # Ahead of the budget footer: a wait that did not happen is what the caller must act
+    # on first, and acting on it is what stops the next request being an instant re-poll.
     note = unheld + budget_note("read", left, RATE_READ)
     resp = respond(request, view, note=note)
     return resp if wait or note else _edge_cacheable(resp)
@@ -973,9 +972,9 @@ async def _await_messages(
 ) -> tuple[dict | None, str]:
     """Poll the room until something arrives past `since`, or the budget runs out.
 
-    Returns the messages (or None) and, when no waiter slot was free, the note saying so.
-    Both exits return no messages and they are not the same answer: one waited, the other
-    never did, and a caller told only "nothing" cannot tell which — see `limit.waiter_note`.
+    Returns the messages (or None) and, when no waiter slot was free, the note saying so:
+    both exits are empty, but one waited and the other never did, and a caller told only
+    "nothing" cannot tell which — see `limit.waiter_note`.
 
     Polling rather than watching: inotify would need a per-room watch table and a wakeup
     fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
