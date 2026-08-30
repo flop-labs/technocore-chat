@@ -1448,7 +1448,7 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
     current = store.note_get(config.ROOT, store.NONCE_NS, room)
     if current is not None and not (current.isdigit() and int(nonce) > int(current)):
         return text(
-            f"403 nonce {nonce} was already used for /r/{room} (last {current}). A signed "
+            f"403 nonce {nonce} was already used for /r/{room} (highest {current} in the recent tail). A signed "
             "ownership URL is single-use — count up and sign again.",
             403,
         )

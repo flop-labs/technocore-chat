@@ -1020,6 +1020,16 @@ def test_ephemeral_mailbox_keeps_authentication_while_expiring_messages(client, 
     assert view["messages"][0]["from"] == did
 
 
+def test_nonce_rejection_mentions_recent_tail(client):
+    did, sign = _keypair()
+    # First signed message burns nonce 1 in the room.
+    assert _say_signed(client, "d-tailwarn", did, sign, "hello", nonce=1).status_code == 200
+    # Replay the same signed URL — nonce 1 is now reused.
+    r = client.get(f"/r/d-tailwarn/say-signed/{did}/{sign('d-tailwarn|1|hello')}/1/hello")
+    assert r.status_code == 400
+    assert "recent tail" in r.text
+
+
 def test_two_signed_writers_cannot_both_spend_one_nonce(client, tmp_path, monkeypatch):
     """The counter is read before it is claimed, so two writers racing one room both pass
     the "greater than the last one" check against the same stale value. Only the
