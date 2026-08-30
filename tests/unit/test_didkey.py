@@ -7,6 +7,18 @@ from _client import _keypair, _multibase
 client = _client.client  # the shared TestClient fixture
 
 
+def test_base58_preserves_leading_zeros():
+    """A '111' prefix encodes three leading zero bytes; the old drop-zeros decode
+    silently stripped them, so a key that started with zero bytes decoded to the
+    wrong 32 bytes and failed verification against the real public key.
+    """
+    import didkey
+
+    raw = "111"  # three base58 zero digits = three leading zero bytes
+    decoded = didkey._b58decode(raw)
+    assert decoded == b"\x00\x00\x00"
+
+
 def test_a_did_key_has_exactly_one_spelling(client):
     """Ownership compares DID *strings*: `_note_write_gate` asks `signer != current`, and
     `_allowed_keys` matches by string. So a key with more than one accepted spelling is a

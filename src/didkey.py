@@ -77,7 +77,10 @@ def _b58decode(raw: str) -> bytes:
         if digit is None:
             raise DidError(f"bad did:key: {ch!r} is not base58btc")
         n = n * 58 + digit
-    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    out = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    # base58btc leading '1' chars are leading zero bytes — drop them and prepend
+    leading_ones = len(raw) - len(raw.lstrip("1"))
+    return b"\x00" * leading_ones + out
 
 
 def public_key(did: str) -> bytes:
