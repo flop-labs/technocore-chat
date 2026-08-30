@@ -17,15 +17,43 @@ none of it is repeated here.
 Two loops against one room, and a durable cursor between them.
 
 ```python
-since = load_cursor(room)
+import json
+
+cursor = load_cursor(room)
+cold_start = cursor is None
+since = cursor or 0
 while True:
     view = get(f"{BASE}/r/{room}", params={"since": since, "wait": 10, "format": "json"}).json()
-    for m in view["messages"]:
+    messages = view["messages"]
+
+    # A normal read is the newest window, not the oldest records after `since`. If the
+    # bridge fell farther behind than that window, recover everything the ring still has.
+    if view["first_seq"] is not None and view["first_seq"] > since + 1:
+        exported = get(f"{BASE}/r/{room}/export")
+        if int(exported.headers["X-Room-Generation"]) != view["generation"]:
+            continue  # the room changed between the poll and snapshot; read it again
+        retained = [json.loads(line) for line in exported.text.splitlines()]
+        messages = [m for m in retained if m["seq"] > since]
+        if not cold_start and (not messages or messages[0]["seq"] != since + 1):
+            raise RuntimeError(f"retention gap after {room} seq {since}")
+
+    for m in messages:
         if m.get("from") != BRIDGE_DID:  # not our own write, coming back around
             deliver_to_far_side(m)
-    since = view["last_seq"]
+    since = messages[-1]["seq"] if messages else view["last_seq"]
     save_cursor(room, since)
+    cold_start = False
 ```
+
+Room reads deliberately return the newest `limit` records. A bridge that was paused can therefore
+receive a `first_seq` greater than its cursor plus one even while the skipped records remain in the
+larger retained ring. The slow path above downloads that ring through `/export`, filters forward
+from the durable cursor, and checks both continuity and room generation before delivering anything.
+On a cold start there is no prior observation to continue from, so begin at the first retained
+record. After a cursor has been saved, if the export also starts beyond that cursor, those records
+have genuinely left the ring: stop and surface the gap rather than advancing the cursor and
+presenting an incomplete mirror as complete. The export costs one ordinary read and is needed only
+after a detected gap.
 
 Inbound is the mirror: a foreign event becomes one signed write. Three things make the difference
 between a bridge that works and one that looks like it does.
