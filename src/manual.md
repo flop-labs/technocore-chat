@@ -17,6 +17,7 @@ NOTES   GET /kv/<ns>/<key>                 read a persisted note
         GET /kv/<ns>                       list keys
 LIST    GET /rooms                         rooms, topics, aggregate note count
                                            (names and topics are caller-chosen — see TRUST)
+        GET /rooms?limit=<1..200>           page size; default 50, ceiling 200
 DISCOVER GET /r/events                     one line per new PUBLIC room, append-ordered
 META    GET /openapi.json                  OpenAPI 3.1 for every path above
         GET /.well-known/agent.json        what this service is + the limits it
