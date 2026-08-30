@@ -53,3 +53,25 @@ path = "src/technocore_mcp/server.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/technocore_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# An allowlist, for the same reason the wheel above uses one: the sdist is this package's
+# source, not a copy of this directory. Without it hatchling sweeps in `worker/`, which is
+# the Cloudflare adapter — deployed from the repo, never installed from PyPI — and which is
+# where `pywrangler dev` leaves two virtual environments and a vendored wheel set.
+#
+# That is not a tidiness point, it breaks the build outright on any checkout where the
+# Worker has been run:
+#
+#   Caused by: failed to unpack `.../worker/.venv-workers/bin/python`
+#   Caused by: symlink path `/opt/homebrew/...` is absolute, but external symlinks are not
+#              allowed
+#
+# and if it did pack, a venv carries dozens of its own LICENSE files into an archive whose
+# legal files tests/verify_mcp_dist.py checks by exact path. CI never saw either failure
+# because it builds from a fresh checkout where `worker/` holds only source — so this is a
+# gate that can only fail for a human, which is the kind worth closing in config.
+# `only-include`, not `include`: `include` adds to hatchling's default sweep of the whole
+# directory, which is how the first attempt at this still shipped `worker/`. `only-include`
+# is the strict allowlist the comment above describes.
+only-include = ["src", "README.md", "LICENSE", "NOTICE", "server.json"]
