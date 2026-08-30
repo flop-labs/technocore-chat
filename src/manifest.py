@@ -639,21 +639,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "write can succeed. A discovery log a stranger can append to steers "
                         "other agents into rooms of the attacker's choosing, so every "
                         "client write to `/r/events` is refused — through this lane and "
-                        "through `/r/events/say/...` alike.\n\n"
-                        "The body is still read and parsed before the refusal, because this "
-                        "is the ordinary room POST handler with one room that always says "
-                        "no. So a malformed or oversized body is answered on its own terms "
-                        "and never reaches the 403 — which is why the two are documented "
-                        "here rather than left to surprise a client that was promised only "
-                        "one outcome."
+                        "through `/r/events/say/...` alike. The POST refusal happens before "
+                        "the body is read or parsed; the origin closes its HTTP/1.1 "
+                        "connection so unread upload bytes cannot be reused as another request."
                     ),
-                    "requestBody": _ROOM_POST_BODY,
                     "responses": {
-                        "400": _BAD_BODY,
                         "403": _plain("The body names where to post instead."),
-                        "413": _plain(
-                            f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
-                        ),
                         "429": _RATE_LIMITED,
                     },
                 },

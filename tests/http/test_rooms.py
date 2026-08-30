@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import _client
+import pytest
 from _client import (
     _age,
     _at,
@@ -47,26 +48,75 @@ def test_traversal_and_bad_names_rejected(client, tmp_path):
     assert client.get("/r/lobby?format=json").json()["messages"][0]["from"] == "n"
 
 
-def test_posting_to_the_events_room_documents_what_it_really_answers(client):
-    """`/r/events` is the ordinary room POST handler with one room that always says no, so
-    the body is read and parsed *before* the refusal — a malformed or oversized body never
-    reaches the 403. Documenting only the 403 promised a client one outcome and delivered
-    three. Review catch on #40.
+def test_posting_to_the_events_room_is_refused_before_reading_a_body(client, monkeypatch):
+    """The URL already names the one room no client may write.
+
+    Reading an attacker-controlled body before that unconditional gate spends the JSON and
+    streaming budget on a request that cannot succeed. Because an unread HTTP body cannot be
+    reused safely, the refusal also closes the connection rather than leaving bytes for the
+    next request on the socket.
     """
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "413", "429"}
-    # It parses a body, so it declares one.
-    assert (
-        "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])
-    )
+    assert set(documented["responses"]) == {"403", "429"}
+    assert "requestBody" not in documented
 
-    assert client.post("/r/events", json={"from": "bot", "text": "hi"}).status_code == 403
-    assert client.post("/r/events", content=b"not json").status_code == 400
-    assert client.post("/r/events", json=[1, 2]).status_code == 400
-    oversize = client.post("/r/events", content=b"x" * (app_module.MAX_BODY + 1))
+    async def body_must_not_be_read(_request):
+        pytest.fail("/r/events read a body before its unconditional 403")
+
+    monkeypatch.setattr(app_module, "read_json", body_must_not_be_read)
+    for body in ({"from": "bot", "text": "hi"}, b"not json", b"x" * (app_module.MAX_BODY + 1)):
+        if isinstance(body, dict):
+            refused = client.post("/r/events", json=body)
+        else:
+            refused = client.post("/r/events", content=body)
+        assert refused.status_code == 403
+        assert refused.headers["connection"] == "close"
+
+    monkeypatch.undo()
+    assert client.post("/r/lobby", content=b"not json").status_code == 400
+    oversize = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
     assert oversize.status_code == 413
+
+
+def test_rate_limited_events_post_keeps_the_shared_429_contract(client, monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "RATE_WRITE", 1)
+    app_module._buckets.clear()
+    first = client.post("/r/events", content=b"ignored")
+    limited_response = client.post("/r/events", content=b"also ignored")
+    assert first.status_code == 403
+    assert limited_response.status_code == 429
+    assert "connection" not in limited_response.headers
+
+
+def test_unread_body_helper_does_not_emit_connection_on_http2():
+    from starlette.requests import Request
+
+    import app as app_module
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "2",
+            "method": "POST",
+            "scheme": "https",
+            "path": "/r/events",
+            "raw_path": b"/r/events",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "server": ("localhost", 443),
+            "root_path": "",
+        }
+    )
+    response = app_module._reject_if_events_room(
+        "events", close=request.scope.get("http_version") in {"1.0", "1.1"}
+    )
+    assert response is not None
+    assert "connection" not in response.headers
 
 
 def test_control_chars_cannot_forge_records(client):

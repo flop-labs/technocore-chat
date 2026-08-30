@@ -270,8 +270,7 @@ def text(
     }
     if not index:
         headers["X-Robots-Tag"] = "noindex"
-    if extra_headers:
-        headers.update(extra_headers)
+    headers.update(extra_headers or {})
     return PlainTextResponse(
         body if body.endswith("\n") else body + "\n",
         status_code=status,
@@ -961,7 +960,6 @@ async def _await_messages(
             )
             if view["messages"]:
                 return view
-    return None
 
 
 def room_export(request: Request) -> Response:
@@ -1001,7 +999,7 @@ def room_export(request: Request) -> Response:
     )
 
 
-def _reject_if_events_room(room: str) -> Response | None:
+def _reject_if_events_room(room: str, *, close: bool = False) -> Response | None:
     """The events room is server-written only.
 
     Everything else here is uniformly world-writable, and this is the one deliberate
@@ -1014,8 +1012,8 @@ def _reject_if_events_room(room: str) -> Response | None:
             f"403 /r/{store.EVENTS_ROOM} is written by the server only — it announces new "
             "public rooms. Read it freely; post somewhere else.",
             403,
+            extra_headers={"Connection": "close"} if close else None,
         )
-    return None
 
 
 def _allowed_keys(room: str) -> set[str]:
@@ -1034,8 +1032,7 @@ def _allowed_keys(room: str) -> set[str]:
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
     a signature refuses the unsigned lane outright, and the reply says what to send."""
-    denied = _reject_if_events_room(room)
-    if denied:
+    if denied := _reject_if_events_room(room):
         return denied
     if store.is_mailbox(room) and signer is None:
         return text(
@@ -1303,13 +1300,16 @@ async def read_json(request: Request) -> dict | Response:
 async def room_post(request: Request) -> Response:
     """Non-restricted clients (curl, SDKs) can use a normal POST — including the signed
     lane, by carrying `did`/`sig`/`nonce` beside `text`."""
+    room = request.path_params["room"]
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
         return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
+    close = request.scope.get("http_version") in {"1.0", "1.1"}
+    if denied := _reject_if_events_room(room, close=close):
+        return denied
     payload = await read_json(request)
     if isinstance(payload, Response):
         return payload
-    room = request.path_params["room"]
     credentials = _payload_credentials(payload)
     signer = None
     if credentials:

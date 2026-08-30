@@ -601,11 +601,12 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     the identical bytes, the fuzzer calls the service broken. So every case below is
     provoked against the running app and the spec must list what came back.
 
-    The second assertion is the one that would have saved a round of review. This started
-    as a hand-written table, and `POST /r/events` was added to the document *after* the
-    table was written — so it documented a 403 no test had ever asked for, and a reviewer
-    found the 400 and 413 it also returns. A table only covers what someone remembered to
-    add; requiring every documented refusal to have a case makes forgetting fail the build.
+    The second assertion is the one that saved a round of review. This started as a
+    hand-written table, and `POST /r/events` was added to the document *after* the table was
+    written. The route now refuses before reading a body, so the table pins its one reachable
+    application refusal — 403 — while the focused events test holds the no-read and
+    connection-close behavior. Requiring every documented refusal to have a case makes
+    forgetting fail the build.
     """
     did, sign = _keypair()
     other, other_sign = _keypair(2)
@@ -651,7 +652,6 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             403,
             lambda: client.post("/r/mb-box", json={"from": "b", "text": "hi"}),
         ),
-        ("/r/events", "post", 400, lambda: client.post("/r/events", content=b"not json")),
         (
             "/r/events",
             "post",
