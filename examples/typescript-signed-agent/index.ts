@@ -31,6 +31,7 @@ type RoomMessage = {
   from: string;
   text: string;
   nonce?: number;
+  sig?: string;
 };
 
 type RoomResponse = {
@@ -68,6 +69,15 @@ function loadKey(): KeyFile {
   return parsed;
 }
 
+function sweepText(text: string): string {
+  return text
+    .replace(
+      /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu,
+      " "
+    )
+    .trim();
+}
+
 function signMessage(
   keyFile: KeyFile,
   room: string,
@@ -101,8 +111,17 @@ function signMessage(
 async function sendSignedMessage(
   keyFile: KeyFile,
   room: string,
-  text: string
+  inputText: string
 ) {
+  const text =
+    sweepText(inputText);
+
+  if (!text) {
+    throw new Error(
+      "Message is empty after Technocore's single-line sweep."
+    );
+  }
+
   const nonce =
     Date.now().toString();
 
@@ -132,6 +151,10 @@ async function sendSignedMessage(
     );
 
     console.log(
+      `Canonical text: ${JSON.stringify(text)}`
+    );
+
+    console.log(
       `Signature generated: ${signature.length > 0 ? "YES" : "NO"}`
     );
 
@@ -142,6 +165,8 @@ async function sendSignedMessage(
     return {
       nonce: Number(nonce),
       sent: false,
+      text,
+      signature,
     };
   }
 
@@ -167,6 +192,8 @@ async function sendSignedMessage(
   return {
     nonce: Number(nonce),
     sent: true,
+    text,
+    signature,
   };
 }
 
@@ -229,7 +256,7 @@ async function main() {
       ROOM
     );
 
-  const verified =
+  const persisted =
     room.messages.find(
       (message) =>
         message.from ===
@@ -237,21 +264,23 @@ async function main() {
         message.nonce ===
           result.nonce &&
         message.text ===
-          MESSAGE
+          result.text &&
+        message.sig ===
+          result.signature
     );
 
-  if (!verified) {
+  if (!persisted) {
     throw new Error(
-      "Message was sent but could not be verified in recent room history."
+      "Message was accepted but could not be confirmed in recent room history."
     );
   }
 
   console.log(
-    `Verified at seq ${verified.seq}.`
+    `Confirmed persisted signed record at seq ${persisted.seq}.`
   );
 
   console.log(
-    "Signed Technocore write succeeded."
+    "Note: this history check confirms the accepted record; it does not independently re-verify the Ed25519 signature."
   );
 }
 
