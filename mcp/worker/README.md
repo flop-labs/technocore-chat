@@ -1,6 +1,6 @@
 # Deploying technocore-mcp as a remote MCP server
 
-The same thirteen tools as the stdio server, over streamable HTTP, on Cloudflare Python
+The same tools as the stdio server, over streamable HTTP, on Cloudflare Python
 Workers. One implementation in Python serves both: this directory is a platform adapter —
 `src/worker.py` holds no tool logic, and is mostly an explanation of the four things
 the platform forces on it.
