@@ -177,7 +177,14 @@ def wire(tmp_path, monkeypatch):
                 )
             )
 
-            def post(payload):
+            def post(payload=None, *, content=None):
+                """One POST. `content` sends bytes verbatim, which is the only way to put
+                something that is not JSON on the wire — `json=` would serialise the string
+                `"not json at all"` into a perfectly valid JSON document."""
+                if content is not None:
+                    return portal.call(
+                        lambda: http.post("/mcp", content=content, headers=WIRE_HEADERS)
+                    )
                 return portal.call(lambda: http.post("/mcp", json=payload, headers=WIRE_HEADERS))
 
             yield post
@@ -734,12 +741,104 @@ def test_falsey_non_object_params_are_rejected(wire, params):
     assert response.status_code == 400
 
 
-def test_malformed_json_is_refused_without_guessing(wire, tmp_path):
-    """The transport is exposed to arbitrary bytes. A torn frame is a parse error naming
-    the violated shape, never a 500 and never a guess at what was meant."""
-    for payload in ("not json at all", "[]", '"ping"', "7"):
-        response = wire(json.loads(payload) if payload != "not json at all" else payload)
-        assert response.status_code == 400
+def test_an_explicit_null_params_is_read_as_absent(wire):
+    """The one member of that set the SDK reads differently, written down rather than
+    dropped from it.
+
+    JSON-RPC 2.0 says a `params` member, *if present*, must be an array or an object, and
+    the hand-rolled server refused `null` on that reading. The SDK's request model makes
+    `params` optional and treats an explicit `null` as its absence, which is what every
+    other optional member in the protocol means by `null` — and for these tools the two
+    readings cannot differ in outcome: no method takes no-arguments-but-differently, and
+    `tools/call` with no params fails on the missing tool name either way.
+
+    Asserting it here rather than deleting the case: this is a behaviour change from the
+    hand-rolled server, and a test that says so is how it stays visible instead of being
+    rediscovered by whoever depended on the refusal."""
+    reply = frames(wire({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": None}))[0]
+    assert reply == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+    missing_name = frames(
+        wire({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": None})
+    )[0]
+    assert "error" in missing_name
+
+
+def test_malformed_bytes_are_refused_as_a_parse_error(wire):
+    """The transport is exposed to arbitrary bytes, not just to well-formed JSON that says
+    the wrong thing. These have to go on the wire verbatim: handing them to a JSON encoder
+    turns `not json at all` into the valid document `"not json at all"`, which tests
+    something else entirely and quietly loses the torn-frame case."""
+    for body in (b'{"jsonrpc": "2.0", "id"', b"not json at all", b"", b"\xff\xfe"):
+        response = wire(content=body)
+        assert response.status_code == 400, body
+        assert frames(response)[0]["error"]["code"] == -32700, body
+
+
+def test_well_formed_json_that_is_not_a_request_is_refused_without_guessing(wire):
+    """A valid JSON document of the wrong shape: an array, a string, a number. Parsed
+    fine, so this is the *other* refusal — invalid params, naming the shape it wanted —
+    rather than a 500 or a guess at what was meant."""
+    for payload in ([], "ping", 7):
+        response = wire(payload)
+        assert response.status_code == 400, payload
+        assert frames(response)[0]["error"]["code"] == -32602, payload
+
+
+def test_configure_repoints_the_origin_and_the_handshake_together(monkeypatch):
+    """The seam a Cloudflare Worker configures itself through.
+
+    A Worker has no process environment — `[vars]` and `wrangler secret` arrive on the
+    entrypoint's `env` binding, per request, after this module's `os.environ` reads have
+    long run — so a `TECHNOCORE_URL` that could not be applied afterwards would leave the
+    deployment silently proxying the public instance.
+
+    The handshake has to move with it. `instructions` is where the model is told which
+    service it is about to read untrusted text from, and a stale origin there names the
+    wrong one. The SDK publishes `instructions` read-only, so `configure` writes the
+    attribute the handshake reads; this is the test that fails if the SDK stops reading it.
+    """
+    from technocore_mcp import server as mcp_server
+
+    monkeypatch.setattr(mcp_server, "BASE_URL", mcp_server.BASE_URL)
+    monkeypatch.setattr(mcp_server, "DEFAULT_NICK", mcp_server.DEFAULT_NICK)
+    monkeypatch.setattr(mcp_server, "INSTRUCTIONS", mcp_server.INSTRUCTIONS)
+    monkeypatch.setattr(
+        mcp_server.server._lowlevel_server,
+        "instructions",
+        mcp_server.server._lowlevel_server.instructions,
+    )
+
+    mcp_server.configure(base_url="https://chat.example.test/", nick="worker-bot")
+    assert mcp_server.BASE_URL == "https://chat.example.test"  # the trailing slash goes
+    assert mcp_server.DEFAULT_NICK == "worker-bot"
+    handshake = mcp_server.server.instructions or ""
+    assert "https://chat.example.test" in handshake
+    assert mcp_server.DEFAULT_URL not in handshake
+
+    # Both arguments are independently optional: a Worker with only one var set must not
+    # blank the other.
+    mcp_server.configure(nick="second")
+    assert mcp_server.BASE_URL == "https://chat.example.test"
+    assert mcp_server.DEFAULT_NICK == "second"
+    mcp_server.configure()
+    assert mcp_server.DEFAULT_NICK == "second"
+
+
+def test_the_worker_entry_point_applies_the_binding_before_it_serves(monkeypatch):
+    """The Worker is not importable here — `workers` exists only inside the runtime — so
+    what is checked is that the entry point *names* the three things it must do, in the
+    order it must do them: read the binding into `configure`, swap the transport, then
+    build the app. Getting that order wrong builds an app around the wrong origin."""
+    source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text()
+    steps = [
+        source.index("technocore.configure("),
+        source.index("technocore.use_fetch(workers_fetch)"),
+        source.index("technocore.streamable_http_app()"),
+    ]
+    assert steps == sorted(steps)
+    for var in ("TECHNOCORE_URL", "TECHNOCORE_NICK"):
+        assert f'getattr(self.env, "{var}", None)' in source, var
 
 
 # ------------------------------------------------------------------ packaging

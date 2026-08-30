@@ -1,7 +1,7 @@
 """technocore-mcp as a remote MCP server on Cloudflare Python Workers.
 
 The tools are `technocore_mcp`'s, unmodified: this file is the platform adapter and
-nothing else. Two things differ from the stdio build, and only two.
+nothing else. Three things differ from the stdio build, and only three.
 
 **The fetch.** Python Workers run on Pyodide, which has no raw sockets — `urllib` there
 does not fail at import, it fails at connect, in production. Outbound HTTP is the
@@ -10,10 +10,15 @@ function in the package that touches the network. Everything above it — URL bu
 which query keys survive, how an error body becomes a tool result — is shared code, so
 the two deployments cannot disagree about what a tool answers.
 
+**The configuration.** A Worker has no process environment. `[vars]` and `wrangler
+secret` arrive on the entrypoint's `env` binding, per request, so `TECHNOCORE_URL` and
+`TECHNOCORE_NICK` are read from there and applied with `configure()` — which the stdio
+build gets from `os.environ` at import. Without this a Worker would silently proxy the
+public instance while its wrangler.jsonc said otherwise.
+
 **The server.** An ASGI app expects an ASGI *server* to own the socket; here the platform
-owns it, and `workers.asgi.entrypoint` is the adapter. `uvicorn` is not installed and is
-not installable (the SDK marks it `sys_platform != "emscripten"`), which is why nothing
-here calls `run()`.
+owns it. `uvicorn` is not installed and is not installable (the SDK marks it
+`sys_platform != "emscripten"`), which is why nothing here calls `run()`.
 
 The endpoint is stateless streamable HTTP at `/mcp`. Stateless is not a compromise: every
 tool call is one independent GET against the origin, nothing is held between them, and an
@@ -29,7 +34,7 @@ from technocore_mcp import server as technocore
 
 # `workers` is the runtime SDK Cloudflare injects; it exists only inside a Python Worker
 # and is not installable on CPython, so nothing outside that runtime can resolve it.
-from workers import asgi, fetch  # ty: ignore[unresolved-import]
+from workers import WorkerEntrypoint, asgi, fetch  # ty: ignore[unresolved-import]
 
 
 async def workers_fetch(url: str, headers: dict[str, str], timeout: float) -> tuple[int, str]:
@@ -55,6 +60,23 @@ async def workers_fetch(url: str, headers: dict[str, str], timeout: float) -> tu
     return response.status, await response.text()
 
 
-technocore.use_fetch(workers_fetch)
+class Default(WorkerEntrypoint):
+    """The Worker. Built once per isolate, on the first request that reaches it.
 
-Default = asgi.entrypoint(technocore.streamable_http_app())
+    Not at import, because that is the whole point: `self.env` is the only place a Worker's
+    configuration exists, and it does not exist yet when this module is executed. Cached on
+    the class rather than rebuilt per request, because building it registers nine tools and
+    the configuration cannot change within an isolate's life.
+    """
+
+    _app = None
+
+    async def fetch(self, request):
+        if Default._app is None:
+            technocore.configure(
+                base_url=getattr(self.env, "TECHNOCORE_URL", None),
+                nick=getattr(self.env, "TECHNOCORE_NICK", None),
+            )
+            technocore.use_fetch(workers_fetch)
+            Default._app = technocore.streamable_http_app()
+        return await asgi.fetch(Default._app, request, self.env, self.ctx)

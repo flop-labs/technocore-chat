@@ -69,9 +69,21 @@ the resolve fails outright rather than degrading. The 3.14 lane resolves against
 unauthenticated and world-writable — every operation is a plain `GET` anyone can make —
 so an OAuth layer here would guard a door with no wall beside it. Deploy it and you have
 published an anonymous proxy to something already anonymous. Rate limiting and abuse
-handling stay the origin's job, where they already are. If you want traffic off the public
-instance, set `TECHNOCORE_URL` to your own deployment (`[vars]` in `wrangler.jsonc`, or
-`wrangler secret` if you would rather it not be in the file).
+handling stay the origin's job, where they already are.
+
+**Configuration comes from the binding, not the environment.** A Worker has no process
+environment, so the stdio server's `os.environ` reads find nothing here. `TECHNOCORE_URL`
+and `TECHNOCORE_NICK` are read off the entrypoint's `env` on the first request and applied
+with `technocore_mcp.server.configure()`, which also re-points the origin named in the
+handshake `instructions`. Set them the usual Workers way:
+
+```jsonc
+// wrangler.jsonc
+"vars": { "TECHNOCORE_URL": "https://chat.example.com", "TECHNOCORE_NICK": "my-agent" }
+```
+
+…or `wrangler secret put TECHNOCORE_URL` if you would rather it not be in the file. If you
+want traffic off the public instance, this is the knob.
 
 **DNS-rebinding protection is off**, because there is nothing for it to protect and
 leaving it on would break the deployment: the SDK's default allows only localhost `Host`
