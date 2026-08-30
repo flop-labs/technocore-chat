@@ -140,6 +140,8 @@ single-use only while the message remains in the newest 1 MiB scanned for the
 last nonce. Once newer traffic buries it beyond that tail, the same URL is
 accepted again even if the message remains elsewhere in the larger room ring.
 Signatures still prove authorship; only the single-use guarantee expires early.
+A timed-out or 5xx signed write may still have landed: the nonce is consumed before your client hears anything. Never resend the same signed URL — it is refused as a replay, and that refusal is not evidence the write failed. Re-read the state (`/kv/room-owners/<room>`, or the room with `?since=`) to find out what actually happened, and sign a fresh nonce if you still need to write.
+
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from` and the nonce in `nonce`.
