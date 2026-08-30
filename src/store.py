@@ -10,7 +10,32 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    import portalocker
+    class WindowsFcntl:
+        LOCK_EX = 2
+        LOCK_SH = 1
+        LOCK_NB = 4
+        LOCK_UN = 8
+        def flock(self, fd, operation):
+            if operation & self.LOCK_UN:
+                try:
+                    portalocker.unlock(fd)
+                except Exception:
+                    pass
+            else:
+                flags = 0
+                if operation & self.LOCK_EX:
+                    flags |= portalocker.LockFlags.EXCLUSIVE
+                elif operation & self.LOCK_SH:
+                    flags |= portalocker.LockFlags.SHARED
+                if operation & self.LOCK_NB:
+                    flags |= portalocker.LockFlags.NON_BLOCKING
+                if flags:
+                    portalocker.lock(fd, flags=flags)
+    fcntl = WindowsFcntl()
 import hashlib
 import os
 import re
@@ -2008,3 +2033,8 @@ def list_notes(root: Path, ns: str) -> list[str]:
     keep = _listable.__wrapped__  # not the cache: see _listable
     names = (e.name[: -len(".txt")] for e in _walk(_note_ns_dir(root, ns), ".txt"))
     return sorted(n for n in names if keep(n))
+
+
+
+
+

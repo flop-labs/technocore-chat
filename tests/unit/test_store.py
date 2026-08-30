@@ -752,6 +752,10 @@ def test_engagement_window_binds_before_the_ring_does(tmp_path, monkeypatch):
     assert row["nick_diversity"] == 0.2
 
 
+import sys
+import pytest
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows path names cannot contain newlines")
 def test_listings_never_echo_a_name_the_validator_would_reject(tmp_path):
     """Defence in depth for anything already on disk: a hand-created file with a newline
     in its name must not be echoed into a response and forge a line."""
@@ -1102,3 +1106,4 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
