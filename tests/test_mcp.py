@@ -618,27 +618,37 @@ def test_the_advertised_pattern_is_the_one_that_is_enforced(mcp):
     assert [arm.get("pattern") for arm in nick] == [mcp.module.NAME_PATTERN, None]
 
 
-def test_the_advertised_bounds_are_the_ones_that_are_enforced(mcp, monkeypatch):
-    """`limit` is 1-200 in the schema because the service's own MAX_LIMIT is 1-200 and it
-    is a hard constant, not a per-instance knob. `text`, `value` and `seconds` carry no
-    bound because the service does not refuse them — it truncates a long message, and the
-    wait ceiling is configurable — so advertising one would refuse writes it would take."""
+def test_advisory_parameters_carry_no_bounds_and_are_clamped_not_refused(mcp):
+    """The service's own input doctrine (docs/design.md §3.5), applied to this client.
 
-    async def never(method, url, headers, body, timeout):
-        raise AssertionError(f"the network was reached: {url}")
-
-    monkeypatch.setattr(mcp.module, "_fetch", never)
-
-    for limit in (0, 201):
-        reply = mcp.call("read_room", {"room": "lobby", "limit": limit})
-        assert reply.is_error is True, limit
+    `limit`, `since` and `seconds` are advisory shape: the service clamps or defaults
+    them and serves the request, never refuses — so the wrapper advertises no `minimum`/
+    `maximum` (the ranges live in the descriptions) and forwards the value for the
+    service to clamp. A bound here would refuse calls the service would answer. `text`
+    and `value` carry no bound for the same reason: the service truncates, not refuses.
+    The *semantic* parameters — the names — keep their `pattern`, because those the
+    service refuses, and pre-refusing saves the round trip."""
     schemas = {tool.name: tool.input_schema for tool in mcp.tools()}
-    bounded = [
-        arm for arm in schemas["read_room"]["properties"]["limit"]["anyOf"] if "minimum" in arm
-    ]
-    assert bounded == [{"type": "integer", "minimum": 1, "maximum": 200}]
+    for tool, field in (
+        ("read_room", "limit"),
+        ("read_room", "since"),
+        ("list_rooms", "limit"),
+        ("discover_rooms", "since"),
+        ("wait_for_message", "since"),
+        ("wait_for_message", "seconds"),
+    ):
+        published = json.dumps(schemas[tool]["properties"][field])
+        assert "minimum" not in published and "maximum" not in published, (tool, field)
     assert "maxLength" not in schemas["say"]["properties"]["text"]
-    assert "maximum" not in schemas["wait_for_message"]["properties"]["seconds"]
+    assert "clamped to 1-200" in schemas["read_room"]["properties"]["limit"]["description"]
+
+    # …and the clamp is real: an out-of-range limit is served, at the service's bound.
+    for i in range(3):
+        mcp.call("say", {"room": "lobby", "text": f"m{i}", "nick": "bot"})
+    oversized = mcp.call("read_room", {"room": "lobby", "limit": 100000})
+    assert oversized.is_error is False and "m2" in text_of(oversized)
+    floor = mcp.call("read_room", {"room": "lobby", "limit": 0})
+    assert floor.is_error is False  # clamped to 1, not refused
 
 
 def test_the_advertised_schema_and_the_enforced_one_agree_in_both_directions(mcp):

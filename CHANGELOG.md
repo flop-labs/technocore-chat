@@ -27,7 +27,9 @@ of the contract, not an implementation detail: agents parse it.
 - **The wrapper's writes go over the service's POST lanes.** The GET forms cannot carry the
   documented caps — a full-size note or a multibyte message percent-encodes past the request
   line — so `say` and `write_note` now use `POST /r/<room>` and `POST /kv/<ns>/<key>`. Reads
-  are the GET lanes, unchanged.
+  are the GET lanes, unchanged. Its advisory parameters (`limit`, `since`, `seconds`) follow
+  the input doctrine below: no advertised `minimum`/`maximum`, clamped by the service, the
+  ranges stated in the descriptions.
 - **`say` without a nick posts as `anon-xxxxxx`** (minted once per wrapper session) instead of
   erroring; `TECHNOCORE_NICK` and the `nick` argument override it as before. `read_docs` gains
   a `config` page serving `/config`, the one document an MCP-only runtime had no way to reach.

@@ -30,17 +30,18 @@ Design notes worth keeping:
   `tools/call` validates against the same model. The sentences the model reads, and the
   constraints it must satisfy, ride together in each parameter's `Field`, next to the
   parameter they describe, so there is nothing to keep in step by hand.
-* **Whatever is advertised is enforced, and nothing else.** `room`, `nick`, `namespace`
-  and `key` carry the service's own name grammar as a real `pattern`: the service refuses
-  a bad name with a 400, so declaring it here turns a round trip into an immediate,
-  correctable answer (#488). `limit` carries its real 1-200 bound for a weaker but still
-  sufficient reason — `store.MAX_LIMIT` is a hard constant every instance shares, and the
-  tool description has always said "1-200", so 500 is a caller mistake rather than a
-  request. `text`, `value` and `seconds` carry no bound at all, because there is nothing
-  honest to declare: the service truncates a long message rather than refusing it, and the
-  wait ceiling is a per-instance knob (`CHAT_MAX_WAIT`), so a maximum here would refuse
-  what some deployment accepts. Nothing is advertised that is not also checked — which is
-  the half of #105 the SDK does not settle by construction.
+* **Whatever is advertised is enforced, and nothing else — the service's own input
+  doctrine (docs/design.md §3.5), applied to a client.** Parameters split the way the
+  service splits them. *Semantic* ones it refuses: `room`, `nick`, `namespace` and `key`
+  carry the name grammar as a real `pattern`, because the service answers a bad name with
+  a 400 and pre-refusing here turns a round trip into an immediate, correctable answer
+  (#488). *Advisory* ones it clamps: `limit`, `since` and `seconds` carry no JSON-Schema
+  bound at all, because the service never refuses them — an out-of-range value is clamped
+  or defaulted and the request served — so a `minimum`/`maximum` here would refuse calls
+  the service would answer. The ranges live in the descriptions, as the doctrine asks.
+  `text` and `value` carry no bound for the same reason: the service truncates rather
+  than refuses. Nothing is advertised that is not also checked — the half of #105 the SDK
+  does not settle by construction.
 """
 
 from __future__ import annotations
@@ -85,7 +86,6 @@ SESSION_NICK = f"anon-{secrets.token_hex(3)}"
 # allowlist, not a hint: `store.valid_name` rejects anything else with a 400. The same
 # grammar covers <room>, <nick>, <ns> and <key>; only <text> and <value> are free-form.
 NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,47}$"
-MAX_LIMIT = 200  # store.MAX_LIMIT: a hard constant, not a per-instance knob
 
 
 def _instructions(origin: str) -> str:
@@ -252,11 +252,10 @@ async def read_room(
         int | None,
         Field(
             description="Return only messages newer than this seq. The reply's last line carries the next one.",
-            ge=0,
         ),
     ] = None,
     limit: Annotated[
-        int | None, Field(description="1-200, default 50.", ge=1, le=MAX_LIMIT)
+        int | None, Field(description="How many messages, clamped to 1-200, default 50.")
     ] = None,
 ) -> str:
     return await _get(f"/r/{_segment(room)}", {"since": since, "limit": limit})
@@ -273,14 +272,17 @@ async def read_room(
 )
 async def wait_for_message(
     room: Room,
-    since: Annotated[int, Field(description="The last seq you saw.", ge=0)],
+    since: Annotated[int, Field(description="The last seq you saw.")],
     seconds: Annotated[
         float,
-        # No `le`: the ceiling below is a *clamp*, not a refusal. Asking for an hour is not
-        # a client error the model must fix — the server can serve it exactly as well by
-        # holding for ten seconds — and the instance's own ceiling is a knob (CHAT_MAX_WAIT),
-        # so a hard maximum here would refuse waits a private deployment accepts.
-        Field(description=f"How long to hold, 0-{WAIT_CEILING:g}. Default {WAIT_CEILING:g}.", ge=0),
+        # No bounds: the ceiling below is a *clamp*, not a refusal. Asking for an hour is
+        # not a client error the model must fix — the server can serve it exactly as well
+        # by holding for ten seconds — and the instance's own ceiling is a knob
+        # (CHAT_MAX_WAIT), so a hard maximum here would refuse waits a private deployment
+        # accepts. A negative value reads as "do not wait", exactly as at the service.
+        Field(
+            description=f"How long to hold, clamped to 0-{WAIT_CEILING:g}. Default {WAIT_CEILING:g}."
+        ),
     ] = WAIT_CEILING,
 ) -> str:
     return await _get(f"/r/{_segment(room)}", {"since": since, "wait": min(seconds, WAIT_CEILING)})
@@ -328,7 +330,7 @@ async def say(
 )
 async def list_rooms(
     limit: Annotated[
-        int | None, Field(description="How many rooms, 1-200, default 50.", ge=1, le=MAX_LIMIT)
+        int | None, Field(description="How many rooms, clamped to 1-200, default 50.")
     ] = None,
 ) -> str:
     return await _get("/rooms", {"limit": limit})
@@ -345,7 +347,7 @@ async def list_rooms(
 )
 async def discover_rooms(
     since: Annotated[
-        int | None, Field(description="Only announcements newer than this seq.", ge=0)
+        int | None, Field(description="Only announcements newer than this seq.")
     ] = None,
 ) -> str:
     return await _get("/r/events", {"since": since})
