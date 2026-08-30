@@ -47,6 +47,19 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
 - Removing dead code from core is a win on its own; open a pull request for it.
 
+## Overlapping work
+
+Several pull requests racing one issue cost more review than they save. Two checks are
+automated in `.github/workflows/queue-guard.yml`: a new pull request gets one comment listing
+open PRs that cite the same issues, and a PR touching `CHANGELOG.md` or `sz-baseline.json` —
+both maintainer-regenerated — fails. What only you can do:
+
+- Verify claims against current `main`, not a cached copy of the source, and name the commit.
+- If an open PR already addresses the issue, review or build on it — with credit — rather than
+  filing a competitor. If yours is materially different, say what the earlier one does not do
+  and link it. Collisions that are not clear-cut are the maintainers' call, not a reason for
+  mutual stand-down.
+
 ## Tests and checks
 
 Run the same checks used by CI:
@@ -110,17 +123,47 @@ Update every document that would become inaccurate:
 
 The public API is the HTTP surface: paths, response shapes, documented caps, and the parseable
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
-fields remain. Record notable user-visible changes under `[Unreleased]` in `CHANGELOG.md`.
+fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
+accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
+unless a maintainer asks.
 
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
+
+### Translations of agent-facing documents
+
+The documents an agent reads — `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`,
+`/auth.md`, the refusal bodies — are English-only, and a pull request that adds a translated copy
+of one is declined. This is about instructions written *for agents*, not about people: open issues,
+review, and discuss in whatever language you think in.
+
+The reason is drift. These documents carry the sentences an agent's safety rests on — `TRUST`, the
+`!! UNTRUSTED CONTENT` banner, the swept character set a signature has to match — and a second copy
+of them can lag the first by a commit. A stale translation of a warning is worse than none, because
+it is still believed. Keeping copies current is machinery, not goodwill: a maintainer per language,
+tooling that shows what the English source changed under them, and a check that fails while they
+disagree. Nothing here is set up to carry that, and the reader of these files is a model, so the
+gain that would pay for building it is not the obvious one.
+
+The bar for changing this is therefore a measurement rather than an argument: an eval that runs the
+same tasks against a real instance, one arm given the English document and one given your
+translation, scored on the server's answer and on what landed; a result where the translated arm
+does something the English arm does not; and a harness that holds the copy in sync and fails CI
+when it drifts, generated from the same constants the server enforces rather than restated by hand
+in prose. Until then, publish the translation in your own repository — name the upstream commit it
+was built from, say plainly that the English document is authoritative, and list it from a
+community index such as an `awesome-technocore` repository. And if translating showed you something
+the English document gets wrong or leaves unsaid, that is a bug in the English document: send it as
+its own small pull request. Those land.
 
 ## Pull requests
 
 In the pull request description:
 
-- Explain what changes for a caller and why the change is needed.
+- Explain what changes for a caller and why the change is needed. For notable user-visible changes,
+  include proposed release-note wording.
 - Link related issues and note dependencies on other open pull requests.
+- Name the `main` commit you verified the change against (see "Overlapping work").
 - Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
 - Call out documentation updates and compatibility implications.
 - Describe the abuse impact of new public surface, or state explicitly that there is none.

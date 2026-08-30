@@ -9,6 +9,7 @@ import pytest
 from _client import (
     _age,
     _at,
+    _keypair,
     _race_before_lock,
     _stats_for,
 )
@@ -216,17 +217,42 @@ def test_the_reaper_records_room_usage_for_the_ring_to_read(tmp_path, monkeypatc
 
 
 def test_every_room_can_still_carry_a_topic_and_an_owner(tmp_path, monkeypatch):
-    """MAX_NOTES_PER_NS = MAX_ROOMS is only true if the *global* note cap can cover it.
+    """MAX_NOTES_PER_NS >= MAX_ROOMS is only true if the *global* note cap can cover it.
 
     Raising MAX_ROOMS without raising MAX_NOTES_TOTAL would leave the per-namespace cap
-    nominally equal to the room cap and the global cap binding first — the invariant would
+    nominally at or above the room cap and the global cap binding first — the invariant would
     read as intact in the source and be false on disk.
+
+    A floor rather than an equality since CHAT_MAX_NOTES_PER_NS: an operator may widen one
+    namespace past the room count, and nothing about the reserved namespaces cares that they
+    can. What they may not do is go under it, which is the direction this guards.
     """
     import store
 
-    assert store.MAX_NOTES_PER_NS == store.MAX_ROOMS
+    assert store.MAX_NOTES_PER_NS >= store.MAX_ROOMS
     reserved = (store.TOPIC_NS, store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS)
     assert store.MAX_NOTES_TOTAL >= len(reserved) * store.MAX_ROOMS
+
+
+def test_listing_notes_does_not_evict_the_room_names(tmp_path):
+    """`_listable` is memoized for the rooms walk, which asks about the same MAX_ROOMS names
+    on every /rooms. Note *keys* go through the same test and there can be MAX_NOTES_PER_NS
+    of them in one listing — enough to flush the cache on a single /kv/<ns> read and leave
+    the walk cold, for entries nothing asks about twice. So `list_notes` calls the
+    undecorated function, and this is what says so.
+    """
+    import store
+
+    for i in range(20):
+        store.append(tmp_path, f"room{i}", "bot", "hi")
+    store.list_rooms(tmp_path)  # warms the cache with room names
+    warm = store._listable.cache_info().currsize
+    assert warm >= 20
+
+    for i in range(200):
+        store.note_set(tmp_path, "did", f"k{i}", "v")
+    assert store.list_notes(tmp_path, "did") == sorted(f"k{i}" for i in range(200))
+    assert store._listable.cache_info().currsize == warm, "a note listing must not touch it"
 
 
 def test_rejected_write_leaves_no_lock_file(tmp_path, monkeypatch):
@@ -238,7 +264,7 @@ def test_rejected_write_leaves_no_lock_file(tmp_path, monkeypatch):
     for i in range(5):
         with pytest.raises(store.StoreError, match="room limit"):
             store.append(tmp_path, f"flood{i}", "bot", "hi")
-    assert list((tmp_path / "rooms").glob("*.lock")) == [
+    assert list((tmp_path / "rooms").rglob("*.lock")) == [
         store.room_path(tmp_path, "only").with_suffix(".jsonl.lock")
     ]
 
@@ -272,8 +298,8 @@ def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, path):
-        real_check(root, path)
+    def slow_check(root, ns_dir, path):
+        real_check(root, ns_dir, path)
         time.sleep(0.02)  # widen the count→write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
@@ -289,7 +315,7 @@ def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
     threads = [threading.Thread(target=create, args=(i,)) for i in range(8)]
     [t.start() for t in threads]
     [t.join() for t in threads]
-    assert sum(1 for _ in (tmp_path / "notes").glob("*/*.txt")) == 4
+    assert sum(1 for _ in (tmp_path / "notes").rglob("*.txt")) == 4
 
 
 def test_orphan_locks_are_swept(tmp_path):
@@ -348,6 +374,60 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     _reap_now(tmp_path)
 
     assert path.exists() and lock.exists()
+
+
+def test_cursors_survive_a_reaped_then_recreated_room(tmp_path):
+    """#139: a room that is reaped and later recreated restarts seq at 1, so every reader
+    still polling with a cursor from the old generation silently starves — reads answer 200
+    with count 0 forever. Reaping now leaves the previous generation's high-water mark in a
+    sidecar, and last_seq() consults it, so a recreated room continues the sequence and old
+    cursors see the new messages. Fails before the fix: the recreated room restarts at 1 and
+    the old cursor never sees anything again."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice" if i % 2 == 0 else "bob", f"msg {i}")
+    cursor = store.read_messages(tmp_path, "d-talk")["last_seq"]  # 6
+    assert cursor == 6
+
+    # Reap the room: age it past idle and force a reap pass (drop the .reaped marker gate).
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    # Recreate it under the same name (new generation).
+    store.append(tmp_path, "d-talk", "carol", "can anyone hear me?")
+
+    result = store.read_messages(tmp_path, "d-talk", since=cursor)
+    assert result["count"] > 0, "an old cursor must not starve on a recreated room"
+
+
+def test_a_recreated_room_reports_a_new_generation(tmp_path):
+    """#139 dir #3: a room reaped and recreated under the same name is a *different*
+    conversation. The read view must expose a generation that bumps on recreate, so a
+    stateful client can detect the discontinuity and resync instead of silently watching a
+    new conversation under the old name. The floor bump (dir #2) keeps a stateless cursor
+    fed, but only the generation tells a stateful reader the conversation changed. Fails
+    before the fix: the read view carries no generation, so the recreation is
+    indistinguishable from a continuation."""
+    import store
+
+    store.append(tmp_path, "d-talk", "alice", "first conversation")
+    before = store.read_messages(tmp_path, "d-talk")["generation"]
+    assert before == 1, "the first creation is generation 1"
+
+    # Reap the room, then recreate it under the same name.
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    store.append(tmp_path, "d-talk", "carol", "second conversation")
+    after = store.read_messages(tmp_path, "d-talk")["generation"]
+    assert after == before + 1, "recreate must bump the generation"
 
 
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
@@ -428,6 +508,32 @@ def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     _race_under_lock(monkeypatch, store, refresh)
     _reap_now(tmp_path)
     assert path.exists()
+
+
+def test_reap_keeps_a_note_refreshed_after_the_stat(tmp_path, monkeypatch):
+    """The same recheck, on the nested half of the walk.
+
+    Rooms and notes are two passes of one loop over one `_walk`, and only the room pass was
+    covered. The trap this guards is that `os.DirEntry.stat()` caches: the reaper stats once
+    to decide a file is idle and again under the lock to catch a writer who got in between,
+    and a recheck reading the cached value silently returns the pre-lock answer. That is not
+    a slower reap, it is a deleted note somebody had just written — so it is pinned on both
+    branches rather than on whichever one happened to have a test.
+    """
+    import store
+
+    store.note_set(tmp_path, "plans", "k", "v")
+    path = store.note_path(tmp_path, "plans", "k")
+    _age(path, store.IDLE_SECONDS + 60)
+
+    def refresh(target):
+        if os.fspath(target) == os.fspath(path):  # only the note under test
+            os.utime(target, None)
+
+    _race_under_lock(monkeypatch, store, refresh)
+    _reap_now(tmp_path)
+    assert path.exists(), "a note refreshed between the walk and the lock must survive"
+    assert store.note_get(tmp_path, "plans", "k") == "v"
 
 
 def test_trusting_every_peer_would_hand_the_caller_its_own_rate_limit_identity():
@@ -941,3 +1047,119 @@ def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path)
         "\n".join((json.dumps({"t": "yesterday"}), json.dumps([1, 2]), json.dumps({"t": 7})))
     )
     assert store.snapshots(tmp_path) == [{"t": 7}]
+
+
+def test_fsync_is_a_knob_but_compaction_never_skips_it(tmp_path, monkeypatch):
+    """CHAT_FSYNC=0 trades the per-message fsync for write headroom: a host crash can lose
+    the final moments of appends, and torn-tail healing already prices a cut-short write at
+    one record. Compaction is not part of the trade — os.replace of a file whose bytes never
+    reached disk can lose the room's whole retained ring, so it pays the fsync either way."""
+    import config
+    import store
+
+    real = os.fsync
+    calls = []
+
+    def counted(fd):
+        calls.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(store.os, "fsync", counted)
+
+    store.append(tmp_path, "lobby", "bot", "durable")
+    # Four, not two: creating the lobby room and its /r/events announcement each pay one
+    # fsync for the record and one for the seq-state metadata (generation/floor) the reaper
+    # leaves behind on a later reap (#139). The knob governs both.
+    assert len(calls) == 4
+
+    with config.override(FSYNC=False):
+        store.append(tmp_path, "lobby", "bot", "fast")
+        assert len(calls) == 4  # neither the append nor a seq-state write paid one
+        store._compact(store.room_path(tmp_path, "lobby"))
+        assert len(calls) == 5  # the rewrite did not
+
+
+def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_path, monkeypatch):
+    """A write changes one room's (mtime_ns, size), so the overview re-reads that room's
+    tail and reuses every other window from the memo — O(changed), not O(shown)."""
+    import store
+
+    store._cached_window.cache_clear()  # module-level state; the counts below are exact
+    store.append(tmp_path, "aaa", "bot", "one")
+    store.append(tmp_path, "bbb", "bot", "two")
+    calls = []
+    real = store.room_window
+    monkeypatch.setattr(
+        store, "room_window", lambda root, name: (calls.append(name), real(root, name))[1]
+    )
+
+    store.room_stats(tmp_path)
+    first = sorted(calls)
+    store.room_stats(tmp_path)
+    assert sorted(calls) == first, "an unchanged room must not be re-read"
+
+    store.append(tmp_path, "aaa", "bot", "again")  # aaa's second message
+    calls.clear()
+    view = store.room_stats(tmp_path)
+    assert calls == ["aaa"], "only the changed room is re-read"
+    assert {r["room"]: r["last_seq"] for r in view["rooms"]}["aaa"] == 2
+
+    held = store._cached_window.cache_info().currsize
+    store.append(tmp_path, "aaa", "bot", "third-message")
+    store.room_stats(tmp_path)
+    info = store._cached_window.cache_info()
+    # The stat is the key, so aaa's superseded window is not deleted when the room changes,
+    # it stops being asked for: the memo took the new stat and kept the old one, and maxsize
+    # is the only thing that ever reclaims it. tests/unit/test_memo_caches.py is where that
+    # bound is exercised past its limit, under threads.
+    assert (info.currsize, info.maxsize) == (held + 1, store._WINDOW_MEMO_MAX)
+
+
+def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
+    """A topic set is a note write, so it bumps notes_written and shows up immediately;
+    a deletion the counter cannot see (the reaper's) ages out with the TTL."""
+    import config
+    import store
+
+    def topics():
+        return {r["room"]: r["topic"] for r in store.room_stats(tmp_path)["rooms"]}
+
+    store.append(tmp_path, "aaa", "bot", "hello")
+    assert topics()["aaa"] is None
+    store.note_set(tmp_path, store.TOPIC_NS, "aaa", "what aaa is for")
+    assert topics()["aaa"] == "what aaa is for"
+
+    store.note_path(tmp_path, store.TOPIC_NS, "aaa").unlink()  # a reaper-style deletion
+    with config.override(NOTE_STATS_CACHE_SECONDS=0):
+        assert topics()["aaa"] is None  # visible once the clock (here: disabled) expires
+
+
+def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path):
+    """The stated boundary of `_last_nonce`'s bytes-level reject, not a wish.
+
+    The reject assumes the DID is in the line as itself. Both encoders this store has ever
+    written rooms with put it there literally — test_json_backend.py pins that byte-for-byte
+    — so the only way to produce the record below is to write the file with something else.
+    `_parse` still yields the right `from`, and the scan still skips it, which means a replay
+    of that record's nonce is accepted while the record sits in the window.
+
+    That is a real narrowing, kept deliberately: covering it costs a second scan of every
+    line (2.1 ms -> 3.7 ms against a 4.1 ms baseline on tests/capacity_bench.py), which is
+    most of what the reject buys, to defend files this store did not write. Make the scan
+    escape-aware and this test is what tells you: delete it and pin the opposite.
+    """
+    import didkey
+    import store
+
+    did, _ = _keypair()
+    assert didkey.is_did(did)  # a key the verifier would accept, not a did-shaped string
+    escaped = "".join(f"\\u{ord(c):04x}" for c in did)
+    room = store.room_path(tmp_path, "lobby")
+    room.parent.mkdir(parents=True)
+    room.write_bytes(
+        b'{"seq":1,"ts":"t","from":"' + escaped.encode() + b'","text":"signed","nonce":7}\n'
+    )
+    rec = store._parse(room.read_bytes())
+    assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
+    assert did.encode() not in room.read_bytes()  # but not present as itself, so:
+    assert store._last_nonce(tmp_path, "lobby", did) is None

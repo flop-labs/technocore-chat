@@ -87,11 +87,141 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_names_every_category_the_sweep_actually_takes(client):
+    """The same drift the caps test guards, on the sweep (#171).
+
+    The prose said "C0/C1 controls, format characters, zero-width joiners, bidi overrides",
+    which is `Cc` plus part of `Cf`, while `INVISIBLE_CATEGORIES` also takes Cs, Co, Zl and
+    Zp. A reader who trusted it signed text the server had already altered, then met a 403
+    naming the signature rather than the sweep. Both halves are asserted: every enforced
+    category is named, plus the four that used to be missing are present by name.
+    """
+    import store
+
+    manual = client.get("/llms.txt").text
+    swept = manual.split("SINGLE LINE:", 1)[1].split("\n\n", 1)[0]
+    for category in store.INVISIBLE_CATEGORIES:
+        assert category in swept, f"the manual does not name {category}, which the sweep takes"
+    # The regression itself: these four were enforced and unnamed.
+    for missing in ("Cs", "Co", "Zl", "Zp"):
+        assert missing in swept, missing
+
+
+def test_the_manual_states_the_url_break_even_it_actually_has(client):
+    """The GET write lane meets two ceilings, of which the character cap is not the binding one.
+
+    Percent-encoding costs 3 bytes per UTF-8 byte, so the ~16 KB a URL survives at the edge
+    divides by `MAX_TEXT_CHARS` into a bytes-per-character break-even. Above it a caller
+    cannot reach the character cap in a URL at all. The prose used to frame that as
+    "non-Latin scripts do not fit", which is the wrong axis: dense Vietnamese is Latin and
+    does not fit either. 16 KB is the edge's number rather than one this service enforces,
+    so what is pinned here is the arithmetic against our own cap.
+    """
+    import store
+
+    break_even = (16 << 10) // store.MAX_TEXT_CHARS
+    budget = client.get("/llms.txt").text.split("URL BUDGET:", 1)[1].split("\n\n", 1)[0]
+    assert f"break-even is {break_even} bytes per character" in budget
+    assert "Vietnamese" in budget  # the counterexample that makes the axis clear
+    assert "Non-Latin scripts do not" not in budget  # the framing this replaced
+
+
+def test_the_service_never_normalizes_so_a_signature_covers_the_form_you_sent(client):
+    """What the manual's NORMALIZATION paragraph promises, asserted through the surface.
+
+    Unicode composition is a caller's choice rather than a canonical form. This service takes
+    neither side: it stores the code points it was given. That has to be documented because
+    the signed lane makes it sharp. NFC and NFD of one word are different bytes, so a
+    signature over one is not a signature over the other, while the 403 that follows says
+    nothing about normalization.
+    """
+    import unicodedata
+
+    precomposed = unicodedata.normalize("NFC", "Việt")
+    decomposed = unicodedata.normalize("NFD", "Việt")
+    assert precomposed != decomposed and len(decomposed) > len(precomposed)
+
+    for form in (precomposed, decomposed):
+        posted = client.post("/r/norm?format=json", json={"from": "vi", "text": form})
+        assert posted.status_code == 200
+        assert posted.json()["posted"]["text"] == form  # stored as sent, neither folded
+
+    stored = [m["text"] for m in client.get("/r/norm?format=json").json()["messages"]]
+    assert stored == [precomposed, decomposed]  # two messages, not one deduplicated word
+
+    did, sign = _keypair()
+    signature = sign(f"norm|1|{precomposed}")
+    crossed = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": decomposed}
+    )
+    assert crossed.status_code == 403  # signed one form, sent the other
+    matched = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": precomposed}
+    )
+    assert matched.status_code == 200
+
+
+def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client):
+    """The reported bug, through the surface that reported it (#242).
+
+    RESERVED_ROOM_BYTES is the budget divided by MAX_ROOMS, so it is the one published
+    figure an operator can move: CHAT_MAX_ROOMS=10240 halves it to 512 KiB, and the old
+    `>> 20` render published that as "0 MiB" — a floor of zero reads as no floor at all,
+    the opposite of what the append path enforces. At the source default the floor lands
+    exactly on 1 MiB, which is why the manual test above never caught it.
+    """
+    import app as app_module
+    import store
+
+    assert "0 MiB per room" not in app_module._render_manual()  # the default is not broken
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(store, "MAX_ROOMS", 10240)
+        monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", store.MAX_TOTAL_ROOM_BYTES // 10240)
+        raised = app_module._render_manual()
+    finally:
+        monkeypatch.undo()
+
+    assert "512 KiB per room" in raised
+    assert "0 MiB per room" not in raised
+    assert app_module._render_manual() == app_module.MANUAL  # and it renders back the same
+
+
+def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
+    """Two ways a whole-unit shift misreports a guarantee, and the rule for each.
+
+    Falling under the unit is the reported one: `524288 >> 20` is 0. Truncating *within*
+    the unit is the quieter one — at CHAT_MAX_ROOMS=3000 the floor is 1.7 MiB and `>> 20`
+    still says "1 MiB". Rounding would fix the second and break the guarantee, since
+    1.969 MiB stated as "2.0 MiB" promises more than the store enforces, so this floors.
+    """
+    import manifest
+    import store
+
+    assert manifest.fmt_bytes(524288) == "512 KiB"  # the reported case: under the unit
+    assert manifest.fmt_bytes(1789569) == "1.7 MiB"  # the quiet case: 5 GiB // 3000
+    assert manifest.fmt_bytes(2064548) == "1.9 MiB"  # 1.969 MiB — floored, never "2.0 MiB"
+
+    # Defaults are byte-identical to the shift they replace, so no published text moves.
+    assert manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES) == "5 GiB"
+    assert manifest.fmt_bytes(store.MAX_ROOM_BYTES) == "10 MiB"
+    assert manifest.fmt_bytes(1 << 20) == "1 MiB"  # the floor at the default 5120 rooms
+    assert manifest.fmt_bytes((1 << 20) + 1) == "1 MiB"  # a whole unit gains no fake ".0"
+    assert manifest.fmt_bytes(512) == "512 B" and manifest.fmt_bytes(0) == "0 B"
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
+    import store
 
     limits = client.get("/.well-known/agent.json").json()["limits"]
     assert limits["new_rooms_per_day_per_ip"] == app_module.RATE_ROOMS_PER_DAY
+    # Both note caps, because either can be the refusal and only one of them used to be
+    # derivable: `notes_per_namespace` was MAX_ROOMS until CHAT_MAX_NOTES_PER_NS made it a
+    # per-deployment number, so a client that reads it off `rooms` now reads it wrong.
+    assert limits["notes"] == store.MAX_NOTES_TOTAL
+    assert limits["notes_per_namespace"] == store.MAX_NOTES_PER_NS
 
 
 def test_health_docs_do_not_promise_storage_readiness(client):
@@ -110,12 +240,15 @@ def test_health_docs_do_not_promise_storage_readiness(client):
 
 
 def test_agent_surfaces_are_never_html(client):
+    # Cache-Control is deliberately not asserted here: it is per path and it is covered
+    # path by path in the four edge-cache tests at the end of this file. This one is about
+    # the HTML exception not spreading (docs/design.md §8), and mixing the two is what
+    # turned a widened cache rule into an edit to a test named for XSS.
     client.get("/r/lobby/say/bot/hi")
     for path in ("/", "/llms.txt", "/robots.txt", "/r/lobby", "/rooms", "/healthz"):
         r = client.get(path)
         assert r.headers["content-type"].startswith("text/plain"), path
         assert r.headers["x-content-type-options"] == "nosniff", path
-        assert r.headers["cache-control"] == "no-store", path
 
 
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
@@ -125,7 +258,7 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     assert client.get("/r/lobby").headers["x-robots-tag"] == "noindex"
 
 
-def test_skill_md_is_the_same_manual_and_is_never_rate_limited(client, monkeypatch):
+def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
     import config
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
@@ -154,6 +287,32 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     assert "/patterns.md" not in "".join(  # nothing disallows it for crawlers
         line for line in client.get("/robots.txt").text.splitlines() if "Disallow" in line
     )
+
+
+def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
+    """The bridging guide, served like the patterns it composes.
+
+    Its whole premise is that every protocol in it is a process run beside this service, so
+    the assertion that matters is the negative one: publishing the document must not turn
+    into a claim that this origin speaks any of them. The manifest still refuses A2A and MCP
+    (test_no_protocol_claims_in_the_manifest), and this checks the document says so itself.
+
+    Unlimited for a sharper reason than the manual's: a bridge author reads it precisely
+    when their bridge is being told to back off.
+    """
+    import config
+
+    page = client.get("/interop.md")
+    assert page.status_code == 200
+    assert page.headers["content-type"].startswith("text/plain")
+    assert "ActivityPub" in page.text and "A2A" in page.text
+    assert "speaks one protocol" in page.text  # states what this origin actually answers
+    assert "/interop.md" in client.get("/llms.txt").text  # the manual points here
+    assert "/interop.md" in client.get("/sitemap.xml").text  # crawlers are told about it
+    with config.override(RATE_READ=1):
+        for _ in range(5):
+            assert client.get("/interop.md").status_code == 200  # never rate limited
+    assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
 
 
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
@@ -188,15 +347,16 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     did_a, _sign_a = _keypair(7)
     a_static = X25519PrivateKey.from_private_bytes(bytes([7]) * 32)
     fp = hashlib.sha256(did_a.encode()).hexdigest()[:16]
+    did_path = f"/kv/did-{fp[:2]}/{fp[2:]}"
     mailbox = "mb-p-inbox-of-a"
     note = f"{did_a} x25519:{b64(a_static.public_key().public_bytes_raw())} mailbox:{mailbox}"
-    assert client.post(f"/kv/did/{fp}", json={"value": note}).status_code == 200
+    assert client.post(did_path, json={"value": note}).status_code == 200
 
     # B (sender): reads the note, seals a room key to A with an ephemeral key.
     did_b, sign_b = _keypair(8)
     # The value is the last non-empty line: note reads open with the untrusted-content
     # banner, and a real reader has to skip it exactly like this.
-    fetched = [ln for ln in client.get(f"/kv/did/{fp}").text.splitlines() if ln.strip()][-1]
+    fetched = [ln for ln in client.get(did_path).text.splitlines() if ln.strip()][-1]
     b_x25519 = dict(f.split(":", 1) for f in fetched.split(" ")[1:])
     eph = X25519PrivateKey.from_private_bytes(bytes([8]) * 32)
     a_pub = X25519PrivateKey.from_private_bytes(bytes([7]) * 32).public_key()
@@ -347,8 +507,8 @@ def test_every_documented_response_declares_the_body_it_returns(client):
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
-    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
-    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
+    value is published. A non-finite ceiling reaches /openapi.json and
     /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
     but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
     service answering with undiscoverable documents is worse off than one that refused to
@@ -396,21 +556,67 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
 def test_an_integral_ceiling_publishes_as_an_integer(client):
     """`10.0` and `10` are the same number to a validator and different bytes to a reader,
     and this was an integer literal until the ceiling became configurable. A fractional
-    ceiling still publishes as a float, because fractional waits are real."""
+    ceiling still publishes as a float, because fractional waits are real.
+
+    Read off `/.well-known/agent.json` rather than the `wait` parameter's `maximum`: the
+    server clamps to the ceiling instead of refusing past it, so under the input doctrine
+    (docs/design.md §3.5) the OpenAPI parameter states the clamp in prose and no longer
+    publishes a constraint nothing enforces. `limits.long_poll_seconds` is where the number
+    stayed machine-readable, and the same rendering rule applies to it."""
     import manifest
 
-    def maximum(doc):
-        return next(
-            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
-        )["schema"]["maximum"]
+    def ceiling(doc):
+        return doc["limits"]["long_poll_seconds"]
 
-    served = maximum(client.get("/openapi.json").json())
+    served = ceiling(client.get("/.well-known/agent.json").json())
     assert served == 10 and isinstance(served, int)
-    assert maximum(manifest.openapi_document("", "0.7.0", 65536, 2.5)) == 2.5
-    assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
+    assert ceiling(manifest.agent_manifest("", "0.7.0", 1, 1, 1, 2.5)) == 2.5
+    assert ceiling(manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)) == 10
+    # And the prose that replaced the constraint carries the same number, not `10.0`.
+    wait = next(
+        p
+        for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
+        if p["name"] == "wait"
+    )
+    assert "clamped to 10." in wait["description"] and "maximum" not in wait["schema"]
 
 
-_REFUSALS = frozenset({"400", "403", "404", "409"})
+_REFUSALS = frozenset({"400", "403", "404", "409", "422"})
+
+
+_DUPE_TEXT = "one more copy of this sentence than allowed is refused, measured"
+
+
+def _one_copy_too_many(client, lane: str):
+    """Land the allowed copies of one long text, then one more, and return its response.
+
+    The filter's knobs are pinned here rather than read off the shipped defaults - the
+    shared client fixture pins the filter OFF, so without this override there is no 422
+    to document - and `allowed` reads the pinned value, so the copy count and the
+    threshold cannot drift apart when someone tunes one of them.
+    """
+    import app as app_module
+    import config
+    import limit
+
+    limit._dupes.clear()
+    app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
+    with config.override(DUPE_FILTER_SECONDS=30, DUPE_MAX_COPIES=5, RATE_WRITE=600):
+        allowed = config.DUPE_MAX_COPIES  # the pinned 5, read so count and knob cannot drift
+        for i in range(allowed):
+            if lane == "say":
+                client.get(f"/r/dupe422/say/n{i}/{_DUPE_TEXT.replace(' ', '%20')}")
+            elif lane == "post":
+                client.post("/r/dupe422", json={"from": f"n{i}", "text": _DUPE_TEXT})
+            else:
+                did, sign = _keypair(100 + i)
+                _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
+        if lane == "say":
+            return client.get(f"/r/dupe422/say/last/{_DUPE_TEXT.replace(' ', '%20')}")
+        if lane == "post":
+            return client.post("/r/dupe422", json={"from": "last", "text": _DUPE_TEXT})
+        did, sign = _keypair(199)
+        return _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
 
 
 def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
@@ -437,6 +643,7 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     cases = [
         # Reads.
         ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
+        ("/r/{room}/export", "get", 400, lambda: client.get("/r/UPPER/export")),
         ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
         ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
         ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
@@ -547,6 +754,28 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
                 f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
         ),
+        # The cross-sender duplicate filter: one copy past the threshold, inside the
+        # window, through each write lane. Enabled per case because it is off by default and the
+        # case has to be self-contained; the ring is cleared first because it is process
+        # state that outlives any one room file.
+        (
+            "/r/{room}/say/{nick}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say"),
+        ),
+        (
+            "/r/{room}",
+            "post",
+            422,
+            lambda: _one_copy_too_many(client, "post"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say-signed"),
+        ),
     ]
 
     doc = client.get("/openapi.json").json()
@@ -615,14 +844,25 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
         longest_name = "a" * 48
 
         def wait_is_honoured():
-            published = next(
-                p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
-            )["schema"]["maximum"]
+            # The ceiling moved out of the parameter's `maximum` and into the prose plus
+            # `limits.long_poll_seconds` (docs/design.md §3.5), so read it where it is now
+            # published. What is being asserted is unchanged: the largest wait the service
+            # advertises is one it actually takes.
+            published = client.get("/.well-known/agent.json").json()["limits"]["long_poll_seconds"]
             started = time.monotonic()
             client.get(f"/r/idle?since=1&wait={published}")
             # It has to actually hold the connection, not return an immediate empty reply
             # that a caller cannot tell from a quiet room.
             assert time.monotonic() - started >= published * 0.8
+
+        checks_without_a_published_bound = [
+            lambda: _ok(client, "/r/lobby?limit=200"),
+            lambda: _ok(client, "/r/lobby?since=0"),
+            lambda: _ok(client, "/rooms?limit=1"),
+            lambda: client.get("/r/lobby?format=json").json(),
+            lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1"),
+            wait_is_honoured,
+        ]
 
         # (the bound as published, a request using it at its extreme)
         checks = [
@@ -638,12 +878,6 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 '{"maxLength": 8192, "minLength": 1}',
                 lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
             ),
-            ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
-            ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
-            ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
-            ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
-            ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
-            ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
             # The signed lane's three, at the exact shapes it publishes. A room each,
             # because a nonce is single-use per key per room and the 19-digit one spends
             # the ceiling — 10**19 - 1 being the largest the published pattern allows, and
@@ -660,10 +894,18 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
             ),
             (
-                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$"}',
                 lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
             ),
         ]
+
+        # `limit`, `since`, `wait` and `format` clamp instead of refusing, and `if_absent`
+        # matches case-insensitively, which JSON Schema cannot express — so none of them
+        # publishes a bound any more (docs/design.md §3.5) and none has one to cover here.
+        # They are still exercised at the extreme the prose promises, because a clamp
+        # nobody honours misleads exactly as much as a `maximum` nobody enforces.
+        for exercise in checks_without_a_published_bound:
+            exercise()
 
         for _bound, exercise in checks:
             exercise()
@@ -706,15 +948,21 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
         assert schema["minLength"] == schema["maxLength"] == len(did)
         assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
 
-    for schema in (param(say, "sig"), param(note, "sig"), body["properties"]["sig"]):
+    # The body's copies live under `dependentSchemas.did` rather than on the properties:
+    # the handler reads `sig`/`nonce` only when a `did` is present, so a body without one
+    # is an unsigned write and publishing their shapes unconditionally would be a
+    # constraint nothing enforces (docs/design.md §3.5). Same shapes, stated where they
+    # actually hold — which is still one definition and still three publishing sites.
+    signed = body["dependentSchemas"]["did"]
+    for schema in (param(say, "sig"), param(note, "sig"), signed["properties"]["sig"]):
         assert re.fullmatch(schema["pattern"], sign("anything"))
         assert schema["minLength"] == schema["maxLength"] == didkey.SIG_CHARS
-    for schema in (param(say, "nonce"), param(note, "nonce"), body["properties"]["nonce"]):
+    for schema in (param(say, "nonce"), param(note, "nonce"), signed["properties"]["nonce"]):
         assert re.fullmatch(schema["pattern"], "1") and not re.fullmatch(schema["pattern"], "x")
 
     # `did` alone is refused rather than downgraded to an unsigned post, so the schema
     # says which fields travel together instead of listing three loose optional strings.
-    assert body["dependentRequired"] == {"did": ["sig", "nonce"]}
+    assert signed["required"] == ["sig", "nonce"]
     assert client.post("/r/lobby", json={"text": "hi", "did": did}).status_code == 400
     # …but a stray `sig` with no `did` is an ordinary unsigned post, and the schema must
     # not claim otherwise.
@@ -895,10 +1143,12 @@ def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
 
 def test_the_manual_defines_every_convention_it_names(client):
     """A convention an agent cannot derive is a convention it will get wrong. The DID note
-    fingerprint is the one that bites: `/kv/did/<fingerprint>` is unusable without knowing
-    what the fingerprint is of, and a note key cannot hold a raw did:key."""
+    fingerprint is the one that bites: the sharded path is unusable without knowing what
+    the fingerprint is of and exactly where to split it."""
     manual = client.get("/llms.txt").text
-    assert "first 16 hex characters of the" in manual and "SHA-256" in manual
+    assert "first 16 lowercase hex characters of SHA-256" in manual
+    assert "/kv/did-<first 2>/<remaining 14>" in manual
+    assert "legacy /kv/did/<fingerprint>" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
     assert "newest 1 MiB" in manual
     assert "even if the message remains elsewhere in the larger room ring" in manual
@@ -1103,6 +1353,29 @@ def test_auth_md_states_the_absence_rather_than_leaving_it_to_inference(client):
     assert "<room>\\|<nonce>\\|<text>" in body  # the payload, so it cannot drift
 
 
+def test_default_cors_hides_cross_origin_replies_but_does_not_stop_get_writes(client):
+    """CORS is a browser read gate, not a write gate on a simple GET surface.
+
+    An untrusted origin gets no readable response, but the browser still sends the request
+    and the service still stores it. The served auth guide must say that explicitly: a
+    browser client that mistakes a hidden response for a rejected write can retry a write
+    that already landed, which is especially sharp on the signed nonce lane.
+    """
+    origin = {"Origin": "https://untrusted.example"}
+    written = client.get("/r/cors-check/say/browser/landed", headers=origin)
+
+    assert written.status_code == 200
+    assert "access-control-allow-origin" not in written.headers
+    stored = client.get("/r/cors-check?format=json").json()["messages"]
+    assert [(message["from"], message["text"]) for message in stored] == [("browser", "landed")]
+
+    auth = client.get("/auth.md").text
+    assert (
+        "CORS controls whether browser JavaScript can read a response, not whether the "
+        "request is sent" in auth
+    )
+
+
 def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
     """The scanners want these two and would score us higher for them. There is no
     authorization server, so both would advertise an issuer nothing can answer — the same
@@ -1124,7 +1397,7 @@ def test_only_the_markdown_documents_negotiate_markdown(client):
     when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
     is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
-    for path in ("/skill.md", "/patterns.md", "/auth.md"):
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
         assert got.startswith("text/markdown"), f"{path} answered {got}"
         assert client.get(path).headers["content-type"].startswith("text/plain")
@@ -1146,16 +1419,206 @@ def test_the_manual_is_not_markdown_and_so_is_never_labelled_as_such(client):
 
 
 def test_the_ai_catalog_lists_only_artifacts_that_resolve(client):
-    """A catalog exists to resolve to real things. Every entry's url must be served here,
-    and no entry may claim an MCP server card or A2A agent card, because this origin
-    publishes neither document."""
+    """A catalog exists to resolve to real things, and that is the invariant: every entry's
+    url must be served by this origin.
+
+    The MCP server card is now one of them, and its presence here is not a claim that this
+    origin speaks MCP — the catalog resolves to the card, and the card names an endpoint on
+    another host. The A2A agent card stays absent because no such document exists to point
+    at; if one is ever added, it is the loop below, not this line, that has to keep passing.
+    """
     doc = client.get("/.well-known/ai-catalog.json").json()
     assert doc["specVersion"] == "1.0" and doc["host"]["displayName"]
     types = {e["type"] for e in doc["entries"]}
-    assert "application/mcp-server-card+json" not in types
+    assert "application/mcp-server-card+json" in types
     assert "application/a2a-agent-card+json" not in types
     assert "application/agent-skills+md" in types
     for entry in doc["entries"]:
         assert entry["identifier"] and entry["type"] and entry["url"]
         path = entry["url"].split("testserver", 1)[-1] or "/"
         assert client.get(path).status_code == 200, f"{entry['identifier']} -> {path}"
+
+
+# The documents are static per release and deliberately outside the rate limiter, which
+# makes them both the cheapest thing to cache and the least defended thing not to. These
+# four tests are the fence around that: what may be held at the edge, what may never be,
+# and the exact string, so a later refactor of the shared helper cannot widen it silently.
+
+
+def test_the_static_documents_are_edge_cacheable_and_the_header_is_exact(client):
+    """Every document a crawler or an agent fetches per release, cacheable by the CDN in
+    front. `max-age=0` is what keeps this invisible to callers — they still revalidate on
+    every request; only the shared cache is allowed to hold a copy, which is the whole
+    point on the paths that have no rate limiter in front of them.
+
+    The exact string is pinned once rather than for each path: it is one helper, and the
+    value is a contract with the CDN, not an implementation detail.
+    """
+    static = "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    assert client.get("/").headers["cache-control"] == static
+
+    documents = ("/", "/llms.txt", "/skill.md", "/patterns.md", "/interop.md", "/auth.md")
+    for path in (*documents, "/robots.txt", "/.well-known/security.txt"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc, path
+        assert "no-store" not in cc, path
+
+
+def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
+    """The three that would each be a real defect if held at the edge.
+
+    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
+    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
+    rollback probe reads — a cached `ok` would let a broken release pass its own health
+    gate. /stats is token-gated and counts one worker's requests.
+    """
+    import config
+
+    for path in ("/humans", "/healthz"):
+        assert client.get(path).headers["cache-control"] == "no-store", path
+
+    # With no token configured /stats is a 404, so the gated response has to be provoked
+    # or this asserts no-store on a path that was never routed.
+    with config.override(STATS_TOKEN="t", STATS_CACHE_SECONDS=0):
+        r = client.get("/stats", headers={"x-stats-token": "t"})
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-store"
+
+
+def test_a_write_and_a_refusal_are_never_edge_cacheable(client):
+    """Writes in this protocol are GETs, so a cacheable header on one is a silently
+    swallowed write — the caller gets a 200 that never reached the store. A cached 429 is
+    the same defect pointed the other way: one caller's exhausted budget, served to
+    everyone until it expires.
+    """
+    import config
+
+    assert client.get("/r/lobby/say/bot/hi").headers["cache-control"] == "no-store"
+
+    with config.override(RATE_WRITE=2):
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(4)]
+        assert 429 in codes, codes
+        refused = client.get("/r/lobby/say/bot/again")
+        assert refused.status_code == 429
+        assert refused.headers["cache-control"] == "no-store"
+
+
+def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(client):
+    """The half of edge-caching the documents needed that the polled reads never did.
+
+    /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
+    labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
+    ignored Accept would hand one caller's label to the next. / and /llms.txt never
+    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+
+    And the markdown answer itself stays no-store, which is belt-and-braces on top of
+    Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
+    nobody has, the edge can still only ever hold the default representation.
+    """
+    import config
+
+    for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
+        assert client.get(path).headers["vary"] == "Accept", path
+        negotiated = client.get(path, headers={"Accept": "text/markdown"})
+        assert negotiated.headers["content-type"].startswith("text/markdown"), path
+        assert negotiated.headers["cache-control"] == "no-store", path
+
+    for path in ("/", "/llms.txt"):
+        assert "vary" not in client.get(path).headers, path
+
+    # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
+    with config.override(STATIC_CACHE_SECONDS=0):
+        for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
+            assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_the_response_schema_publishes_the_sig_it_now_returns(client):
+    """A field the service returns but the document does not list is a field no generated
+    client can see. `sig` on a stored record is published with the same shape the signed
+    lanes already advertise for the signature they accept, and a real record satisfies it.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    assert _say_signed(client, "docsig", did, sign, "published shape").status_code == 200
+    record = client.get("/r/docsig?format=json").json()["messages"][-1]
+
+    doc = client.get("/openapi.json").json()
+    message = doc["paths"]["/r/{room}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["messages"]["items"]
+    published = message["properties"]["sig"]
+    assert published["minLength"] == published["maxLength"] == didkey.SIG_CHARS
+    assert re.fullmatch(published["pattern"], record["sig"])
+    # Optional, not required: records written before the field existed have no `sig`, and a
+    # reader must read that as "not re-verifiable", never as "invalid".
+    assert "sig" not in message["required"]
+
+
+def test_the_mcp_server_card_is_served_and_conforms_to_the_extension_schema(client):
+    """`/.well-known/mcp/server-card.json` — SEP-2127's four required fields and the
+    constraints its schema puts on them, asserted here rather than by fetching the schema.
+
+    The schema is unratified and lives outside this repo, so a network fetch would make
+    this suite depend on a draft moving under it. What is pinned instead is the contract as
+    of the SEP-review snapshot: `$schema`, `name`, `version` and `description` are required;
+    `name` is reverse-DNS with exactly one slash; `description` is capped at 100 characters;
+    a remote's `type` is one of two strings. Those are the ways a card is invalid rather
+    than merely unfashionable, and they are cheap to keep true.
+    """
+    card = client.get("/.well-known/mcp/server-card.json")
+    assert card.status_code == 200
+    assert card.headers["content-type"].startswith("application/json")
+    doc = card.json()
+
+    for required in ("$schema", "name", "version", "description"):
+        assert doc.get(required), required
+    assert doc["$schema"] == (
+        "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+    )
+    assert re.fullmatch(r"[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+", doc["name"]), doc["name"]
+    assert 3 <= len(doc["name"]) <= 200
+    assert 1 <= len(doc["description"]) <= 100, len(doc["description"])
+
+    (remote,) = doc["remotes"]
+    assert remote["type"] == "streamable-http"  # the enum's other member is the dead `sse`
+    assert remote["url"].startswith("https://")
+    assert remote["supportedProtocolVersions"]
+
+
+def test_the_server_card_reports_the_running_version_and_the_handshake_name(client):
+    """Two names on one card, and they are answers to different questions.
+
+    `name` is the registry identity the schema's reverse-DNS pattern demands. `serverInfo`
+    is what the wrapper actually answers with at `initialize`, which is a plain string and
+    would fail that pattern. Neither can be derived from the other, so both are published
+    and this pins that they stay distinct rather than being collapsed into one.
+
+    `version` is this service's release. The card does not claim to be the wrapper's PyPI
+    version — those have diverged before — which is why this asserts against /config rather
+    than against anything in mcp/.
+    """
+    doc = client.get("/.well-known/mcp/server-card.json").json()
+    assert doc["version"] == client.get("/config").json()["version"]
+    assert doc["serverInfo"]["version"] == doc["version"]
+    assert doc["serverInfo"]["name"] == "technocore-chat"
+    assert doc["serverInfo"]["name"] != doc["name"]
+    assert doc["capabilities"]["tools"] == {"listChanged": False}
+
+
+def test_the_card_and_the_registry_manifest_name_the_same_server(client):
+    """`mcp/server.json` and the card describe one server from two formats, and both live
+    in this repo — so a drift between them is a thing this suite can prevent rather than
+    discover in production. The endpoint especially: the card is how an agent finds it and
+    the manifest is how a registry does, and an agent sent somewhere the registry does not
+    know about is worse than either document alone.
+    """
+    manifest_path = Path(__file__).resolve().parents[2] / "mcp" / "server.json"
+    registry = json.loads(manifest_path.read_text())
+    doc = client.get("/.well-known/mcp/server-card.json").json()
+
+    assert doc["name"] == registry["name"]
+    ((card_remote,), (registry_remote,)) = (doc["remotes"], registry["remotes"])
+    assert card_remote["url"] == registry_remote["url"]
+    assert card_remote["type"] == registry_remote["type"]
+    assert doc["websiteUrl"] == registry["websiteUrl"]
