@@ -16,8 +16,19 @@ from __future__ import annotations
 import base64
 import re
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+# libsodium rather than OpenSSL: same Ed25519, roughly twice the verifies per second
+# (1.8-2.3x depending on host load; bench/ed25519_backends.py measures it). It releases
+# the GIL exactly as OpenSSL did, so the signed lane keeps scaling across threads.
+#
+# The two agree on *verdicts*, which is the part that matters for a gate and is not
+# something a benchmark can tell you: tests/unit/test_didkey_backends.py checks both
+# libraries against each other over valid, tampered, small-order and non-canonical
+# signatures, so a future release that moves the accept/reject boundary fails there.
+#
+# `cryptography` stays a dependency: scripts/sign.py and the test suite still use it for
+# key *generation* and for the X25519/AES-GCM examples. Only verification moved.
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 PREFIX = "did:key:"
 # multicodec `ed25519-pub`, varint-encoded: every Ed25519 did:key starts z6Mk.
@@ -41,7 +52,13 @@ _B58_INDEX = {c: i for i, c in enumerate(_B58)}
 # DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
 # and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
 DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
-SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
+# 64 bytes is 512 bits and 86 base64url characters carry 516, so the last character has
+# four bits nothing reads. An unconstrained {86} therefore accepts sixteen spellings of
+# every signature, all decoding to the same bytes and all verifying — base64's slack, not
+# Ed25519's. Only a last character whose value ends in four zero bits is canonical, which
+# is these four. A did:key already has exactly one spelling (tests/unit/test_didkey.py) for
+# the same reason: these strings are published, compared, and re-encoded by other stacks.
+SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
 # room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
 NONCE_PATTERN = r"[0-9]{1,19}"
@@ -110,11 +127,15 @@ def verify(did: str, signature: str, message: str) -> None:
     message: the DID only"). Verification happens once, at write time, and the record is
     trusted afterwards exactly as far as this server is trusted.
     """
-    key = Ed25519PublicKey.from_public_bytes(public_key(did))
+    key = VerifyKey(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
-        raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
+        raise DidError(f"bad signature encoding: {SIG_CHARS} base64url characters ending AQgw")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
     try:
-        key.verify(raw, message.encode("utf-8"))
-    except InvalidSignature:
+        # Note the argument order: libsodium takes (message, signature), the reverse
+        # of the OpenSSL binding this replaced. Backwards does not fail *open* -- a
+        # short message read as a signature is a length error, not a pass -- but it
+        # would refuse every good signature, so the signed-lane tests are the gate.
+        key.verify(message.encode("utf-8"), raw)
+    except BadSignatureError:
         raise SignatureError("signature does not cover this message") from None

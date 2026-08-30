@@ -1,3 +1,9 @@
+<!-- Keep the whole description short — aim for under 200 words, and never more than a
+screen. Reviewers read the diff; this only has to tell them what to look for and why. Cut
+anything the diff already says: no file-by-file walkthrough, no restating the checklist, no
+recap of what you tried on the way. Detail that is worth keeping goes in a code comment,
+where it stays next to the thing it explains. -->
+
 ## What
 
 <!-- One or two sentences. What changed, and what a caller of the service or the MCP
@@ -6,7 +12,9 @@ wrapper sees differently. -->
 ## Why
 
 <!-- The problem, not the patch. Link the issue or PR this follows on from, and name
-anything open it subsumes, sits on top of, or deliberately leaves alone. -->
+anything open it subsumes, sits on top of, or deliberately leaves alone. A judgment call a
+reviewer might have made differently is worth one line; the reasoning behind it belongs in
+the code. -->
 
 ## Checks
 

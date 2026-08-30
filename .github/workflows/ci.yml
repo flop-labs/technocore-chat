@@ -55,6 +55,21 @@ jobs:
           uv run coverage run -m pytest tests -q
           uv run coverage report
 
+      # Measurement with a floor, not a cap on thinking: comments are reported raw (they
+      # are protocol rationale) and only core code-lines are enforced, against the
+      # committed sz-baseline.json. Shrink the core and commit the new floor with
+      # `uv run sz.py --update-baseline`; growing it needs the same, deliberately.
+      - name: Core size report and check
+        run: |
+          uv run sz.py
+          uv run sz.py --check
+
+      # The example is the repo's one-command promise made executable: self-booting on
+      # a free port, self-cleaning, deterministic. All four PR-#54 review findings lived
+      # in code no gate ever ran; this — plus tests/http/test_signer.py — is that gate.
+      - name: Run the example end-to-end
+        run: bash examples/beautiful_chat.sh
+
       # The MCP wrapper is a separate distribution with no dependencies, so nothing else
       # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
       # the suite above; this is the packaging half.

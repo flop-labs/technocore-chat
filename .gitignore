@@ -9,3 +9,15 @@ dist/
 node_modules/
 mutants/
 .schemathesis/
+
+# local agent workspaces and scratch worktrees
+.claude/
+.codex/
+.entire/
+.gemini/
+.opencode/
+.pi/
+.worktrees/
+
+# local Quint oracle work in progress — never commit from this machine
+quint-*

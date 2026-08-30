@@ -309,7 +309,7 @@ class Server:
             return _error(None, INVALID_REQUEST, "request id must be a string or integer")
         if not _is_request(message):
             return _error(ident, INVALID_REQUEST, "missing method")
-        params = message.get("params") or {}
+        params = message.get("params", {})
         if not isinstance(params, dict):
             # By-position params: legal JSON-RPC, but no method here takes them, and
             # guessing which argument a client meant is worse than saying so.

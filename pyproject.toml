@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.7.0"
+version = "0.10.0"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -10,6 +10,16 @@ requires-python = ">=3.12"
 dependencies = [
     "starlette==1.6.0",
     "uvicorn[standard]==0.52.2",
+    # Signature *verification* only (src/didkey.py) — libsodium is ~2x OpenSSL per verify
+    # (bench/ed25519_backends.py), and provably the same verdicts (tests/unit).
+    "pynacl==1.6.2",
+    # Every stored record passes through this: ~4.7x stdlib on the read path and ~13.7x on
+    # the append, byte-identical output for the shapes store.py writes (so no migration),
+    # and it rejects the NaN/Infinity literals stdlib accepts. app.py keeps stdlib json for
+    # the three published documents, which use indent=1 and orjson only does indent 2.
+    "orjson==3.12.0",
+    # Still required: scripts/sign.py generates keys with it, and the docs examples
+    # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
     "cryptography==50.0.0",
 ]
 
@@ -59,8 +69,12 @@ known-first-party = ["app", "didkey", "store"]
 # separately-published MCP wrapper — its own package, checked here so it cannot rot.
 extra-paths = ["./src", "./mcp/src"]
 
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The single source of path bootstrap for the suite — src for import app/store/didkey,
+# tests for _client — so no test file needs its own sys.path.insert.
+pythonpath = ["src", "tests"]
 
 [tool.coverage.run]
 branch = true
@@ -78,17 +92,26 @@ skip_covered = true
 # the machine time, and why, is in tests/mutation_scope.py; this is only its plumbing.
 [tool.mutmut]
 source_paths = ["src"]
-# humans.html is the only other thing in src/ and it is not Python.
-only_mutate = ["src/app.py", "src/store.py", "src/didkey.py"]
+# humans.html is the only other thing in src/ and it is not Python. config.py is out on
+# purpose: tests/mutation_scope.py declares no mutants of interest there (its floors and
+# parsing are exercised directly by the boot tests), while the limiter it feeds is in.
+only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
 # asserted against, and app.py reads SKILL.md at import.
 also_copy = ["SKILL.md", "docker", "mcp"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
-pytest_add_cli_args_test_selection = ["tests/test_app.py", "tests/test_store_stateful.py"]
+# test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
+# suite the monolith did, and test_mcp.py stays excluded for the reason above.
+pytest_add_cli_args_test_selection = [
+    "tests/http",
+    "tests/unit",
+    "tests/test_store_stateful.py",
+]
 
 # Not an installable package: src/ is copied into the image and imported by path.
 # Without this, uv tries to build a wheel and fails.
 [tool.uv]
 package = false
+required-version = ">=0.9"

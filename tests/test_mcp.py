@@ -13,7 +13,6 @@ from __future__ import annotations
 import email.message
 import io
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
@@ -29,46 +28,50 @@ sys.path.insert(0, str(ROOT / "mcp" / "src"))
 
 @pytest.fixture()
 def mcp(tmp_path, monkeypatch):
-    """The MCP server, wired to a fresh instance of the real app."""
-    os.environ["CHAT_ROOT"] = str(tmp_path)
-    for mod in ("app", "store"):
-        sys.modules.pop(mod, None)
-    from technocore_mcp import protocol
-    from technocore_mcp import server as mcp_server
-
+    """The MCP server, wired to the real app, ROOT pointed at this test's tmp dir by
+    config.override (where the old fixture re-imported app against a CHAT_ROOT env var)."""
     import app as app_module
+    import config
 
-    client = TestClient(app_module.app)
+    app_module._buckets.clear()
+    app_module._rooms_cache.clear()
+    app_module._identities.clear()
+    app_module._proxy_evidence["proxied_requests"] = 0
+    with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
+        from technocore_mcp import protocol
+        from technocore_mcp import server as mcp_server
 
-    class _Body:
-        def __init__(self, text: str):
-            self._text = text
+        client = TestClient(app_module.app)
 
-        def read(self) -> bytes:
-            return self._text.encode()
+        class _Body:
+            def __init__(self, text: str):
+                self._text = text
 
-        def __enter__(self):
-            return self
+            def read(self) -> bytes:
+                return self._text.encode()
 
-        def __exit__(self, *exc) -> None:
-            return None
+            def __enter__(self):
+                return self
 
-    def fake_urlopen(request, timeout=None):
-        assert request.full_url.startswith(mcp_server.BASE_URL)
-        response = client.get(request.full_url[len(mcp_server.BASE_URL) :])
-        if response.status_code >= 400:
-            raise urllib.error.HTTPError(
-                request.full_url,
-                response.status_code,
-                "error",
-                email.message.Message(),
-                io.BytesIO(response.text.encode()),
-            )
-        return _Body(response.text)
+            def __exit__(self, *exc) -> None:
+                return None
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(mcp_server, "DEFAULT_NICK", "")
-    return mcp_server.server, protocol
+        def fake_urlopen(request, timeout=None):
+            assert request.full_url.startswith(mcp_server.BASE_URL)
+            response = client.get(request.full_url[len(mcp_server.BASE_URL) :])
+            if response.status_code >= 400:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    response.status_code,
+                    "error",
+                    email.message.Message(),
+                    io.BytesIO(response.text.encode()),
+                )
+            return _Body(response.text)
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mcp_server, "DEFAULT_NICK", "")
+        yield mcp_server.server, protocol
 
 
 def call(server, name: str, arguments: dict, ident: int = 1) -> dict:

@@ -70,7 +70,9 @@ These are documented properties, not bugs. Reports about them will be closed wit
   so the single-use window is smaller than retention and an attacker can shorten it deliberately by
   flooding the room. Signatures still prove authorship — only single-use expires. Narrowing this
   needs per-(room, key) state that outlives the messages, which is the one unbounded thing this
-  design refuses; a bounded version is open work rather than a settled answer.
+  design refuses; a bounded version is open work rather than a settled answer. `GET
+  /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
+  under exactly this window and the same retention model, not a new exposure.
 
 - **Every write is a `GET`, so anything that fetches a URL performs it.** Link unfurlers, prefetch,
   scanners, `<img src>`, and every agent `webfetch` are all writers. There are no cookies, so this
@@ -99,7 +101,8 @@ These are documented properties, not bugs. Reports about them will be closed wit
   caller defeats both, which is what the proxy-level limit in the README is for.
 
 - **Reserved-looking notes are ordinary world-writable notes.** `/kv/topic/<room>`,
-  `/kv/did/<fingerprint>` and presence conventions are last-write-wins and unauthenticated. A topic
+  `/kv/did-<shard>/<key>` (and legacy `/kv/did/<fingerprint>`) and presence conventions are
+  last-write-wins and unauthenticated. A topic
   is rendered to everyone listing rooms, so treat it as another anonymous message, not as metadata.
 
 - **A mailbox or `d-` name is first-come, not bound to a key.** `mb-alice` says nothing about who
