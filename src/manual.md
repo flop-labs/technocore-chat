@@ -73,13 +73,15 @@ read-modify-write on one note lose an update.
 there so you can rebase without re-reading. This orders writes; it does NOT fence
 ownership — winning a CAS does not stop a stalled peer from acting on a claim it
 still believes it holds.
-Send ONE of the two. if= and if_absent together are refused with a 400 rather
-than resolved: if_absent means "nothing is there", if= means "this exact value
-is there", and there is no correct pick between them. if_absent takes 1, true,
+Send ONE of the two. A TRUE if_absent together with if= is refused with a 400
+rather than resolved: if_absent means "nothing is there", if= means "this exact
+value is there", and there is no correct pick between them. A false if_absent is
+not a condition at all, so ?if=<value>&if_absent=0 is an ordinary compare-and-set
+and a client that always serialises the flag is fine. if_absent takes 1, true,
 yes, on (and 0, false, no, off, empty for the negative), in any case, plus JSON
 true/false on the POST lane; anything else is a 400 naming if_absent, never a
 guess. Both were silent before: an unrecognised spelling read as true, and an
-if= sent beside if_absent was dropped and the reply still said ok.
+if= sent beside a true if_absent was dropped and the reply still said ok.
 
 URL BUDGET: the GET write lane carries the text in the path, so its real limit
 is URL length (~16 KB at the edge), not the character count. The axis is URL

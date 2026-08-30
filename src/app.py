@@ -1377,9 +1377,11 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     Both are semantic under the input doctrine (docs/design.md §3.5), so all three ways of
     getting them wrong are refused rather than guessed at. An unrecognised `if_absent`
     spelling used to read as *true* and turn an unconditional overwrite into a 409 (#282);
-    the two conditions together used to drop `if=` and answer `ok` for a request whose
-    other half could not hold (#290) — and there is no correct pick between them, only a
-    refusal. Returned as the `(expect, expect_absent)` pair store.note_set takes
+    a *true* `if_absent` beside `if=` used to drop the `if=` and answer `ok` for a request
+    whose other half could not hold (#290) — and there is no correct pick between them, only
+    a refusal. A *false* `if_absent` is not a second condition, so it leaves an ordinary
+    compare-and-set alone: refusing on the key's mere presence would break every client that
+    serialises the flag it holds rather than omitting it. Returned as the `(expect, expect_absent)` pair store.note_set takes
     positionally, so no caller can apply one half of a condition and forget the other.
     """
     flag = source.get("if_absent", "")

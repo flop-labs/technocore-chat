@@ -109,3 +109,16 @@ def test_290_if_together_with_if_absent_is_refused_rather_than_resolved(client):
     assert client.get("/kv/scratch/both").status_code == 404  # and nothing was written
     posted = client.post("/kv/scratch/both", json={"value": "v", "if": "X", "if_absent": True})
     assert posted.status_code == 400 and "if=" in posted.text
+
+    # ...but only a *true* `if_absent` contradicts `if=`. A false one is not a second
+    # condition, so this stays an ordinary compare-and-set — refusing on the key's mere
+    # presence would break every client that serialises the flag it holds rather than
+    # omitting it, and it is not what #290 asked for either.
+    client.get("/kv/scratch/cas/set/v1")
+    assert client.get("/kv/scratch/cas/set/v2?if=v1&if_absent=0").status_code == 200
+    assert client.get("/kv/scratch/cas/set/v3?if=v2&if_absent=FALSE").status_code == 200
+    # and it is a real compare-and-set, not a condition quietly dropped on the way through
+    assert client.get("/kv/scratch/cas/set/v4?if=WRONG&if_absent=0").status_code == 409
+    kept = client.post("/kv/scratch/cas", json={"value": "v5", "if": "v3", "if_absent": False})
+    assert kept.status_code == 200, kept.text
+    assert client.get("/kv/scratch/cas").text.splitlines()[-1] == "v5"

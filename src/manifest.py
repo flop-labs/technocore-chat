@@ -87,8 +87,10 @@ _IF_ABSENT_RULE = (
     f"Write only if the note does not exist yet. True: {_IF_ABSENT_TRUE}. False: "
     f"{_IF_ABSENT_FALSE}. Matched case-insensitively, and a JSON `true`/`false` also works "
     "on the POST lane; anything else is a 400 naming this parameter rather than a guess at "
-    "what you meant. Refused together with `if=`: the two conditions contradict, and there "
-    "is no correct pick between them."
+    "what you meant. A *true* one together with `if=` is refused: those two conditions "
+    "contradict, and there is no correct pick between them. A false one is not a condition "
+    "at all, so it sits beside `if=` as an ordinary compare-and-set — a client that "
+    "serialises every parameter it holds, `false` included, is not penalised for it."
 )
 _IF_ABSENT_PARAM = {
     "in": "query",
@@ -103,8 +105,8 @@ _IF_PARAM = {
     "description": (
         "Compare-and-set: write only if this is the current value. An empty string is a "
         'legal note value, so `?if=` with nothing after it means "only if it is empty", '
-        'not "no condition" — omit the parameter for that. Refused together with '
-        "`if_absent`."
+        'not "no condition" — omit the parameter for that. Refused together with a *true* '
+        "`if_absent`; a false one leaves this an ordinary compare-and-set."
     ),
 }
 
