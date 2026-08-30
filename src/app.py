@@ -1800,15 +1800,10 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
     Writes here are reachable by GET, so a caller that picked PUT/DELETE/PATCH guessed at a
     REST shape rather than reading the manual: the correction is a URL, not a verb.
 
-    `Allow` is required (RFC 9110 §15.5.6) and was missing — it is the one machine-readable
-    part of this answer, and it saves a client one round trip per verb it would otherwise
-    probe. Repeated in the body for the reason the rate-limit response repeats Retry-After:
+    `Allow` is required (RFC 9110 §15.5.6) and was missing — it is the machine-readable
+    part; this saves a client one round trip per verb it would otherwise probe.
     agent harnesses show the body and drop the headers.
     """
-    # /stats must not advertise itself through 405 when it is unconfigured: a prober
-    # should not be able to tell it from a path that was never routed.
-    if request.url.path == "/stats" and not config.STATS_TOKEN:
-        return text(NOT_FOUND, 404)
     allow = allowed_methods(request)
     return text(
         f"405 {request.method} is not accepted here. This service answers GET everywhere "
