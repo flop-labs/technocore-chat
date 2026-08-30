@@ -1167,7 +1167,11 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     free-form field is last, so the canonical string parses one way only.
     """
     if not NONCE_RE.fullmatch(nonce):
-        return text(f"400 nonce must be 1-19 digits, got {nonce!r}", 400)
+        # Both rules in one sentence, rather than a branch that picks the violated one: the
+        # length rule alone is true of `007` as well, so answering a padded nonce with it
+        # names a rule the caller had already kept (§3.5, #373). `7, not 007` carries the
+        # fix without costing the reader the rule it came from.
+        return text(f"400 nonce must be 1-19 digits, no leading zeros (7, not 007): {nonce!r}", 400)
     try:
         didkey.verify(did, sig, canonical)
     except didkey.DidError as exc:

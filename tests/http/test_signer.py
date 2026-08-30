@@ -55,13 +55,24 @@ def test_a_keygen_seed_reproduces_the_did() -> None:
 
 
 def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
-    # '١' is a Unicode digit isdigit() accepts and NONCE_RE ([0-9]{1,19}) refuses;
-    # 20 digits and the empty string are over- and under-length. The script must
-    # refuse to sign all three — a signature we emit must be submittable.
-    for bad_nonce in ("١", "0" * 20, ""):
+    # '١' is a Unicode digit isdigit() accepts and NONCE_RE refuses; 20 digits and the
+    # empty string are over- and under-length; `007` and `0000000042` are padded
+    # spellings the server refuses because a record stores the nonce as a number and
+    # cannot give the zeros back. The script must refuse to sign all of them — a
+    # signature we emit must be submittable.
+    for bad_nonce in ("١", "0" * 20, "", "007", "0000000042"):
         out = run("say", "--seed", SEED, "lobby", bad_nonce, "hi")
         assert out.returncode != 0, f"nonce {bad_nonce!r} was accepted"
         assert "nonce" in (out.stdout + out.stderr).lower()
+
+    # The script's copy of the rule against the server's own, rather than two lists that
+    # can drift: the script is standalone by design (PEP 723) and so cannot import
+    # didkey, which is exactly why the agreement needs a gate rather than a convention.
+    for probe in ("0", "7", "42", "9223372036854775807", "007", "00", "0042", "1" * 20, "1a"):
+        accepted = run("say", "--seed", SEED, "lobby", probe, "hi").returncode == 0
+        assert accepted == bool(didkey.NONCE_RE.fullmatch(probe)), (
+            f"script and server disagree about nonce {probe!r}"
+        )
 
     good = run("say", "--seed", SEED, "lobby", "7", "hi")
     assert good.returncode == 0

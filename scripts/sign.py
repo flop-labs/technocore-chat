@@ -40,8 +40,10 @@ signature — ready for:
   GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<url-encoded text>
   GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<url-encoded value>
 
-Nonces are yours to choose (1-19 digits) and must count up per key per room;
-a millisecond clock works, and so does a plain counter.
+Nonces are yours to choose (1-19 digits, no leading zeros: 7, not 007) and must
+count up per key per room; a millisecond clock works, and so does a plain
+counter. Pad nothing — a record stores the nonce as a number, so a padded
+spelling is signed and then cannot be read back off the export.
 """
 
 from __future__ import annotations
@@ -172,8 +174,12 @@ def main() -> None:
     # ASCII digits only, exactly the server's NONCE_RE: str.isdigit() alone also
     # accepts Unicode digits like '١', the script would sign them, and the server
     # would then refuse a signature we told the caller was good (review: PR #54).
-    if not re.fullmatch(r"[0-9]{1,19}", args.nonce):
-        raise SystemExit(f"nonce must be 1-19 ASCII digits, got {args.nonce!r}")
+    # No leading zeros, for the same reason and one more: a record stores the nonce
+    # as a number, so `007` signs a string the export cannot give back and the
+    # stored signature never re-verifies. This copy is deliberate — the script is
+    # standalone by design — and tests/http/test_signer.py holds it to the server's.
+    if not re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", args.nonce):
+        raise SystemExit(f"nonce must be 1-19 ASCII digits, no leading zeros, got {args.nonce!r}")
     if args.cmd == "say":
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
     else:

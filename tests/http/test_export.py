@@ -46,6 +46,46 @@ def test_a_signed_record_reverifies_from_the_exported_bytes_alone(client):
     didkey.verify(rec["from"], rec["sig"], f"proofs|{rec['nonce']}|{rec['text']}")
 
 
+def test_a_nonce_the_export_could_not_carry_is_refused_at_the_write(client):
+    """The re-verify promise holds for every nonce the server *accepts*, not just the
+    canonical ones.
+
+    A record stores the nonce as a JSON number, and a number has no leading zeros to give
+    back: `007` and `7` are two different signed messages and one stored record. So the
+    padded spelling was accepted, stored, exported — and its own stored signature did not
+    verify against the line it was exported on, silently and for the lifetime of the
+    record. The manual's re-verifier caveat does not reach it either: "treat the nonce as
+    opaque digits" recovers a 19-digit value exactly (the test above), and the digits it
+    names are the ones a padded record no longer carries. Guessing the padding back — up to
+    18 spellings, accept whichever verifies — is the many-spellings-per-value acceptance
+    #177 removed from SIG_PATTERN, so it is not the way out either.
+
+    Refused at the door rather than normalised on the way in, because normalising would
+    store a record whose signature covers a string the caller never sent — the same
+    unverifiable line, arrived at politely. A fixed-width counter is the likely source
+    (padding is how a client makes nonces sort), so the refusal says what to send instead.
+    """
+    did, sign = _keypair()
+    padded = _say_signed(client, "d-padded", did, sign, "padded nonce", nonce="0000000042")
+    assert padded.status_code == 400
+    # Names the rule it broke, not the length rule it kept: `0000000042` is 1-19 digits.
+    assert "leading zeros" in padded.text
+
+    # Nothing was stored, so there is no unverifiable line to export.
+    assert client.get("/r/d-padded/export").content == b""
+
+    # The canonical spelling of the same value still writes and still re-verifies, and
+    # `0` itself stays legal — a counter may start there.
+    assert _say_signed(client, "d-padded", did, sign, "padded nonce", nonce=42).status_code == 200
+    assert _say_signed(client, "d-zero", did, sign, "zero nonce", nonce=0).status_code == 200
+    for room in ("d-padded", "d-zero"):
+        lines = client.get(f"/r/{room}/export").content.splitlines()
+        signed = [rec for rec in map(json.loads, lines) if "sig" in rec]
+        assert len(signed) == 1
+        rec = signed[0]
+        didkey.verify(rec["from"], rec["sig"], f"{room}|{rec['nonce']}|{rec['text']}")
+
+
 def test_a_torn_final_line_is_excluded(client, tmp_path):
     client.get("/r/torn/say/bot/whole%20line")
     path = store.room_path(tmp_path, "torn")

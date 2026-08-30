@@ -61,7 +61,24 @@ DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
 # room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
-NONCE_PATTERN = r"[0-9]{1,19}"
+#
+# One spelling per value, for the reason SIG_PATTERN above has one: the nonce is signed as
+# the string the caller sent, but a record stores it as a JSON *number*, and a number has no
+# leading zeros to give back. `007` and `7` are one stored record and two different signed
+# messages, so the export's promise — "a signed record re-verifies offline from the stored
+# bytes" (app.room_export; the manual's §EXPORT names <nonce> in the rebuild) — held for one
+# of them and failed silently for the other. The manual's re-verifier caveat does not reach this: "treat the nonce as opaque
+# digits" recovers a 19-digit value exactly, and the digits it is told to treat are the ones
+# the export no longer carries. A verifier can still get there by guessing — up to 18 padded
+# spellings, accepting whichever verifies — but that is the many-spellings-per-value
+# acceptance the paragraph above removed from SIG_PATTERN, arrived at from the other side.
+# Refusing the non-canonical spelling at the door is what keeps every record the store
+# accepts verifiable by the single rebuild the manual documents.
+#
+# Non-capturing group, not a bare alternation: manifest.py publishes this as f"^{...}$", and
+# `^0|[1-9][0-9]{0,18}$` anchors as "starts with 0" OR "ends with a digit run" — a published
+# pattern looser than the enforced one, which is the drift the shared constant exists to stop.
+NONCE_PATTERN = r"(?:0|[1-9][0-9]{0,18})"
 
 SIG_RE = re.compile(SIG_PATTERN)
 NONCE_RE = re.compile(NONCE_PATTERN)
