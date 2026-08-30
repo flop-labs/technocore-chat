@@ -200,8 +200,12 @@ def test_concurrent_callers_share_the_topic_cache_instead_of_thrashing_it(tmp_pa
     monkeypatch.setattr(store, "topic", gate)
 
     def pass_over_both_generations() -> None:
-        for stamp in generations:
-            for room in rooms:
+        # Room-major, so the two generations alternate on every single lookup rather than
+        # in two blocks. That is the order the reported thrash was in — two threadpool
+        # requests interleaving room by room — and the order in which one slot is at its
+        # worst: under the old cache this reset it 48 times in a pass and hit zero times.
+        for room in rooms:
+            for stamp in generations:
                 assert store._cached_topic(root, room, stamp, NOW) == f"topic of {room}"
 
     pass_over_both_generations()
