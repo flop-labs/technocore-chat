@@ -1084,6 +1084,7 @@ def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_pa
     tail and reuses every other window from the memo — O(changed), not O(shown)."""
     import store
 
+    store._cached_window.cache_clear()  # module-level state; the counts below are exact
     store.append(tmp_path, "aaa", "bot", "one")
     store.append(tmp_path, "bbb", "bot", "two")
     calls = []
@@ -1103,10 +1104,15 @@ def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_pa
     assert calls == ["aaa"], "only the changed room is re-read"
     assert {r["room"]: r["last_seq"] for r in view["rooms"]}["aaa"] == 2
 
-    monkeypatch.setattr(store, "_WINDOW_MEMO_MAX", 1)
+    held = store._cached_window.cache_info().currsize
     store.append(tmp_path, "aaa", "bot", "third-message")
     store.room_stats(tmp_path)
-    assert len(store._window_memo) == 1  # the bound holds under eviction
+    info = store._cached_window.cache_info()
+    # The stat is the key, so aaa's superseded window is not deleted when the room changes,
+    # it stops being asked for: the memo took the new stat and kept the old one, and maxsize
+    # is the only thing that ever reclaims it. tests/unit/test_memo_caches.py is where that
+    # bound is exercised past its limit, under threads.
+    assert (info.currsize, info.maxsize) == (held + 1, store._WINDOW_MEMO_MAX)
 
 
 def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):

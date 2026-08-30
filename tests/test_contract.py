@@ -20,6 +20,7 @@ import schemathesis
 
 import app as app_module
 import config
+import store
 
 # Deterministic on purpose: a fixed seed plus `deterministic` fixes the generation and the
 # pinned schemathesis fixes the generator, so a red run here is a change in this service and
@@ -86,9 +87,18 @@ def instance(tmp_path_factory):
     the fuzzer wrote in one operation is a room the read operations can then find, and
     hypothesis refuses a function-scoped fixture behind `@given` for exactly the reason it
     would be wrong here — it is not reset per example, and must not be.
+
+    The three memo caches behind /rooms are process state that outlives a ROOT, so they are
+    cleared for the same reason the shared client fixture clears them: an entry keyed on a
+    previous run's store would answer a generated read with a room this one never wrote.
+    Their clock is deliberately not pinned here — validity is part of the key now, so a
+    window boundary falling mid-run changes which entry is looked up and nothing else, and
+    no check in this module asserts on cache hits.
     """
     app_module._buckets.clear()
-    app_module._rooms_cache.clear()
+    app_module._rooms_walk.cache_clear()
+    store._cached_window.cache_clear()
+    store._topics_memo.cache_clear()
     app_module._identities.clear()
     with config.override(
         ROOT=tmp_path_factory.mktemp("contract"),
