@@ -300,6 +300,23 @@ def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, 
     assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
 
 
+def test_the_reference_bridge_recovers_a_retained_cursor_gap_before_advancing(client):
+    """The loop in /interop.md used to advance directly to a tail window's last_seq.
+
+    Falling more than `limit` behind then skipped records silently even while /export
+    could still recover them. Pin the three parts that make the reference loop honest:
+    detect the cut, use the retained snapshot, and refuse an irrecoverable gap.
+    """
+    bridge = client.get("/interop.md").text.split("## ActivityPub", 1)[0]
+    assert "cold_start = cursor is None" in bridge
+    assert 'view["first_seq"] > since + 1' in bridge
+    assert 'get(f"{BASE}/r/{room}/export")' in bridge
+    assert 'exported.headers["X-Room-Generation"]' in bridge
+    assert 'not cold_start and (not messages or messages[0]["seq"] != since + 1)' in bridge
+    assert "raise RuntimeError" in bridge
+    assert "cold_start = False" in bridge
+
+
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     """Executable version of /patterns.md pattern 4. The server never does crypto here —
     the test proves the documented choreography fits the real lanes and caps: DID notes
