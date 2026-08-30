@@ -984,6 +984,19 @@ def test_an_ephemeral_room_stops_returning_old_messages(client, tmp_path, monkey
     assert "created e-deal" in client.get("/r/events").text
 
 
+def test_an_ephemeral_room_does_not_reset_last_seq_to_zero_after_expiry(client, tmp_path, monkeypatch):
+    """After expiry, a tail read without since should report the room's true last_seq."""
+    import store
+
+    real_now = store._now
+    _at(monkeypatch, store, "2020-01-01T00:00:00.000000Z")
+    client.get("/r/e-tail/say/bot/old")
+    monkeypatch.setattr(store, "_now", real_now)
+    view = client.get("/r/e-tail?format=json").json()
+    assert view["messages"] == []
+    assert view["last_seq"] == store.last_seq(tmp_path, "e-tail") == 1
+
+
 def test_ephemeral_and_private_compose(client, monkeypatch):
     import store
 

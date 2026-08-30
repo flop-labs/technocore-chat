@@ -764,7 +764,7 @@ def read_messages(root: Path, room: str, limit: int = 50, since: int | None = No
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": out[-1]["seq"] if out else (since if since is not None else last_seq(root, room)),
         "messages": out,
     }
 
