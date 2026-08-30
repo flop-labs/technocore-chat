@@ -23,6 +23,7 @@ import hmac
 import json
 import sys
 import time
+import types
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -1045,6 +1046,127 @@ def test_the_worker_gates_a_signing_key_behind_the_bearer_token():
     assert source.index("hmac.compare_digest") < source.index("signing_key=key")
 
 
+def _worker_module():
+    """`worker.py` with the runtime SDK stubbed, so its gate can be *run* and not just read.
+
+    The checks above are source-level because "the Worker's own gates cannot be executed off
+    the Cloudflare runtime". Only one import stands in the way of executing them —
+    `from workers import ...`, the SDK Cloudflare injects — and the `_cloudflare` import
+    beside it is already guarded by `except ImportError`, which is the branch a non-Worker
+    takes. Stubbing that one module is enough, and a gate in front of a signing key is worth
+    a stub: a string match cannot tell a comparison that is written correctly from one that
+    is correct, and both of the bugs this file now pins passed every source check.
+
+    `asgi.fetch` returns a sentinel, so "the gate let this through" is observable without a
+    real ASGI app.
+    """
+    import importlib.util
+
+    stub = types.ModuleType("workers")
+    for name, value in (
+        ("Response", type("Response", (), {"__init__": _stub_response_init})),
+        ("WorkerEntrypoint", type("WorkerEntrypoint", (), {})),
+        ("asgi", types.SimpleNamespace(fetch=_stub_asgi_fetch)),
+        ("fetch", lambda *a, **k: None),
+    ):
+        setattr(stub, name, value)
+    saved = sys.modules.get("workers")
+    sys.modules["workers"] = stub
+    try:
+        path = ROOT / "mcp" / "worker" / "src" / "worker.py"
+        spec = importlib.util.spec_from_file_location("technocore_worker_probe", path)
+        assert spec is not None and spec.loader is not None, f"cannot load {path}"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if saved is None:
+            del sys.modules["workers"]
+        else:
+            sys.modules["workers"] = saved
+
+
+def _stub_response_init(self, body, status=200):
+    self.body, self.status = body, status
+
+
+async def _stub_asgi_fetch(*args, **kwargs):
+    return "SERVED"
+
+
+class _Req:
+    def __init__(self, authorization):
+        self.headers = {} if authorization is None else {"Authorization": authorization}
+
+
+async def _worker_answer(authorization, token="s3cret-token-value", key="a" * 64):
+    """What the Worker answers a request carrying `authorization`, with both secrets set.
+
+    `_technocore` is stubbed, so a request that passes the gate stops at the seam instead of
+    configuring the real `technocore_mcp.server`. That is not tidiness: `fetch` calls
+    `configure(signing_key=...)` on the way through, which is process-wide state, and a gate
+    test that left a signer behind would silently change what every later test in this file
+    sees. What is under test is the gate, and the gate is entirely above that call.
+    """
+    module = _worker_module()
+    module._technocore = lambda: types.SimpleNamespace(
+        configure=lambda **kwargs: None,
+        use_fetch=lambda fetch: None,
+        streamable_http_app=lambda: None,
+    )
+    entry = module.Default.__new__(module.Default)
+    entry.env = types.SimpleNamespace(
+        TECHNOCORE_SIGNING_KEY=key,
+        TECHNOCORE_MCP_TOKEN=token,
+        TECHNOCORE_URL=None,
+        TECHNOCORE_NICK=None,
+    )
+    entry.ctx = None
+    module.Default._configured = False
+    return await entry.fetch(_Req(authorization))
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER", "BeArEr"])
+def test_the_worker_matches_the_bearer_scheme_case_insensitively(scheme):
+    """The auth scheme is a case-insensitive token (RFC 9110 §11.1), and clients spell it as
+    they like. `removeprefix("Bearer ")` matched exactly one spelling, so a conforming client
+    sending `bearer <token>` was answered 401 — a refusal naming the header it had got right,
+    on the endpoint whose whole job is to stand in front of a signing key."""
+    with anyio.from_thread.start_blocking_portal() as portal:
+        assert portal.call(_worker_answer, f"{scheme} s3cret-token-value") == "SERVED"
+
+
+def test_the_worker_accepts_a_token_stored_with_surrounding_whitespace():
+    """Trimming only the presented half meant a stored token carrying a newline could not be
+    matched by any caller — including one reproducing it byte for byte, since their copy was
+    trimmed and the stored one was not. The endpoint refused everyone and its 401 named the
+    header the operator was already sending correctly."""
+    with anyio.from_thread.start_blocking_portal() as portal:
+        for stored in ("s3cret-token-value\n", " s3cret-token-value", "s3cret-token-value "):
+            assert portal.call(_worker_answer, "Bearer s3cret-token-value", stored) == "SERVED"
+            wrong = portal.call(_worker_answer, "Bearer nope", stored)
+            assert wrong.status == 401
+
+
+def test_the_worker_still_refuses_every_credential_that_is_not_the_token():
+    """The direction that must never regress. A gate that wrongly refuses is an outage; one
+    that wrongly accepts hands out the identity."""
+    with anyio.from_thread.start_blocking_portal() as portal:
+        for header in (
+            None,
+            "",
+            "Bearer wrong",
+            "Bearer s3cret",  # a prefix of the token
+            "Bearer s3cret-token-valueX",  # the token plus a character
+            "Bearer ",
+            "Bearer",
+            "Basic s3cret-token-value",  # right credential, wrong scheme
+            "Bearer café",  # non-ASCII: a refusal, never a TypeError
+            "Bearer \x00",
+        ):
+            assert portal.call(_worker_answer, header).status == 401
+
+
 # ------------------------------------------------------------------ the transport
 
 
@@ -1394,7 +1516,7 @@ def test_the_worker_token_check_answers_a_non_ascii_header_rather_than_crashing(
     source = (
         Path(__file__).resolve().parents[1] / "mcp" / "worker" / "src" / "worker.py"
     ).read_text()
-    assert "compare_digest(presented.strip().encode(), str(token).encode())" in source
+    assert "compare_digest(presented.strip().encode(), str(token).strip().encode())" in source
     # And the property that motivates it, asserted against the stdlib rather than assumed.
     with pytest.raises(TypeError):
         hmac.compare_digest("café", "cafe")

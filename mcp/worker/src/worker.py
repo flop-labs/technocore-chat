@@ -213,7 +213,14 @@ class Default(WorkerEntrypoint):
                 status=503,
             )
         if token:
-            presented = (request.headers.get("Authorization") or "").removeprefix("Bearer ")
+            # The scheme is matched case-insensitively, because it is a case-insensitive
+            # token (RFC 9110 §11.1) and clients spell it as they like. `removeprefix
+            # ("Bearer ")` matched one spelling, so `bearer <token>` was answered 401 —
+            # a refusal naming the header the caller had got right. `partition` leaves a
+            # bare credential with no scheme in `scheme`, so that still compares as `raw`.
+            raw = request.headers.get("Authorization") or ""
+            scheme, _, rest = raw.partition(" ")
+            presented = rest if scheme.lower() == "bearer" else raw
             # Compared as bytes, not str: `compare_digest` refuses two `str` arguments
             # unless both are ASCII, and raises `TypeError` rather than returning False.
             # The header is attacker-controlled, so `Authorization: Bearer café` would
@@ -221,7 +228,15 @@ class Default(WorkerEntrypoint):
             # 500 instead of a 401. It fails closed either way — the throw happens before
             # anything is served — but a crash is not an answer, and encoding both sides
             # keeps the comparison constant-time over the bytes that actually arrived.
-            if not hmac.compare_digest(presented.strip().encode(), str(token).encode()):
+            #
+            # Both sides are trimmed. Trimming only the presented half meant a token stored
+            # with surrounding whitespace — a newline survives more than one way of putting
+            # a secret into an environment — could not be matched by any caller at all,
+            # including one reproducing it byte for byte, and the 401 told them to send
+            # exactly what they were already sending. Trimming the stored side only widens
+            # the set of deployments that work: a token whose spelling depended on an
+            # invisible character had no working caller before.
+            if not hmac.compare_digest(presented.strip().encode(), str(token).strip().encode()):
                 return Response(
                     "401 this endpoint requires `Authorization: Bearer <token>`.",
                     status=401,
