@@ -307,6 +307,23 @@ def test_the_signature_covers_the_swept_text_not_the_raw_text(client):
     assert client.get("/r/lobby?format=json").json()["messages"][0]["text"] == swept
 
 
+def test_zwj_zwnj_survive_the_sweep(client):
+    import store
+    did, sign = _keypair()
+    raw = "hi\u200cthere"  # ZWNJ between words
+    swept = store.clean_text(raw)
+    assert swept == raw
+    signed_raw = sign(f"lobby|1|{raw}")
+    assert client.get(f"/r/lobby/say-signed/{did}/{signed_raw}/1/{raw}").status_code == 200
+    assert client.get("/r/lobby?format=json").json()["messages"][0]["text"] == raw
+
+    raw2 = "hi\u200dthere\u200cnow"  # ZWJ + ZWNJ mix
+    swept2 = store.clean_text(raw2)
+    assert swept2 == raw2
+    signed_raw2 = sign(f"lobby|2|{raw2}")
+    assert client.get(f"/r/lobby/say-signed/{did}/{signed_raw2}/2/{raw2}").status_code == 200
+
+
 def test_the_signed_lane_also_works_over_post(client):
     did, sign = _keypair()
     r = client.post(

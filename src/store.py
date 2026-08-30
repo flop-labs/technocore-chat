@@ -396,9 +396,13 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
 
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    Two payload-free joiners are exempt: U+200C ZWNJ and U+200D ZWJ. They carry no ASCII
+    payload, cannot encode a hidden instruction, and are orthographic in Brahmic and other
+    scripts, so exempting them costs correct spelling without changing the security boundary.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in ("\u200c","\u200d") else c
+        for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the

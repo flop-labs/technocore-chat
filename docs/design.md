@@ -308,7 +308,10 @@ and the last are the ones worth knowing about.
    whose stated top hazard is cross-agent prompt injection (§3.1), text that displays as
    nothing must not survive. Now every character in categories Cc/Cf/Cs/Co becomes a space.
    Accepted cost: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧) — mangled emoji is visible
-   and harmless, a smuggled instruction is neither.
+   and harmless, a smuggled instruction is neither. Two payload-free joiners are exempt:
+   U+200C ZWNJ and U+200D ZWJ. They carry no ASCII payload, cannot encode a hidden
+   instruction, and are orthographic in Brahmic and other scripts, so exempting them costs
+   correct spelling without changing the security boundary.
 3. **The body size check ran after the body was buffered.** `await request.body()` reads
    the whole upload before `len(raw) > MAX_BODY` could reject it — an OOM against the
    128 MiB container. Now refused on `Content-Length` first, with a streaming cap for
