@@ -18,7 +18,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -1485,34 +1485,51 @@ def _reap(root: Path) -> None:
                 # stat above, and deleting a just-written room would lose live messages.
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
-                # It re-stats by path, never through the entry — see _reapable. A guard note
-                # rechecks its room the same way, under the same lock, for the same reason:
-                # the room could have been recreated in the gap since the check above.
-                with _locked(p):
-                    reason = _reap_reason(p, guard_room, now, stillborn_rule)
-                    if reason:
-                        if stillborn_rule:
-                            # Leave the previous generation's high-water mark behind so a
-                            # recreated room continues the sequence instead of restarting at 1
-                            # and stranding every cursor pointing past it (#139 dir #2). Stored
-                            # in a root-level map under the seq-state lock. Also preserves the
-                            # room's generation so the read view can expose the discontinuity
-                            # (#139 dir #3): a silently-repaired cursor is fine for a stateless
-                            # reader, but a stateful one needs to know the conversation changed.
-                            # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
-                            room = p.name[: -len(".jsonl")]
-                            with _locked(root / ".seqstate"):
-                                state = _read_seq_state(root)
-                                hwm = last_seq(root, room)
-                                state[room] = {
-                                    "floor": hwm if hwm > 0 else 0,
-                                    "gen": state.get(room, {}).get("gen", 0),
-                                }
-                                _write_seq_state(root, state)
-                        p.unlink(missing_ok=True)
-                        config._dbg(2, "reap", room=p.name, reason=reason)
-                        if stillborn_rule:
-                            reaped[f"reaped_{reason}"] += 1
+                # It re-stats by path, never through the entry — see _reapable.
+                #
+                # A guard note additionally takes the room's own lock first, room-then-note
+                # -- the only order anything here takes both locks in, so there is nothing
+                # to invert. `_write_record` takes that identical lock (`_locked(path)` on
+                # the room) to create or recreate a room, so holding it here makes the
+                # decision and the unlink atomic with a concurrent recreation: whichever of
+                # the two gets the room lock first is the one whose view of "does this room
+                # exist" the other has to live with. If the writer gets there first, this
+                # recheck (still inside the room lock) finds a live room and leaves the note
+                # alone. If this reap gets there first, the writer stays queued until the
+                # note is already gone -- which is correct, not a bug: a legitimately reaped
+                # guard is supposed to leave the name free to claim, same as any other reap.
+                # What holding this lock does NOT fix: an authorization decision app.py's
+                # _room_write_gate already made by reading the note before either lock was
+                # taken. That gap is between the gate's read and the write that acts on it,
+                # exists for any concurrent note mutation, and is not specific to reaping --
+                # tracked separately (see PR #518's description) rather than folded in here.
+                with _locked(guard_room) if guard_room is not None else nullcontext():
+                    with _locked(p):
+                        reason = _reap_reason(p, guard_room, now, stillborn_rule)
+                        if reason:
+                            if stillborn_rule:
+                                # Leave the previous generation's high-water mark behind so a
+                                # recreated room continues the sequence instead of restarting
+                                # at 1 and stranding every cursor pointing past it (#139 dir
+                                # #2). Stored in a root-level map under the seq-state lock.
+                                # Also preserves the room's generation so the read view can
+                                # expose the discontinuity (#139 dir #3): a silently-repaired
+                                # cursor is fine for a stateless reader, but a stateful one
+                                # needs to know the conversation changed. (Rooms only: notes
+                                # are not sequenced, so they carry no floor/gen.)
+                                room = p.name[: -len(".jsonl")]
+                                with _locked(root / ".seqstate"):
+                                    state = _read_seq_state(root)
+                                    hwm = last_seq(root, room)
+                                    state[room] = {
+                                        "floor": hwm if hwm > 0 else 0,
+                                        "gen": state.get(room, {}).get("gen", 0),
+                                    }
+                                    _write_seq_state(root, state)
+                            p.unlink(missing_ok=True)
+                            config._dbg(2, "reap", room=p.name, reason=reason)
+                            if stillborn_rule:
+                                reaped[f"reaped_{reason}"] += 1
             except OSError:
                 continue  # racing writer or vanished file: next pass picks it up
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room
