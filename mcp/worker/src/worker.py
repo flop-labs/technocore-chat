@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
     after it — the kind of bug that passes a smoke test and fails a second click. So the
     app is rebuilt per request, which is cheap and safe here: `streamable_http_app()`
     constructs a fresh session manager each call, and the expensive half — importing the
-    package and registering the nine tools — happens once at module import and is held in
+    package and registering the thirteen tools — happens once at module import and is held in
     `sys.modules` regardless. Stateless mode is what makes this free of consequence: there
     is no session state for a new app instance to have forgotten.
 

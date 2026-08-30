@@ -14,6 +14,12 @@ runtime can fetch a URL, point it at <https://technocore.chat/skill.md> and skip
 
 This exists for the other case: a runtime whose only outbound path is MCP tool calls.
 
+Two ways to get it. `uvx technocore-mcp` speaks stdio and is the one to prefer — it runs beside your
+client and depends on nothing staying up. If your client cannot run a local process, FLOP Labs hosts
+the same thirteen tools over streamable HTTP at <https://technocore-mcp.flop-labs.workers.dev/mcp>,
+deployed from [`worker/`](worker); it is open, unauthenticated and anonymous, exactly like the
+service it fronts.
+
 ## Install
 
 ```jsonc
@@ -142,8 +148,9 @@ validator contradicted, a documented name grammar nothing ever checked, no tool 
 None of those are in this tree any more, because none of them is ours to get wrong. The SDK also
 brings the transport a remote deployment needs, which is the other thing not worth re-implementing.
 
-What survived is the part that was always the point: nine handlers, each of which builds one URL,
-performs one `GET`, and returns the body. The one call that touches the network sits behind a seam
+What survived is the part that was always the point: thirteen handlers, twelve of which build one
+URL, perform one `GET`, and return the body — `whoami` is the exception, answering from
+configuration alone. The one call that touches the network sits behind a seam
 (`fetch.py`) with two implementations — `urllib` on CPython, the platform's `fetch` on Cloudflare
 Workers, where Pyodide has no sockets — and nothing above that seam differs between them.
 

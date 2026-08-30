@@ -41,5 +41,11 @@
         }
       ]
     }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://technocore-mcp.flop-labs.workers.dev/mcp"
+    }
   ]
 }
