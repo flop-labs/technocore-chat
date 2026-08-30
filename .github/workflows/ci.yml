@@ -40,7 +40,10 @@ jobs:
       # pywrangler installs prebuilt wheels only, so the wrapper has to be a wheel before
       # the Worker can bundle it. This is the step a human forgets; here it cannot be.
       - name: Build the wrapper wheel the Worker resolves against
-        run: uv build --wheel -o dist --project mcp
+        # `-o` is relative to the working directory, not to `--project`, so the wheel has
+        # to be aimed at mcp/dist — that is where the Worker's `find-links = ["../dist"]`
+        # looks, and a repo-root `dist/` leaves it resolving against an absent directory.
+        run: uv build --wheel -o mcp/dist --project mcp
 
       # `--dry-run` resolves against the Pyodide index and bundles without deploying, which
       # is where all three breakages showed up. It needs no Cloudflare credentials.

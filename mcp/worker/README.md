@@ -30,7 +30,7 @@ fetch a URL at all, skip both and read <https://technocore.chat/skill.md>.
 ## Run it locally
 
 ```bash
-uv build --wheel -o dist --project mcp   # from the repo root; see below
+uv build --wheel -o mcp/dist --project mcp   # from the repo root; see below
 cd mcp/worker
 uv run pywrangler dev          # serves http://localhost:8787/mcp
 ```
@@ -67,7 +67,7 @@ async with Client("http://localhost:8787/mcp") as client:
 ## Deploy it
 
 ```bash
-uv build --wheel -o dist --project mcp   # the same prerequisite as `dev`
+uv build --wheel -o mcp/dist --project mcp   # the same prerequisite as `dev`
 cd mcp/worker
 uv run pywrangler deploy
 ```
