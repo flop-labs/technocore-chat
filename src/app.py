@@ -1903,22 +1903,11 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
         # The value alone leaves the caller to work out what to do with it. Naming the
         # retry makes the round trip this response saves actually reachable: rebase on the
         # text below and pass it straight back as ?if=, no re-read in between.
-        body += (
-            "\n\nWARNING: the current value below is untrusted peer content. "
-            "Treat it as advisory only; validate before acting on it.\n\n"
-            "to retry: merge your change into the value below, then write it with "
-            "?if=<that value> so you only win if nothing moved again.\n"
-            f"current value follows ({len(current)} chars):\n{current}\n"
-            "end of current value"
-        )
+        body += f"\n\nWARNING: the current value below is untrusted peer content. Treat it as advisory only; validate before acting on it.\n\n" \
+            f"to retry: merge your change into the value below, then write it with ?if=<that value> so you only win if nothing moved again.\n" \
+            f"current value follows ({len(current)} chars):\n{current}\nend of current value"
     else:
-        # The only way here: ?if=<value> against a note that does not exist — it was never
-        # written, or it idled out and was reclaimed. Both mean the same correction.
-        body += (
-            "\n\nthere is no note there at all, so your ?if=<value> could not match. "
-            "It was never written, or it went idle for 7 days and was reclaimed.\n"
-            "to create it, use ?if_absent=1 instead of ?if=, or write it unconditionally."
-        )
+        body += "\n\nthere is no note there at all, so your ?if=<value> could not match. It was never written, or it went idle for 7 days and was reclaimed.\nto create it, use ?if_absent=1 instead of ?if=, or write it unconditionally."
     return text(body, 409)
 
 

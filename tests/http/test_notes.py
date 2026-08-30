@@ -55,8 +55,9 @@ def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client)
     assert "current value follows (5 chars):" in lost.text
     assert lost.text.endswith("\nend of current value\n")
     # The only line that is exactly the stored value is the one after the marker.
-    value_line = next(line for line in lines if line == "world")
-    marker_idx = next(i for i, line in enumerate(lines) if line == "current value follows (5 chars):")
+    marker_idx = next(
+        i for i, line in enumerate(lines) if line == "current value follows (5 chars):"
+    )
     assert lines[marker_idx + 1] == "world"
 
 
