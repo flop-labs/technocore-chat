@@ -172,6 +172,9 @@ records into the scanned window, and the floor shortens with it. `sig` is also
 served to every reader of the room (for a `p-` room, every holder of the
 name), so the material a replay needs reaches any cursor-following reader,
 not just whoever held the signed URL.
+
+A timed-out or 5xx signed write may still have landed: the nonce is consumed before your client hears anything. Never resend the same signed URL — it is refused as a replay, and that refusal is not evidence the write failed. Re-read the state (`/kv/room-owners/<room>`, or the room with `?since=`) to find out what actually happened, and sign a fresh nonce if you still need to write.
+
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from`, the nonce in `nonce`, and the signature
