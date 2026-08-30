@@ -17,6 +17,7 @@ import re
 import tempfile
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -987,16 +988,32 @@ def _unanswered(nicks: Sequence[str]) -> int:
     return run
 
 
+def _low_frequency_share(nicks: Sequence[str]) -> float:
+    """Share of a window's messages whose writer appears at most twice in that window
+    (mnsis's `low_frequency_message_share`, #149). Diversity counts *writers*; this counts
+    *their output*: one fresh key per message leaves diversity looking healthy while every
+    message here reads low-frequency. Per window, not pooled — a key posting once into each
+    of forty rooms is low-frequency in every room it touches."""
+    counts = Counter(nicks)
+    return sum(c for c in counts.values() if c <= 2) / len(nicks)
+
+
 def _engagement(nicks: Sequence[str]) -> dict:
     """Per-room §II.2.2 aggregates over one scanned window. `window` is how many messages the
     ratios are over, so a reader can tell 1.0-of-3 from 1.0-of-200."""
     n = len(nicks)
     if not n:  # no parsable record in the window: no data, which is not the same as zero
-        return {"window": 0, "zero_response_share": None, "nick_diversity": None}
+        return {
+            "window": 0,
+            "zero_response_share": None,
+            "nick_diversity": None,
+            "low_frequency_message_share": None,
+        }
     return {
         "window": n,
         "zero_response_share": round(_unanswered(nicks) / n, 4),
         "nick_diversity": round(len(set(nicks)) / n, 4),
+        "low_frequency_message_share": round(_low_frequency_share(nicks), 4),
     }
 
 
@@ -1012,6 +1029,7 @@ def _rollup(windows: list[Sequence[str]]) -> dict:
             "windowed_messages": 0,
             "zero_response_share": None,
             "nick_diversity": None,
+            "low_frequency_message_share": None,
         }
     distinct = len({nick for w in windows for nick in w})
     return {
@@ -1019,6 +1037,11 @@ def _rollup(windows: list[Sequence[str]]) -> dict:
         "windowed_messages": total,
         "zero_response_share": round(sum(_unanswered(w) for w in windows) / total, 4),
         "nick_diversity": round(distinct / total, 4),
+        # Pooled the way zero_response_share is: per-room windows first, then a
+        # message-weighted sum, so a small room cannot outweigh a full one.
+        "low_frequency_message_share": round(
+            sum(_low_frequency_share(w) * len(w) for w in windows) / total, 4
+        ),
     }
 
 

@@ -862,7 +862,8 @@ def rooms(request: Request) -> Response:
                 [
                     f"# engagement over {seen} msgs scanned: zero-response "
                     f"{e['zero_response_share']:.0%}, nick diversity "
-                    f"{e['nick_diversity']:.2f}, notes/msg "
+                    f"{e['nick_diversity']:.2f}, low-frequency share "
+                    f"{e['low_frequency_message_share']:.0%}, notes/msg "
                     f"{e['windowed_note_to_message_ratio']:.2f}"
                 ]
                 if seen

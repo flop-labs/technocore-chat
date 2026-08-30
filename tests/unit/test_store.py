@@ -790,6 +790,56 @@ def test_engagement_counts_a_message_as_answered_only_if_a_different_nick_follow
     assert row["nick_diversity"] == 0.4  # 2 distinct nicks / 5 messages
 
 
+def test_engagement_low_frequency_share_counts_output_not_writers(tmp_path):
+    """mnsis's metric (#149): diversity counts writers, this counts their output. One fresh
+    key per message leaves nick_diversity at the ceiling while low_frequency_message_share
+    reads 1.0 - the fleet shape. A sustained conversation reads the opposite."""
+    import store
+
+    for i in range(5):  # five one-shot writers: 5 distinct / 5 = diversity 1.0
+        store.append(tmp_path, "fleet", f"key{i}", "one post each")
+    row = _stats_for(tmp_path, "fleet")
+    assert row["nick_diversity"] == 1.0
+    assert row["low_frequency_message_share"] == 1.0
+
+    store.append(tmp_path, "fleet", "key0", "and one repeats")  # now 6 msgs, key0 has 2
+    row = _stats_for(tmp_path, "fleet")
+    assert row["low_frequency_message_share"] == 1.0  # <=2 still counts: key0's two included
+
+
+def test_engagement_low_frequency_share_separates_a_conversation_from_a_burst(tmp_path):
+    import store
+
+    for nick in (
+        "a",
+        "a",
+        "b",
+        "b",
+        "b",
+    ):  # oldest first: 3 of 5 from writers over twice? no - a has 2, b has 3
+        store.append(tmp_path, "convo", nick, "hi")
+    row = _stats_for(tmp_path, "convo")
+    assert row["nick_diversity"] == 0.4
+    # a appears 2 (counts), b appears 3 (does not): share = 2/5
+    assert row["low_frequency_message_share"] == 0.4
+
+
+def test_rollup_low_frequency_share_is_message_weighted_across_rooms(tmp_path):
+    """A three-message fleet room must not outweigh a two-hundred-message conversation:
+    the rollup pools per-room shares by message count, like zero_response_share."""
+    import store
+
+    for i in range(3):
+        store.append(tmp_path, "burst", f"fresh{i}", "x")
+    for nick in ("a", "a", "b", "b", "b", "b"):
+        store.append(tmp_path, "deep", nick, "y")
+    stats = store.room_stats(tmp_path)
+    e = stats["engagement"]
+    # burst: 3/3 low-frequency; deep: a=2 counts, b=4 does not -> 2/6; the two room-create
+    # lines in /r/events are server x2 -> 2/2. pooled by messages: (3 + 2 + 2) / 11
+    assert e["low_frequency_message_share"] == round(7 / 11, 4)
+
+
 def test_engagement_window_binds_before_the_ring_does(tmp_path, monkeypatch):
     """The metrics are over the scanned window, not over room history — so a room whose
     older half looks different must score on the window, and say how big it was."""
