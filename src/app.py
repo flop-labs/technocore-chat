@@ -16,6 +16,7 @@ import json
 import secrets
 import time
 import tomllib
+from collections.abc import Mapping
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -245,6 +246,39 @@ def _seconds(value: str | None) -> float:
     except (TypeError, ValueError):
         return 0.0
     return min(seconds, MAX_WAIT) if seconds > 0 else 0.0
+
+
+# The `if_absent` spellings, and what each one means. They live in manifest because that is
+# where they are *published*: the parameter's accepted set and the set enforced below are
+# one object, so the document cannot describe a lane the server does not have.
+_ABSENT = manifest.IF_ABSENT
+
+
+def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) -> str:
+    """A field the schema publishes as a string, or a 400 that names that field.
+
+    The other half of the input doctrine (docs/design.md §3.5) from `_cursor`/`_seconds`
+    above: those two carry advisory numbers and clamp, this one carries identity, content
+    and conditions and refuses. `str()` on whatever JSON arrived turned `{"from": 0}` into
+    the nickname `0` and `{"text": 12345}` into a message, both against a schema that says
+    `string` (#427) — and coercion is exactly what an agent's cheap check-and-retry loop
+    cannot see. Absent and present-but-not-a-string are told apart by the key, not by the
+    value, so an explicit JSON `null` is refused as the wrong type rather than reported as
+    a field the caller left out.
+
+    `is_name=True` is the body's one field that is both required and a name — `from` on
+    the unsigned POST lane. Both of its failures used to be answered by somebody else:
+    absent, it became `""` and failed *room*-name validation, and malformed, it reached
+    `valid_name` as a nick and came back quoting the shared `<room>`/`<nick>`/`<ns>`/
+    `<key>` rule (#373). Either way the caller was told a parameter it had got right was
+    the wrong one, which is the failure the doctrine's last clause names.
+    """
+    value = source.get(name, None if is_name else "")
+    if not isinstance(value, str):
+        raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
+    if is_name and not store.NAME_RE.fullmatch(value):
+        raise StoreError(f"bad {name}: {value!r} must match /{store.NAME_RE.pattern}/")
+    return value
 
 
 def text(
@@ -1243,14 +1277,6 @@ def room_say_signed(request: Request) -> Response:
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
 
 
-def _payload_credentials(payload: dict) -> tuple[str, str, str] | None:
-    """did/sig/nonce out of a POST body, or None for an unsigned post."""
-    did = str(payload.get("did", "")).strip()
-    if not did:
-        return None
-    return did, str(payload.get("sig", "")).strip(), str(payload.get("nonce", "")).strip()
-
-
 async def read_json(request: Request) -> dict | Response:
     """Refuse on Content-Length, then cap the stream.
 
@@ -1310,11 +1336,14 @@ async def room_post(request: Request) -> Response:
     if isinstance(payload, Response):
         return payload
     room = request.path_params["room"]
-    credentials = _payload_credentials(payload)
+    # Every field the body schema publishes as a string is read through _field, so the type
+    # the document promises is the type the handler gets — the credentials included, which
+    # were `str()`-coerced here for the same reason `from`/`text` were (#427).
+    did, sent = _field(payload, "did").strip(), _field(payload, "text")
     signer = None
-    if credentials:
-        did, sig, nonce = credentials
-        body = store.clean_text(str(payload.get("text", "")))
+    if did:
+        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
+        body = store.clean_text(sent)
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
             return signer
@@ -1331,7 +1360,7 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
+            nick = _field(payload, "from", is_name=True)
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
@@ -1377,18 +1406,32 @@ def note_read(request: Request) -> Response:
     return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
 
 
-def _condition(source: dict) -> tuple[str | None, bool]:
+def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     """Read a conditional-write condition from query params or a JSON body.
 
     Two forms, because one cannot express both: `if_absent` means "only if nothing is
     there" (create), `if=<text>` means "only if it still holds exactly this" (replace).
     An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
     the separate flag rather than a sentinel.
+
+    Both are semantic under the input doctrine (docs/design.md §3.5), so all three ways of
+    getting them wrong are refused rather than guessed at. An unrecognised `if_absent`
+    spelling used to read as *true* and turn an unconditional overwrite into a 409 (#282);
+    a *true* `if_absent` beside `if=` used to drop the `if=` and answer `ok` for a request
+    whose other half could not hold (#290) — and there is no correct pick between them, only
+    a refusal. A *false* `if_absent` is not a second condition, so it leaves an ordinary
+    compare-and-set alone: refusing on the key's mere presence would break every client that
+    serialises the flag it holds rather than omitting it. Returned as the `(expect, expect_absent)` pair store.note_set takes
+    positionally, so no caller can apply one half of a condition and forget the other.
     """
-    if source.get("if_absent") not in (None, "", False, "0", "false"):
-        return None, True
-    expect = source.get("if")
-    return (str(expect) if expect is not None else None), False
+    flag = source.get("if_absent", "")
+    absent = flag if isinstance(flag, bool) else _ABSENT.get(_field(source, "if_absent").lower())
+    if absent is None:
+        raise StoreError(f"bad if_absent: expected one of {sorted(_ABSENT)}, not {flag!r}")
+    expect = _field(source, "if") if source.get("if") is not None else None
+    if absent and expect is not None:
+        raise StoreError("bad if_absent: refused with if= — send one condition, not both")
+    return expect, absent
 
 
 def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
@@ -1495,10 +1538,7 @@ def note_write(request: Request) -> Response:
     denied = _note_write_gate(p["ns"], p["key"], value, None)
     if denied:
         return denied
-    expect, expect_absent = _condition(dict(request.query_params))
-    meta = store.note_set(
-        config.ROOT, p["ns"], p["key"], value, expect=expect, expect_absent=expect_absent
-    )
+    meta = store.note_set(config.ROOT, p["ns"], p["key"], value, *_condition(request.query_params))
     return respond(
         request,
         meta,
@@ -1552,8 +1592,7 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    expect, expect_absent = _condition(dict(request.query_params))
-    meta = store.note_set(config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent)
+    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
     return respond(
         request,
         meta,
@@ -1575,15 +1614,15 @@ async def note_post(request: Request) -> Response:
         return payload
     p = request.path_params
     ns, key = p["ns"], p["key"]
-    value = store.clean_text(str(payload.get("value", "")), store.MAX_VALUE_CHARS)
-    credentials = _payload_credentials(payload)
+    value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
+    did = _field(payload, "did").strip()
     signer = None
-    if credentials:
-        did, sig, nonce = credentials
+    if did:
+        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
         if isinstance(signer, Response):
             return signer
-    expect, expect_absent = _condition(payload)
+    condition = _condition(payload)
 
     # Off the event loop, for the reason spelled out in room_post: the note gate reads a
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
@@ -1596,9 +1635,7 @@ async def note_post(request: Request) -> Response:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
-        meta = store.note_set(
-            config.ROOT, ns, key, value, expect=expect, expect_absent=expect_absent
-        )
+        meta = store.note_set(config.ROOT, ns, key, value, *condition)
         return respond(
             request,
             meta,

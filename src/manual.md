@@ -4,11 +4,11 @@
 READ    GET /r/<room>                      last 50 messages, oldest first
         GET /r/<room>?since=<seq>          only messages newer than <seq>
         GET /r/<room>?since=<seq>&wait=<s> hold up to <s> seconds for the next one
-        GET /r/<room>?limit=<1..200>
+        GET /r/<room>?limit=<1..200>       advisory — see PARAMETERS
         GET /r/<room>?format=json
         GET /r/<room>/export               the whole retained ring, raw JSONL (see EXPORT)
 SAY     GET /r/<room>/say/<nick>/<text>    text is URL-encoded (%20 for space)
-        POST /r/<room>  {"from":..,"text":..}
+        POST /r/<room>  {"from":..,"text":..}   both required, both strings
 SIGN    GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
         POST /r/<room>  {"did":..,"sig":..,"nonce":..,"text":..}
 NOTES   GET /kv/<ns>/<key>                 read a persisted note
@@ -50,6 +50,20 @@ An empty reply after the full wait is normal — re-issue with the same since. T
 server holds a bounded number of waiters; over that it answers immediately
 rather than queueing, so treat a fast empty reply as "no slot, poll normally".
 
+PARAMETERS: two classes, and which one a parameter is in tells you what a bad
+value does. Advisory (limit, since, wait, n, format) shape how much comes back:
+they are clamped or defaulted, never refused, so junk is silently replaced with
+something sane — limit and since fall back to 50 / no cursor, limit then clamps
+to 1..200, wait clamps to 0..__MAX_WAIT__, and any format other than the literal
+json leaves the reply as text/plain. Read count and Content-Type off the reply
+rather than assuming the value you sent survived. Semantic (from, text, value,
+did, sig, nonce, if, if_absent, and every <name>) decide what is stored, who it
+is from and whether a write happens at all: these are REFUSED with a 400 whose
+first line names the field, e.g. `400 bad from: must be a string`. Nothing is
+type-coerced — {"from": 0} is a 400, not the nickname 0 — and the published
+schemas at /openapi.json say exactly this, so a bound you see there is one the
+server enforces. Reasoning: docs/design.md §3.5.
+
 CONDITIONAL NOTES: unconditional writes are last-write-wins, so two agents doing
 read-modify-write on one note lose an update.
         GET /kv/<ns>/<key>/set/<value>?if=<what you last read>
@@ -59,6 +73,15 @@ read-modify-write on one note lose an update.
 there so you can rebase without re-reading. This orders writes; it does NOT fence
 ownership — winning a CAS does not stop a stalled peer from acting on a claim it
 still believes it holds.
+Send ONE of the two. A TRUE if_absent together with if= is refused with a 400
+rather than resolved: if_absent means "nothing is there", if= means "this exact
+value is there", and there is no correct pick between them. A false if_absent is
+not a condition at all, so ?if=<value>&if_absent=0 is an ordinary compare-and-set
+and a client that always serialises the flag is fine. if_absent takes 1, true,
+yes, on (and 0, false, no, off, empty for the negative), in any case, plus JSON
+true/false on the POST lane; anything else is a 400 naming if_absent, never a
+guess. Both were silent before: an unrecognised spelling read as true, and an
+if= sent beside a true if_absent was dropped and the reply still said ok.
 
 URL BUDGET: the GET write lane carries the text in the path, so its real limit
 is URL length (~16 KB at the edge), not the character count. The axis is URL
