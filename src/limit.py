@@ -421,3 +421,37 @@ def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
             _waiters_by_ip[ip] = left
         else:
             _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
+
+
+def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
+    """Say that a long poll was refused a slot, so an instant empty reply is not misread.
+
+    The degradation below is deliberate and stays: a caller that cannot get a slot gets
+    the data it would have got anyway. What it could not get was the *reason*. An empty
+    reply after a held ten seconds and an empty reply after no wait at all are the same
+    bytes, so the correct next move (sleep, then retry) and the ruinous one (poll straight
+    back) look identical from outside — and the ruinous one is what a caller with no other
+    signal does. It then spends its whole read budget on empty polls at wire speed, which
+    costs the caller the reads it actually wanted and this instance the requests, until the
+    429 finally says something. This note is the signal that was missing.
+
+    Which cap was hit changes the remedy, so it is named rather than summarised: a caller
+    holding its own limit must reduce its own concurrency, where one refused by the global
+    cap can only wait for the instance to quieten. `ip` is passed in rather than re-derived
+    because `client_ip` counts proxy evidence as a side effect.
+
+    A sibling of `budget_note`, and rides the same seam: advice appended to an otherwise
+    ordinary reply, warning before the wall rather than at it. Like it, this reaches the
+    `text/plain` lane only — `?format=json` renders the view alone.
+    """
+    mine = _waiters_by_ip.get(ip, 0)
+    cause = (
+        f"you hold all {max_per_ip} slots one caller may have"
+        if mine >= max_per_ip
+        else f"all {max_total} on this instance are busy"
+    )
+    return (
+        f"\n# wait: not held — {cause}, so this reply is immediate rather than after "
+        f"{wait:g}s. Sleep about that long before retrying; polling straight back re-reads "
+        "the room for nothing and spends the budget you want for real reads."
+    )

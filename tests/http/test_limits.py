@@ -756,9 +756,59 @@ def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(cli
         async def is_disconnected(self):
             return True
 
+    # No note on this exit: the caller that would read it has already gone.
     result = asyncio.run(app_module._await_messages(cast(Request, Gone()), "lobby", 50, 1, 10))
-    assert result is None
+    assert result == (None, "")
     assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
+
+
+def test_a_long_poll_refused_a_slot_says_so_instead_of_looking_like_a_quiet_room(
+    client, monkeypatch
+):
+    """The refusal degrades to an immediate empty reply, which is the right *data* and was
+    an ambiguous *answer*: identical bytes to a wait that was held and found nothing. A
+    caller that cannot tell polls straight back at wire speed, spending the read budget it
+    wanted for real reads. The note is the difference, and it names which cap was hit
+    because the remedies differ — hold fewer waits, or wait for the instance to quieten.
+    """
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 0)
+    refused = client.get("/r/lobby?since=1&wait=10")
+    assert refused.status_code == 200
+    assert "(no new messages)" in refused.text  # the data is unchanged
+    assert "# wait: not held" in refused.text
+    assert "all 0 on this instance are busy" in refused.text
+    assert "rather than after 10s" in refused.text  # the wait it did not get
+    assert "Sleep about that long before retrying" in refused.text
+
+    # The per-caller cap is a different remedy, so it reads differently.
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 64)
+    monkeypatch.setattr(app_module, "MAX_WAITERS_PER_IP", 0)
+    mine = client.get("/r/lobby?since=1&wait=10")
+    assert "you hold all 0 slots one caller may have" in mine.text
+
+    # `?format=json` renders the view alone, exactly as it does for the budget footer —
+    # the note is a text/plain affordance and adding a field would change the published
+    # schema. Pinned so the asymmetry is a decision rather than a surprise.
+    assert "wait" not in client.get("/r/lobby?since=1&wait=10&format=json").json()
+
+
+def test_a_wait_that_was_actually_held_reports_nothing_extra(client, monkeypatch):
+    """The other half of the pair: an honest empty answer must stay bare, or the note
+    would train a caller to back off from exactly the polling the service wants."""
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 64)
+    monkeypatch.setattr(app_module, "MAX_WAITERS_PER_IP", 4)
+
+    held = client.get("/r/lobby?since=1&wait=0.2")
+    assert "(no new messages)" in held.text
+    assert "# wait:" not in held.text
+    assert app_module._waiters_total == 0  # and the slot went back
 
 
 def test_timestamps_carry_microseconds_and_seq_stays_authoritative(client):

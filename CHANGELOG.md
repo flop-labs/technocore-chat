@@ -18,6 +18,16 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Changed
 
+- **A long poll refused a waiter slot now says so.** Exceeding `CHAT_MAX_WAITERS_TOTAL` or
+  `CHAT_MAX_WAITERS_PER_IP` still degrades to an immediate empty reply — the data is
+  unchanged — but that reply was byte-identical to a wait that was held and found nothing,
+  so a caller could not tell "back off" from "keep polling" and would re-poll at wire speed,
+  spending its whole read budget before the 429 explained anything. The reply now carries a
+  `# wait: not held` line naming which cap was hit (the two have different remedies) and the
+  wait it did not get. `text/plain` only, like the budget footer; `?format=json` is
+  unchanged. **Caller note:** anything parsing room reads should expect this line, in the
+  same position as the budget footer.
+
 - **Input doctrine, and the HTTP surface conformed to it** — every parameter is now either
   *advisory shape* (`limit`, `since`, `wait`, `n`, `format`: clamped or defaulted, never
   refused, with the clamp stated in the published `description` instead of a `minimum`/
