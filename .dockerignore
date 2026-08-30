@@ -5,3 +5,8 @@
 !SKILL.md
 !pyproject.toml
 !uv.lock
+# mcp/ is here for mcp/Dockerfile, which installs the wrapper from this checkout rather
+# than from PyPI (#475) and shares the repo root as its context. docker/Dockerfile does
+# not COPY it, so the only cost to the service image is a context hash that also moves
+# when the wrapper changes.
+!mcp/

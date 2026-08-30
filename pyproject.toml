@@ -35,6 +35,12 @@ dev = [
     # The store's lifecycle rules only conflict in *sequences*; tests/test_store_stateful.py
     # generates the orderings.
     "hypothesis>=6.165.10",
+    # Dev-only, and only for tests/test_mcp.py: the separately-published wrapper in mcp/
+    # declares this itself (mcp/pyproject.toml), and the service in src/ neither imports
+    # nor ships it. The root suite imports `technocore_mcp` off mcp/src via sys.path, so
+    # the SDK has to be importable *here* for those tests to run — it is not a runtime
+    # dependency of technocore-chat and must never become one.
+    "mcp>=2.1,<3",
 ]
 
 # Its own group, not `dev`: one job's tool, eighteen packages, nothing else imports it, so

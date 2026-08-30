@@ -1,0 +1,29 @@
+# The Worker's own project, separate from mcp/pyproject.toml on purpose: this one is never
+# published, and it exists so `pywrangler` has a dependency set to resolve against Pyodide.
+#
+# `pywrangler dev` / `pywrangler deploy` run `uv pip compile` against the Pyodide wheel
+# index for the interpreter the compat flags select, write pylock.toml, and bundle the
+# result into the Worker. Nothing here is installed on CPython.
+[project]
+name = "technocore-mcp-worker"
+version = "0.1.0"
+description = "Cloudflare Worker entry point for the technocore-chat MCP server"
+requires-python = ">=3.14"
+dependencies = [
+    # The wrapper itself, from the checkout beside this file rather than from PyPI, so
+    # `pywrangler dev` serves the branch you are on. Point it at the published wheel
+    # (`technocore-mcp`) instead to deploy a release.
+    "technocore-mcp",
+    # Pulled in by the SDK anyway; named here so a resolve failure says which package
+    # could not be built for wasm rather than surfacing three levels down.
+    "mcp>=2.1,<3",
+]
+
+[tool.uv.sources]
+technocore-mcp = { path = "..", editable = false }
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]

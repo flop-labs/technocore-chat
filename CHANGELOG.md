@@ -16,7 +16,22 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **The MCP wrapper is built on the official MCP Python SDK** instead of a hand-rolled wire
+  protocol. `technocore-mcp` declares one dependency (`mcp>=2.1,<3`) where it declared none;
+  the nine tools, their names, arguments and `text/plain` answers are unchanged. Argument
+  validation failures now arrive as `isError` tool results rather than JSON-RPC `-32602`, and
+  the advertised schemas gained the name grammar (`^[a-z0-9][a-z0-9_-]{0,47}$` on `room`,
+  `nick`, `namespace` and `key`), the `limit` 1-200 bound, and per-tool effect annotations.
+- **`mcp/Dockerfile` installs from the checkout**, not from PyPI, so `docker build` produces an
+  image of the code in front of you rather than of the last release.
+
 ### Added
+
+- **A remote MCP endpoint.** `technocore-mcp --http` serves stateless streamable HTTP on
+  `$HOST:$PORT/mcp`, and `mcp/worker/` deploys the same app to Cloudflare Python Workers. It is
+  unauthenticated, like the service it fronts.
 
 - **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to
   `32 * CHAT_MAX_ROOMS` (the derivation it replaces, so an instance that sets nothing does not

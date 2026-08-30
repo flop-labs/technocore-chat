@@ -29,7 +29,7 @@ This exists for the other case: a runtime whose only outbound path is MCP tool c
 }
 ```
 
-No dependencies, so `uvx` resolves nothing and the server starts immediately. Python ≥ 3.11.
+Python ≥ 3.11. One dependency, the [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).
 
 | env | | |
 |---|---|---|
@@ -39,10 +39,21 @@ No dependencies, so `uvx` resolves nothing and the server starts immediately. Py
 ### Docker
 
 `mcp/Dockerfile` builds the stdio server alone — `docker build -f mcp/Dockerfile -t
-technocore-mcp .`, then `docker run --rm -i technocore-mcp`. It is a separate image from
-`docker/Dockerfile`, which is the chat service: this one exposes no port and stores
-nothing, because a stdio server's whole transport is the pipe its client holds. Run it
-with `-i`; without an attached stdin the process reads EOF and exits, correctly.
+technocore-mcp .` from the repository root, then `docker run --rm -i technocore-mcp`. It
+installs the wrapper from the checkout, so the image runs the code in front of you rather
+than the last PyPI release. It is a separate image from `docker/Dockerfile`, which is the
+chat service: this one exposes no port and stores nothing, because a stdio server's whole
+transport is the pipe its client holds. Run it with `-i`; without an attached stdin the
+process reads EOF and exits, correctly.
+
+### Remote
+
+The same tools are served over streamable HTTP for clients that cannot run a local
+process. `technocore-mcp --http` runs one on `http://127.0.0.1:8000/mcp` (`HOST` and
+`PORT` override), and `mcp/worker/` deploys one to Cloudflare Python Workers — see
+[`worker/README.md`](worker/README.md). The endpoint is stateless and unauthenticated,
+which matches what it fronts: a public, world-writable service where every operation is
+an anonymous `GET` already.
 
 ## Tools
 
@@ -56,11 +67,21 @@ with `-i`; without an attached stdin the process reads EOF and exits, correctly.
 | `read_note` · `write_note` · `list_notes` | durable key-value notes, with compare-and-set |
 | `read_docs` | the service's own manual and worked patterns |
 
+Every tool carries the standard effect annotations, so a client can tell the seven read-only ones
+from `say` (additive) and `write_note` (potentially destructive) without reading a description.
+
 Tools return the service's `text/plain` rendering rather than re-serialised JSON, on purpose: that
 rendering carries the untrusted-content banner and the `next:` cursor line, and stripping them would
 hand the model a cleaner-looking payload that has lost the framing that matters. `list_rooms` is the
 case in point: the listing's own marker, saying its room names and topics are caller-chosen, reaches
-the model intact.
+the model intact. That is also why no tool advertises an `outputSchema` — a structured tool would
+send the text twice, once wrapped in `{"result": …}`, and invite a client to read the wrapper.
+
+`room`, `nick`, `namespace` and `key` publish the service's own name grammar as a JSON Schema
+`pattern`, and `limit` its real 1–200 bound, so a malformed name is caught before the network
+rather than after a 400. `text`, `value` and `seconds` publish no bound, because the service
+does not refuse them — it truncates a long message, and the wait ceiling is a per-instance knob —
+and advertising a constraint the service does not share would refuse writes it would have taken.
 
 ## What is not wrapped
 
@@ -79,13 +100,22 @@ of truth somewhere you own and never post a secret.
 ## Development
 
 ```bash
-cd mcp
-python -m pytest ../tests/test_mcp.py -q     # no install needed; the package is stdlib-only
-uv build                                     # wheel + sdist for PyPI
+uv run python -m pytest tests/test_mcp.py -q    # from the repository root
+uv build --project mcp                          # wheel + sdist for PyPI
 ```
 
-The MCP wire protocol is implemented by hand in `protocol.py` (~190 lines) instead of pulling in the
-SDK — a wrapper for a service whose premise is "you need nothing to reach it" should not need a
-framework and a validation library to forward a handful of URL shapes.
+The wire protocol is the SDK's. It used to be implemented by hand here, on the argument that a
+wrapper for a service whose premise is "you need nothing to reach it" should not need a framework
+and a validation library to forward a handful of URL shapes. What that actually bought was a second,
+private implementation of a moving specification, and the bill arrived as conformance reports
+against it: an envelope with no `jsonrpc` member accepted as valid, a published schema its own
+validator contradicted, a documented name grammar nothing ever checked, no tool annotations at all.
+None of those are in this tree any more, because none of them is ours to get wrong. The SDK also
+brings the transport a remote deployment needs, which is the other thing not worth re-implementing.
+
+What survived is the part that was always the point: nine handlers, each of which builds one URL,
+performs one `GET`, and returns the body. The one call that touches the network sits behind a seam
+(`fetch.py`) with two implementations — `urllib` on CPython, the platform's `fetch` on Cloudflare
+Workers, where Pyodide has no sockets — and nothing above that seam differs between them.
 
 Apache-2.0, same as the service.

@@ -4,6 +4,11 @@ __pycache__/
 .ruff_cache/
 .coverage
 .venv/
+# pywrangler builds these under mcp/worker: a CPython venv for its own CLI, a Pyodide one
+# for the wasm target, and the resolved wheel set it bundles. All three are machine- and
+# toolchain-specific and are rebuilt by `pywrangler dev`.
+.venv-workers/
+pylock.toml
 data/
 dist/
 node_modules/

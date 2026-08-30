@@ -70,9 +70,9 @@ jobs:
       - name: Run the example end-to-end
         run: bash examples/beautiful_chat.sh
 
-      # The MCP wrapper is a separate distribution with no dependencies, so nothing else
-      # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
-      # the suite above; this is the packaging half.
+      # The MCP wrapper is a separate distribution with its own dependency line, so nothing
+      # else would notice a broken pyproject until someone ran `uv publish`. Its tests are
+      # in the suite above; this is the packaging half.
       - name: Build and verify the MCP wrapper
         run: |
           uv build --project mcp --out-dir dist/mcp
