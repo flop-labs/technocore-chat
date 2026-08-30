@@ -688,6 +688,16 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "a real letter" in body and "sent over post" in body
     # and the footer names the lane that works here, not the one that would 403
     assert "say:  /r/mb-inbox/say-signed/" in body
+
+
+def test_unsigned_post_requires_from(client):
+    # missing from must fail specifically, not as a malformed room name
+    r = client.post("/r/lobby", json={"text": "hello"})
+    assert r.status_code == 400
+    assert "from" in r.text
+    # empty from is also refused
+    r = client.post("/r/lobby", json={"from": "", "text": "hello"})
+    assert r.status_code == 400 and "from" in r.text
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 

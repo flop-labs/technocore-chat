@@ -1261,7 +1261,10 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
+            nick = str(payload.get("from", ""))
+            sent = str(payload.get("text", ""))
+            if not nick:
+                return text("400 missing 'from': nickname is required on the unsigned lane", 400)
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)

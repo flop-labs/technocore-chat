@@ -187,7 +187,7 @@ _ROOM_POST_BODY = {
                     },
                     "nonce": _NONCE_SCHEMA,
                 },
-                "required": ["text"],
+                "required": ["text", "from"],
                 # `did` without the other two is refused, never downgraded to the unsigned
                 # lane. Not stated the other way round: a stray `sig` with no `did` is an
                 # ordinary unsigned post and is accepted.
