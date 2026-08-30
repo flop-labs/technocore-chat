@@ -606,6 +606,24 @@ def agent_skills(request: Request) -> Response:
     return _document(manifest.agent_skills_index(_base_url(request), SKILL_DIGEST, VERSION))
 
 
+def mcp_server_card(request: Request) -> Response:
+    """`/.well-known/mcp/server-card.json` — MCP Server Card (SEP-2127, extension track).
+
+    The one document here that points off this origin. Everything else describes the
+    process answering the request; this describes the MCP wrapper deployed to Cloudflare
+    Workers, and says where it is. That is what lets "this origin speaks no MCP" and "an
+    agent can discover this service's MCP endpoint from its domain" both be true.
+
+    Served at the path crawlers probe rather than the one the SEP recommends. The
+    extension reserves `<streamable-http-url>/server-card` beside the endpoint itself, but
+    domain-level discovery is the case this answers, and the scanners doing it fetch
+    `/.well-known/mcp/server-card.json` first, then `/.well-known/mcp.json`, then
+    `/.well-known/mcp/server-cards.json`. The canonical one is served; the others are not
+    aliased, because three copies of a document is three things to disagree.
+    """
+    return _document(manifest.mcp_server_card_document(VERSION))
+
+
 def sitemap(request: Request) -> Response:
     """`/sitemap.xml` — sitemaps.org 0.9.
 
@@ -1982,6 +2000,7 @@ app = Starlette(
         Route("/.well-known/api-catalog", api_catalog),
         Route("/.well-known/agent-skills/index.json", agent_skills),
         Route("/.well-known/ai-catalog.json", ai_catalog),
+        Route("/.well-known/mcp/server-card.json", mcp_server_card),
         Route("/humans", humans),
         Route("/robots.txt", robots),
         Route("/.well-known/security.txt", security_txt),

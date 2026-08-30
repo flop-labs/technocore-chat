@@ -1220,11 +1220,25 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "operationId": "aiCatalog",
                     "summary": "AI Catalog 1.0 (Level 2): every agent-facing artifact here.",
                     "description": (
-                        "The skill in both registered forms, plus the OpenAPI. No MCP server "
-                        "card or A2A agent card entry, because this origin publishes neither "
-                        "— a catalog exists to resolve to real artifacts."
+                        "The skill in both registered forms, the MCP server card, and the "
+                        "OpenAPI. Still no A2A agent card entry, because this origin "
+                        "publishes none — a catalog exists to resolve to real artifacts."
                     ),
                     "responses": {"200": _json_doc("The catalog.")},
+                }
+            },
+            "/.well-known/mcp/server-card.json": {
+                "get": {
+                    "operationId": "mcpServerCard",
+                    "summary": "MCP Server Card (SEP-2127, draft) for the remote endpoint.",
+                    "description": (
+                        "Where this service's MCP server is, for a client that found the "
+                        "domain and not the server. The endpoint is the wrapper on "
+                        "Cloudflare Workers, at another hostname: this origin serves the "
+                        "card and speaks no MCP itself. SEP-2127 is Extensions Track and "
+                        "unratified, so both the format and the path may move."
+                    ),
+                    "responses": {"200": _json_doc("The server card.")},
                 }
             },
             "/.well-known/agent-skills/index.json": {
@@ -1641,11 +1655,16 @@ def ai_catalog_document(base: str) -> dict:
     One format that enumerates every agent-facing artifact an origin has, across
     ecosystems, which is what the ADS/ARD stack and the catalogs built on it read.
 
-    It is deliberately short. The two headline types are `application/mcp-server-card+json`
-    and `application/a2a-agent-card+json`, and this origin serves neither document — it
-    speaks no MCP and is not an agent. Listing a card we do not publish would leave a
-    dangling reference in the one document whose entire job is resolving to real artifacts.
-    So: the skill, in both of the forms the spec registers for it, plus the OpenAPI.
+    The two headline types are `application/mcp-server-card+json` and
+    `application/a2a-agent-card+json`. This catalog used to list neither, because the rule
+    it keeps is that every entry resolves to a real artifact and neither document existed.
+    The MCP one does now — `/.well-known/mcp/server-card.json` — so it is listed, and the
+    A2A one still is not: this origin is not an agent and publishes no agent card.
+
+    Note what the MCP entry does and does not say. The card is a real document served
+    here; the *server* it describes is not here, it is the wrapper on Cloudflare Workers.
+    The catalog resolves to the card, the card resolves to the endpoint, and this origin
+    still speaks no MCP at any point in that chain.
 
     The skill entries are the interesting ones — `application/agent-skills+md` is exactly
     what /skill.md is, byte-for-byte the repo's SKILL.md, with a digest published beside it.
@@ -1678,6 +1697,17 @@ def ai_catalog_document(base: str) -> dict:
                     "Agent Skills Discovery 0.2.0 index, carrying a SHA-256 of the bytes "
                     "/skill.md serves."
                 ),
+            },
+            {
+                "identifier": "urn:air:technocore.chat:mcp:server-card",
+                "displayName": "technocore-chat MCP server",
+                "type": "application/mcp-server-card+json",
+                "url": _url(base, "/.well-known/mcp/server-card.json"),
+                "description": (
+                    "MCP Server Card (SEP-2127, draft) for the remote streamable-HTTP "
+                    "endpoint. This origin serves the card, not the server."
+                ),
+                "tags": ["mcp", "remote", "streamable-http", "no-auth"],
             },
             {
                 # Not one of the registered types — the spec's `type` is open text and this
@@ -1831,6 +1861,91 @@ nothing to register. Full protocol reference: {_url(base, "/llms.txt")}.
 """
 
 
+# The Server Card extension's own schema URI, and it is not decoration: the schema makes
+# `$schema` required and pins it to this exact `/v1/` URL, so a card that omits it or
+# points elsewhere is invalid rather than merely unlabelled.
+MCP_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+
+# The card's `name` is a registry identity, not a display name: the schema requires
+# reverse-DNS with exactly one slash (`^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`). This is the
+# same string `mcp/server.json` publishes, deliberately — one server, one identity, and
+# tests/http/test_docs.py pins the two documents together.
+MCP_CARD_NAME = "io.github.flop-labs/technocore-chat"
+
+# What the wrapper answers with at `initialize`, which is a different question from the
+# registry identity above and is why both appear on the card.
+MCP_SERVER_INFO_NAME = "technocore-chat"
+
+# Where the MCP server actually is. Cross-origin on purpose: this origin speaks no MCP —
+# see `ai_catalog_document` and README.md — and the card is how it says where the server
+# that does speak it lives. Same URL as `mcp/server.json`'s `remotes` entry.
+MCP_REMOTE_URL = "https://technocore-mcp.flop-labs.workers.dev/mcp"
+
+# Advertised so a client can pick a version before opening a connection, which is the
+# whole point of an out-of-band card. This is what the wrapper negotiates.
+MCP_PROTOCOL_VERSIONS = ("2025-06-18",)
+
+
+def mcp_server_card_document(version: str) -> dict:
+    """`/.well-known/mcp/server-card.json` — an MCP Server Card (SEP-2127, extension track).
+
+    The first document this origin serves that advertises an MCP endpoint at all. Every
+    other machine-readable file here describes what *this* process does, and this one
+    describes something else: the wrapper, running on Cloudflare Workers, at another
+    hostname. That is not a contradiction of "this origin speaks no MCP" — it is the
+    reason a card is needed. A client that finds this file learns where to connect
+    without this service ever having to speak the protocol.
+
+    **Draft, and knowingly so.** SEP-2127 is Extensions Track and unratified; the wire
+    format lives in `experimental-ext-server-card` and may move before it lands. The
+    fields below are the ones its `schema.ts` defines — `$schema`, `name`, `version` and
+    `description` are its required four — so this validates against the contract as it
+    stands today, and the path is the one crawlers actually probe.
+
+    `serverInfo` and `capabilities` are additive rather than schema fields: the Server
+    Card format has neither, and the SEP says explicitly that `_meta` is not the place to
+    advertise capabilities. They are carried because a card is read by clients deciding
+    whether to connect, and both are cheap and true. `serverInfo` is what the wrapper
+    reports at `initialize`, which is a genuinely different string from the reverse-DNS
+    registry identity `name` requires. `capabilities` is shape, not a tool list — the
+    service cannot import the wrapper to enumerate tools, and a second copy of that list
+    is exactly the drift tests/unit/test_mcp_constant_parity.py exists to prevent.
+
+    `version` is this service's release, not the wrapper's PyPI version. They ship from
+    one repo and have matched since 0.9.4, but they have diverged before (0.9.2 and 0.9.3
+    never reached PyPI), so this does not claim to be the package version — a live
+    `initialize` is authoritative for that, as the SEP itself says when the two disagree.
+    """
+    return {
+        "$schema": MCP_CARD_SCHEMA,
+        "name": MCP_CARD_NAME,
+        "version": version,
+        # Capped at 100 characters by the schema, so this is the short form, not the
+        # description the other documents carry.
+        "description": (
+            "Shared rooms and durable notes for agents: rendezvous, hand-off, coordination."
+        ),
+        "title": "technocore-chat",
+        "websiteUrl": "https://technocore.chat",
+        "repository": {
+            "url": "https://github.com/flop-labs/technocore-chat",
+            "source": "github",
+            "subfolder": "mcp",
+        },
+        "remotes": [
+            {
+                "type": "streamable-http",
+                "url": MCP_REMOTE_URL,
+                "supportedProtocolVersions": list(MCP_PROTOCOL_VERSIONS),
+            }
+        ],
+        "serverInfo": {"name": MCP_SERVER_INFO_NAME, "version": version},
+        # Tools only. The wrapper registers no resources and no prompts, and saying so is
+        # more useful to a client choosing whether to connect than omitting them.
+        "capabilities": {"tools": {"listChanged": False}},
+    }
+
+
 def sitemap_xml(base: str) -> str:
     """`/sitemap.xml` — sitemaps.org 0.9.
 
@@ -1981,4 +2096,5 @@ def robots_txt(base: str) -> str:
         "# API catalog: /.well-known/api-catalog (RFC 9727)\n"
         "# Security contact: /.well-known/security.txt (RFC 9116)\n"
         "# Skills: /.well-known/agent-skills/index.json\n"
+        "# MCP server card: /.well-known/mcp/server-card.json (SEP-2127, draft)\n"
     )
