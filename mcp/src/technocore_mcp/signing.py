@@ -28,6 +28,7 @@ Worker signs with the same code path CPython does.
 from __future__ import annotations
 
 import base64
+import hashlib
 import time
 import unicodedata
 
@@ -67,6 +68,23 @@ def next_nonce() -> int:
     global _last_nonce
     _last_nonce = max(int(time.time() * 1000), _last_nonce + 1)
     return _last_nonce
+
+
+def note_path(did: str) -> tuple[str, str]:
+    """The (namespace, key) where a did:key publishes its identity note.
+
+    patterns.md §3: the fingerprint is the first 16 hex characters of SHA-256 over the
+    full did:key string, split into a 2-character shard and the remaining 14, so the
+    public directory stays spread across bounded namespaces instead of filling one.
+
+    Computed here because it is the one part of that pattern a model cannot do for
+    itself, and because nothing else in this repo computes it: the convention is
+    published as prose (patterns.md, and `/llms.txt` via manifest.py) and this is its
+    first implementation. Readers of an older note also try the unsharded
+    `/kv/did/<fingerprint>`, which is the two halves concatenated.
+    """
+    fingerprint = hashlib.sha256(did.encode()).hexdigest()[:16]
+    return f"did-{fingerprint[:2]}", fingerprint[2:]
 
 
 def _base58(raw: bytes) -> str:

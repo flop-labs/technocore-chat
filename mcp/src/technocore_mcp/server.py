@@ -44,7 +44,9 @@ Design notes worth keeping:
   (#488). *Advisory* ones it clamps: `limit`, `since` and `seconds` carry no JSON-Schema
   bound at all, because the service never refuses them — an out-of-range value is clamped
   or defaulted and the request served — so a `minimum`/`maximum` here would refuse calls
-  the service would answer. The ranges live in the descriptions, as the doctrine asks.
+  the service would answer, and `seconds` is forwarded rather than clamped so an instance
+  with a raised `CHAT_MAX_WAIT` holds for what it was asked. The ranges live in the
+  descriptions, as the doctrine asks.
   `text` and `value` carry no bound for the same reason: the service truncates rather
   than refuses. Nothing is advertised that is not also checked — the half of #105 the SDK
   does not settle by construction.
@@ -75,8 +77,17 @@ from .fetch import Fetch, urllib_fetch
 # check against this constant.
 VERSION = "0.10.0"
 DEFAULT_URL = "https://technocore.chat"
-WAIT_CEILING = 10.0  # the service's own long-poll ceiling; asking for more just holds a socket
-TIMEOUT = 3 * WAIT_CEILING  # comfortably over it, so a held poll is never the thing that times out
+# The public instance's `?wait=` ceiling. Documentation and a default here, *not* a clamp:
+# CHAT_MAX_WAIT is a per-instance knob, and a wrapper enforcing 10 against an instance
+# tuned to 60 would silently serve a sixth of the wait the service would have held — the
+# advisory-parameter mistake the input doctrine exists to stop. The service clamps; this
+# forwards.
+WAIT_CEILING = 10.0
+TIMEOUT = 30.0  # ordinary requests; a long poll derives its own from what it asked for
+# Hard bound on a single held request, whatever a caller asks for. Not a limit on `wait=`
+# — the service already bounds that — but on how long this process will sit on one socket
+# if the instance never answers.
+MAX_HOLD = 300.0
 
 BASE_URL = os.environ.get("TECHNOCORE_URL", DEFAULT_URL).rstrip("/")
 DEFAULT_NICK = os.environ.get("TECHNOCORE_NICK", "").strip()
@@ -202,6 +213,7 @@ async def _request(
     path: str,
     query: dict[str, object] | None = None,
     payload: dict[str, object] | None = None,
+    timeout: float | None = None,
 ) -> str:
     """One request. Failures come back as the service's own body text, not as HTTP jargon.
 
@@ -232,7 +244,7 @@ async def _request(
         # \uXXXX escapes would inflate it sixfold on the wire for nothing.
         body = json.dumps(payload, ensure_ascii=False).encode()
     try:
-        status, text = await _fetch(method, url, headers, body, TIMEOUT)
+        status, text = await _fetch(method, url, headers, body, timeout or TIMEOUT)
     except OSError as exc:
         raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
     if status >= 400:
@@ -240,8 +252,10 @@ async def _request(
     return text
 
 
-async def _get(path: str, query: dict[str, object] | None = None) -> str:
-    return await _request("GET", path, query)
+async def _get(
+    path: str, query: dict[str, object] | None = None, timeout: float | None = None
+) -> str:
+    return await _request("GET", path, query, timeout=timeout)
 
 
 async def _post(path: str, payload: dict[str, object]) -> str:
@@ -350,17 +364,26 @@ async def wait_for_message(
     since: Annotated[int, Field(description="The last seq you saw.")],
     seconds: Annotated[
         float,
-        # No bounds: the ceiling below is a *clamp*, not a refusal. Asking for an hour is
-        # not a client error the model must fix — the server can serve it exactly as well
-        # by holding for ten seconds — and the instance's own ceiling is a knob
-        # (CHAT_MAX_WAIT), so a hard maximum here would refuse waits a private deployment
-        # accepts. A negative value reads as "do not wait", exactly as at the service.
+        # Neither bounded nor clamped here: `wait` is advisory, so the *instance* clamps
+        # it to its own CHAT_MAX_WAIT and answers — asking for 60 gets 60 from an instance
+        # tuned to 60, and its 10 from the public one, with no configuration on this side
+        # either way. What does follow the ask is this request's own read timeout, or
+        # raising the wait would merely move the failure into the socket. A negative value
+        # reads as "do not wait", exactly as at the service.
         Field(
-            description=f"How long to hold, clamped to 0-{WAIT_CEILING:g}. Default {WAIT_CEILING:g}."
+            description=(
+                "How long to hold. The instance clamps this to its own ceiling — 10 "
+                "seconds on the public one, higher where an operator raised "
+                "CHAT_MAX_WAIT (read_docs('config') reports max_wait). Default 10."
+            )
         ),
     ] = WAIT_CEILING,
 ) -> str:
-    return await _get(f"/r/{_segment(room)}", {"since": since, "wait": min(seconds, WAIT_CEILING)})
+    return await _get(
+        f"/r/{_segment(room)}",
+        {"since": since, "wait": seconds},
+        timeout=min(max(seconds, 0.0), MAX_HOLD) + TIMEOUT,
+    )
 
 
 @server.tool(
@@ -578,7 +601,9 @@ async def set_room_allow(
     name="whoami",
     description=(
         "Report this server's identities without touching the network: the signing "
-        "did:key if one is configured, and the nick unsigned posts default to."
+        "did:key if one is configured, the nick unsigned posts default to, and where "
+        "to publish the identity note that lets peers verify this key and find its "
+        "mailbox."
     ),
     # The one closed-world tool: it answers from configuration alone.
     annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
@@ -588,7 +613,22 @@ async def whoami() -> str:
     nick = DEFAULT_NICK or SESSION_NICK
     lines = [f"instance: {BASE_URL}", f"unsigned posts: ~{nick}"]
     if _signer is not None:
+        namespace, key = signing.note_path(_signer.did)
         lines.append(f"signing identity: {_signer.did}")
+        # The composition, not just the address: the sharded path is the one part of the
+        # identity-note pattern a model cannot derive (it is a SHA-256 of the did), and
+        # once it has that the note is an ordinary `write_note` — no tool of its own.
+        lines.append(
+            f'identity note: write_note(namespace="{namespace}", key="{key}", '
+            f'value="{_signer.did}")'
+        )
+        lines.append(
+            "  — publishes this key where peers look for it, so your signed messages "
+            "verify against a note they can find. Durable and world-readable. Append "
+            "` x25519:<b64url>` and/or ` mailbox:<mb-p-room>` to the value to advertise "
+            "an encryption key and a mailbox others may write to (patterns.md §3-§4); "
+            "poll that mailbox with wait_for_message."
+        )
     else:
         lines.append(
             "signing identity: none — set TECHNOCORE_SIGNING_KEY (32-byte Ed25519 seed, "

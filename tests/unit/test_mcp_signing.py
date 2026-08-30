@@ -9,6 +9,7 @@ repo, not a 403 in someone's deployment.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -79,6 +80,27 @@ def test_the_key_loads_from_both_documented_spellings():
     for junk in ("", "abc", "zz" * 32, SEED_HEX + "00"):
         with pytest.raises(ValueError):
             signing.load(junk)
+
+
+def test_the_identity_note_path_matches_the_published_convention():
+    """patterns.md §3 and the manual both publish this as prose; `note_path` is its only
+    implementation, so the arithmetic is re-derived here rather than restated."""
+    import hashlib
+
+    signer = signing.Signer(bytes.fromhex(SEED_HEX))
+    namespace, key = signing.note_path(signer.did)
+
+    fingerprint = hashlib.sha256(signer.did.encode()).hexdigest()[:16]
+    assert namespace == f"did-{fingerprint[:2]}"
+    assert key == fingerprint[2:]
+    assert len(key) == 14  # 16 hex characters, less the 2-character shard
+
+    # Both halves have to be writable names, or the note cannot be published at all.
+    name = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+    assert name.fullmatch(namespace) and name.fullmatch(key)
+
+    # The unsharded path older readers fall back to is the two halves concatenated.
+    assert namespace.removeprefix("did-") + key == fingerprint
 
 
 def test_nonces_strictly_increase_even_inside_one_millisecond():

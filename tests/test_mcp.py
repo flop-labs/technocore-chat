@@ -468,18 +468,39 @@ def test_read_docs_reaches_all_four_pages(mcp):
     assert "READ    GET /r/<room>" in text_of(mcp.call("read_docs", {}))  # manual by default
 
 
-def test_wait_for_message_bounds_its_own_wait(mcp):
-    """The service caps wait= at 10s; a client asking for an hour must not park a socket
-    for one — and must still get a well-formed empty reply. The ceiling is a clamp rather
-    than a schema maximum on purpose: an over-large wait is a request the server can serve
-    exactly as well by holding for ten seconds, not a mistake the model has to correct."""
+def test_wait_for_message_forwards_the_ask_and_lets_the_instance_clamp(mcp, monkeypatch):
+    """`wait` is an advisory parameter: the service clamps it to its own CHAT_MAX_WAIT and
+    answers, so the wrapper forwards rather than imposing a second ceiling of its own.
+    Clamping at 10 here would silently serve a sixth of the hold an instance tuned to 60
+    was asked for, while changing nothing about the public instance — which does the
+    clamping either way."""
     mcp.call("say", {"room": "lobby", "text": "one", "nick": "bot"})
     body = text_of(mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": 0}))
     assert "no new messages" in body
     assert "wait=0" in mcp.asked[-1]
 
-    mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": 3600})
-    assert f"wait={mcp.module.WAIT_CEILING:g}" in mcp.asked[-1]
+    # An hour, forwarded as asked — and this instance still answers at its own ceiling
+    # rather than holding the socket, which is what makes forwarding safe.
+    asked = mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": 3600})
+    assert asked.is_error is False
+    assert "wait=3600" in mcp.asked[-1]
+
+    # The read timeout follows the ask, or raising the wait would merely move the failure
+    # out of the service and into the socket — and it is bounded, so one absurd ask cannot
+    # park this process for a day.
+    held: list[float] = []
+
+    async def record(method, url, headers, body, timeout):
+        held.append(timeout)
+        return 200, "no new messages"
+
+    monkeypatch.setattr(mcp.module, "_fetch", record)
+    mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": 60})
+    mcp.call("read_room", {"room": "lobby"})
+    mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": 86400})
+    assert held[0] == 60 + mcp.module.TIMEOUT
+    assert held[1] == mcp.module.TIMEOUT  # an ordinary read is unaffected
+    assert held[2] == mcp.module.MAX_HOLD + mcp.module.TIMEOUT
 
 
 # ------------------------------------------------------------------ the URLs built
@@ -929,6 +950,32 @@ def test_whoami_reports_the_identity_without_touching_the_network(mcp, monkeypat
 
     did = with_key(mcp, monkeypatch)
     assert did in text_of(mcp.call("whoami", {}))
+
+
+def test_whoami_hands_out_an_identity_note_call_that_works(mcp, monkeypatch):
+    """The point of putting the path in `whoami` rather than in a tool of its own: what
+    it reports is a `write_note` call, and running it publishes the identity where a peer
+    following patterns.md §3 would look. This test is the composition, end to end."""
+    import re
+
+    did = with_key(mcp, monkeypatch)
+    reported = text_of(mcp.call("whoami", {}))
+    call = re.search(r'write_note\(namespace="([^"]+)", key="([^"]+)"', reported)
+    assert call is not None, reported
+    namespace, key = call.groups()
+
+    published = mcp.call(
+        "write_note",
+        {"namespace": namespace, "key": key, "value": f"{did} mailbox:mb-p-secret"},
+    )
+    assert published.is_error is False, text_of(published)
+
+    # A peer that computed the same fingerprint from the did alone finds it.
+    from technocore_mcp import signing
+
+    assert signing.note_path(did) == (namespace, key)
+    found = text_of(mcp.call("read_note", {"namespace": namespace, "key": key}))
+    assert did in found and "mailbox:mb-p-secret" in found
 
 
 def test_configure_accepts_and_clears_a_signing_key(mcp, monkeypatch):
