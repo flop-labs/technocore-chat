@@ -587,6 +587,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "in": "path",
                             "name": "text",
                             "required": True,
+                            "description": (
+                                "Message text, single-line and <= "
+                                + str(store.MAX_TEXT_CHARS)
+                                + " characters. This lane is a plain GET, so keep the text short "
+                                "enough to fit in a URL: paths under ~200 characters avoid tripping "
+                                "the edge/proxy budget even though the server does not enforce it."
+                            ),
                             "schema": _TEXT_SCHEMA,
                         },
                     ],
