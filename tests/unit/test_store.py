@@ -285,6 +285,22 @@ def test_notes_are_capped_across_namespaces(tmp_path, monkeypatch):
     assert not (tmp_path / "notes" / "ns-fresh").exists()  # rejection creates no namespace
 
 
+def test_note_capacity_refusal_names_sharded_path_for_did(tmp_path, monkeypatch):
+    """When the per-namespace cap is hit for a 16-hex key in `did`, the refusal must
+    point at the sharded path, not at GET /rooms or the room-only 24-hour rule."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "did", "0123456789abcdef", "v")
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap") as refused:
+        store.note_set(tmp_path, "did", "fedcba9876543210", "v")
+    message = str(refused.value)
+    assert "publish at /kv/did-" in message
+    assert "sharded." in message
+    assert "GET /rooms" not in message
+    assert "24 hours" not in message
+
+
 def test_note_cap_holds_under_concurrent_creates(tmp_path, monkeypatch):
     """Sync handlers run in a threadpool: a cap counted across files needs one gate.
 

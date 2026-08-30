@@ -460,6 +460,11 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
 # the string: 350 ns of hashing becomes a 36 ns cache hit, which is how the whole resolution
 # lands under the budget rather than over it. Sized like `_listable`, and for the same reason
 # — names are caller-supplied, so a flood of fresh ones must cost misses and never memory.
+def _is_did_note_namespace(ns_dir: Path) -> bool:
+    """Return True only for the `did` namespace directory directly under `notes/`."""
+    return ns_dir.name == "did" and ns_dir.parent.name == "notes"
+
+
 @lru_cache(maxsize=MAX_ROOMS)
 def _shard(name: str, key: bytes | None = None) -> str:
     """The directory component `name` hashes into — two hex characters, `00` to `ff`."""
@@ -535,6 +540,11 @@ def _resolve(d: Path, name: str, suffix: str) -> Path:
 def room_path(root: Path, room: str) -> Path:
     """Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`."""
     return _resolve(root / "rooms", valid_name(room), ".jsonl")
+
+
+def _is_did_note_namespace(ns_dir: Path) -> bool:
+    """Return True only for the `did` namespace directory directly under `notes/`."""
+    return ns_dir.name == "did" and ns_dir.parent.name == "notes"
 
 
 def _note_ns_dir(root: Path, ns: str) -> Path:
@@ -1803,6 +1813,21 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
     if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
+        if ns_dir.name == "did" and _is_did_note_namespace(ns_dir):
+            key = path.name.removesuffix(".txt")
+            try:
+                shard = _shard(ns_dir.name, key.encode("utf-8"))
+            except Exception:
+                shard = None
+            guide = (
+                f"publish at /kv/did-{shard}/{key} instead — the same fingerprint, sharded."
+                if shard
+                else "overwrite a note you already own — idle notes are reclaimed after 7 days."
+            )
+            raise StoreError(
+                f"note limit reached ({MAX_NOTES_PER_NS} is the cap, and this would be a new one). "
+                f"Existing notes still accept writes, but a fresh identity has nothing to reuse — {guide}"
+            )
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     _check_note_total(root)
 
