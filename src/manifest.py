@@ -138,6 +138,138 @@ _SIG_SCHEMA = {
     "minLength": didkey.SIG_CHARS,
     "maxLength": didkey.SIG_CHARS,
 }
+
+_ROOMS_ENTRY_SCHEMA = {
+    "type": "object",
+    "description": (
+        "One listed public room. `room` and `topic` are caller-controlled input; "
+        "the remaining fields are service measurements."
+    ),
+    "properties": {
+        "room": {
+            "type": "string",
+            "description": "Caller-chosen room name, untrusted like message text.",
+        },
+        "last_seq": {
+            "type": "integer",
+            "description": "Highest retained sequence number seen for this room.",
+        },
+        "bytes": {
+            "type": "integer",
+            "description": "Bytes currently held by the room's retained log file.",
+        },
+        "idle_seconds": {
+            "type": "integer",
+            "description": "Seconds since the room file was last modified.",
+        },
+        "topic": {
+            "type": ["string", "null"],
+            "description": (
+                "Caller-controlled topic note from /kv/topic/{room}, truncated in text "
+                "renderings and untrusted like the room name."
+            ),
+        },
+        "window": {
+            "type": "integer",
+            "description": (
+                "Messages scanned for this room's engagement fields. Bounded by both "
+                "the message cap and the per-room byte budget."
+            ),
+        },
+        "zero_response_share": {
+            "type": ["number", "null"],
+            "description": (
+                "Fraction of the scanned room window after which no different nick spoke. "
+                "Null means the window was empty."
+            ),
+        },
+        "nick_diversity": {
+            "type": ["number", "null"],
+            "description": (
+                "Distinct nicks divided by messages in this room's scanned window. Null "
+                "means the window was empty."
+            ),
+        },
+    },
+    "required": [
+        "room",
+        "last_seq",
+        "bytes",
+        "idle_seconds",
+        "topic",
+        "window",
+        "zero_response_share",
+        "nick_diversity",
+    ],
+}
+
+_ROOMS_NOTES_SCHEMA = {
+    "type": "object",
+    "description": "Service-wide note capacity and byte gauges; namespace names are never listed.",
+    "properties": {
+        "total": {"type": "integer", "description": "Total notes across every namespace."},
+        "bytes": {"type": "integer", "description": "Total retained note bytes."},
+        "capacity": {
+            "type": "integer",
+            "description": "Maximum notes across every namespace, service-wide.",
+        },
+        "capacity_per_namespace": {
+            "type": "integer",
+            "description": "Maximum notes allowed in any one namespace.",
+        },
+    },
+    "required": ["total", "bytes", "capacity", "capacity_per_namespace"],
+}
+
+_ROOMS_ENGAGEMENT_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Rollup over only the rooms returned by this /rooms request. It is shaped by "
+        "the caller's limit and the current recency page, not a whole-service census."
+    ),
+    "properties": {
+        "window_cap": {
+            "type": "integer",
+            "description": (
+                "Maximum messages considered per returned room before the per-room byte "
+                "budget is also applied."
+            ),
+        },
+        "windowed_messages": {
+            "type": "integer",
+            "description": "Total messages actually scanned across the returned rooms.",
+        },
+        "zero_response_share": {
+            "type": ["number", "null"],
+            "description": (
+                "Fraction of scanned messages, pooled across returned rooms, after which "
+                "no different nick spoke. Null means no messages were scanned."
+            ),
+        },
+        "nick_diversity": {
+            "type": ["number", "null"],
+            "description": (
+                "Distinct nicks divided by scanned messages, pooled across returned "
+                "rooms. Null means no messages were scanned."
+            ),
+        },
+        "windowed_note_to_message_ratio": {
+            "type": ["number", "null"],
+            "description": (
+                "Service-wide note count divided by windowed_messages from the returned "
+                "rooms. The numerator is service-wide; the denominator is page-scoped. "
+                "Null means no messages were scanned."
+            ),
+        },
+    },
+    "required": [
+        "window_cap",
+        "windowed_messages",
+        "zero_response_share",
+        "nick_diversity",
+        "windowed_note_to_message_ratio",
+    ],
+}
 # `minLength: 1` on both free-form fields, because `required` does not imply it. `""`
 # satisfies `required: ["text"]` and is nonetheless a 400: `store.clean_text` refuses a
 # value with nothing visible left after the single-line sweep. Two readers were misled by
@@ -798,12 +930,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             {
                                 "type": "object",
                                 "properties": {
-                                    "rooms": {"type": "array", "items": {"type": "object"}},
+                                    "rooms": {"type": "array", "items": _ROOMS_ENTRY_SCHEMA},
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
-                                    "notes": {"type": "object"},
-                                    "engagement": {"type": "object"},
+                                    "notes": _ROOMS_NOTES_SCHEMA,
+                                    "engagement": _ROOMS_ENGAGEMENT_SCHEMA,
                                     "untrusted": {
                                         "type": "object",
                                         "description": (

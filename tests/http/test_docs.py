@@ -1173,6 +1173,56 @@ def test_every_document_scopes_trust_to_caller_bytes_not_to_message_bodies(clien
     assert "untrusted" in schema["properties"], "the JSON field has to be in the contract"
 
 
+def test_rooms_json_schema_names_the_engagement_shapes():
+    """#334: /rooms?format=json serves these fields, so OpenAPI has to name them.
+
+    A bare ``{"type": "object"}`` is not enough for an agent or generated client to know
+    which engagement fields are caller-scoped, service-wide, nullable, or untrusted.
+    """
+    pytest.importorskip("fcntl")
+    import manifest
+
+    spec = manifest.openapi_document("http://testserver", "test", 2048, 1.0)
+    schema = spec["paths"]["/rooms"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]
+
+    room = schema["properties"]["rooms"]["items"]
+    assert {
+        "room",
+        "last_seq",
+        "bytes",
+        "idle_seconds",
+        "topic",
+        "window",
+        "zero_response_share",
+        "nick_diversity",
+    } <= set(room["required"])
+    assert "caller-controlled" in room["description"]
+    assert "per-room byte budget" in room["properties"]["window"]["description"]
+
+    notes = schema["properties"]["notes"]
+    assert {
+        "total",
+        "bytes",
+        "capacity",
+        "capacity_per_namespace",
+    } <= set(notes["required"])
+    assert "namespace names are never listed" in notes["description"]
+
+    engagement = schema["properties"]["engagement"]
+    assert {
+        "window_cap",
+        "windowed_messages",
+        "zero_response_share",
+        "nick_diversity",
+        "windowed_note_to_message_ratio",
+    } <= set(engagement["required"])
+    assert "rooms returned by this /rooms request" in engagement["description"]
+    ratio = engagement["properties"]["windowed_note_to_message_ratio"]["description"]
+    assert "numerator is service-wide" in ratio and "denominator is page-scoped" in ratio
+
+
 def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
     """The metadata is what a machine reads *instead* of the manual, so the byte strings a
     signature is computed over have to be in it — a signature over the wrong concatenation
