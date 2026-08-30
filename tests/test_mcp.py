@@ -467,6 +467,32 @@ def test_an_integral_float_is_an_acceptable_integer(mcp, monkeypatch):
     assert fraction["error"]["code"] == protocol.INVALID_PARAMS
 
 
+def test_mcp_fetch_does_not_emit_trailing_question_mark_when_query_is_empty(
+    mcp, monkeypatch
+):
+    """When every optional query param is omitted, _fetch must not emit a bare '?'.
+
+    Regression test for #494.
+    """
+    server, _ = mcp
+    asked = []
+    inner = urllib.request.urlopen
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: (asked.append(request.full_url), inner(request, timeout))[1],
+    )
+    for tool, args in (
+        ("read_room", {"room": "lobby"}),
+        ("list_rooms", {}),
+        ("discover_rooms", {}),
+    ):
+        asked.clear()
+        reply = call(server, tool, args)
+        assert reply["result"]["isError"] is False, text_of(reply)
+        assert not asked[-1].endswith("?"), asked[-1]
+
+
 def test_by_position_params_are_rejected_rather_than_guessed(mcp):
     server, protocol = mcp
     reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["say"]})

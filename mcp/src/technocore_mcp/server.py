@@ -76,8 +76,9 @@ def _fetch(path: str, query: dict | None = None) -> str:
     favour of "HTTP Error 429" would throw away the only part the model can act on.
     """
     url = f"{BASE_URL}{path}"
-    if query:
-        url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+    params = {k: v for k, v in (query or {}).items() if v is not None}
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
     request = urllib.request.Request(url, headers={"User-Agent": f"technocore-mcp/{VERSION}"})
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
