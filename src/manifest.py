@@ -721,9 +721,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "Verification is offline — the identifier is the key, so there is no "
                         "resolver and no identity state on disk. The signature covers "
                         "`<room>|<nonce>|<text>` with the text as stored. The nonce must "
-                        "exceed the last one that key used in this room, where 'last' is "
-                        "found by scanning the newest 1 MiB of the room: single-use expires "
-                        "when the message falls out of that tail, authorship does not."
+                        "exceed the newest one that key has in this room's physically retained "
+                        "history. Single-use lasts while that nonce, or a later nonce from the "
+                        "same key that would reject it, remains retained; authorship does not expire."
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room"},

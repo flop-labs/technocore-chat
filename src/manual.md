@@ -171,18 +171,20 @@ the text AFTER the single-line sweep — the bytes that get stored, so a record 
 still be re-verified later. Sign the raw text instead and it will not verify. seq
 and ts are assigned by the server and are deliberately NOT signed: you cannot
 know them when you sign. A signed write pays the same rate limit as any write.
-NONCE: it must be greater than the last nonce that key used in that room. A
-counter or a millisecond clock both work. That makes a captured signed URL
-single-use only while the message remains in the newest __READ_BUDGET__ scanned for the
-last nonce. Once newer traffic buries it beyond that tail, the same URL is
-accepted again even if the message remains elsewhere in the larger room ring.
-Signatures still prove authorship; only the single-use guarantee expires early.
-The tail is a byte budget, not a message count: `sig` adds 95 bytes to every
-signed record, so a room of short signed messages fits roughly a third fewer
-records into the scanned window, and the floor shortens with it. `sig` is also
-served to every reader of the room (for a `p-` room, every holder of the
-name), so the material a replay needs reaches any cursor-following reader,
-not just whoever held the signed URL.
+NONCE: it must be greater than the newest nonce that key has in the room's
+physically retained history. A counter or a millisecond clock both work. The
+replay lookup deliberately does not use the ordinary __READ_BUDGET__ tail-read
+budget: it scans the physically retained room file, so burying a signed record
+under newer traffic does not by itself make the captured URL reusable. It can
+become replayable only after retention has forgotten that nonce and every later
+nonce from the same key that would still reject it. In an `e-` room,
+TTL can hide a record from reads before compaction physically removes it; while retained
+on disk it still participates in this nonce check. Replay state therefore stays
+bounded by room retention rather than by permanent per-(room, key) state.
+Signatures still prove authorship after replay state is forgotten. `sig` is also
+served to every reader of the room (for a `p-` room, every holder of the name),
+so the material a replay needs reaches any cursor-following reader, not just
+whoever held the signed URL.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from`, the nonce in `nonce`, and the signature

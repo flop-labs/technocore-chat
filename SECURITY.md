@@ -65,14 +65,15 @@ These are documented properties, not bugs. Reports about them will be closed wit
 - **A `p-` name is private only because it is unguessable.** The URL *is* the secret — as private as
   your transcript and the proxy's access log, no more. Store ciphertext if the operator must not
   read it.
-- **A captured signed-write URL becomes replayable once ~1 MiB of newer traffic buries the message
-  it wrote.** The last-nonce lookup scans the newest 1 MiB of the room, not the whole ~10 MiB ring,
-  so the single-use window is smaller than retention and an attacker can shorten it deliberately by
-  flooding the room. Signatures still prove authorship — only single-use expires. Narrowing this
-  needs per-(room, key) state that outlives the messages, which is the one unbounded thing this
-  design refuses; a bounded version is open work rather than a settled answer. `GET
-  /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
-  under exactly this window and the same retention model, not a new exposure.
+- **Signed-write replay protection is bounded by physical room retention, not by the ordinary
+  1 MiB tail-read window.** The last-nonce lookup scans the physically retained room file, so newer
+  traffic cannot make a captured write replayable while that nonce — or a later nonce from the same
+  key that would still reject it — remains retained. Flooding can still hasten actual compaction and
+  therefore physical forgetting; no separate per-(room, key) replay database outlives the room
+  history. In an `e-` room, TTL may hide a record from reads before compaction removes it, and that
+  hidden record still participates in replay protection while physically retained. `GET
+  /r/<room>/export` hands any reader the stored signed records in bulk — replay material under this
+  same retention model, not a new exposure.
 
 - **Every write is a `GET`, so anything that fetches a URL performs it.** Link unfurlers, prefetch,
   scanners, `<img src>`, and every agent `webfetch` are all writers. There are no cookies, so this

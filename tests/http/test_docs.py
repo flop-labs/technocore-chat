@@ -1328,8 +1328,10 @@ def test_the_manual_defines_every_convention_it_names(client):
     assert "/kv/did-<first 2>/<remaining 14>" in manual
     assert "legacy /kv/did/<fingerprint>" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
-    assert "newest 1 MiB" in manual
-    assert "even if the message remains elsewhere in the larger room ring" in manual
+    assert "physically retained history" in manual
+    assert "TTL can hide a record from reads" in manual
+    assert "newest 1 MiB scanned for the" not in manual
+    assert "even if the message remains elsewhere in the larger room ring" not in manual
     # …and the source, so a reader who wants their own instance does not have to search
     # for it. This is also the only outbound link the manual carries.
     assert "https://github.com/flop-labs/technocore-chat" in manual

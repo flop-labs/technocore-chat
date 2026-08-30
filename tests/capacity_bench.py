@@ -261,10 +261,10 @@ def _build_nonce_room(root: Path, room: str, records: int, mention: str | None =
 
 
 def _parse_every(root: Path, room: str, did: str) -> int | None:
-    """`_last_nonce` before the bytes-level reject. Kept here because a baseline that only
-    exists in git history stops being run."""
+    """`_last_nonce` without the bytes-level reject, over the same retained-file bound."""
     with store.room_path(root, room).open("rb") as f:
-        for raw in store.reverse_lines(f):
+        size = os.fstat(f.fileno()).st_size
+        for raw in store.reverse_lines(f, max_bytes=size):
             rec = store._parse(raw)
             if rec is not None and rec.get("from") == did and isinstance(rec.get("nonce"), int):
                 return rec["nonce"]
@@ -272,23 +272,26 @@ def _parse_every(root: Path, room: str, did: str) -> int | None:
 
 
 def _scan_only(root: Path, room: str) -> None:
-    """The floor: read the window backwards and parse nothing."""
+    """The floor: read the physically retained file backwards and parse nothing."""
     with store.room_path(root, room).open("rb") as f:
-        for _ in store.reverse_lines(f):
+        size = os.fstat(f.fileno()).st_size
+        for _ in store.reverse_lines(f, max_bytes=size):
             pass
 
 
 def nonce_bench(root: Path, records: int) -> None:
-    """A predicate scan, not a tail read: a DID that has NOT posted lately costs the whole
-    READ_BUDGET, which is the common case (lobby: 826 signed writes/min, 770 distinct DIDs,
-    a ~5,400-record window). It holds the room lock, so every signed write pays it. Both
-    loops run over one file, so only the loop differs."""
+    """A predicate scan, not an ordinary tail read.
+
+    An absent DID is the worst case and scans the physically retained room file while the
+    room lock is held. A recent DID still returns newest-first after only a short scan.
+    The comparison loops use the same retained-file byte bound as `_last_nonce`.
+    """
     room, absent = "nonce-bench", _did(records + 5_000)
     path = _build_nonce_room(root, room, records)
     size = path.stat().st_size
     print(
         f"\nsigned-write path — _last_nonce over {records} records, {size >> 10} KiB "
-        f"({size // records} B each); READ_BUDGET covers ~{store.READ_BUDGET // (size // records)}"
+        f"({size // records} B each); retained scan bound {size >> 10} KiB"
     )
     assert didkey.is_did(absent), absent  # the shape claim, not a hope
     assert store._last_nonce(root, room, absent) is None
