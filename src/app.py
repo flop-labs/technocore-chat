@@ -254,7 +254,7 @@ def _seconds(value: str | None) -> float:
 _ABSENT = manifest.IF_ABSENT
 
 
-def _field(source: Mapping[str, object], name: str, missing: str | None = "") -> str:
+def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) -> str:
     """A field the schema publishes as a string, or a 400 that names that field.
 
     The other half of the input doctrine (docs/design.md §3.5) from `_cursor`/`_seconds`
@@ -262,15 +262,22 @@ def _field(source: Mapping[str, object], name: str, missing: str | None = "") ->
     and conditions and refuses. `str()` on whatever JSON arrived turned `{"from": 0}` into
     the nickname `0` and `{"text": 12345}` into a message, both against a schema that says
     `string` (#427) — and coercion is exactly what an agent's cheap check-and-retry loop
-    cannot see. `missing=None` makes the field required: an absent `from` used to become
-    `""` and then fail *room*-name validation, so the refusal named the wrong parameter
-    (#373). Absent and present-but-not-a-string are told apart by the key, not by the
+    cannot see. Absent and present-but-not-a-string are told apart by the key, not by the
     value, so an explicit JSON `null` is refused as the wrong type rather than reported as
     a field the caller left out.
+
+    `is_name=True` is the body's one field that is both required and a name — `from` on
+    the unsigned POST lane. Both of its failures used to be answered by somebody else:
+    absent, it became `""` and failed *room*-name validation, and malformed, it reached
+    `valid_name` as a nick and came back quoting the shared `<room>`/`<nick>`/`<ns>`/
+    `<key>` rule (#373). Either way the caller was told a parameter it had got right was
+    the wrong one, which is the failure the doctrine's last clause names.
     """
-    value = source.get(name, missing)
+    value = source.get(name, None if is_name else "")
     if not isinstance(value, str):
         raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
+    if is_name and not store.NAME_RE.fullmatch(value):
+        raise StoreError(f"bad {name}: {value!r} must match /{store.NAME_RE.pattern}/")
     return value
 
 
@@ -1320,7 +1327,7 @@ async def room_post(request: Request) -> Response:
         if denied:
             return denied
         if signer is None:
-            nick = _field(payload, "from", None)
+            nick = _field(payload, "from", is_name=True)
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)

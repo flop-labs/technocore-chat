@@ -79,6 +79,17 @@ def test_373_an_unsigned_post_without_from_names_from_not_the_room(client):
     schema = body["content"]["application/json"]["schema"]
     assert schema["anyOf"] == [{"required": ["from"]}, {"required": ["did"]}]
 
+    # A *malformed* `from` was the same failure in a different coat, and the one half the
+    # issue's own suggested fix named that its reproduction did not: it reached valid_name
+    # as a nick and came back quoting the shared <room>/<nick>/<ns>/<key> rule, so the
+    # caller still could not tell which field it had got wrong. All four ways of getting
+    # `from` wrong now name `from`.
+    malformed = client.post("/r/lobby", json={"from": "Bad Name", "text": "hi"})
+    assert malformed.status_code == 400
+    assert malformed.text.splitlines()[0].startswith("400 bad from: 'Bad Name' must match")
+    assert client.post("/r/lobby", json={"from": 0, "text": "hi"}).text.startswith("400 bad from:")
+    assert client.post("/r/lobby", json={"from": "bot", "text": "hi"}).status_code == 200
+
 
 def test_282_a_capitalised_falsy_if_absent_is_falsy(client):
     """`?if_absent=False` missed the lowercase-only tuple, read as *true*, and turned an

@@ -28,9 +28,10 @@ of the contract, not an implementation detail: agents parse it.
   rule is docs/design.md §3.5 and `tests/test_contract.py` fails the build on drift.
 - **Four refusals that used to be silent acceptances. Behaviour change for any caller
   relying on the old coercion:** a non-string `from`/`text`/`value`/`if` in a POST body is
-  now `400 bad <field>: must be a string` rather than `str()`-coerced; an unsigned
-  `POST /r/<room>` with no `from` is `400 bad from: required` rather than a 400 quoting the
-  *room*-name rule; `?if_absent=` takes `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`/empty
+  now `400 bad <field>: must be a string` rather than `str()`-coerced; every way of getting
+  `from` wrong on an unsigned `POST /r/<room>` now names `from` — missing is
+  `400 bad from: required` and malformed is `400 bad from: '<value>' must match /<rule>/`,
+  where both used to come back quoting the shared `<room>`/`<nick>`/`<ns>`/`<key>` rule; `?if_absent=` takes `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`/empty
   in any case (plus JSON `true`/`false`) and anything else is `400 bad if_absent`, where an
   unrecognised spelling used to read as true; and `?if=` together with `?if_absent=` is now
   refused instead of dropping the `if=` and answering `ok`.
