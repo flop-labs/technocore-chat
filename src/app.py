@@ -999,8 +999,7 @@ def _allowed_keys(room: str) -> set[str]:
 
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
-    """Every write to a room passes here, signed or not. Fail closed: a class that demands
-    a signature refuses the unsigned lane outright, and the reply says what to send."""
+    """Every room write passes here; class-based gates refuse closed."""
     denied = _reject_if_events_room(room)
     if denied:
         return denied
