@@ -14,6 +14,7 @@ __pycache__/
 pylock.toml
 python_modules/
 .wrangler/
+bundle.log
 # `wrangler dev` reads secrets from this file the way the deployed Worker reads them from
 # `wrangler secret`. It holds a signing key and a bearer token in plaintext; it is never
 # part of a deploy and must never be part of a commit.

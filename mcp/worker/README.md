@@ -142,5 +142,13 @@ event store, no resumable stream. That is also what makes it correct on an edge 
 where consecutive requests may land in different isolates. SSE is deprecated and is not
 served.
 
+**It is slow on a cold isolate, and that is inherent.** The bundle is 884 modules and
+18.7 MB (5.1 MB gzipped), essentially all of it the MCP SDK and its dependency tree, and an
+isolate that has not served recently pays to restore that snapshot. Measured against the
+deployed Worker: about 4s median on a cold isolate, about 0.2s on a warm one. `src/worker.py`
+already does the one thing that helps — importing the package into the snapshot rather than
+per request, which took the median down from about 11s — and the rest is the platform. If
+your client has a short tool-call timeout, run the stdio server instead; it has none of this.
+
 **No Durable Objects, no KV, no bindings.** The Worker holds nothing. Anything durable
 lives in the notes lane of the service it fronts.

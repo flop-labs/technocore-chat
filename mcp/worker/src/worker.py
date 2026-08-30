@@ -41,6 +41,7 @@ where it already is. The one thing worth a wall is a signing key — see `Defaul
 """
 
 import hmac
+from typing import Any
 
 # `workers` is the runtime SDK Cloudflare injects; it exists only inside a Python Worker
 # and is not installable on CPython, so nothing outside that runtime can resolve it.
@@ -48,6 +49,30 @@ from workers import Response, WorkerEntrypoint, asgi, fetch  # ty: ignore[unreso
 
 # `technocore_mcp` is NOT imported here, and the reason is a platform rule rather than a
 # style preference — see `_technocore()`.
+
+
+# Import the package at module scope if the runtime will allow it, so the MCP SDK lands in
+# the snapshot instead of being re-imported by every cold isolate. See `_technocore()` for
+# what this is working around and why one frozen value is the acceptable price.
+# `Any` rather than the module type: this name is None until an import succeeds, and the
+# whole point is that either import may be the one that does.
+_module: Any = None
+try:
+    from _cloudflare.allow_entropy import (  # ty: ignore[unresolved-import]
+        allow_bad_entropy_calls,
+    )
+except ImportError:  # not a Python Worker, or the private module moved
+    pass
+else:
+    try:
+        with allow_bad_entropy_calls(1):
+            from technocore_mcp import server as _eager
+
+        _module = _eager
+    except Exception:
+        # Budget exhausted, or the chain drew entropy this does not cover. Python drops a
+        # module whose execution raised, so the lazy path below re-imports it cleanly.
+        _module = None
 
 
 def _technocore():
@@ -72,13 +97,42 @@ def _technocore():
     and the failure is total rather than partial: it happens while the module is being
     executed, so there is no handler yet to return a 500 and every request 500s.
 
-    Deferring the import to the first request costs a slower first response in each
-    isolate — the SDK is imported after the snapshot rather than baked into it — and buys
-    a Worker that runs. `Default._app` below is what keeps it to the *first* request.
-    """
-    from technocore_mcp import server as technocore
+    Deferring the import to the first request buys a Worker that runs, but it is not free
+    and the bill is larger than it looks: measured against the deployed Worker, a request
+    that lands on a cold isolate spends 7-21 seconds importing the SDK, and isolates turn
+    over often enough that most requests paid it. That is past the point where an MCP
+    client gives up.
 
-    return technocore
+    So the module-level block above tries the import eagerly inside
+    `allow_bad_entropy_calls`, the same mechanism Cloudflare's own SDK uses to let
+    allowlisted packages (pydantic_core, cryptography, aiohttp, numpy.random) draw entropy
+    during their import. Those patches fire on their own, so the one call this budget has
+    to cover is the one nobody patched: `opentelemetry.context` minting a contextvar key
+    with `uuid4()`. Freezing that into the snapshot means every isolate names that
+    contextvar identically, which is harmless — it is a variable name, not a secret, and
+    contextvars are per-isolate regardless. Nothing security-bearing is frozen: the signing
+    key is a configured seed, not drawn, and nonces are drawn per request, where entropy is
+    real.
+
+    Measured on the deployed Worker, twelve back-to-back calls each way: deferred, a median
+    of about 11s and a worst case of 21s; eager, a median of about 4s. A request that finds
+    a warm isolate is ~0.2s under both, which is also what says the per-request app rebuild
+    is not the cost — the cold path is. What remains after this fix is the platform
+    restoring an 18 MB, 884-module snapshot, which is not something this file can shorten;
+    it is the price of the MCP SDK on Pyodide. Deploy-time startup goes 750ms -> 2.7s,
+    which is the same import moving into the snapshot where it belongs.
+
+    This function is the fallback for when that does not work — a runtime without the
+    private module, a budget that turns out to be too small, a future dependency that draws
+    entropy nobody expected. Then the import happens here, in request context, slowly and
+    correctly. `Default._configured` keeps it to once per isolate either way.
+    """
+    global _module
+    if _module is None:
+        from technocore_mcp import server as module
+
+        _module = module
+    return _module
 
 
 async def workers_fetch(
