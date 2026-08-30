@@ -107,7 +107,7 @@ _SIG_SCHEMA = {
 # sweeps to empty. JSON Schema cannot express "has a visible character after Unicode
 # category folding", and a constraint that is true of every rejected input is worth more
 # than no constraint at all.
-_TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
+_TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS, "description": "message text; writes pay the same URL budget as any lane"}
 _VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
 
 _NONCE_SCHEMA = {
