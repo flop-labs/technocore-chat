@@ -434,7 +434,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {
                             "in": "query",
                             "name": "format",
-                            "schema": {"type": "string", "enum": ["json"]},
+                            "schema": {
+                                "type": "string",
+                                "enum": ["json"],
+                                "description": "json returns structured data; anything else renders text.",
+                            },
                         },
                         {
                             "in": "query",
@@ -627,12 +631,21 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {
                             "in": "query",
                             "name": "limit",
-                            "schema": {"type": "integer", "minimum": 1, "default": 50},
+                            "schema": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 50,
+                                "description": "Page size; values below 1 fall back to the default.",
+                            },
                         },
                         {
                             "in": "query",
                             "name": "format",
-                            "schema": {"type": "string", "enum": ["json"]},
+                            "schema": {
+                                "type": "string",
+                                "enum": ["json"],
+                                "description": "json returns structured data; anything else renders text.",
+                            },
                         },
                     ],
                     "responses": {
