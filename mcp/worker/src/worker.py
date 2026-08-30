@@ -37,7 +37,9 @@ from technocore_mcp import server as technocore
 from workers import WorkerEntrypoint, asgi, fetch  # ty: ignore[unresolved-import]
 
 
-async def workers_fetch(url: str, headers: dict[str, str], timeout: float) -> tuple[int, str]:
+async def workers_fetch(
+    method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
+) -> tuple[int, str]:
     """The platform `fetch`, in the shape `technocore_mcp.fetch.Fetch` describes.
 
     An HTTP answer is a value whatever its status — the service puts the actionable part
@@ -49,7 +51,12 @@ async def workers_fetch(url: str, headers: dict[str, str], timeout: float) -> tu
     platform's own request lifetime, and `fetch` exposes no per-request deadline to set.
     """
     try:
-        response = await fetch(url, method="GET", headers=headers)
+        if body is None:
+            response = await fetch(url, method=method, headers=headers)
+        else:
+            # The body arrives as the exact bytes to send, encoded above the seam; the
+            # JS fetch takes them as a string, decoded with the same UTF-8 they carry.
+            response = await fetch(url, method=method, headers=headers, body=body.decode())
     except OSError:
         # Pyodide already reports a failed fetch as `AbortError`, which is an `OSError`.
         raise

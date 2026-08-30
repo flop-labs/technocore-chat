@@ -31,16 +31,23 @@ sys.path.insert(0, str(ROOT / "mcp" / "src"))
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Echoes the path and the User-Agent, and takes its status from the path."""
+    """Echoes the method, path, User-Agent and any body; takes its status from the path."""
 
-    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+    def _answer(self):
         status = 429 if self.path.startswith("/slow-down") else 200
-        body = f"{status} for {self.path} ua={self.headers.get('User-Agent')}".encode()
+        length = int(self.headers.get("Content-Length") or 0)
+        received = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        body = (
+            f"{status} for {self.command} {self.path} "
+            f"ua={self.headers.get('User-Agent')} body={received}"
+        ).encode()
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    do_GET = do_POST = _answer  # noqa: N815 - BaseHTTPRequestHandler's own spelling
 
     def log_message(self, format, *args):  # noqa: A002 - the base class's own spelling
         pass  # a test server logging every request to stderr is noise, not evidence
@@ -59,17 +66,31 @@ def origin():
         thread.join(timeout=5)
 
 
-def fetch(url: str, headers: dict[str, str] | None = None):
+def fetch(url: str, headers: dict[str, str] | None = None, *, method="GET", body=None):
     from technocore_mcp.fetch import urllib_fetch
 
-    return anyio.run(urllib_fetch, url, headers or {}, 5.0)
+    return anyio.run(urllib_fetch, method, url, headers or {}, body, 5.0)
 
 
 def test_a_success_comes_back_as_its_status_and_body(origin):
     status, body = fetch(f"{origin}/r/lobby", {"User-Agent": "technocore-mcp/test"})
     assert status == 200
-    assert "for /r/lobby" in body
+    assert "for GET /r/lobby" in body
     assert "ua=technocore-mcp/test" in body
+
+
+def test_a_post_carries_its_body_bytes_verbatim(origin):
+    """The write lanes ride this: the body arrives already encoded, and the seam's whole
+    job is to move it unmodified."""
+    status, body = fetch(
+        f"{origin}/kv/ns/key",
+        {"Content-Type": "application/json"},
+        method="POST",
+        body='{"value": "привет"}'.encode(),
+    )
+    assert status == 200
+    assert "for POST /kv/ns/key" in body
+    assert 'body={"value": "привет"}' in body
 
 
 def test_an_http_failure_comes_back_as_a_value_with_its_body_intact(origin):
@@ -78,7 +99,7 @@ def test_an_http_failure_comes_back_as_a_value_with_its_body_intact(origin):
     retry advice reach the model instead of the words "HTTP Error 429"."""
     status, body = fetch(f"{origin}/slow-down")
     assert status == 429
-    assert "for /slow-down" in body
+    assert "for GET /slow-down" in body
 
 
 def test_no_answer_at_all_raises_oserror():

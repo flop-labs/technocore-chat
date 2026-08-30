@@ -44,18 +44,24 @@ WIRE_HEADERS = {
 
 
 class Harness:
-    """One MCP client, one recording of every URL the tools actually fetched.
+    """One MCP client, one recording of every request the tools actually sent.
 
+    `asked` is the URLs alone, for the assertions that are about URL building; `sent` is
+    the full `(method, url, body)` triple, for the ones about which lane a write took.
     The portal is what lets the tests stay synchronous like the rest of the suite: the
     SDK is async end to end, so each call is handed to a loop running on another thread,
     exactly as Starlette's own TestClient does it.
     """
 
-    def __init__(self, portal, client: Client, asked: list[str], module):
+    def __init__(self, portal, client: Client, sent: list[tuple], module):
         self._portal = portal
         self._client = client
-        self.asked = asked
+        self.sent = sent
         self.module = module
+
+    @property
+    def asked(self) -> list[str]:
+        return [url for _, url, _ in self.sent]
 
     def call(self, name: str, arguments: dict) -> CallToolResult:
         return self._portal.call(self._client.call_tool, name, arguments)
@@ -123,11 +129,11 @@ def mcp(tmp_path, monkeypatch):
                     )
                 )
             )
-            asked: list[str] = []
+            sent: list[tuple] = []
 
-            async def fetch(url, headers, timeout):
-                asked.append(url)
-                response = await service.get(url, headers=headers)
+            async def fetch(method, url, headers, body, timeout):
+                sent.append((method, url, body))
+                response = await service.request(method, url, content=body, headers=headers)
                 return response.status_code, response.text
 
             monkeypatch.setattr(mcp_server, "_fetch", fetch)
@@ -135,7 +141,7 @@ def mcp(tmp_path, monkeypatch):
             client = stack.enter_context(
                 portal.wrap_async_context_manager(Client(mcp_server.server))
             )
-            yield Harness(portal, client, asked, mcp_server)
+            yield Harness(portal, client, sent, mcp_server)
 
 
 @pytest.fixture()
@@ -159,8 +165,8 @@ def wire(tmp_path, monkeypatch):
                 )
             )
 
-            async def fetch(url, headers, timeout):
-                response = await service.get(url, headers=headers)
+            async def fetch(method, url, headers, body, timeout):
+                response = await service.request(method, url, content=body, headers=headers)
                 return response.status_code, response.text
 
             monkeypatch.setattr(mcp_server, "_fetch", fetch)
@@ -308,7 +314,7 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
         assert schema.get("required", []) == required
         assert ("required" in schema) == bool(required)
     pages = {t.name: t.input_schema for t in mcp.tools()}["read_docs"]["properties"]["page"]
-    assert pages["enum"] == ["manual", "patterns", "skill"]
+    assert pages["enum"] == ["manual", "patterns", "skill", "config"]
 
 
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
@@ -361,10 +367,20 @@ def test_since_is_forwarded_so_polling_returns_only_new_lines(mcp):
     assert "m2" in body and "m0" not in body
 
 
-def test_say_without_a_nick_says_how_to_fix_it(mcp):
+def test_say_without_a_nick_falls_back_to_the_session_anon_name(mcp):
+    """No configuration, no error: the write lands, attributed to a name minted once per
+    process. Per-process and not per-call, because a nick is how other agents recognise
+    a sender across messages — a fresh name every call would be nine strangers in one
+    conversation — and the service marks it `~` (self-asserted) exactly like any other."""
     reply = mcp.call("say", {"room": "lobby", "text": "hi"})
-    assert reply.is_error is True
-    assert "TECHNOCORE_NICK" in text_of(reply)
+    assert reply.is_error is False
+    anon = mcp.module.SESSION_NICK
+    assert anon.startswith("anon-")
+    assert f"<~{anon}> hi" in text_of(mcp.call("read_room", {"room": "lobby"}))
+
+    # …and both overrides still win over the fallback: the env default, then the argument.
+    mcp.call("say", {"room": "lobby", "text": "named", "nick": "alice"})
+    assert "<~alice> named" in text_of(mcp.call("read_room", {"room": "lobby"}))
 
 
 def test_notes_round_trip_and_a_failed_condition_returns_the_current_value(mcp):
@@ -394,10 +410,14 @@ def test_discovery_and_room_listing_reach_their_lanes(mcp):
     assert "/r/meta" in text_of(mcp.call("list_rooms", {}))
 
 
-def test_read_docs_reaches_all_three_pages(mcp):
+def test_read_docs_reaches_all_four_pages(mcp):
     assert "READ    GET /r/<room>" in text_of(mcp.call("read_docs", {"page": "manual"}))
     assert "patterns" in text_of(mcp.call("read_docs", {"page": "patterns"}))
     assert "technocore-chat" in text_of(mcp.call("read_docs", {"page": "skill"}))
+    # `config` is the one page an MCP-only runtime has no other way to reach: the knobs
+    # this instance actually runs with, which a caller otherwise learns by experiment.
+    config_page = text_of(mcp.call("read_docs", {"page": "config"}))
+    assert "rate_read" in config_page and "max_wait" in config_page
     assert "READ    GET /r/<room>" in text_of(mcp.call("read_docs", {}))  # manual by default
 
 
@@ -423,7 +443,7 @@ def test_a_call_with_no_optional_arguments_builds_no_query_string(mcp):
     to append `?` and then urlencoded nothing into it. The three tools below in their
     commonest form — no arguments at all — each sent a URL ending in a bare `?`."""
     mcp.call("say", {"room": "lobby", "text": "hi", "nick": "bot"})
-    mcp.asked.clear()
+    mcp.sent.clear()
 
     mcp.call("read_room", {"room": "lobby"})
     mcp.call("list_rooms", {})
@@ -441,10 +461,49 @@ def test_a_partly_specified_call_carries_only_the_arguments_given(mcp):
     assert mcp.asked[-1] == f"{mcp.module.BASE_URL}/r/lobby?limit=5"
 
 
+def test_writes_go_over_post_with_the_text_in_the_body(mcp):
+    """The GET write lanes cannot carry what the service promises to accept: 8192 note
+    characters (or 4096 message characters of multibyte text) percent-encode past the
+    request line most servers allow and past Cloudflare's 16 KiB URL ceiling — the exact
+    reason the service grew POST /r/<room> and POST /kv/<ns>/<key> beside them, and one
+    an in-process ASGI transport never enforces, so the *method* is what this asserts.
+    """
+    big_note = "х" * 8192  # multibyte on purpose: the worst case for percent-encoding
+    mcp.call("write_note", {"namespace": "plans", "key": "big", "value": big_note})
+    method, url, body = mcp.sent[-1]
+    assert (method, url) == ("POST", f"{mcp.module.BASE_URL}/kv/plans/big")
+    # Real UTF-8 in the body, not percent-encoding and not \uXXXX escapes: 8192
+    # two-byte characters plus the JSON framing, nowhere near any URL ceiling.
+    assert len(body) < 17_000 and b"%" not in body
+    assert big_note in text_of(mcp.call("read_note", {"namespace": "plans", "key": "big"}))
+
+    big_text = "щ" * 4096
+    mcp.call("say", {"room": "lobby", "text": big_text, "nick": "bot"})
+    method, url, _ = mcp.sent[-1]
+    assert (method, url) == ("POST", f"{mcp.module.BASE_URL}/r/lobby")
+    assert big_text in text_of(mcp.call("read_room", {"room": "lobby"}))
+
+
+def test_reads_stay_on_the_get_lanes(mcp):
+    mcp.call("say", {"room": "lobby", "text": "hi", "nick": "bot"})
+    for name, arguments in (
+        ("read_room", {"room": "lobby"}),
+        ("wait_for_message", {"room": "lobby", "since": 0, "seconds": 0}),
+        ("list_rooms", {}),
+        ("discover_rooms", {}),
+        ("read_note", {"namespace": "n", "key": "k"}),
+        ("list_notes", {"namespace": "n"}),
+        ("read_docs", {}),
+    ):
+        mcp.call(name, arguments)
+        method, _, body = mcp.sent[-1]
+        assert (method, body) == ("GET", None), name
+
+
 def test_every_request_identifies_this_package_and_its_version(mcp, monkeypatch):
     seen = {}
 
-    async def record(url, headers, timeout):
+    async def record(method, url, headers, body, timeout):
         seen.update(headers)
         return 200, "ok"
 
@@ -461,8 +520,8 @@ def test_use_fetch_replaces_the_whole_transport(mcp):
     original = module._fetch
     try:
 
-        async def canned(url, headers, timeout):
-            return 200, f"served {url} without a socket"
+        async def canned(method, url, headers, body, timeout):
+            return 200, f"served {method} {url} without a socket"
 
         module.use_fetch(canned)
         assert "without a socket" in text_of(mcp.call("list_rooms", {}))
@@ -485,7 +544,7 @@ def test_wrong_argument_types_are_rejected_before_any_request_is_made(mcp, monke
     """`since: "one"` is the client's bug, not something the service should be asked
     about — it is caught here, before a string reaches the query builder."""
 
-    async def never(url, headers, timeout):
+    async def never(method, url, headers, body, timeout):
         raise AssertionError(f"the network was reached: {url}")
 
     monkeypatch.setattr(mcp.module, "_fetch", never)
@@ -517,7 +576,8 @@ def test_a_value_that_only_spells_its_type_wrongly_is_read_rather_than_refused(m
 
     created = mcp.call("write_note", {"namespace": "n", "key": "k", "value": "v", "if_absent": 1})
     assert created.is_error is False
-    assert mcp.asked[-1].endswith("?if_absent=1")
+    method, _, body = mcp.sent[-1]
+    assert method == "POST" and b'"if_absent"' in body
 
 
 def test_the_name_grammar_is_enforced_before_the_network(mcp, monkeypatch):
@@ -528,7 +588,7 @@ def test_the_name_grammar_is_enforced_before_the_network(mcp, monkeypatch):
     The service applies this same rule to <room>, <nick>, <ns> and <key>; only <text> and
     <value> are free-form, and neither carries a pattern here."""
 
-    async def never(url, headers, timeout):
+    async def never(method, url, headers, body, timeout):
         raise AssertionError(f"the network was reached: {url}")
 
     monkeypatch.setattr(mcp.module, "_fetch", never)
@@ -564,7 +624,7 @@ def test_the_advertised_bounds_are_the_ones_that_are_enforced(mcp, monkeypatch):
     bound because the service does not refuse them — it truncates a long message, and the
     wait ceiling is configurable — so advertising one would refuse writes it would take."""
 
-    async def never(url, headers, timeout):
+    async def never(method, url, headers, body, timeout):
         raise AssertionError(f"the network was reached: {url}")
 
     monkeypatch.setattr(mcp.module, "_fetch", never)
@@ -636,7 +696,7 @@ def test_a_network_failure_becomes_an_actionable_tool_result(mcp, monkeypatch):
     Include the configured origin and the cause because either may be the misconfiguration.
     """
 
-    async def unreachable(url, headers, timeout):
+    async def unreachable(method, url, headers, body, timeout):
         raise OSError("connection refused")
 
     monkeypatch.setattr(mcp.module, "_fetch", unreachable)
@@ -653,7 +713,7 @@ def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypa
     wrapper that reported "HTTP Error 429" would throw away the only part the model can
     act on, and the SDK hides the text of any exception that is not a ToolError."""
 
-    async def rate_limited(url, headers, timeout):
+    async def rate_limited(method, url, headers, body, timeout):
         return 429, "slow down: retry in 7s\n"
 
     monkeypatch.setattr(mcp.module, "_fetch", rate_limited)
@@ -661,7 +721,7 @@ def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypa
     assert reply.is_error is True
     assert "retry in 7s" in text_of(reply)
 
-    async def silent(url, headers, timeout):
+    async def silent(method, url, headers, body, timeout):
         return 503, "   "
 
     monkeypatch.setattr(mcp.module, "_fetch", silent)

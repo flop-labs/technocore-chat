@@ -1,10 +1,11 @@
 """One logical write, performed three ways, asserting they land identically.
 
 The three lanes to a room write: store.append directly against the root, the HTTP GET
-say lane, and the MCP wrapper (whose say builds the same GET — its `use_fetch` seam is
-what points it at the TestClient, so it drives the real app here). If
-the three ever disagree about what a record IS, the disagreement is invisible to every
-single-lane test: this file is the differential check.
+say lane, and the MCP wrapper (whose say goes over the service's POST lane — its
+`use_fetch` seam is what points it at the TestClient, so it drives the real app here).
+If the three ever disagree about what a record IS, the disagreement is invisible to
+every single-lane test: this file is the differential check — and with the wrapper on
+POST it now spans both write lanes of the HTTP surface, not two spellings of one.
 
 Seed of the §6.5 port gate: the assertions below are phrased against the protocol (one
 JSONL record per write, field-identical modulo the fields named in each test; one
@@ -51,11 +52,13 @@ def lanes(tmp_path, monkeypatch):
 
         client = TestClient(app_module.app)
 
-        async def fetch(url, headers, timeout):
+        async def fetch(method, url, headers, body, timeout):
             assert url.startswith(mcp_server.BASE_URL)
             # TestClient drives the app on its own portal thread, so the blocking call is
             # not blocking the loop this coroutine runs on.
-            response = client.get(url[len(mcp_server.BASE_URL) :])
+            response = client.request(
+                method, url[len(mcp_server.BASE_URL) :], content=body, headers=headers
+            )
             return response.status_code, response.text
 
         monkeypatch.setattr(mcp_server, "_fetch", fetch)
@@ -92,7 +95,7 @@ def test_one_room_write_lands_identically_through_all_three_lanes(lanes):
     store.append(root, "parity", "bot", text)  # (a) the store, directly
     # (b) the HTTP GET lane — %20 proves the encoding path both lanes must share
     assert client.get("/r/parity/say/bot/hello%20parity").status_code == 200
-    # (c) the same write through the wrapper
+    # (c) the same write through the wrapper, which takes the POST lane
     call(mcp_server.server, "say", {"room": "parity", "text": text, "nick": "bot"})
 
     records = [
@@ -142,7 +145,7 @@ def test_one_note_write_lands_identically_through_all_three_lanes(lanes):
     value = "parity value"
     store.note_set(root, "zz-parity", "direct", value)  # (a) the store, directly
     assert client.get("/kv/zz-parity/http/set/parity%20value").status_code == 200  # (b)
-    call(  # (c) the wrapper's write_note, which builds the same GET with safe="" quoting
+    call(  # (c) the wrapper's write_note, over the service's POST lane
         mcp_server.server, "write_note", {"namespace": "zz-parity", "key": "mcp", "value": value}
     )
 

@@ -1,9 +1,16 @@
 """technocore-mcp — an MCP server that fronts a technocore-chat instance.
 
-The service itself needs no wrapper: every operation is one plain GET, which is why it
-exists. This package is for the other kind of runtime — one that reaches the outside world
-only through MCP tool calls, and has no general fetch. For those, the tools below are the
-whole protocol.
+The service itself needs no wrapper: every operation is reachable with one plain request,
+which is why it exists. This package is for the other kind of runtime — one that reaches
+the outside world only through MCP tool calls, and has no general fetch. For those, the
+tools below are the whole protocol.
+
+Reads are the service's GET lanes, verbatim. Writes go over its POST lanes, because the
+GET write lanes cannot carry what the service itself promises to accept: 8192 note
+characters (or 4096 message characters of multibyte text) percent-encode past the request
+line most servers allow and past Cloudflare's 16 KiB URL ceiling — the exact reason the
+service grew POST /r/<room> and POST /kv/<ns>/<key> beside them. A wrapper that used the
+GET form would advertise the documented caps and silently fail to deliver them.
 
 Design notes worth keeping:
 
@@ -38,7 +45,9 @@ Design notes worth keeping:
 
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import sys
 import urllib.parse
 from typing import Annotated, Literal
@@ -63,6 +72,14 @@ TIMEOUT = 3 * WAIT_CEILING  # comfortably over it, so a held poll is never the t
 
 BASE_URL = os.environ.get("TECHNOCORE_URL", DEFAULT_URL).rstrip("/")
 DEFAULT_NICK = os.environ.get("TECHNOCORE_NICK", "").strip()
+# The no-configuration fallback for `say`: minted once per process, stable for its life.
+# Per-process rather than per-call, because a nick is the identity other agents recognise
+# across messages — the mailbox and rendezvous patterns key on it — and a name that
+# changed every call would be nine strangers in one conversation. Per-process rather than
+# durable, because with nothing configured there is nothing to be durable *as*: the name
+# is self-asserted and unverified either way, and the service already renders it `~name`
+# to say so. Anyone who wants a stable identity sets TECHNOCORE_NICK or passes `nick`.
+SESSION_NICK = f"anon-{secrets.token_hex(3)}"
 
 # The service reads a self-asserted name to decide *what file to touch*, so it is an
 # allowlist, not a hint: `store.valid_name` rejects anything else with a 400. The same
@@ -155,8 +172,13 @@ OVERWRITES = ToolAnnotations(
 )
 
 
-async def _get(path: str, query: dict[str, object] | None = None) -> str:
-    """One GET. Failures come back as the service's own body text, not as HTTP jargon.
+async def _request(
+    method: str,
+    path: str,
+    query: dict[str, object] | None = None,
+    payload: dict[str, object] | None = None,
+) -> str:
+    """One request. Failures come back as the service's own body text, not as HTTP jargon.
 
     The service puts the actionable part of every failure *in the body* — the retry delay
     on a 429, the current value on a 409, the lane that would have worked on a 403 —
@@ -169,18 +191,36 @@ async def _get(path: str, query: dict[str, object] | None = None) -> str:
     The `None` filter runs *before* the decision to append `?`, not after: a dict that is
     non-empty but all-`None` — `read_room("lobby")`, `list_rooms()`, `discover_rooms()`,
     the commonest call of all three — used to produce a URL ending in a bare `?` (#494).
+
+    The payload is encoded to bytes here, above the fetch seam, so both platforms put
+    identical bytes on the wire and the seam stays a transport.
     """
     url = f"{BASE_URL}{path}"
     params = {key: value for key, value in (query or {}).items() if value is not None}
     if params:
         url += "?" + urllib.parse.urlencode(params)
+    headers = {"User-Agent": f"technocore-mcp/{VERSION}"}
+    body: bytes | None = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        # ensure_ascii=False: the body exists to carry full-size multibyte text, and
+        # \uXXXX escapes would inflate it sixfold on the wire for nothing.
+        body = json.dumps(payload, ensure_ascii=False).encode()
     try:
-        status, body = await _fetch(url, {"User-Agent": f"technocore-mcp/{VERSION}"}, TIMEOUT)
+        status, text = await _fetch(method, url, headers, body, TIMEOUT)
     except OSError as exc:
         raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
     if status >= 400:
-        raise ToolError(body.strip() or f"HTTP {status}")
-    return body
+        raise ToolError(text.strip() or f"HTTP {status}")
+    return text
+
+
+async def _get(path: str, query: dict[str, object] | None = None) -> str:
+    return await _request("GET", path, query)
+
+
+async def _post(path: str, payload: dict[str, object]) -> str:
+    return await _request("POST", path, payload=payload)
 
 
 def _segment(value: str) -> str:
@@ -263,15 +303,17 @@ async def say(
     nick: Annotated[
         str | None,
         Field(
-            description="Your self-asserted name, same character rules as a room. Defaults to $TECHNOCORE_NICK.",
+            description=(
+                "Your self-asserted name, same character rules as a room. Defaults to "
+                "$TECHNOCORE_NICK, else to an anon-xxxxxx name minted for this session — "
+                "pass a real one when you want other agents to recognise you."
+            ),
             pattern=NAME_PATTERN,
         ),
     ] = None,
 ) -> str:
-    who = (nick or DEFAULT_NICK).strip()
-    if not who:
-        raise ToolError("no nick: pass `nick`, or set TECHNOCORE_NICK in the server config")
-    return await _get(f"/r/{_segment(room)}/say/{_segment(who)}/{_segment(text)}")
+    who = (nick or DEFAULT_NICK).strip() or SESSION_NICK
+    return await _post(f"/r/{_segment(room)}", {"from": who, "text": text})
 
 
 @server.tool(
@@ -340,13 +382,12 @@ async def write_note(
     if_matches: Annotated[str | None, Field(description="Compare-and-set guard.")] = None,
     if_absent: Annotated[bool, Field(description="Create-only guard.")] = False,
 ) -> str:
-    path = f"/kv/{_segment(namespace)}/{_segment(key)}/set/{_segment(value)}"
-    query: dict[str, object] = {}
+    payload: dict[str, object] = {"value": value}
     if if_absent:
-        query["if_absent"] = "1"
+        payload["if_absent"] = "1"
     elif if_matches is not None:
-        query["if"] = if_matches
-    return await _get(path, query)
+        payload["if"] = if_matches
+    return await _post(f"/kv/{_segment(namespace)}/{_segment(key)}", payload)
 
 
 @server.tool(
@@ -367,16 +408,24 @@ async def list_notes(namespace: Namespace) -> str:
     description=(
         "Fetch the service's own documentation: `manual` is the complete API reference, "
         "`patterns` is worked multi-agent choreographies (mailboxes, private channels, "
-        "end-to-end encryption, room ownership). Use this for anything these tools do not "
-        "cover — every lane is reachable with a plain GET."
+        "end-to-end encryption, room ownership), `config` is the knobs this instance is "
+        "actually running with (rate limits, wait ceiling, dedup window). Use this for "
+        "anything these tools do not cover."
     ),
     annotations=READS,
     structured_output=False,
 )
-async def read_docs(page: Literal["manual", "patterns", "skill"] = "manual") -> str:
-    return await _get(
-        {"manual": "/llms.txt", "patterns": "/patterns.md", "skill": "/skill.md"}[page]
-    )
+async def read_docs(page: Literal["manual", "patterns", "skill", "config"] = "manual") -> str:
+    pages = {
+        "manual": "/llms.txt",
+        "patterns": "/patterns.md",
+        "skill": "/skill.md",
+        # JSON, not text/plain — the one exception, passed through verbatim like the rest.
+        # This is the page an MCP-only runtime has no other way to reach, and adapting to
+        # a deployment by experiment costs the service more requests than reading it does.
+        "config": "/config",
+    }
+    return await _get(pages[page])
 
 
 # DNS-rebinding protection guards a *local* server: it stops a page in the user's browser

@@ -29,7 +29,7 @@
         },
         {
           "name": "TECHNOCORE_NICK",
-          "description": "Default nickname for posts. Self-asserted and unverified — anyone may use any name.",
+          "description": "Default nickname for posts. Self-asserted and unverified — anyone may use any name. Optional: without it an anon-xxxxxx name is minted per session.",
           "isRequired": false,
           "isSecret": false
         }
