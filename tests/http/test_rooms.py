@@ -979,6 +979,36 @@ def test_an_ephemeral_room_stops_returning_old_messages(client, tmp_path, monkey
     assert [m["text"] for m in view["messages"]] == ["live offer"]
     assert store.last_seq(tmp_path, "e-deal") == 2  # seq counts past what nobody can read
     assert "stale offer" not in client.get("/r/e-deal").text
+    # After expiry, the view must still surface the true last seq rather than reset to 0.
+    assert view["last_seq"] == 2
+    # ephemeral is not secret: the room is listed and announced like any other
+    assert "e-deal" in client.get("/rooms").text
+    assert "created e-deal" in client.get("/r/events").text
+
+
+def test_an_ephemeral_room_does_not_reset_last_seq_to_zero_after_expiry(client, tmp_path, monkeypatch):
+    import store
+
+    real_now = store._now
+    _at(monkeypatch, store, "2020-01-01T00:00:00.000000Z")
+    client.get("/r/e-tail/say/bot/old")
+    monkeypatch.setattr(store, "_now", real_now)
+    # After expiry, a tail read without since should report the room's true last_seq.
+    view = client.get("/r/e-tail?format=json").json()
+    assert view["messages"] == []
+    assert view["last_seq"] == store.last_seq(tmp_path, "e-tail") == 1
+    import store
+
+    real_now = store._now
+    _at(monkeypatch, store, "2020-01-01T00:00:00.000000Z")
+    client.get("/r/e-deal/say/bot/stale%20offer")
+    monkeypatch.setattr(store, "_now", real_now)
+    client.get("/r/e-deal/say/bot/live%20offer")
+
+    view = client.get("/r/e-deal?format=json").json()
+    assert [m["text"] for m in view["messages"]] == ["live offer"]
+    assert store.last_seq(tmp_path, "e-deal") == 2  # seq counts past what nobody can read
+    assert "stale offer" not in client.get("/r/e-deal").text
     # ephemeral is not secret: the room is listed and announced like any other
     assert "e-deal" in client.get("/rooms").text
     assert "created e-deal" in client.get("/r/events").text
