@@ -441,8 +441,10 @@ def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
     because `client_ip` counts proxy evidence as a side effect.
 
     A sibling of `budget_note`, and rides the same seam: advice appended to an otherwise
-    ordinary reply, warning before the wall rather than at it. Like it, this reaches the
-    `text/plain` lane only — `?format=json` renders the view alone.
+    ordinary reply, warning before the wall rather than at it. Unlike it, the fact does
+    not stop at `text/plain`: this string is that lane's rendering, and `?format=json`
+    carries the same verdict as the view's `wait_held`, so neither lane has to infer a
+    refusal from latency.
     """
     mine = _waiters_by_ip.get(ip, 0)
     cause = (
