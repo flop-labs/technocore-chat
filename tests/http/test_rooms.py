@@ -112,8 +112,10 @@ def test_unread_body_helper_does_not_emit_connection_on_http2():
             "root_path": "",
         }
     )
-    response = app_module.text("refused", 403)
-    assert app_module._close_unread_body(request, response) is response
+    response = app_module._reject_if_events_room(
+        "events", close=request.scope.get("http_version") in {"1.0", "1.1"}
+    )
+    assert response is not None
     assert "connection" not in response.headers
 
 
