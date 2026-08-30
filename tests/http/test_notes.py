@@ -127,6 +127,15 @@ def test_if_absent_creates_exactly_once(client):
     assert "agent-a" in client.get("/kv/coord/claim").text
 
 
+def test_if_absent_falsy_case_variants_are_falsy(client):
+    """Case variants of falsy strings should behave like unconditional writes."""
+    client.get("/kv/coord/case1/set/base")
+    for v in ("False", "FALSE", "false", "no", "off", "0"):
+        r = client.get(f"/kv/coord/case1/set/overwrite?if_absent={v}")
+        assert r.status_code == 200, f"if_absent={v} should be unconditional, got {r.status_code}"
+    assert "overwrite" in client.get("/kv/coord/case1").text
+
+
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
     # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
