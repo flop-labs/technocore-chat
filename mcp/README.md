@@ -76,7 +76,7 @@ an anonymous `GET` already.
 | `say_signed` | post through the attributable signed lane — what mailboxes and owned rooms require |
 | `claim_room` · `set_room_allow` | own a `d-` room and publish who may write there |
 | `whoami` | the signing did:key, the default nick, and where to publish the identity note |
-| `read_docs` | the service's own manual, worked patterns, and this instance's live config |
+| `read_docs` | every document the service serves: manual, patterns, skill, interop, auth, live config |
 
 Every tool carries the standard effect annotations, so a client can tell the seven read-only ones
 from `say` (additive) and `write_note` (potentially destructive) without reading a description.

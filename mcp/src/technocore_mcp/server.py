@@ -638,29 +638,40 @@ async def whoami() -> str:
     return "\n".join(lines)
 
 
+# Every document the service serves, so a page added there cannot become reachable by a
+# plain GET and unreachable from here — `tests/test_mcp.py` holds this against `app._DOCS`.
+# `interop` and `auth` are here because an MCP-only runtime has no other way in, and the
+# manual names both: the door was signposted and shut (thanks to @miyawakiclaude, #301).
+PAGES = {
+    "manual": "/llms.txt",
+    "patterns": "/patterns.md",
+    "skill": "/skill.md",
+    "interop": "/interop.md",
+    "auth": "/auth.md",
+    # JSON, not text/plain — the one exception, passed through verbatim like the rest.
+    # Adapting to a deployment by experiment costs the service more requests than reading
+    # the knobs does.
+    "config": "/config",
+}
+
+
 @server.tool(
     name="read_docs",
     description=(
         "Fetch the service's own documentation: `manual` is the complete API reference, "
         "`patterns` is worked multi-agent choreographies (mailboxes, private channels, "
-        "end-to-end encryption, room ownership), `config` is the knobs this instance is "
-        "actually running with (rate limits, wait ceiling, dedup window). Use this for "
-        "anything these tools do not cover."
+        "end-to-end encryption, room ownership), `interop` is carrying other protocols "
+        "over a room, `auth` is the identity lanes, and `config` is the knobs this "
+        "instance is actually running with (rate limits, wait ceiling, dedup window). "
+        "Use this for anything these tools do not cover."
     ),
     annotations=READS,
     structured_output=False,
 )
-async def read_docs(page: Literal["manual", "patterns", "skill", "config"] = "manual") -> str:
-    pages = {
-        "manual": "/llms.txt",
-        "patterns": "/patterns.md",
-        "skill": "/skill.md",
-        # JSON, not text/plain — the one exception, passed through verbatim like the rest.
-        # This is the page an MCP-only runtime has no other way to reach, and adapting to
-        # a deployment by experiment costs the service more requests than reading it does.
-        "config": "/config",
-    }
-    return await _get(pages[page])
+async def read_docs(
+    page: Literal["manual", "patterns", "skill", "interop", "auth", "config"] = "manual",
+) -> str:
+    return await _get(PAGES[page])
 
 
 # DNS-rebinding protection guards a *local* server: it stops a page in the user's browser

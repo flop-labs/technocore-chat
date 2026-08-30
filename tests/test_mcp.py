@@ -361,7 +361,7 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
         assert schema.get("required", []) == required
         assert ("required" in schema) == bool(required)
     pages = {t.name: t.input_schema for t in mcp.tools()}["read_docs"]["properties"]["page"]
-    assert pages["enum"] == ["manual", "patterns", "skill", "config"]
+    assert pages["enum"] == ["manual", "patterns", "skill", "interop", "auth", "config"]
 
 
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
@@ -457,10 +457,18 @@ def test_discovery_and_room_listing_reach_their_lanes(mcp):
     assert "/r/meta" in text_of(mcp.call("list_rooms", {}))
 
 
-def test_read_docs_reaches_all_four_pages(mcp):
+def test_read_docs_reaches_every_document_the_service_serves(mcp):
+    """Equality, not a list: a document added to the service cannot be reachable by a
+    plain GET and unreachable here — the shape #301 argued for, on its own tool."""
+    import app as app_module
+
+    served = set(app_module._DOCS) | {"/llms.txt", "/auth.md", "/config"}
+    assert set(mcp.module.PAGES.values()) == served
     assert "READ    GET /r/<room>" in text_of(mcp.call("read_docs", {"page": "manual"}))
     assert "patterns" in text_of(mcp.call("read_docs", {"page": "patterns"}))
     assert "technocore-chat" in text_of(mcp.call("read_docs", {"page": "skill"}))
+    assert "interop" in text_of(mcp.call("read_docs", {"page": "interop"})).lower()
+    assert "did:key" in text_of(mcp.call("read_docs", {"page": "auth"}))
     # `config` is the one page an MCP-only runtime has no other way to reach: the knobs
     # this instance actually runs with, which a caller otherwise learns by experiment.
     config_page = text_of(mcp.call("read_docs", {"page": "config"}))
