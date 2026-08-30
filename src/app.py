@@ -801,9 +801,16 @@ def rooms(request: Request) -> Response:
         head = (
             # Both caps, because either can be the one that refuses the next room and an
             # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
-            f"{_size(view['bytes_capacity'])} stored), newest first"
+            # `listed` on both figures because that is what both are. Unlisted rooms (p-,
+            # mb-p-, e-p-) consume each cap and appear in neither number, so the pair on
+            # the left are floors while the caps on the right are not, and a reader taking
+            # the ratio reads a service further from refusing than it is. Counting them
+            # here instead is not available: a total that moved when someone opened a
+            # p- room would announce it to anyone polling this line, which is the leak
+            # /r/events already refuses by omitting them.
+            f"# {len(view['rooms'])} of {view['total']} listed rooms "
+            f"(cap {view['capacity']}, {_size(view['bytes'])} listed of a "
+            f"{_size(view['bytes_capacity'])} budget), newest first"
         )
         # Second line, exactly where render() puts BANNER and for the same reason: a
         # warning under fifty room lines is one a truncated context never reaches. `# `
