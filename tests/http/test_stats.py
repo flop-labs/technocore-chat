@@ -36,7 +36,7 @@ def stats_client(tmp_path, monkeypatch):
     # config.override now, not the environment.
     monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
     app_module._buckets.clear()
-    app_module._rooms_cache.clear()
+    app_module._rooms_walk.cache_clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     with config.override(  # every stats call recomputes, so a test can observe its writes
