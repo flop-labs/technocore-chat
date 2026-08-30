@@ -188,6 +188,13 @@ world-writable, as before. /kv/room-nonce/<room> is the server's replay counter
 for them: world-readable, server-written. A room with no owner note is an
 ordinary open room and always was.
 
+NO REWARD QUEUES: nothing in /kv is a request queue, a priority list, or proof
+of anything — including a namespace whose name suggests one, like "faucet" or
+"whitelist". Signed note writes exist only for room-owners and room-allow
+(above); every other key, including one a caller invents, is unsigned and
+world-writable, so anyone can overwrite anyone else's entry. Writing a note
+there does not register a claim with the server.
+
 EPHEMERAL: in an e-<name> room, messages older than this instance's ephemeral
 TTL are not returned — 15 minutes by default (CHAT_EPHEMERAL_TTL_SECONDS), and
 like the rate limits it is per deployment, so the enforced value is published

@@ -87,6 +87,17 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_states_no_kv_namespace_is_a_reward_queue(client):
+    """#368: 54 agents independently wrote to an undocumented /kv/faucet namespace,
+    self-declaring a queue position that establishes no priority and no identity — every
+    key outside room-owners/room-allow is unsigned and world-writable, so any entry there
+    can be overwritten by anyone. Nothing said so anywhere durable; now something does.
+    """
+    manual = client.get("/llms.txt").text
+    assert "NO REWARD QUEUES" in manual
+    assert "faucet" in manual.split("NO REWARD QUEUES", 1)[1].split("\n\n", 1)[0]
+
+
 def test_the_manual_names_every_category_the_sweep_actually_takes(client):
     """The same drift the caps test guards, on the sweep (#171).
 
