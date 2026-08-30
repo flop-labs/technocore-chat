@@ -16,6 +16,25 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Changed
+
+- **Input doctrine, and the HTTP surface conformed to it** — every parameter is now either
+  *advisory shape* (`limit`, `since`, `wait`, `n`, `format`: clamped or defaulted, never
+  refused, with the clamp stated in the published `description` instead of a `minimum`/
+  `maximum`/`enum` nothing enforced) or *semantic* (identity, content, `if=`/`if_absent`,
+  every name: refused with a `400` whose first line names the field). `/openapi.json` and
+  `/.well-known/agent.json` now describe what the server actually does; the `wait` ceiling
+  moved from the parameter's `maximum` into its prose and `limits.long_poll_seconds`. The
+  rule is docs/design.md §3.5 and `tests/test_contract.py` fails the build on drift.
+- **Four refusals that used to be silent acceptances. Behaviour change for any caller
+  relying on the old coercion:** a non-string `from`/`text`/`value`/`if` in a POST body is
+  now `400 bad <field>: must be a string` rather than `str()`-coerced; an unsigned
+  `POST /r/<room>` with no `from` is `400 bad from: required` rather than a 400 quoting the
+  *room*-name rule; `?if_absent=` takes `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`/empty
+  in any case (plus JSON `true`/`false`) and anything else is `400 bad if_absent`, where an
+  unrecognised spelling used to read as true; and `?if=` together with `?if_absent=` is now
+  refused instead of dropping the `if=` and answering `ok`.
+
 ### Added
 
 - **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to

@@ -1243,7 +1243,7 @@ wheels = [
 
 [[package]]
 name = "technocore-chat"
-version = "0.9.7"
+version = "0.10.0"
 source = { virtual = "." }
 dependencies = [
     { name = "cryptography" },
@@ -1254,15 +1254,13 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-contract = [
-    { name = "schemathesis" },
-]
 dev = [
     { name = "coverage" },
     { name = "httpx2" },
     { name = "hypothesis" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "schemathesis" },
     { name = "ty" },
 ]
 mutation = [
@@ -1279,13 +1277,13 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-contract = [{ name = "schemathesis", specifier = "==4.25.0" }]
 dev = [
     { name = "coverage", specifier = ">=7.15.4" },
     { name = "httpx2", specifier = ">=2.10.0" },
     { name = "hypothesis", specifier = ">=6.165.10" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.1" },
+    { name = "schemathesis", specifier = "==4.25.0" },
     { name = "ty", specifier = ">=0.0.71" },
 ]
 mutation = [{ name = "mutmut", specifier = "==3.7.0" }]

@@ -541,18 +541,29 @@ def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
 def test_an_integral_ceiling_publishes_as_an_integer(client):
     """`10.0` and `10` are the same number to a validator and different bytes to a reader,
     and this was an integer literal until the ceiling became configurable. A fractional
-    ceiling still publishes as a float, because fractional waits are real."""
+    ceiling still publishes as a float, because fractional waits are real.
+
+    Read off `/.well-known/agent.json` rather than the `wait` parameter's `maximum`: the
+    server clamps to the ceiling instead of refusing past it, so under the input doctrine
+    (docs/design.md §3.5) the OpenAPI parameter states the clamp in prose and no longer
+    publishes a constraint nothing enforces. `limits.long_poll_seconds` is where the number
+    stayed machine-readable, and the same rendering rule applies to it."""
     import manifest
 
-    def maximum(doc):
-        return next(
-            p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
-        )["schema"]["maximum"]
+    def ceiling(doc):
+        return doc["limits"]["long_poll_seconds"]
 
-    served = maximum(client.get("/openapi.json").json())
+    served = ceiling(client.get("/.well-known/agent.json").json())
     assert served == 10 and isinstance(served, int)
-    assert maximum(manifest.openapi_document("", "0.7.0", 65536, 2.5)) == 2.5
-    assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
+    assert ceiling(manifest.agent_manifest("", "0.7.0", 1, 1, 1, 2.5)) == 2.5
+    assert ceiling(manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)) == 10
+    # And the prose that replaced the constraint carries the same number, not `10.0`.
+    wait = next(
+        p
+        for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
+        if p["name"] == "wait"
+    )
+    assert "clamped to 10." in wait["description"] and "maximum" not in wait["schema"]
 
 
 _REFUSALS = frozenset({"400", "403", "404", "409", "422"})
@@ -818,14 +829,25 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
         longest_name = "a" * 48
 
         def wait_is_honoured():
-            published = next(
-                p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["name"] == "wait"
-            )["schema"]["maximum"]
+            # The ceiling moved out of the parameter's `maximum` and into the prose plus
+            # `limits.long_poll_seconds` (docs/design.md §3.5), so read it where it is now
+            # published. What is being asserted is unchanged: the largest wait the service
+            # advertises is one it actually takes.
+            published = client.get("/.well-known/agent.json").json()["limits"]["long_poll_seconds"]
             started = time.monotonic()
             client.get(f"/r/idle?since=1&wait={published}")
             # It has to actually hold the connection, not return an immediate empty reply
             # that a caller cannot tell from a quiet room.
             assert time.monotonic() - started >= published * 0.8
+
+        checks_without_a_published_bound = [
+            lambda: _ok(client, "/r/lobby?limit=200"),
+            lambda: _ok(client, "/r/lobby?since=0"),
+            lambda: _ok(client, "/rooms?limit=1"),
+            lambda: client.get("/r/lobby?format=json").json(),
+            lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1"),
+            wait_is_honoured,
+        ]
 
         # (the bound as published, a request using it at its extreme)
         checks = [
@@ -841,12 +863,6 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 '{"maxLength": 8192, "minLength": 1}',
                 lambda: _ok(client, "/kv/plans/big", post={"value": "x" * 8192}),
             ),
-            ('{"maximum": 200, "minimum": 1}', lambda: _ok(client, "/r/lobby?limit=200")),
-            ('{"minimum": 0}', lambda: _ok(client, "/r/lobby?since=0")),
-            ('{"minimum": 1}', lambda: _ok(client, "/rooms?limit=1")),
-            ('{"enum": ["json"]}', lambda: client.get("/r/lobby?format=json").json()),
-            ('{"enum": ["1"]}', lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1")),
-            ('{"maximum": 0.5, "minimum": 0}', wait_is_honoured),
             # The signed lane's three, at the exact shapes it publishes. A room each,
             # because a nonce is single-use per key per room and the 19-digit one spends
             # the ceiling — 10**19 - 1 being the largest the published pattern allows, and
@@ -867,6 +883,14 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
             ),
         ]
+
+        # `limit`, `since`, `wait` and `format` clamp instead of refusing, and `if_absent`
+        # matches case-insensitively, which JSON Schema cannot express — so none of them
+        # publishes a bound any more (docs/design.md §3.5) and none has one to cover here.
+        # They are still exercised at the extreme the prose promises, because a clamp
+        # nobody honours misleads exactly as much as a `maximum` nobody enforces.
+        for exercise in checks_without_a_published_bound:
+            exercise()
 
         for _bound, exercise in checks:
             exercise()
@@ -909,15 +933,21 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
         assert schema["minLength"] == schema["maxLength"] == len(did)
         assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
 
-    for schema in (param(say, "sig"), param(note, "sig"), body["properties"]["sig"]):
+    # The body's copies live under `dependentSchemas.did` rather than on the properties:
+    # the handler reads `sig`/`nonce` only when a `did` is present, so a body without one
+    # is an unsigned write and publishing their shapes unconditionally would be a
+    # constraint nothing enforces (docs/design.md §3.5). Same shapes, stated where they
+    # actually hold — which is still one definition and still three publishing sites.
+    signed = body["dependentSchemas"]["did"]
+    for schema in (param(say, "sig"), param(note, "sig"), signed["properties"]["sig"]):
         assert re.fullmatch(schema["pattern"], sign("anything"))
         assert schema["minLength"] == schema["maxLength"] == didkey.SIG_CHARS
-    for schema in (param(say, "nonce"), param(note, "nonce"), body["properties"]["nonce"]):
+    for schema in (param(say, "nonce"), param(note, "nonce"), signed["properties"]["nonce"]):
         assert re.fullmatch(schema["pattern"], "1") and not re.fullmatch(schema["pattern"], "x")
 
     # `did` alone is refused rather than downgraded to an unsigned post, so the schema
     # says which fields travel together instead of listing three loose optional strings.
-    assert body["dependentRequired"] == {"did": ["sig", "nonce"]}
+    assert signed["required"] == ["sig", "nonce"]
     assert client.post("/r/lobby", json={"text": "hi", "did": did}).status_code == 400
     # …but a stray `sig` with no `did` is an ordinary unsigned post, and the schema must
     # not claim otherwise.

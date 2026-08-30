@@ -46,14 +46,19 @@ def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
     import config
 
     with config.override(MAX_WAIT=0.5):
-        published = next(
+        # The ceiling is a clamp, not a refusal, so it is published as prose on the `wait`
+        # parameter and as a number in `limits.long_poll_seconds` rather than as a
+        # `maximum` the handler never enforced (docs/design.md §3.5).
+        published = client.get("/.well-known/agent.json").json()["limits"]["long_poll_seconds"]
+        assert published == 0.5
+        wait = next(
             p
             for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
             if p["name"] == "wait"
-        )["schema"]
-        assert published["maximum"] == 0.5
-        # The largest value the schema permits is a wait the server actually takes.
-        assert app_module._seconds(str(published["maximum"])) == 0.5
+        )
+        assert "clamped to 0.5" in wait["description"]
+        # The largest value the service advertises is a wait the server actually takes.
+        assert app_module._seconds(str(published)) == 0.5
 
 
 def test_the_body_cap_holds_when_nothing_declares_a_length(client):

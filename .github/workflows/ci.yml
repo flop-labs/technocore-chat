@@ -117,10 +117,10 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-      - run: uv sync --frozen --group contract
+      - run: uv sync --frozen
 
       # Tuned so the fuzzer spends its budget on handlers rather than on the parts that
-      # exist to stop it. CHAT_MAX_WAIT is published as the `wait` maximum, and at the
+      # exist to stop it. CHAT_MAX_WAIT is the ceiling `wait` clamps to, and at the
       # default 10 a few generated long polls cost more than the whole run; without the
       # rate bumps the limiter answers most of it with a 429 that conforms and checks
       # nothing. Everything else is the shipped configuration.
@@ -140,13 +140,18 @@ jobs:
       # so a failure is a change in this service. ~800 requests in under ten seconds.
       #
       # Checks are named rather than `all`, because two of the rest assume things this
-      # service breaks on purpose: negative_data_rejection expects schema-invalid input to
-      # be refused, but a mistyped `?wait=` or `?limit=` is ignored (`_cursor` falls back);
-      # positive_data_acceptance expects valid input to succeed, but a valid write to a
-      # mailbox or a reserved namespace is refused. What remains is what must hold — no
-      # 500s, every response matching the status, content type, headers and schema
-      # promised, and the two 405 checks, since Allow is the machine-readable half of a
-      # refused method.
+      # service breaks on purpose: positive_data_acceptance expects valid input to succeed,
+      # but a valid write to a mailbox or a reserved namespace is refused; and
+      # negative_data_rejection's generator also invents a query parameter the document
+      # does not list and expects a refusal, which this service will never give — ignoring
+      # unknown query parameters is what makes the documented `?n=` cache-buster work at
+      # all. Turning that one mutation off is a config-file setting the CLI has no flag
+      # for, so the negative half of the contract is enforced by tests/test_contract.py
+      # (in-process, on every `pytest`, with `allow-extra-parameters` off and the input
+      # doctrine of docs/design.md §3.5 behind it) rather than here. What this job asserts
+      # is the over-the-wire half: no 500s, every response matching the status, content
+      # type, headers and schema promised, and the two 405 checks, since Allow is the
+      # machine-readable half of a refused method.
       #
       # --warnings lists what to *enable*. Three are left out because they can never clear:
       # missing_auth (POST /r/events only ever 403s, and there are no credentials to

@@ -35,12 +35,12 @@ dev = [
     # The store's lifecycle rules only conflict in *sequences*; tests/test_store_stateful.py
     # generates the orderings.
     "hypothesis>=6.165.10",
-]
-
-# Its own group, not `dev`: one job's tool, eighteen packages, nothing else imports it, so
-# day-to-day `uv sync --frozen` stays small. Pinned exactly because the job's whole claim
-# is that a failure is a change here and not in the generator that found it.
-contract = [
+    # In `dev` rather than its own group since tests/test_contract.py — the generative half
+    # of the input doctrine (docs/design.md §3.5) — runs inside pytest, so the ordinary
+    # `uv sync --frozen` has to be enough to run the suite. Pinned exactly, not `>=` like
+    # the rest: the test's whole claim is that a failure is a change in this service and
+    # not in the generator that found it. The out-of-process CLI run in .github/workflows
+    # /ci.yml uses this same pin.
     "schemathesis==4.25.0",
 ]
 
