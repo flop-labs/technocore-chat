@@ -200,13 +200,13 @@ def store_bench(root: Path) -> None:
 
     def room_gate() -> None:
         try:
-            store._check_room_capacity(fresh_room)
+            store._check_room_capacity(root, fresh_room)
         except store.StoreError:
             pass  # at the cap the refusal is the answer; the walk is what we are timing
 
     def note_gate() -> None:
         try:
-            store._check_note_capacity(root, fresh_note)
+            store._check_note_capacity(root, root / "notes" / "ns0", fresh_note)
         except store.StoreError:
             pass
 
@@ -224,7 +224,7 @@ def store_bench(root: Path) -> None:
     bench("glob  rooms/*.jsonl", lambda: _drain(root.glob("rooms/*.jsonl")))
     bench("_walk rooms .jsonl", lambda: _drain(store._walk(root / "rooms", ".jsonl")))
     bench("glob  notes/*/*.txt", lambda: _drain(root.glob("notes/*/*.txt")))
-    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt", True)))
+    bench("_walk notes .txt", lambda: _drain(store._walk(root / "notes", ".txt")))
     bench("_scan notes .txt (count only)", lambda: _scan_notes(root))
 
 
@@ -319,7 +319,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     is counted at the call, not inferred from a latency, so the figure is exact.
 
     It drives `app._rooms_view` rather than the route, so it measures the stamp alone. The
-    `_rooms_cache.clear()` that used to run on every write in `take` cost the same thing
+    `_rooms_walk` clear that used to run on every write in `take` cost the same thing
     per worker, and is gone for the same reason; a server-level run (`--port`) is what shows
     the two together.
     """
@@ -335,7 +335,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     def run(label: str, keys: tuple) -> None:
         walks, latencies, sent, served, noted = 0, [], 0, 0, 0
         last: dict | None = None
-        app._rooms_cache.clear()
+        app._rooms_walk.cache_clear()
         app.ROOMS_STAMP_KEYS = keys
         start = time.monotonic()
         while (now := time.monotonic() - start) < seconds:

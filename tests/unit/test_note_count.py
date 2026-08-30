@@ -61,7 +61,8 @@ def test_a_new_note_reads_the_same_number_of_directories_at_any_store_size(
     (root / ".reaped").touch()  # reap is throttled; measure the create path, not a reap
 
     fresh = store.note_path(root, "ns0", "brand-new")
-    reads = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(root, fresh))
+    ns_dir = store._note_ns_dir(root, "ns0")
+    reads = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(root, ns_dir, fresh))
     (tmp_path / f"reads{namespaces}.txt").write_text(str(reads))
     # Zero directories, at any store size. Both caps read a file: the global one at the
     # root, the per-namespace one inside the namespace. It was 1 — the caller's own
@@ -84,11 +85,15 @@ def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, m
     fresh = store.note_path(tmp_path, "did", "brand-new")
 
     (ns / store.NOTES_FILE).unlink()  # what a reap leaves behind
-    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, fresh))
-    assert rebuild == 1, "a dropped count must be rebuilt by scanning that namespace once"
+    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
+    # 2, not 1: the rebuild scan recurses, and one seeded note occupies one bucket — so the
+    # namespace directory and that bucket. The cost grows with OCCUPIED buckets rather than
+    # with notes, and one level of 256 bounds it at 257 reads however full the namespace
+    # gets; two levels would have made it ~30,000 at the per-namespace cap.
+    assert rebuild == 2, "a dropped count must be rebuilt by scanning that namespace once"
     assert (ns / store.NOTES_FILE).exists(), "…and the rebuild must be persisted"
 
-    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, fresh))
+    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
     assert cached == 0, "every create after the rebuild is a file read"
 
 
@@ -318,7 +323,7 @@ def test_a_refused_write_counts_nothing(tmp_path) -> None:
 
     after = (store._note_count(tmp_path), store._note_totals(ns, store._ns_totals)[0])
     assert after == before, f"8 refused writes moved the counts {before} -> {after}"
-    assert len(list(ns.glob("*.txt"))) == 1, "…and none of them created a note"
+    assert len(list(ns.rglob("*.txt"))) == 1, "…and none of them created a note"
 
 
 def test_racers_on_one_key_count_one_note(tmp_path) -> None:
@@ -347,7 +352,7 @@ def test_racers_on_one_key_count_one_note(tmp_path) -> None:
     [t.join() for t in threads]
 
     ns = tmp_path / "notes" / "did"
-    assert sorted(p.stem for p in ns.glob("*.txt")) == ["same", "seed"]
+    assert sorted(p.stem for p in ns.rglob("*.txt")) == ["same", "seed"]
     assert store._note_count(tmp_path) == 2, "eight writes to one key are one note"
     assert store._note_totals(ns, store._ns_totals)[0] == 2
 
@@ -372,7 +377,7 @@ def test_a_reap_frees_a_namespace_that_had_filled(tmp_path, monkeypatch) -> None
 
     # Age both notes past the idle rule and let the next write run a pass.
     old = time.time() - store.IDLE_SECONDS - 60
-    for note in (tmp_path / "notes" / "did").glob("*.txt"):
+    for note in (tmp_path / "notes" / "did").rglob("*.txt"):
         os.utime(note, (old, old))
     monkeypatch.setattr(store, "REAP_EVERY", 0)
     store.note_set(tmp_path, "elsewhere", "k", "v")  # any write; the reap rides the path
@@ -394,8 +399,8 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, path):
-        real_check(root, path)
+    def slow_check(root, ns_dir, path):
+        real_check(root, ns_dir, path)
         time.sleep(0.02)  # widen the count->write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
@@ -412,7 +417,7 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     [t.start() for t in threads]
     [t.join() for t in threads]
 
-    on_disk = len(list((tmp_path / "notes" / "did").glob("*.txt")))
+    on_disk = len(list((tmp_path / "notes" / "did").rglob("*.txt")))
     assert on_disk == 4, f"cap is 4, namespace holds {on_disk}"
     assert store._note_totals(tmp_path / "notes" / "did", store._ns_totals)[0] == 4
 
@@ -595,9 +600,14 @@ def test_a_reap_cannot_remove_a_namespace_a_create_is_entering(tmp_path, monkeyp
     at_the_window, reap_done = threading.Event(), threading.Event()
     creator, died = [], []
     real_open, real_walk = open, store._walk
+    # Asked of the resolver rather than spelled out: since sharding the sidecar sits in the
+    # key's bucket, so a hardcoded `fresh/k.txt.lock` matches nothing and the window this
+    # test exists to open is never reached — a premise that fails loudly, which is why the
+    # assertion below is on `at_the_window` and not only on the outcome.
+    sidecar = f"{store.note_path(tmp_path, 'fresh', 'k')}.lock"
 
     def open_the_sidecar_lock_but_park_in_the_window(path, *a, **kw):
-        if str(path).endswith(f"fresh{os.sep}k.txt.lock"):
+        if str(path) == sidecar:
             at_the_window.set()
             reap_done.wait(1.0)  # unfixed the reap gets here; fixed it is stuck on the gate
         return real_open(path, *a, **kw)
@@ -608,14 +618,14 @@ def test_a_reap_cannot_remove_a_namespace_a_create_is_entering(tmp_path, monkeyp
         except BaseException as exc:  # noqa: BLE001 — recorded for the assertion, not hidden
             died.append(exc)
 
-    def walk_but_let_a_create_into_the_window_first(d, suffix, nested=False):
+    def walk_but_let_a_create_into_the_window_first(d, suffix):
         # The sweep of orphan note locks: the count walk is done and its gate given back,
         # and the rmdir is next. The only point in the pass where this race is reachable.
         if suffix == ".txt.lock" and not creator:
             creator.append(threading.Thread(target=create))
             creator[0].start()
             at_the_window.wait(5)
-        return real_walk(d, suffix, nested)
+        return real_walk(d, suffix)
 
     monkeypatch.setattr(store, "open", open_the_sidecar_lock_but_park_in_the_window, raising=False)
     monkeypatch.setattr(store, "_walk", walk_but_let_a_create_into_the_window_first)

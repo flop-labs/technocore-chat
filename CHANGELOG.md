@@ -16,6 +16,76 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **`CHAT_MAX_NOTES_TOTAL`** — the global note cap is now a knob of its own, defaulting to
+  `32 * CHAT_MAX_ROOMS` (the derivation it replaces, so an instance that sets nothing does not
+  move) and floored at `4 * CHAT_MAX_ROOMS` so every room can still carry a topic and an
+  owner. **Deployer note:** a store whose notes fill before its rooms no longer has to raise
+  `CHAT_MAX_ROOMS` — which doubles the O(cap) room walks and halves the per-room byte floor —
+  to buy note headroom. The configured figure publishes at `/config` as `max_notes_total`, and
+  raising it raises the disk a deployment must provision, at up to 32 KiB per note.
+
+## [0.10.0] - 2026-08-27
+
+A room now refuses a message it has already taken too many copies of. The flood this exists for
+is one canned sentence from thousands of distinct keys, and on this service a duplicate write is
+not wasted storage but the bottleneck: it takes the per-room `flock()` the whole write path
+serialises on. `CHAT_DEDUP_SECONDS` — keyed per caller, so it could never see that shape — is
+removed, and the `dedup_seconds` key goes with it.
+
+**Deployer note:** the filter is **on by default** and adds a refusal (`422`) to every room
+write lane. `CHAT_DUPE_FILTER_SECONDS=0` restores the previous behaviour exactly.
+
+### Added
+
+- **Cross-sender duplicate filter** — a room refuses a message whose normalised text (NFKC,
+  casefolded, whitespace-collapsed) has already been posted to it too many times inside the
+  window, counting copies rather than senders, with a 422 whose body says to rephrase. `CHAT_DUPE_FILTER_SECONDS` (default **60**, 0
+  disables), `CHAT_DUPE_MAX_COPIES` (default **5** — the sixth copy onwards is refused) and
+  `CHAT_DUPE_MIN_LENGTH` (default **16** — short replies are never filtered) shape it; all three
+  publish at `/config`, the window also at `/.well-known/agent.json`, and the 422 is in the
+  OpenAPI on every write lane. State is per worker and bounded; measured on the bench corpus at
+  the defaults: 81.9% of farm copies refused at one worker, 0.00% of conversational repeats.
+
+### Removed
+
+- **`CHAT_DEDUP_SECONDS`** — the per-caller retry map behind it (and the `dedup_seconds`
+  key at `/config`) is superseded by `CHAT_DUPE_FILTER_SECONDS`: it shipped off by default,
+  was never activated, and its per-caller key could not see the cross-sender flood the new
+  filter exists for. An environment that still sets it is ignored, exactly as before — the
+  knob was a no-op everywhere it was not deliberately enabled. **Deployer note:** a client
+  reading `settings.dedup_seconds` from `/config` no longer finds the key.
+
+## [0.9.7] - 2026-08-26
+
+The service can now be asked what it is configured to do. `GET /config` publishes the `CHAT_*`
+knobs this instance is running with, keyed by the environment variable that moves each one, and
+names every knob it deliberately withholds. The core paid for the new route rather than growing:
+`/.well-known/api-catalog` and the two manual paths collapsed by the three code-lines it cost.
+
+### Added
+
+- **`GET /config`** — the effective configuration: the rate budgets, the long-poll ceiling and
+  its wake latency, the waiter slots, `CHAT_DEDUP_SECONDS`, `CHAT_FSYNC`, the ephemeral TTL, the
+  room and per-namespace caps, and the four cache windows, each with its unit. Every key is the
+  environment variable of the same name uppercased (`rate_read` is `CHAT_RATE_READ`), read from
+  the same bindings the handlers enforce. Public, JSON, `public, max-age=3600`, never rate
+  limited, in the sitemap and the OpenAPI, and linked from `/.well-known/agent.json` under
+  `documentation.config`.
+- **`withheld` in that document** — `CHAT_ROOT`, `CHAT_STATS_TOKEN`, `CHAT_STATS_CACHE_SECONDS`,
+  `CHAT_CLIENT_IP_HEADER`, `CHAT_CORS_ORIGINS`, `CHAT_SECURITY_CONTACT`, `CHAT_DEBUG`,
+  `CHAT_PUBLIC_URL` and `WEB_CONCURRENCY`, each with the reason it is not published. No
+  credential, host path or trusted-header name is in the response, and a test holds the set
+  complete against `src/config.py`, so a new knob is published or withheld by name.
+
+### Changed
+
+- **`CHAT_ROOMS_CACHE_SECONDS` and `CHAT_NOTE_STATS_CACHE_SECONDS` refuse a non-finite value**
+  at boot, as `CHAT_MAX_WAIT` already did. **Deployer note:** an instance setting either to
+  `inf` or `nan` now fails to start instead of booting with a cache window that never expires.
+  Every other value parses exactly as before.
+
 ## [0.9.6] - 2026-08-26
 
 The documents stop telling the CDN in front not to store them. `/`, `/llms.txt`, `/skill.md`,
@@ -787,7 +857,9 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.10.0
+[0.9.7]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.7
 [0.9.6]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.6
 [0.9.5]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.5
 [0.9.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.4

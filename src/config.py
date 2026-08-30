@@ -18,6 +18,29 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+
+def _finite_env(name: str, default: str) -> float:
+    """A float from the environment, or refuse to start. Every float knob below uses it.
+
+    Every integer setting here goes through `int()`, which raises on junk and takes the
+    process down at import — the loudest possible way to report bad configuration.
+    `float()` does not: it accepts `inf` and `nan` happily, and every knob here is now
+    *published*, at /config if not sooner. A non-finite value reaches that document — and
+    /openapi.json and /.well-known/agent.json, for the ceilings they carry — as the bare
+    token `Infinity`, which Python's json module emits and reads back but RFC 8259 does
+    not permit, so every strict parser rejects the whole document: a browser, a Go or Rust
+    client, a validating registry. A discovery service answering with undiscoverable
+    documents is worse off than one that refused to boot, which is exactly what the
+    settings beside it already do. `inf` on a cache window is a live bug either way — the
+    entry never expires and the view never refreshes again.
+    """
+    raw = os.environ.get(name, default)
+    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number, got {raw!r}")
+    return value
+
+
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 
 # Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
@@ -60,12 +83,12 @@ STATS_CACHE_SECONDS = int(os.environ.get("CHAT_STATS_CACHE_SECONDS", "60"))
 # ordering, the engagement aggregates and the per-room and total byte figures. Sharing
 # one walk needs that — stamping messages meant one message anywhere ended every window
 # early, and at production write rates the window was never reached at all.
-ROOMS_CACHE_SECONDS = float(os.environ.get("CHAT_ROOMS_CACHE_SECONDS", "3"))
+ROOMS_CACHE_SECONDS = _finite_env("CHAT_ROOMS_CACHE_SECONDS", "3")
 # The note-capacity gauge and topic previews, reused across /rooms requests.
 # note_stats is two file reads now (not a per-note walk); stamped on the notes_written
 # counter, so a note write invalidates immediately from any worker; only reaper
 # deletions can be this stale. 0 disables.
-NOTE_STATS_CACHE_SECONDS = float(os.environ.get("CHAT_NOTE_STATS_CACHE_SECONDS", "30"))
+NOTE_STATS_CACHE_SECONDS = _finite_env("CHAT_NOTE_STATS_CACHE_SECONDS", "30")
 # s-maxage on /rooms and plain room reads, so a CDN can collapse a poll storm into one
 # origin request per interval. Browsers still revalidate (max-age=0); long-polls are
 # never marked. 0 restores no-store. A CDN must still mark the paths cache-eligible.
@@ -144,6 +167,35 @@ MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
 # scan by the same factor. 0.9.2 gave each namespace its own count file, so the create path
 # reads two numbers and walks nothing, and the cap is a blast-radius choice alone.
 MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MAX_ROOMS)))
+# What the WHOLE store may hold. Defaults to `32 * MAX_ROOMS`, which is the derivation this
+# replaces, so an instance that sets nothing does not move — and store.py keeps the argument
+# for why the surplus above the floor is sized at 28 * MAX_ROOMS.
+#
+# Floored at `4 * MAX_ROOMS` because the four reserved namespaces (`topic`, `room-owners`,
+# `room-allow`, `room-nonce`) hold one note per room each: below that the MAX_NOTES_PER_NS
+# invariant above is a lie, since the global cap would run out before every room could carry
+# a topic and an owner. The floor lives here so store.py never has to re-check it.
+#
+# It became a knob because the derivation left the note ceiling unreachable except through
+# MAX_ROOMS, and rooms and notes are not one resource. Measured on technocore.chat: notes
+# 1,276,805 of 1,310,720 (97.4%) while rooms sat at 96.3% of their own cap, and the only
+# lever was doubling MAX_ROOMS — which doubles the room walks and halves RESERVED_ROOM_BYTES
+# to buy note headroom that has nothing to do with rooms. A deployment whose agents write
+# many notes per room (identity, room guards, KV) meets this wall first, and now has a lever
+# for it alone. Nothing is loosened by default: the ceiling is where it was.
+#
+# It is NOT floored at MAX_NOTES_PER_NS, deliberately. The global cap binds above the
+# per-namespace one, so setting this below that knob makes the per-namespace cap inert
+# rather than unsafe — one namespace may then take the whole store, which is a choice an
+# operator can only make on purpose, and refusing it would be a floor with no invariant
+# under it.
+#
+# What it costs is disk, on store.py's arithmetic: a note is capped at 8192 code points, up
+# to 32 KiB in 4-byte UTF-8, so the hostile ceiling is this number x 32 KiB. At the default
+# that is 5 GiB, equal to MAX_TOTAL_ROOM_BYTES. Raise it and the volume a deployment has to
+# provision grows with it — which is the whole reason this is an operator's decision and not
+# a constant.
+MAX_NOTES_TOTAL = max(4 * MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_TOTAL", 32 * MAX_ROOMS)))
 # Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
 # real ceiling is N times these — which is the reason they are knobs at all: an operator
 # adding workers has no other way to hold the total where it was. 0 is meaningful here and
@@ -159,49 +211,94 @@ MAX_WAITERS_PER_IP = max(0, int(os.environ.get("CHAT_MAX_WAITERS_PER_IP", "4")))
 WORKERS = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
 
 
-def _finite_env(name: str, default: str) -> float:
-    """A float from the environment, or refuse to start.
-
-    Every other numeric setting here goes through `int()`, which raises on junk and takes
-    the process down at import — the loudest possible way to report bad configuration.
-    `float()` does not: it accepts `inf` and `nan` happily, and this is the one knob whose
-    value is *published*. A non-finite ceiling reaches /openapi.json and
-    /.well-known/agent.json as the bare token `Infinity`, which Python's json module emits
-    and reads back but RFC 8259 does not permit — so every strict parser rejects the whole
-    document: a browser, a Go or Rust client, a validating registry. A discovery service
-    answering with undiscoverable documents is worse off than one that refused to boot,
-    which is exactly what the settings beside it already do.
-    """
-    raw = os.environ.get(name, default)
-    value = float(raw)  # ValueError takes the process down, as int() does elsewhere
-    if not math.isfinite(value):
-        raise ValueError(f"{name} must be a finite number, got {raw!r}")
-    return value
-
-
 # Ceiling on ?wait=, tunable because the useful value is whatever the proxy in front will
 # hold. Passed into both manifest builders rather than hardcoded there: three documents
 # publish this number, and a tuned instance still saying 10 is the drift manifest.py
 # exists to prevent.
 MAX_WAIT = max(0.0, _finite_env("CHAT_MAX_WAIT", "10"))
 
-# How long an identical unsigned write is answered with the message it repeats instead of
-# writing a second one. A caller whose connection dropped never saw its 200 and sends the
-# same bytes again; without this the room shows the thing said twice.
+# How often a ?wait= long-poll re-reads the room. This is the wake latency: a write lands
+# at an arbitrary phase against a fixed-interval tick, so the wait for the next read is
+# near enough uniform over [0, WAIT_POLL] — median ~0.5x it, p90 ~0.9x, worst case the
+# whole interval — plus ~10 ms for the read and the round trip. That additive term is why
+# the p90 stops tracking the interval once it is small: over 60 independent phases on four
+# workers, 0.5 measured 462 ms (0.92x) and 0.05 measured 56 ms (1.13x, mostly overhead).
 #
-# OFF by default (0), and that default is the whole design decision. Nothing in an HTTP
-# request distinguishes a retry from a caller that meant to say the same thing twice, so
-# this trades a duplicate for a *dropped message* — and on this service identical rapid
-# repeats are ordinary traffic, not a fault: three tests in the suite write the same nick
-# and text back to back and require all of them to land, `test_lane_parity` among them,
-# because one write through each lane IS the same nick and text. Enabling it silently
-# collapses those. A duplicate is visible and someone can ignore it; a message that never
-# arrived is neither.
+# It is also what makes long-polling work across processes at all — the poll re-reads the
+# room *file*, so a write from any worker is seen by a waiter parked on every other one,
+# with no shared memory, no lifespan hook and no wakeup bus.
 #
-# So an operator turns it on, per deployment, knowing their agents: CHAT_DEDUP_SECONDS=5
-# is a sane value where callers retry on timeout and rarely repeat themselves. Keep it
-# short either way — past a few seconds a repeat is a conversation, not a retry.
-DEDUP_SECONDS = max(0.0, _finite_env("CHAT_DEDUP_SECONDS", "0"))
+# Lowering it buys latency with reads: at 0.5 a waiter costs two tail reads a second, at
+# 0.05 it costs twenty, times MAX_WAITERS_TOTAL per process. On a cached small room those
+# reads are cheap and 0.05 is a reasonable trade for a ~55 ms p90; on a busy instance with
+# the waiter cap raised, measure before dropping it far.
+#
+# Floored, not clamped to zero like the knobs above it: 0 would spin the wait loop with no
+# sleep at all, burning a core and issuing unbounded reads per waiter, which is a way to
+# take an instance down by configuration. 0.01 is already 100 reads a second per waiter.
+WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
+
+# The CROSS-SENDER duplicate filter: a room refuses a message whose normalised text too
+# many senders have already posted to it inside this window. It exists because a room
+# taking the same canned sentence from thousands of identities is not conversation —
+# and on this service a duplicate write costs the per-room flock the whole write path
+# serialises on, so refusing it before the lock is worth more than the storage it saves.
+# (This replaces the per-caller retry map that lived here as CHAT_DEDUP_SECONDS: that
+# was a retry helper keyed per caller, off by default, never activated, and keyed so it
+# could never see a cross-sender flood — 76% of the measured duplicate messages came
+# from a different sender than the copy before them.)
+#
+# ON by default at 60s, and 0 is the opt-out rather than the opt-in. The filter spent a
+# release defaulting to off while its false-positive shape was measured
+# (bench/dupe_filter.py: 0.00% of conversational repeats refused, at every window from
+# 15s to 900s), and the thing it exists for was meanwhile taking 71% of the busiest
+# room's writes through a lock the whole write path serialises on. A deployment that
+# wants the old behaviour back sets 0 and pays one comparison per write.
+#
+# The two knobs beside it shape how conservative the filter is — DUPE_MIN_LENGTH exempts
+# the short conversational replies ("ok", "gm", "+1") that are legitimate repeats by
+# nature, and DUPE_MAX_COPIES lets the first N copies through so a genuine echo wave is
+# never refused. State is per worker, bounded (see limit.MAX_DUPE_KEYS), and costs no
+# I/O. It does take one mutex — both write lanes reach the ring from a threadpool — but
+# a leaf one, held for a hash and a handful of dict operations and never across the
+# flock it exists to spare, so there is nothing it can deadlock against. Costs
+# ~microseconds per write when on, one comparison and no lock at all when off.
+#
+# Sizing the window, from bench/dupe_filter.py's sweep on a sustained corpus at the
+# measured rates: catch rises steeply to ~60s and then flattens, while the ring reaches
+# its own MAX_DUPE_KEYS bound around 300s — past there memory is the limiter, not the
+# window. The knee moves right with workers, because per-worker rings each see 1/W of
+# the copies: at WEB_CONCURRENCY=5 the same 60s window catches less than it does at one
+# worker, and widening toward 120s is the compensation when the sharding loss matters
+# more than the extra refusal window. Short-legit repeats are protected by the LENGTH
+# floor, not the window — the sweep shows 0.00% on them at every window from 15s to 900s.
+DUPE_FILTER_SECONDS = max(0.0, _finite_env("CHAT_DUPE_FILTER_SECONDS", "60"))
+# Normalised characters; a text SHORTER than this is never refused, however many copies
+# arrive — the comparison is `len(normalized) < min_length`, so a text of exactly this
+# length is still filterable. 16 keeps every observed conversational repeat ("ok", "gm", "+1",
+# "yes", "thanks", one-word answers) outside the filter while still catching the
+# shortest measured farm phrase ("flop agent check-in", 19 characters).
+DUPE_MIN_LENGTH = max(0, int(os.environ.get("CHAT_DUPE_MIN_LENGTH", "16")))
+# Copies of one normalised text a room accepts inside the window before further copies
+# are refused. 5, so the sixth copy onwards is refused: half a dozen agents echoing one
+# sentence inside a minute is already unusual, and catch at one worker moves 88.3% ->
+# 81.9% between N=3 and N=5 (the head phrases arrive at 1-3 copies per second, so two
+# extra allowed copies are noise there; the loss is the x12 mid-band slipping under the
+# bar).
+#
+# What N costs an honest room, stated the way it actually behaves: a genuine echo wave
+# arrives as a conversation moment, not a drip, so a wave that reaches N+1 copies loses
+# its last one EVERY time — 1/(N+1) of that wave, which is the bench's `borderline`
+# column on the sustained corpus (25.0% at N=3, 16.7% at N=5, 11.1% at N=8, matching
+# 1/(N+1) exactly). The fixed corpus reports 1.7% for the same thing only because it
+# shuffles each wave's copies across the whole span, which is not how a wave arrives;
+# do not retune off that number. Nothing else measurable is refused: FP-legit and
+# FP-short are 0.00% at every N and every window from 15s to 900s.
+#
+# Under WEB_CONCURRENCY=5 the same N=5/60s catches 50.8% — widening the window to 120s
+# buys that back to 66.6% without touching the threshold. Floored at 1 — 0 would refuse
+# the first copy, which is not filtering but turning the room off.
+DUPE_MAX_COPIES = max(1, int(os.environ.get("CHAT_DUPE_MAX_COPIES", "5")))
 
 # Operator debug ladder, stderr only. 1 = limiter take/refund verdicts with client
 # identity (limit.py); 2 = + store flock/compact/reap/CAS-conflict (store.py); 3 = + one

@@ -16,7 +16,8 @@ import json
 import secrets
 import time
 import tomllib
-from collections import OrderedDict
+from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 
 import orjson
@@ -25,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Match, Route
 
 import config
@@ -155,8 +156,11 @@ LISTING_BANNER = (
 # call time and passed into limit as parameters, exactly as per_min/burst already were.
 MAX_BUCKETS, CHARGED_CREATION = limit.MAX_BUCKETS, limit.CHARGED_CREATION
 MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP = limit.MAX_WAITERS_TOTAL, limit.MAX_WAITERS_PER_IP
-DEDUP_SECONDS = config.DEDUP_SECONDS
-MAX_RECENT_WRITES = limit.MAX_RECENT_WRITES
+DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES = (
+    config.DUPE_FILTER_SECONDS,
+    config.DUPE_MIN_LENGTH,
+    config.DUPE_MAX_COPIES,
+)
 FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
 _requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
 # _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
@@ -490,13 +494,19 @@ def _base_url(request: Request) -> str:
     )
 
 
-def _document(doc: dict) -> Response:
+def _document(doc: dict, media_type: str = "application/json") -> Response:
     """JSON with a short cache. The other JSON on this service is no-store because it is
-    room content that changes per second; these two describe the *shape* of the service,
-    which changes per release, and registries and crawlers refetch them on a schedule."""
+    room content that changes per second; these describe the *shape* of the service — or,
+    for /config, the settings of the process serving it — which changes per release or per
+    deploy, and registries and crawlers refetch them on a schedule.
+
+    `media_type` is for the one document that is JSON under a more specific label
+    (`application/linkset+json`). Declared here rather than overwritten on the response
+    afterwards: two fewer lines, and one fewer place a response's content type is decided.
+    """
     return Response(
         json.dumps(doc, ensure_ascii=False, indent=1) + "\n",
-        media_type="application/json",
+        media_type=media_type,
         headers={"Cache-Control": "public, max-age=3600"},
     )
 
@@ -525,9 +535,7 @@ def agent_json(request: Request) -> Response:
 def api_catalog(request: Request) -> Response:
     """`/.well-known/api-catalog` — RFC 9727. One API, so one linkset entry, and every
     link in it is a path this origin actually answers."""
-    response = _document(manifest.api_catalog_document(_base_url(request)))
-    response.headers["Content-Type"] = "application/linkset+json"
-    return response
+    return _document(manifest.api_catalog_document(_base_url(request)), "application/linkset+json")
 
 
 def ai_catalog(request: Request) -> Response:
@@ -537,6 +545,22 @@ def ai_catalog(request: Request) -> Response:
     card, because it publishes neither. A catalog exists to resolve to real things.
     """
     return _document(manifest.ai_catalog_document(_base_url(request)))
+
+
+def config_json(request: Request) -> Response:
+    """`/config` — the CHAT_* knobs this process is running with, and the withheld ones.
+
+    The caps were already published (agent.json's limits block, the 429 body, the `wait`
+    bound in the spec); the rest of the deployment's observable behaviour was not — dedup,
+    wake latency, waiter slots, fsync, how stale a cached listing may be. A caller that
+    cannot read those adapts by experiment, which costs the service more requests than
+    answering does.
+
+    Unlimited and unauthenticated, like the manual and the spec: the built document holds
+    no credential and no host detail (manifest._WITHHELD is the enumerated reason for each
+    one it leaves out), and rate-limiting the description of the rate limit is a deadlock.
+    """
+    return _document(manifest.config_document(VERSION))
 
 
 def agent_skills(request: Request) -> Response:
@@ -626,9 +650,14 @@ def _size(n: int) -> str:
 
 
 # Keyed by limit, because the limit changes how much work the walk does and therefore what
-# the answer contains. Bounded by construction: _cursor clamps to 0..MAX_LIMIT, so this
-# holds at most a couple of hundred entries even if every caller asks for a different one.
-_rooms_cache: OrderedDict[int, tuple[tuple, float, dict]] = OrderedDict()
+# the answer contains — and by the stamp and the time bucket that say whether an entry is
+# still good, because an entry that is no longer valid is not one to find and invalidate,
+# it is a key nobody asks for (see _rooms_stamp, and store._time_bucket for the clock half).
+#
+# The limit alone was bounded by construction — _cursor clamps to 0..MAX_LIMIT — but the
+# stamp and the bucket both turn over, so the key space is now open and the LRU bound is
+# what closes it: at most MAX_ROOMS_CACHE walks, live and superseded mixed, and never more.
+# A superseded entry is not evicted when its stamp moves, it just stops being looked up.
 MAX_ROOMS_CACHE = 64
 
 
@@ -646,11 +675,18 @@ def _rooms_stamp() -> tuple:
     This is what makes the cache correct rather than merely quick, and the ordering is the
     whole argument: store.append, the create path and the reaper all bump these counters
     *after* the record is on disk (or gone from it), so a stamp read before the walk can
-    never be newer than the data the walk sees. A stale entry is therefore always detected,
+    never be newer than the data the walk sees. A stale view is therefore never served,
     whatever order two concurrent requests interleaved in — a /rooms request that walks the
     pre-write state while a writer is still in fsync, the reaper or the create lock caches
-    that view under the *old* stamp and the next request rejects it. Nothing has to
-    invalidate anything for that to hold, which is why it survives a second worker.
+    that view under the *old* stamp, and the stamp is part of the cache key, so a request
+    that reads the new stamp is not looking it up. It does not have to be found and
+    rejected: it is simply not on the way to any later answer. Nothing has to invalidate
+    anything for that to hold, which is why it survives a second worker — and it is why
+    this is now the whole mechanism rather than half of one. Keying on the stamp instead of
+    storing it beside the value is also what leaves no read-then-validate window between
+    finding an entry and using it, so there is nothing here for a concurrent eviction to
+    race (the bug class of #376/#229). What it costs is that a superseded entry is not
+    reclaimed when its stamp moves; MAX_ROOMS_CACHE is what bounds that.
 
     That argument holds for every key here, and `messages` is deliberately not one of them.
     It is a single global lifetime counter, not per-room, so one message anywhere aged out
@@ -675,8 +711,11 @@ def _rooms_stamp() -> tuple:
 
     The clock is also the backstop under a lying stamp. `_bump` is best effort by design —
     an unwritable .counters must never fail a write that already landed — so a bump can go
-    missing, and a hit needs the stamp to match AND the entry to be inside the window. A
-    lost bump therefore costs at most one window, never a permanently stale listing.
+    missing, and a hit needs the stamp to match AND the time bucket to match — both of them
+    key material, so a miss on either is a miss. A lost bump therefore costs at most one
+    window, never a permanently stale listing. See store._time_bucket for why cutting the
+    window on a boundary can only expire an entry sooner than its own insertion would have,
+    which is the direction that keeps this docstring's promise rather than weakening it.
     """
     counted = store.counters(config.ROOT)
     # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
@@ -711,19 +750,13 @@ def _note_stats() -> dict:
     return view
 
 
-def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+def _rooms_payload(limit: int) -> dict:
+    """The /rooms walk for `limit`, uncached — everything a cache entry is made of.
 
-    Deliberately caching the *store walk* and not the rendered response: the text and JSON
-    renderings differ, and the budget footer is per-caller, so a response cache would have
-    to key on both and would still be wrong for the footer.
+    Split out so the cache is one decorator and the disabled path is one call: with
+    ROOMS_CACHE_SECONDS at 0 this runs and nothing is stored, which is the same "no reuse"
+    the old guarded read/insert pair gave and is now unmistakable at a glance.
     """
-    now = time.monotonic()
-    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
-    if config.ROOMS_CACHE_SECONDS > 0:
-        hit = _rooms_cache.get(limit)
-        if hit and hit[0] == stamp and now - hit[1] < config.ROOMS_CACHE_SECONDS:
-            return hit[2]
     view = store.room_stats(config.ROOT, limit=limit)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
@@ -740,18 +773,42 @@ def _rooms_view(limit: int) -> dict:
     view["engagement"]["windowed_note_to_message_ratio"] = (
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
-    if config.ROOMS_CACHE_SECONDS > 0:
-        # pop-then-insert, not move_to_end: assigning an existing key leaves the entry
-        # where it already was, which may be the front, and a concurrent evictor's popitem
-        # takes it from there — turning the move_to_end that used to follow into a
-        # KeyError. Reachable now that entries outlive a write: a caller cycling ?limit=
-        # keeps the cache full, so the evictor runs while another request is re-walking,
-        # and /rooms is sync, so two of them overlap in Starlette's threadpool.
-        _rooms_cache.pop(limit, None)
-        _rooms_cache[limit] = (stamp, now, view)
-        while len(_rooms_cache) > MAX_ROOMS_CACHE:
-            _rooms_cache.popitem(last=False)
     return view
+
+
+@lru_cache(maxsize=MAX_ROOMS_CACHE)
+def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
+    """_rooms_payload under an LRU, keyed on everything that decides whether it is current.
+
+    There is no read-then-validate and no pop-then-insert here to get wrong. The pair that
+    used to bracket this function — a get, a stamp comparison, then a pop, an insert and an
+    eviction loop — was two unguarded read-modify-writes on shared state, and every fix for
+    them was a rearrangement of the same unguarded sequence. lru_cache is documented
+    threadsafe, so the bookkeeping stays coherent however Starlette's threadpool interleaves
+    two /rooms requests, and no part of the argument for that rests on GIL scheduling.
+
+    The dict it returns is shared by every caller that gets this entry, as it always was:
+    _rooms_payload finishes building it before it is stored, and `rooms` only reads it.
+    """
+    return _rooms_payload(limit)
+
+
+def _rooms_view(limit: int) -> dict:
+    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+
+    Deliberately caching the *store walk* and not the rendered response: the text and JSON
+    renderings differ, and the budget footer is per-caller, so a response cache would have
+    to key on both and would still be wrong for the footer.
+
+    Zero means no reuse, and it means it for entries already in the cache too: the knob is
+    read here, per call, and at zero the walk goes straight past the cache rather than
+    trying to expire what is in it.
+    """
+    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
+    ttl = config.ROOMS_CACHE_SECONDS
+    if ttl <= 0:
+        return _rooms_payload(limit)
+    return _rooms_walk(limit, stamp, store._time_bucket(time.monotonic(), ttl))
 
 
 def rooms(request: Request) -> Response:
@@ -825,7 +882,7 @@ def rooms(request: Request) -> Response:
 # where the knob now lives) is aliased so tests that probe it keep calling app._finite_env.
 _finite_env = config._finite_env
 MAX_WAIT = config.MAX_WAIT
-WAIT_POLL = 0.5  # a new message surfaces within this, so ?wait=0.5 is the useful floor
+WAIT_POLL = config.WAIT_POLL  # CHAT_WAIT_POLL; the useful ?wait= floor is this value
 
 
 def _waiter_slot(ip: str):
@@ -880,6 +937,15 @@ async def _await_messages(
     fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
     two tail reads a second per waiter, bounded by MAX_WAITERS_TOTAL — cheaper in total
     than the busy-polling it replaces, which is the entire point.
+
+    It is also what makes ?wait= work under --workers N, which is not obvious and has been
+    read as a bug more than once. The poll re-reads the room *file*, so a write from any
+    worker is seen by a waiter parked on every other one; there is no per-worker event
+    registry to be isolated, and none is needed. What the process boundary costs is
+    latency, not delivery — one WAIT_POLL at worst — and CHAT_WAIT_POLL is the dial for it.
+    A cross-process wakeup bus would buy the rest of that interval for a background task, a
+    lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
+    reader consumes each byte, so N-1 workers miss it).
     """
     with _waiter_slot(client_ip(request)) as granted:
         if not granted:
@@ -896,6 +962,43 @@ async def _await_messages(
             if view["messages"]:
                 return view
     return None
+
+
+def room_export(request: Request) -> Response:
+    """`GET /r/<room>/export` — the retained ring, one raw JSONL download.
+
+    Every other read is a tail window (newest <= MAX_LIMIT), so nothing could copy the
+    history a room still holds even though it is literally a file (docs/design.md
+    §5.1–§5.2: a signed record re-verifies offline from the stored bytes, which is what
+    makes a dump a bundle of portable proofs). The body is the stored bytes exactly as
+    written — see store.export_room for why re-serializing is refused and how the
+    snapshot is bounded.
+
+    Metadata rides in one header rather than a body prelude, so `curl ... > room.jsonl`
+    yields a file that is nothing but records. Reachability is the room read's: whoever
+    holds the name reads it, `p-` rooms included, and a missing room answers exactly as
+    the room read does (200, empty). The read budget applies unchanged — the response is
+    already bounded by the room byte cap, so a separate budget class would price the same
+    worst case twice. No `wait=` and no query params in v1.
+    """
+    _, retry = take(request, "read", RATE_READ)
+    if retry:
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
+    room = request.path_params["room"]
+    # One call carries both halves: the store reads the generation right after the open,
+    # so header and body are captured back to back — up to the residual race
+    # store.export_room's docstring accepts, never a request lifetime apart.
+    generation, chunks = store.export_room(config.ROOT, room)
+    return StreamingResponse(
+        chunks,
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex",
+            "X-Room-Generation": str(generation),
+        },
+    )
 
 
 def _reject_if_events_room(room: str) -> Response | None:
@@ -1034,42 +1137,60 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     return did
 
 
-def _retry_key(request: Request, room: str, nick: str, body: str) -> tuple:
-    """What makes two unsigned writes the same write. The text is digested rather than
-    kept, so the key is a fixed size whatever the caller sent.
+def _dupe_refusal(request: Request, room: str) -> Response:
+    """422 for a text this room has already taken inside the window.
 
-    The client is part of the key and has to be: behind a CDN that this deployment is not
-    configured to read a header from, every caller shares one address (see the
-    client_identity block in /stats), and a key without it would let one agent's "ok"
-    swallow another's. Including it can only ever make the key more specific.
+    Not 200 — a 200 on a write lane carries the record that landed, and there is no
+    record of the refuser's to return: their message did not land. Not 429 — this is not
+    a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
+    automate into an identical resend. Not 409 — that is the CAS answer and carries the
+    current value; there is no value to merge here. 422 says the request was
+    well-formed and understood, and names the two things that actually work.
+
+    The write gate above may have charged this caller a room-creation token on the way
+    here, and that budget is a *daily* one: settling it with no record hands it straight
+    back, because nothing was created. Every other exit from a write lane already does
+    this — a refusal must not be the one that quietly spends a day's allowance.
     """
-    digest = hashlib.blake2b(body.encode("utf-8"), digest_size=16).digest()
-    return (client_ip(request), room, nick, digest)
+    limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    return text(
+        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
+        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
+        "are refused until that window passes.\n"
+        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
+        "— short replies are never filtered. This is not a rate limit and not a retry "
+        "signal: the same bytes will be refused again, from any identity — the filter "
+        "counts copies, not senders.\n"
+        "the enforced window, threshold and length floor are published at /config under "
+        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        422,
+    )
 
 
-def _already_written(request: Request, key: tuple, room: str, left: int) -> Response | None:
-    """The reply an identical write got moments ago, or None to go ahead and write it.
+@contextmanager
+def _dupe_slot(room: str, body: str):
+    """Reserve one copy of `body` in `room`'s ring for the append that follows, yielding
+    True when the room has already taken enough copies and the caller must refuse.
 
-    Answering with the original record rather than an error is the whole point: a retry
-    means the caller never saw its 200, so a refusal would report failure for a write that
-    succeeded. It gets the seq its message actually has.
+    Knobs read HERE at call time so config.override() and monkeypatch.setattr(app, ...)
+    keep reaching the ring — the same contract take() already follows.
 
-    The record is recovered from the room view this reply carries anyway, so a hit costs
-    one read and skips the append entirely — no flock, no fsync, no reaper. If the seq has
-    already left the window (a busy room, or compaction), there is nothing to answer with
-    and the write goes ahead: a duplicate is the safe direction, not a dropped message.
+    A context manager rather than a bare call because the reservation has to be undone
+    when the append refuses the write: store.append validates the nick, the nonce and
+    the room's capacity, so DUPE_MAX_COPIES malformed requests would otherwise spend a
+    room's whole window on a text nothing ever stored. Returning (the refusal, or the
+    200 path) releases nothing; only an exception does.
     """
-    if DEDUP_SECONDS <= 0:
-        return None
-    seq = limit.recent_write(key, time.monotonic(), DEDUP_SECONDS)
-    if seq is None:
-        return None
-    view = store.read_messages(config.ROOT, room, limit=20)
-    posted = next((m for m in view["messages"] if m.get("seq") == seq), None)
-    if posted is None:
-        return None
-    config._dbg(3, "retry", room=room, seq=seq)
-    return respond(request, {**view, "posted": posted}, note=budget_note("write", left, RATE_WRITE))
+    now = time.monotonic()
+    refused = limit.dupe_refused(
+        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
+    )
+    try:
+        yield refused
+    except BaseException:
+        if not refused:
+            limit.dupe_release(room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH)
+        raise
 
 
 def room_say(request: Request) -> Response:
@@ -1081,12 +1202,10 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    key = _retry_key(request, room, nick, body)
-    replay = _already_written(request, key, room, left)
-    if replay is not None:
-        return replay
-    rec = store.append(config.ROOT, room, nick, body)
-    limit.remember_write(key, rec["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES)
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, nick, body)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1114,7 +1233,10 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1210,16 +1332,17 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick, sent = str(payload.get("from", "")), str(payload.get("text", ""))
-            key = _retry_key(request, room, nick, sent)
-            replay = _already_written(request, key, room, left)
-            if replay is not None:
-                return replay
-            posted = store.append(config.ROOT, room, nick, sent)
-            limit.remember_write(
-                key, posted["seq"], time.monotonic(), DEDUP_SECONDS, MAX_RECENT_WRITES
-            )
+            with _dupe_slot(room, sent) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(config.ROOT, room, nick, sent)
         else:
-            posted = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce))
+            with _dupe_slot(room, body) as refused:
+                if refused:
+                    return _dupe_refusal(request, room)
+                posted = store.append(
+                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
+                )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
@@ -1761,22 +1884,29 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
 
 # The manual's prose lives in manual.md, beside the other served files and shipped the
 # same way (COPY src/ ./). Tokens stay unsubstituted there; only the numbers are code.
-MANUAL = _asset("manual.md")
+_MANUAL_TEMPLATE = _asset("manual.md")
+
 
 # Substituted rather than typed out, because this document is what agents are told is the
 # complete protocol — a number here that disagrees with the enforced constant is worse than
 # no number at all. Prose said "512 rooms, 4096 notes" for a full release after the caps
-# changed underneath it; nothing catches that but generating it.
-MANUAL = (
-    MANUAL.replace("__FREE_PATHS__", FREE_PATHS)
-    .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
-    .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
-    .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
-    .replace("__ROOM_BYTES_TOTAL__", f"{store.MAX_TOTAL_ROOM_BYTES >> 30} GiB")
-    .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
-    .replace("__ROOM_RING__", f"{store.MAX_ROOM_BYTES >> 20} MiB")
-    .replace("__ROOM_FLOOR__", f"{store.RESERVED_ROOM_BYTES >> 20} MiB")
-)
+# changed underneath it; nothing catches that but generating it. A function rather than a
+# module-level expression so a test can re-render it against a non-default CHAT_MAX_ROOMS,
+# which is the only way the floor's formatting is observable at all.
+def _render_manual() -> str:
+    return (
+        _MANUAL_TEMPLATE.replace("__FREE_PATHS__", FREE_PATHS)
+        .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
+        .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
+        .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
+        .replace("__ROOM_BYTES_TOTAL__", manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES))
+        .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
+        .replace("__ROOM_RING__", manifest.fmt_bytes(store.MAX_ROOM_BYTES))
+        .replace("__ROOM_FLOOR__", manifest.fmt_bytes(store.RESERVED_ROOM_BYTES))
+    )
+
+
+MANUAL = _render_manual()
 
 
 def _get_write(path: str, endpoint) -> Route:
@@ -1794,11 +1924,12 @@ def _get_write(path: str, endpoint) -> Route:
 
 app = Starlette(
     routes=[
-        Route("/", llms_txt),
-        Route("/llms.txt", llms_txt),
+        # Two paths, one handler — see llms_txt: the bytes were always the same.
+        *[Route(path, llms_txt) for path in ("/", "/llms.txt")],
         *[Route(path, doc_md) for path in _DOCS],
         Route("/auth.md", auth_md),
         Route("/openapi.json", openapi),
+        Route("/config", config_json),
         Route("/sitemap.xml", sitemap),
         Route("/.well-known/agent.json", agent_json),
         Route("/.well-known/api-catalog", api_catalog),
@@ -1812,6 +1943,7 @@ app = Starlette(
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),
+        Route("/r/{room}/export", room_export),
         _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
         _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),

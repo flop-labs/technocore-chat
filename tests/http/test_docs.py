@@ -87,6 +87,130 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_names_every_category_the_sweep_actually_takes(client):
+    """The same drift the caps test guards, on the sweep (#171).
+
+    The prose said "C0/C1 controls, format characters, zero-width joiners, bidi overrides",
+    which is `Cc` plus part of `Cf`, while `INVISIBLE_CATEGORIES` also takes Cs, Co, Zl and
+    Zp. A reader who trusted it signed text the server had already altered, then met a 403
+    naming the signature rather than the sweep. Both halves are asserted: every enforced
+    category is named, plus the four that used to be missing are present by name.
+    """
+    import store
+
+    manual = client.get("/llms.txt").text
+    swept = manual.split("SINGLE LINE:", 1)[1].split("\n\n", 1)[0]
+    for category in store.INVISIBLE_CATEGORIES:
+        assert category in swept, f"the manual does not name {category}, which the sweep takes"
+    # The regression itself: these four were enforced and unnamed.
+    for missing in ("Cs", "Co", "Zl", "Zp"):
+        assert missing in swept, missing
+
+
+def test_the_manual_states_the_url_break_even_it_actually_has(client):
+    """The GET write lane meets two ceilings, of which the character cap is not the binding one.
+
+    Percent-encoding costs 3 bytes per UTF-8 byte, so the ~16 KB a URL survives at the edge
+    divides by `MAX_TEXT_CHARS` into a bytes-per-character break-even. Above it a caller
+    cannot reach the character cap in a URL at all. The prose used to frame that as
+    "non-Latin scripts do not fit", which is the wrong axis: dense Vietnamese is Latin and
+    does not fit either. 16 KB is the edge's number rather than one this service enforces,
+    so what is pinned here is the arithmetic against our own cap.
+    """
+    import store
+
+    break_even = (16 << 10) // store.MAX_TEXT_CHARS
+    budget = client.get("/llms.txt").text.split("URL BUDGET:", 1)[1].split("\n\n", 1)[0]
+    assert f"break-even is {break_even} bytes per character" in budget
+    assert "Vietnamese" in budget  # the counterexample that makes the axis clear
+    assert "Non-Latin scripts do not" not in budget  # the framing this replaced
+
+
+def test_the_service_never_normalizes_so_a_signature_covers_the_form_you_sent(client):
+    """What the manual's NORMALIZATION paragraph promises, asserted through the surface.
+
+    Unicode composition is a caller's choice rather than a canonical form. This service takes
+    neither side: it stores the code points it was given. That has to be documented because
+    the signed lane makes it sharp. NFC and NFD of one word are different bytes, so a
+    signature over one is not a signature over the other, while the 403 that follows says
+    nothing about normalization.
+    """
+    import unicodedata
+
+    precomposed = unicodedata.normalize("NFC", "Việt")
+    decomposed = unicodedata.normalize("NFD", "Việt")
+    assert precomposed != decomposed and len(decomposed) > len(precomposed)
+
+    for form in (precomposed, decomposed):
+        posted = client.post("/r/norm?format=json", json={"from": "vi", "text": form})
+        assert posted.status_code == 200
+        assert posted.json()["posted"]["text"] == form  # stored as sent, neither folded
+
+    stored = [m["text"] for m in client.get("/r/norm?format=json").json()["messages"]]
+    assert stored == [precomposed, decomposed]  # two messages, not one deduplicated word
+
+    did, sign = _keypair()
+    signature = sign(f"norm|1|{precomposed}")
+    crossed = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": decomposed}
+    )
+    assert crossed.status_code == 403  # signed one form, sent the other
+    matched = client.post(
+        "/r/norm", json={"did": did, "sig": signature, "nonce": "1", "text": precomposed}
+    )
+    assert matched.status_code == 200
+
+
+def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client):
+    """The reported bug, through the surface that reported it (#242).
+
+    RESERVED_ROOM_BYTES is the budget divided by MAX_ROOMS, so it is the one published
+    figure an operator can move: CHAT_MAX_ROOMS=10240 halves it to 512 KiB, and the old
+    `>> 20` render published that as "0 MiB" — a floor of zero reads as no floor at all,
+    the opposite of what the append path enforces. At the source default the floor lands
+    exactly on 1 MiB, which is why the manual test above never caught it.
+    """
+    import app as app_module
+    import store
+
+    assert "0 MiB per room" not in app_module._render_manual()  # the default is not broken
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(store, "MAX_ROOMS", 10240)
+        monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", store.MAX_TOTAL_ROOM_BYTES // 10240)
+        raised = app_module._render_manual()
+    finally:
+        monkeypatch.undo()
+
+    assert "512 KiB per room" in raised
+    assert "0 MiB per room" not in raised
+    assert app_module._render_manual() == app_module.MANUAL  # and it renders back the same
+
+
+def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
+    """Two ways a whole-unit shift misreports a guarantee, and the rule for each.
+
+    Falling under the unit is the reported one: `524288 >> 20` is 0. Truncating *within*
+    the unit is the quieter one — at CHAT_MAX_ROOMS=3000 the floor is 1.7 MiB and `>> 20`
+    still says "1 MiB". Rounding would fix the second and break the guarantee, since
+    1.969 MiB stated as "2.0 MiB" promises more than the store enforces, so this floors.
+    """
+    import manifest
+    import store
+
+    assert manifest.fmt_bytes(524288) == "512 KiB"  # the reported case: under the unit
+    assert manifest.fmt_bytes(1789569) == "1.7 MiB"  # the quiet case: 5 GiB // 3000
+    assert manifest.fmt_bytes(2064548) == "1.9 MiB"  # 1.969 MiB — floored, never "2.0 MiB"
+
+    # Defaults are byte-identical to the shift they replace, so no published text moves.
+    assert manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES) == "5 GiB"
+    assert manifest.fmt_bytes(store.MAX_ROOM_BYTES) == "10 MiB"
+    assert manifest.fmt_bytes(1 << 20) == "1 MiB"  # the floor at the default 5120 rooms
+    assert manifest.fmt_bytes((1 << 20) + 1) == "1 MiB"  # a whole unit gains no fake ".0"
+    assert manifest.fmt_bytes(512) == "512 B" and manifest.fmt_bytes(0) == "0 B"
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store
@@ -368,8 +492,8 @@ def test_every_documented_response_declares_the_body_it_returns(client):
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
-    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this is the
-    one setting whose value is published. A non-finite ceiling reaches /openapi.json and
+    """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
+    value is published. A non-finite ceiling reaches /openapi.json and
     /.well-known/agent.json as the bare token `Infinity` — which Python emits and reads back
     but RFC 8259 forbids, so every strict parser rejects the whole document. A discovery
     service answering with undiscoverable documents is worse off than one that refused to
@@ -431,7 +555,42 @@ def test_an_integral_ceiling_publishes_as_an_integer(client):
     assert manifest.agent_manifest("", "0.7.0", 1, 1, 1, 10.0)["limits"]["long_poll_seconds"] == 10
 
 
-_REFUSALS = frozenset({"400", "403", "404", "409"})
+_REFUSALS = frozenset({"400", "403", "404", "409", "422"})
+
+
+_DUPE_TEXT = "one more copy of this sentence than allowed is refused, measured"
+
+
+def _one_copy_too_many(client, lane: str):
+    """Land the allowed copies of one long text, then one more, and return its response.
+
+    The filter's knobs are pinned here rather than read off the shipped defaults - the
+    shared client fixture pins the filter OFF, so without this override there is no 422
+    to document - and `allowed` reads the pinned value, so the copy count and the
+    threshold cannot drift apart when someone tunes one of them.
+    """
+    import app as app_module
+    import config
+    import limit
+
+    limit._dupes.clear()
+    app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
+    with config.override(DUPE_FILTER_SECONDS=30, DUPE_MAX_COPIES=5, RATE_WRITE=600):
+        allowed = config.DUPE_MAX_COPIES  # the pinned 5, read so count and knob cannot drift
+        for i in range(allowed):
+            if lane == "say":
+                client.get(f"/r/dupe422/say/n{i}/{_DUPE_TEXT.replace(' ', '%20')}")
+            elif lane == "post":
+                client.post("/r/dupe422", json={"from": f"n{i}", "text": _DUPE_TEXT})
+            else:
+                did, sign = _keypair(100 + i)
+                _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
+        if lane == "say":
+            return client.get(f"/r/dupe422/say/last/{_DUPE_TEXT.replace(' ', '%20')}")
+        if lane == "post":
+            return client.post("/r/dupe422", json={"from": "last", "text": _DUPE_TEXT})
+        did, sign = _keypair(199)
+        return _say_signed(client, "dupe422", did, sign, _DUPE_TEXT, nonce=1)
 
 
 def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(client):
@@ -458,6 +617,7 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     cases = [
         # Reads.
         ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
+        ("/r/{room}/export", "get", 400, lambda: client.get("/r/UPPER/export")),
         ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
         ("/kv/{ns}/{key}", "get", 400, lambda: client.get("/kv/UPPER/key")),
         ("/kv/{ns}/{key}", "get", 404, lambda: client.get("/kv/plans/never-written")),
@@ -567,6 +727,28 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
             lambda: client.get(
                 f"/kv/room-owners/d-owned/set-signed/{did}/{signed_note}?if=nothing-like-this"
             ),
+        ),
+        # The cross-sender duplicate filter: one copy past the threshold, inside the
+        # window, through each write lane. Enabled per case because it is off by default and the
+        # case has to be self-contained; the ring is cleared first because it is process
+        # state that outlives any one room file.
+        (
+            "/r/{room}/say/{nick}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say"),
+        ),
+        (
+            "/r/{room}",
+            "post",
+            422,
+            lambda: _one_copy_too_many(client, "post"),
+        ),
+        (
+            "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}",
+            "get",
+            422,
+            lambda: _one_copy_too_many(client, "say-signed"),
         ),
     ]
 
@@ -681,7 +863,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
                 lambda: _ok(client, _say_signed(client, "signed-did", did, sign, "signed")),
             ),
             (
-                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{86}$"}',
+                '{"maxLength": 86, "minLength": 86, "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$"}',
                 lambda: _ok(client, _say_signed(client, "signed-sig", did, sign, "again")),
             ),
         ]
@@ -1126,6 +1308,29 @@ def test_auth_md_states_the_absence_rather_than_leaving_it_to_inference(client):
     assert "<room>\\|<nonce>\\|<text>" in body  # the payload, so it cannot drift
 
 
+def test_default_cors_hides_cross_origin_replies_but_does_not_stop_get_writes(client):
+    """CORS is a browser read gate, not a write gate on a simple GET surface.
+
+    An untrusted origin gets no readable response, but the browser still sends the request
+    and the service still stores it. The served auth guide must say that explicitly: a
+    browser client that mistakes a hidden response for a rejected write can retry a write
+    that already landed, which is especially sharp on the signed nonce lane.
+    """
+    origin = {"Origin": "https://untrusted.example"}
+    written = client.get("/r/cors-check/say/browser/landed", headers=origin)
+
+    assert written.status_code == 200
+    assert "access-control-allow-origin" not in written.headers
+    stored = client.get("/r/cors-check?format=json").json()["messages"]
+    assert [(message["from"], message["text"]) for message in stored] == [("browser", "landed")]
+
+    auth = client.get("/auth.md").text
+    assert (
+        "CORS controls whether browser JavaScript can read a response, not whether the "
+        "request is sent" in auth
+    )
+
+
 def test_no_oauth_metadata_is_served_for_an_issuer_that_does_not_exist(client):
     """The scanners want these two and would score us higher for them. There is no
     authorization server, so both would advertise an issuer nothing can answer — the same
@@ -1275,3 +1480,26 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     with config.override(STATIC_CACHE_SECONDS=0):
         for path in ("/", "/llms.txt", "/skill.md", "/robots.txt"):
             assert client.get(path).headers["cache-control"] == "no-store", path
+
+
+def test_the_response_schema_publishes_the_sig_it_now_returns(client):
+    """A field the service returns but the document does not list is a field no generated
+    client can see. `sig` on a stored record is published with the same shape the signed
+    lanes already advertise for the signature they accept, and a real record satisfies it.
+    """
+    import didkey
+
+    did, sign = _keypair()
+    assert _say_signed(client, "docsig", did, sign, "published shape").status_code == 200
+    record = client.get("/r/docsig?format=json").json()["messages"][-1]
+
+    doc = client.get("/openapi.json").json()
+    message = doc["paths"]["/r/{room}"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["messages"]["items"]
+    published = message["properties"]["sig"]
+    assert published["minLength"] == published["maxLength"] == didkey.SIG_CHARS
+    assert re.fullmatch(published["pattern"], record["sig"])
+    # Optional, not required: records written before the field existed have no `sig`, and a
+    # reader must read that as "not re-verifiable", never as "invalid".
+    assert "sig" not in message["required"]

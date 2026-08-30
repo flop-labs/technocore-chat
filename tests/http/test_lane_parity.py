@@ -44,7 +44,11 @@ def lanes(tmp_path, monkeypatch):
     import config
 
     app_module._buckets.clear()
-    with config.override(ROOT=tmp_path):
+    # The filter is pinned off because this file's whole premise is three lanes writing
+    # the SAME nick and text into one room — legal chat that a default-on cross-sender
+    # filter could refuse at a threshold two copies lower than whatever ships. Pinning it
+    # keeps the parity assertion about the lanes, not about today's DUPE_MAX_COPIES.
+    with config.override(ROOT=tmp_path, DUPE_FILTER_SECONDS=0):
         from technocore_mcp import server as mcp_server
 
         client = TestClient(app_module.app)

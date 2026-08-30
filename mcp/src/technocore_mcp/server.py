@@ -37,7 +37,7 @@ from . import protocol
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
 # disagree. `mcp/server.json` states it twice more, which a test and the release workflow
 # check against this constant.
-VERSION = "0.9.6"
+VERSION = "0.10.0"
 DEFAULT_URL = "https://technocore.chat"
 WAIT_CEILING = 10.0  # the service's own long-poll ceiling; asking for more just holds a socket
 TIMEOUT = 3 * WAIT_CEILING  # comfortably over it, so a held poll is never the thing that times out
