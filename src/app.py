@@ -162,7 +162,7 @@ DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES = (
     config.DUPE_MIN_LENGTH,
     config.DUPE_MAX_COPIES,
 )
-FREE_PATHS, budget_note = limit.FREE_PATHS, limit.budget_note
+FREE_PATHS, budget_note, waiter_note = limit.FREE_PATHS, limit.budget_note, limit.waiter_note
 _requests, _identities, _proxy_evidence = limit._requests, limit._identities, limit._proxy_evidence
 # _buckets, _waiters_by_ip, refill_rate, MAX_IDENTITIES and PROXY_IP_HEADERS are only ever
 # read from outside (tests, /stats prose), never rebound or read by app's own code — they
@@ -953,19 +953,28 @@ async def room_read(request: Request) -> Response:
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
     wait = _seconds(q.get("wait"))
+    unheld = ""
     if wait and since is not None and not view["messages"]:
-        fresh = await _await_messages(request, room, tail, since, wait)
-        if fresh is not None:
-            view = fresh
-    note = budget_note("read", left, RATE_READ)
+        fresh, unheld = await _await_messages(request, room, tail, since, wait)
+        # The JSON lane's half of the note below, since a program gets no footer and must
+        # not infer a refusal from latency. Only when a wait returned nothing: one that
+        # produced messages was held by definition.
+        view = fresh if fresh is not None else {**view, "wait_held": not unheld}
+    # Ahead of the budget footer: a wait that did not happen is what the caller must act
+    # on first, and acting on it is what stops the next request being an instant re-poll.
+    note = unheld + budget_note("read", left, RATE_READ)
     resp = respond(request, view, note=note)
     return resp if wait or note else _edge_cacheable(resp)
 
 
 async def _await_messages(
     request: Request, room: str, limit: int, since: int, wait: float
-) -> dict | None:
+) -> tuple[dict | None, str]:
     """Poll the room until something arrives past `since`, or the budget runs out.
+
+    Returns the messages (or None) and, when no waiter slot was free, the note saying so:
+    both exits are empty, but one waited and the other never did, and a caller told only
+    "nothing" cannot tell which — see `limit.waiter_note`.
 
     Polling rather than watching: inotify would need a per-room watch table and a wakeup
     fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
@@ -981,21 +990,22 @@ async def _await_messages(
     lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
     reader consumes each byte, so N-1 workers miss it).
     """
-    with _waiter_slot(client_ip(request)) as granted:
+    ip = client_ip(request)  # once: client_ip counts proxy evidence as a side effect
+    with _waiter_slot(ip) as granted:
         if not granted:
-            return None
+            return None, waiter_note(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP, wait)
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             await asyncio.sleep(min(WAIT_POLL, max(0.0, deadline - time.monotonic())))
             # Stop burning tail reads on a caller that has already hung up.
             if await request.is_disconnected():
-                return None
+                return None, ""
             view = await run_in_threadpool(
                 store.read_messages, config.ROOT, room, limit=limit, since=since
             )
             if view["messages"]:
-                return view
-    return None
+                return view, ""
+    return None, ""
 
 
 def room_export(request: Request) -> Response:
