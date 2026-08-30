@@ -202,7 +202,17 @@ class Default(WorkerEntrypoint):
 
     async def fetch(self, request):
         key = getattr(self.env, "TECHNOCORE_SIGNING_KEY", None)
-        token = getattr(self.env, "TECHNOCORE_MCP_TOKEN", None)
+        # Normalised ONCE, so the guard below and the comparison further down cannot
+        # disagree about what "no token" means. Trimming at the comparison alone while
+        # the guard tested the raw value made a whitespace-only secret fail *open*: the
+        # guard saw a truthy "   " and let the request through to a comparison whose
+        # expected credential had become b"", which `Authorization: Bearer ` — and an
+        # absent header — also strip to, so `compare_digest` matched and the signing
+        # endpoint admitted a caller carrying no credential material at all. Reported by
+        # @yukkie3276 in review on this PR. A whitespace-only secret now normalises to
+        # empty and takes the 503 below, which is the fail-closed answer this gate
+        # already had for a key with no token.
+        token = str(getattr(self.env, "TECHNOCORE_MCP_TOKEN", None) or "").strip()
         if key and not token:
             return Response(
                 "503 TECHNOCORE_SIGNING_KEY is set but TECHNOCORE_MCP_TOKEN is not. A "
@@ -213,7 +223,23 @@ class Default(WorkerEntrypoint):
                 status=503,
             )
         if token:
-            presented = (request.headers.get("Authorization") or "").removeprefix("Bearer ")
+            # One shape is accepted, in any spelling of the scheme: the documented
+            # `Authorization: Bearer <token>`. The scheme is matched case-insensitively
+            # because it is a case-insensitive token (RFC 9110 §11.1) and clients spell it
+            # as they like — `removeprefix("Bearer ")` matched one spelling, so
+            # `bearer <token>` was answered 401, a refusal naming the header the caller had
+            # got right.
+            #
+            # Anything that is not scheme-plus-credential presents nothing, so it cannot
+            # match: no separator (a bare token with no scheme), a scheme that is not
+            # bearer, or a bearer with an empty credential. The bare token was accepted
+            # before this — `removeprefix` left it whole and it compared equal — an
+            # undocumented spelling on the one gate standing in front of a signing key,
+            # where the documented contract is the only shape worth honouring
+            # (@yukkie3276 on this PR).
+            raw = request.headers.get("Authorization") or ""
+            scheme, sep, rest = raw.partition(" ")
+            presented = rest if sep and scheme.lower() == "bearer" else ""
             # Compared as bytes, not str: `compare_digest` refuses two `str` arguments
             # unless both are ASCII, and raises `TypeError` rather than returning False.
             # The header is attacker-controlled, so `Authorization: Bearer café` would
@@ -221,7 +247,15 @@ class Default(WorkerEntrypoint):
             # 500 instead of a 401. It fails closed either way — the throw happens before
             # anything is served — but a crash is not an answer, and encoding both sides
             # keeps the comparison constant-time over the bytes that actually arrived.
-            if not hmac.compare_digest(presented.strip().encode(), str(token).encode()):
+            #
+            # Both sides are trimmed. Trimming only the presented half meant a token stored
+            # with surrounding whitespace — a newline survives more than one way of putting
+            # a secret into an environment — could not be matched by any caller at all,
+            # including one reproducing it byte for byte, and the 401 told them to send
+            # exactly what they were already sending. Trimming the stored side only widens
+            # the set of deployments that work: a token whose spelling depended on an
+            # invisible character had no working caller before.
+            if not hmac.compare_digest(presented.strip().encode(), token.encode()):
                 return Response(
                     "401 this endpoint requires `Authorization: Bearer <token>`.",
                     status=401,
