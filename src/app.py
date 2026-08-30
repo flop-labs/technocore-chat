@@ -16,8 +16,8 @@ import json
 import secrets
 import time
 import tomllib
-from collections import OrderedDict
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 
 import orjson
@@ -649,9 +649,14 @@ def _size(n: int) -> str:
 
 
 # Keyed by limit, because the limit changes how much work the walk does and therefore what
-# the answer contains. Bounded by construction: _cursor clamps to 0..MAX_LIMIT, so this
-# holds at most a couple of hundred entries even if every caller asks for a different one.
-_rooms_cache: OrderedDict[int, tuple[tuple, float, dict]] = OrderedDict()
+# the answer contains — and by the stamp and the time bucket that say whether an entry is
+# still good, because an entry that is no longer valid is not one to find and invalidate,
+# it is a key nobody asks for (see _rooms_stamp, and store._time_bucket for the clock half).
+#
+# The limit alone was bounded by construction — _cursor clamps to 0..MAX_LIMIT — but the
+# stamp and the bucket both turn over, so the key space is now open and the LRU bound is
+# what closes it: at most MAX_ROOMS_CACHE walks, live and superseded mixed, and never more.
+# A superseded entry is not evicted when its stamp moves, it just stops being looked up.
 MAX_ROOMS_CACHE = 64
 
 
@@ -669,11 +674,18 @@ def _rooms_stamp() -> tuple:
     This is what makes the cache correct rather than merely quick, and the ordering is the
     whole argument: store.append, the create path and the reaper all bump these counters
     *after* the record is on disk (or gone from it), so a stamp read before the walk can
-    never be newer than the data the walk sees. A stale entry is therefore always detected,
+    never be newer than the data the walk sees. A stale view is therefore never served,
     whatever order two concurrent requests interleaved in — a /rooms request that walks the
     pre-write state while a writer is still in fsync, the reaper or the create lock caches
-    that view under the *old* stamp and the next request rejects it. Nothing has to
-    invalidate anything for that to hold, which is why it survives a second worker.
+    that view under the *old* stamp, and the stamp is part of the cache key, so a request
+    that reads the new stamp is not looking it up. It does not have to be found and
+    rejected: it is simply not on the way to any later answer. Nothing has to invalidate
+    anything for that to hold, which is why it survives a second worker — and it is why
+    this is now the whole mechanism rather than half of one. Keying on the stamp instead of
+    storing it beside the value is also what leaves no read-then-validate window between
+    finding an entry and using it, so there is nothing here for a concurrent eviction to
+    race (the bug class of #376/#229). What it costs is that a superseded entry is not
+    reclaimed when its stamp moves; MAX_ROOMS_CACHE is what bounds that.
 
     That argument holds for every key here, and `messages` is deliberately not one of them.
     It is a single global lifetime counter, not per-room, so one message anywhere aged out
@@ -698,8 +710,11 @@ def _rooms_stamp() -> tuple:
 
     The clock is also the backstop under a lying stamp. `_bump` is best effort by design —
     an unwritable .counters must never fail a write that already landed — so a bump can go
-    missing, and a hit needs the stamp to match AND the entry to be inside the window. A
-    lost bump therefore costs at most one window, never a permanently stale listing.
+    missing, and a hit needs the stamp to match AND the time bucket to match — both of them
+    key material, so a miss on either is a miss. A lost bump therefore costs at most one
+    window, never a permanently stale listing. See store._time_bucket for why cutting the
+    window on a boundary can only expire an entry sooner than its own insertion would have,
+    which is the direction that keeps this docstring's promise rather than weakening it.
     """
     counted = store.counters(config.ROOT)
     # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
@@ -734,19 +749,13 @@ def _note_stats() -> dict:
     return view
 
 
-def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+def _rooms_payload(limit: int) -> dict:
+    """The /rooms walk for `limit`, uncached — everything a cache entry is made of.
 
-    Deliberately caching the *store walk* and not the rendered response: the text and JSON
-    renderings differ, and the budget footer is per-caller, so a response cache would have
-    to key on both and would still be wrong for the footer.
+    Split out so the cache is one decorator and the disabled path is one call: with
+    ROOMS_CACHE_SECONDS at 0 this runs and nothing is stored, which is the same "no reuse"
+    the old guarded read/insert pair gave and is now unmistakable at a glance.
     """
-    now = time.monotonic()
-    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
-    if config.ROOMS_CACHE_SECONDS > 0:
-        hit = _rooms_cache.get(limit)
-        if hit and hit[0] == stamp and now - hit[1] < config.ROOMS_CACHE_SECONDS:
-            return hit[2]
     view = store.room_stats(config.ROOT, limit=limit)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
@@ -763,18 +772,42 @@ def _rooms_view(limit: int) -> dict:
     view["engagement"]["windowed_note_to_message_ratio"] = (
         round(view["notes"]["total"] / seen, 4) if seen else None
     )
-    if config.ROOMS_CACHE_SECONDS > 0:
-        # pop-then-insert, not move_to_end: assigning an existing key leaves the entry
-        # where it already was, which may be the front, and a concurrent evictor's popitem
-        # takes it from there — turning the move_to_end that used to follow into a
-        # KeyError. Reachable now that entries outlive a write: a caller cycling ?limit=
-        # keeps the cache full, so the evictor runs while another request is re-walking,
-        # and /rooms is sync, so two of them overlap in Starlette's threadpool.
-        _rooms_cache.pop(limit, None)
-        _rooms_cache[limit] = (stamp, now, view)
-        while len(_rooms_cache) > MAX_ROOMS_CACHE:
-            _rooms_cache.popitem(last=False)
     return view
+
+
+@lru_cache(maxsize=MAX_ROOMS_CACHE)
+def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
+    """_rooms_payload under an LRU, keyed on everything that decides whether it is current.
+
+    There is no read-then-validate and no pop-then-insert here to get wrong. The pair that
+    used to bracket this function — a get, a stamp comparison, then a pop, an insert and an
+    eviction loop — was two unguarded read-modify-writes on shared state, and every fix for
+    them was a rearrangement of the same unguarded sequence. lru_cache is documented
+    threadsafe, so the bookkeeping stays coherent however Starlette's threadpool interleaves
+    two /rooms requests, and no part of the argument for that rests on GIL scheduling.
+
+    The dict it returns is shared by every caller that gets this entry, as it always was:
+    _rooms_payload finishes building it before it is stored, and `rooms` only reads it.
+    """
+    return _rooms_payload(limit)
+
+
+def _rooms_view(limit: int) -> dict:
+    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+
+    Deliberately caching the *store walk* and not the rendered response: the text and JSON
+    renderings differ, and the budget footer is per-caller, so a response cache would have
+    to key on both and would still be wrong for the footer.
+
+    Zero means no reuse, and it means it for entries already in the cache too: the knob is
+    read here, per call, and at zero the walk goes straight past the cache rather than
+    trying to expire what is in it.
+    """
+    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
+    ttl = config.ROOMS_CACHE_SECONDS
+    if ttl <= 0:
+        return _rooms_payload(limit)
+    return _rooms_walk(limit, stamp, store._time_bucket(time.monotonic(), ttl))
 
 
 def rooms(request: Request) -> Response:
