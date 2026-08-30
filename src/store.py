@@ -18,7 +18,7 @@ import tempfile
 import time
 import unicodedata
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -1273,12 +1273,8 @@ def _reapable(path: Path | str, now: float, stillborn_rule: bool) -> str | None:
 ROOM_GUARD_NS = (OWNERS_NS, ALLOW_NS, NONCE_NS)
 
 
-def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: float) -> bool:
-    """True when `entry` is a guard note whose room is still within its own idle window.
-
-    Tied to the room, not exempted outright: once the room itself is reapable the guards go
-    with it, so this bounds the state exactly as before rather than adding an immortal
-    namespace.
+def _guard_note_room(root: Path, base: str, entry: os.DirEntry[str]) -> Path | None:
+    """The room `entry` guards, or None when `entry` is not a guard note at all.
 
     The namespace is the FIRST component under `base`, never the parent directory. That was
     the same thing before sharding and is not now: a bucketed note's parent is `ab`, so a
@@ -1290,14 +1286,59 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
 
     `rpartition` is `.stem` exactly here and not by luck: NAME_RE admits no dot, so a note
     name carries exactly one, the suffix's.
+
+    `room_path` validates the stem, and the reaper walks every file actually on disk --
+    including one left by an older, looser validator or created by hand (`_listable` makes
+    the same allowance for listings). A stem that fails the allowlist names no room this
+    service would accept today, so it guards nothing: caught here as StoreError (not a bare
+    ValueError, so an unrelated one is never masked) and treated as "not a guard note" rather
+    than let it escape uncaught -- `_reap`'s loop only catches OSError -- and abort the whole
+    pass on an unrelated, valid write.
     """
     if entry.path[len(base) :].partition(os.sep)[0] not in ROOM_GUARD_NS:
-        return False
-    room = room_path(root, entry.name.rpartition(".")[0])
+        return None
     try:
-        return now - room.stat().st_mtime <= IDLE_SECONDS
+        return room_path(root, entry.name.rpartition(".")[0])
+    except StoreError:
+        return None
+
+
+def _guard_orphaned(room: Path, now: float) -> bool:
+    """True once the room a guard note names is gone, or is itself reapable — by either
+    rule, idle or stillborn.
+
+    A guard's whole job is to outlive the room it protects until the room itself goes, so
+    checking it against `_reapable` (both rules) rather than a bare mtime comparison against
+    IDLE_SECONDS is what actually ties its lifetime to the room's: a room on the stillborn
+    rule is gone at STILLBORN_SECONDS, and a guard note that kept waiting out IDLE_SECONDS on
+    its own — up to six more days — would sit there long after the room it names is unlinked,
+    still reporting the room "owned" to `_room_write_gate` and blocking the very recreation
+    the reap made room for (room_generation, #139). `_reap` deletes the room this same pass
+    (rooms are walked before notes) so by the time a guard note is checked its room is
+    already gone in the common case; reapable-but-not-yet-unlinked is handled the same way so
+    this holds regardless of walk order.
+    """
+    try:
+        return _reapable(room, now, True) is not None
     except OSError:
-        return False  # no room left to guard
+        return True  # no room left to guard
+
+
+def _reap_reason(
+    path: Path | str, guard_room: Path | None, now: float, stillborn_rule: bool
+) -> str | None:
+    """Why `_reap` would take this entry, or None while it stays. One call covers both
+    the pre-lock check and the post-lock recheck, on a path or a guard room respectively —
+    the same split `_reapable` documents, for the same reason: a cached stat must never
+    stand in for the recheck.
+
+    A guard note (`guard_room` not None) is reasoned about via the room it names, never its
+    own path: `_guard_orphaned` is the whole point of the split, and mixing in `_reapable`
+    on the note's own mtime here would resurrect exactly the bug this replaced.
+    """
+    if guard_room is not None:
+        return "orphaned" if _guard_orphaned(guard_room, now) else None
+    return _reapable(path, now, stillborn_rule)
 
 
 def _reconcile_note_count(root: Path) -> None:
@@ -1427,9 +1468,13 @@ def _reap(root: Path) -> None:
         base = f"{root / sub}{os.sep}"
         for entry in _walk(root / sub, suffix):
             try:
-                if _guards_a_live_room(root, base, entry, now):
-                    continue
-                if not _reapable(entry.path, now, stillborn_rule):
+                # A guard note is reapable exactly when the room it names is gone or is
+                # itself reapable -- never on its own IDLE_SECONDS clock, which is what let
+                # a stillborn-reaped room's owner note survive the room by up to six days.
+                # An ordinary note (guard_room is None) keeps the plain per-note idle check.
+                # See _reap_reason.
+                guard_room = _guard_note_room(root, base, entry)
+                if not _reap_reason(entry.path, guard_room, now, stillborn_rule):
                     continue
                 # The Path is built here and not in the walk: everything above this line
                 # works on the entry scandir already had, and a live pass reaches this
@@ -1441,31 +1486,50 @@ def _reap(root: Path) -> None:
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 # It re-stats by path, never through the entry — see _reapable.
-                with _locked(p):
-                    reason = _reapable(p, now, stillborn_rule)
-                    if reason:
-                        if stillborn_rule:
-                            # Leave the previous generation's high-water mark behind so a
-                            # recreated room continues the sequence instead of restarting at 1
-                            # and stranding every cursor pointing past it (#139 dir #2). Stored
-                            # in a root-level map under the seq-state lock. Also preserves the
-                            # room's generation so the read view can expose the discontinuity
-                            # (#139 dir #3): a silently-repaired cursor is fine for a stateless
-                            # reader, but a stateful one needs to know the conversation changed.
-                            # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
-                            room = p.name[: -len(".jsonl")]
-                            with _locked(root / ".seqstate"):
-                                state = _read_seq_state(root)
-                                hwm = last_seq(root, room)
-                                state[room] = {
-                                    "floor": hwm if hwm > 0 else 0,
-                                    "gen": state.get(room, {}).get("gen", 0),
-                                }
-                                _write_seq_state(root, state)
-                        p.unlink(missing_ok=True)
-                        config._dbg(2, "reap", room=p.name, reason=reason)
-                        if stillborn_rule:
-                            reaped[f"reaped_{reason}"] += 1
+                #
+                # A guard note additionally takes the room's own lock first, room-then-note
+                # -- the only order anything here takes both locks in, so there is nothing
+                # to invert. `_write_record` takes that identical lock (`_locked(path)` on
+                # the room) to create or recreate a room, so holding it here makes the
+                # decision and the unlink atomic with a concurrent recreation: whichever of
+                # the two gets the room lock first is the one whose view of "does this room
+                # exist" the other has to live with. If the writer gets there first, this
+                # recheck (still inside the room lock) finds a live room and leaves the note
+                # alone. If this reap gets there first, the writer stays queued until the
+                # note is already gone -- which is correct, not a bug: a legitimately reaped
+                # guard is supposed to leave the name free to claim, same as any other reap.
+                # What holding this lock does NOT fix: an authorization decision app.py's
+                # _room_write_gate already made by reading the note before either lock was
+                # taken. That gap is between the gate's read and the write that acts on it,
+                # exists for any concurrent note mutation, and is not specific to reaping --
+                # tracked separately (see PR #518's description) rather than folded in here.
+                with _locked(guard_room) if guard_room is not None else nullcontext():
+                    with _locked(p):
+                        reason = _reap_reason(p, guard_room, now, stillborn_rule)
+                        if reason:
+                            if stillborn_rule:
+                                # Leave the previous generation's high-water mark behind so a
+                                # recreated room continues the sequence instead of restarting
+                                # at 1 and stranding every cursor pointing past it (#139 dir
+                                # #2). Stored in a root-level map under the seq-state lock.
+                                # Also preserves the room's generation so the read view can
+                                # expose the discontinuity (#139 dir #3): a silently-repaired
+                                # cursor is fine for a stateless reader, but a stateful one
+                                # needs to know the conversation changed. (Rooms only: notes
+                                # are not sequenced, so they carry no floor/gen.)
+                                room = p.name[: -len(".jsonl")]
+                                with _locked(root / ".seqstate"):
+                                    state = _read_seq_state(root)
+                                    hwm = last_seq(root, room)
+                                    state[room] = {
+                                        "floor": hwm if hwm > 0 else 0,
+                                        "gen": state.get(room, {}).get("gen", 0),
+                                    }
+                                    _write_seq_state(root, state)
+                            p.unlink(missing_ok=True)
+                            config._dbg(2, "reap", room=p.name, reason=reason)
+                            if stillborn_rule:
+                                reaped[f"reaped_{reason}"] += 1
             except OSError:
                 continue  # racing writer or vanished file: next pass picks it up
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room

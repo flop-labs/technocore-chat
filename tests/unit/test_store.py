@@ -870,6 +870,109 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
+def test_ownership_guards_do_not_outlive_a_stillborn_room(tmp_path):
+    """A room nobody answered is reaped at STILLBORN_SECONDS (a day) — far short of the
+    IDLE_SECONDS (a week) an ordinary room gets. A guard note that only ever checked its
+    OWN age against IDLE_SECONDS (as this store did before) would survive the room by up
+    to six days, still reporting /r/d-orphan "owned" to _room_write_gate and blocking the
+    very recreation the reap made room for (room_generation, #139)."""
+    import store
+
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    store.append(tmp_path, "d-orphan", "opener", "anyone home?")  # one message: stillborn
+    for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "1")):
+        store.note_set(tmp_path, ns, "d-orphan", value)
+
+    # Past STILLBORN_SECONDS — the room is reapable — but nowhere near IDLE_SECONDS, where
+    # the notes' own (irrelevant) idle clock would otherwise sit for six more days.
+    for path in (
+        store.room_path(tmp_path, "d-orphan"),
+        store.note_path(tmp_path, store.OWNERS_NS, "d-orphan"),
+        store.note_path(tmp_path, store.ALLOW_NS, "d-orphan"),
+        store.note_path(tmp_path, store.NONCE_NS, "d-orphan"),
+    ):
+        _age(path, store.STILLBORN_SECONDS + 60)
+
+    _reap_now(tmp_path)
+
+    assert not store.room_path(tmp_path, "d-orphan").exists()
+    for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
+        assert store.note_get(tmp_path, ns, "d-orphan") is None, ns
+
+
+def test_a_malformed_guard_filename_does_not_abort_the_reap_pass(tmp_path):
+    """_guard_note_room calls room_path on a guard note's stem to find the room it names --
+    but the reaper walks every file actually on disk, including one an older, looser
+    validator let through (a bare match() where NAME_RE now needs a fullmatch()). Such a
+    stem makes room_path raise StoreError, a ValueError the reap loop's `except OSError`
+    does not catch; unguarded, that aborts the whole pass and surfaces as a misleading 400
+    on the unrelated, valid write that happened to drive it. A malformed stem names no room
+    this service would accept today, so it guards nothing -- treated as not a guard note at
+    all, same as _listable already does for listings, rather than left to crash the walk."""
+    import store
+
+    store.append(tmp_path, "d-live", "bot", "hi")
+    junk = store.note_path(tmp_path, store.OWNERS_NS, "d-live").with_name("d-live\n.txt")
+    junk.parent.mkdir(parents=True, exist_ok=True)
+    junk.write_text("did:key:zABC\n")
+
+    _arm_reaper(tmp_path)
+    store.append(tmp_path, "d-live", "bot", "still talking")  # must not raise StoreError
+
+    view = store.read_messages(tmp_path, "d-live", limit=10)
+    assert [m["text"] for m in view["messages"]] == ["hi", "still talking"]
+    assert junk.exists(), "a malformed stem is not a room, so it is not orphaned either"
+
+
+def test_guard_note_reap_takes_the_room_lock_before_deciding(tmp_path, monkeypatch):
+    """A guard note's reap takes the room's own lock before deciding, not just its own.
+
+    Flagged in review on #518: the earlier version's recheck ran under the note's lock
+    alone, which shares nothing with `_write_record`'s room lock, so a recreation could
+    land between the recheck and the unlink and lose its brand-new owner note to the very
+    unlink that followed -- reopening a room someone had just (re)claimed. `_locked(
+    guard_room)` now wraps the whole decision, room-then-note (the only order anything here
+    takes both locks in, so there is nothing to invert): a recreation and a reap of the
+    room's guards can no longer interleave, only queue -- whichever gets the room lock
+    first is the one the other has to agree with.
+
+    Pinned with `_race_before_lock` rather than real threads -- the same tool
+    `test_one_unreadable_file_does_not_abort_the_whole_pass` already uses to land a failure
+    mid-pass deterministically: the room file is removed directly, standing in for an
+    earlier pass having already reaped the room but not yet reached its guards, so the
+    guard note's own lock call is the only thing left in this pass that ever takes the
+    room's lock -- no room-loop pass of its own to fire the race on first. A recreation is
+    set to run the instant that lock is taken, exactly the gap the review comment
+    described. On the code this replaces -- `with _locked(p):` alone, no room lock --
+    nothing here ever calls `_locked(room)` at all, so `raced` stays empty and the first
+    assertion catches that directly, without depending on guessing the old code's
+    unsynchronized timing to reproduce the loss it allowed.
+    """
+    import store
+
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    store.append(tmp_path, "d-race", "opener", "anyone home?")
+    for ns, value in ((store.OWNERS_NS, did), (store.ALLOW_NS, did), (store.NONCE_NS, "1")):
+        store.note_set(tmp_path, ns, "d-race", value)
+    room = store.room_path(tmp_path, "d-race")
+    room.unlink()  # as if an earlier pass had already reaped the room but not its guards
+
+    def recreate():
+        store.append(tmp_path, "d-race", "new-claimant", "reclaiming")
+
+    raced = _race_before_lock(monkeypatch, store, room, recreate)
+    _reap_now(tmp_path)
+    assert raced, "the guard note's reap never took the room's own lock"
+
+    # The recreation beat the reap to the room lock, so it is the live room the guard
+    # note's recheck (inside that same lock) has to see -- and the owner note it protects
+    # must survive, not be deleted as if it still named the room that was there when the
+    # walk started.
+    assert room.exists()
+    for ns in (store.OWNERS_NS, store.ALLOW_NS, store.NONCE_NS):
+        assert store.note_get(tmp_path, ns, "d-race") is not None, ns
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 
