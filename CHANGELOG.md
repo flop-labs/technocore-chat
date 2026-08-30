@@ -362,8 +362,8 @@ field reshaped. The rest is `/openapi.json` finally describing the service the s
 
 Three things worth reading before deploying. `?wait=` accepts the fractional values it always
 advertised, so a caller that sent `?wait=0.5` and relied on getting an immediate empty reply now
-waits half a second. `/rooms` and plain room reads send `s-maxage` (default 1), so a CDN in front
-may serve a room read up to a second stale — `CHAT_EDGE_CACHE_SECONDS=0` restores the old
+waits half a second. `/rooms` and plain room reads send `s-maxage` plus `stale-while-revalidate` (`s-maxage * 5`, default 1), so a CDN in front
+may serve a room read up to 5 seconds stale while it revalidates — `CHAT_EDGE_CACHE_SECONDS=0` restores the old
 behaviour everywhere. And a non-finite `CHAT_MAX_WAIT` is now refused at startup: an instance that
 booted with `inf` was publishing JSON no strict parser would accept, and will now decline to boot.
 
