@@ -374,3 +374,53 @@ def test_the_generator_refuses_to_write_vectors_it_could_not_verify():
             gen._assert_sweep_matches()
     finally:
         gen.INVISIBLE_CATEGORIES = original
+
+
+# ------------------------------------------------------------------ the bytes a client vendors
+
+
+def test_the_committed_fixture_carries_no_carriage_return():
+    """The blob in the index, not the file on disk.
+
+    Everything else in this module parses the JSON before looking at it, so line endings are
+    invisible to all of it — which is exactly why this file needed an attribute and why no test
+    here could have caught the wrong one. `-text` only suppresses conversion; a contributor whose
+    editor writes CRLF commits CRLF verbatim, and the fixture's bytes then differ by platform for
+    every client that vendors them. `text eol=lf` normalises on the way into the index.
+
+    Read through `git cat-file` rather than off disk on purpose: a checkout may legitimately hold
+    CRLF, and that is not the thing being pinned. What travels is the blob.
+
+    Skipped rather than failed without a `git` binary or outside a work tree — an unpacked tarball
+    has no index to ask, and a test that cannot see its subject should say so.
+    """
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("no git binary; the subject of this test is the index")
+    inside = subprocess.run(
+        [git, "rev-parse", "--is-inside-work-tree"],
+        cwd=HERE,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        pytest.skip("not a git work tree; there is no index to read the blob from")
+
+    blob = subprocess.run(
+        [git, "cat-file", "-p", "HEAD:tests/conformance/vectors.json"],
+        cwd=HERE,
+        capture_output=True,
+        check=False,
+    )
+    if blob.returncode != 0:
+        pytest.skip("vectors.json is not committed at HEAD yet")
+
+    assert b"\r" not in blob.stdout, (
+        "the committed fixture carries CR bytes, so its digest depends on the platform it was "
+        "authored on; check `tests/conformance/.gitattributes` says `text eol=lf` and re-add "
+        "the file so Git normalises it"
+    )
+    assert json.loads(blob.stdout.decode("utf-8")) == VECTORS, (
+        "the committed blob and the file on disk are not the same vectors"
+    )
