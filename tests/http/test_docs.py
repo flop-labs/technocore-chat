@@ -132,6 +132,31 @@ def test_the_manual_template_hardcodes_no_constant_it_could_render(client):
     assert "__" not in app_module.MANUAL
 
 
+def test_the_manual_states_a_rendered_knob_as_this_instances_value_not_the_default(client):
+    """Rendering a per-deployment knob changes what the prose around it may claim.
+
+    The EPHEMERAL paragraph read "__EPHEMERAL_TTL__ by default". That was true while the
+    figure was the software default typed into the file; once it renders from
+    `store.EPHEMERAL_TTL_SECONDS`, an instance configured to an hour serves "1 hour by
+    default" — false about the default, and contradicting the very next clause, which says
+    the enforced value is published elsewhere rather than fixed here.
+
+    So a rendered knob must be labelled as *this instance's* value. Asserted against a
+    changed TTL, because at the default the wrong wording and the right one read alike.
+    """
+    import app as app_module
+    import config
+
+    with config.override(EPHEMERAL_TTL_SECONDS=3600):
+        manual = app_module._render_manual()
+    section = manual.split("EPHEMERAL:", 1)[1].split("\n\n", 1)[0]
+    assert "1 hour" in section, section
+    assert "by default" not in section, "a rendered per-deployment knob is not the default"
+    assert "THIS instance enforces" in section
+    # And the JSON copy is still named, since that is what a machine reads.
+    assert "limits.ephemeral_ttl_seconds" in section
+
+
 def test_the_manual_renders_durations_and_sets_from_the_constants(client):
     """The two helpers that let prose name a set or a period without restating it.
 

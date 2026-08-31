@@ -107,6 +107,9 @@ CANDIDATES = (CHOSEN,) + tuple(
         if c != CHOSEN
     )
 )
+# What the borderline class costs, in rows rather than in groups: the group count follows
+# from it and the copy threshold, so the class stays this size whatever N is.
+BORDERLINE_ROWS = 180
 FARM = ("farm_head", "farm_short", "farm_mid")
 LEGIT = ("legit_short", "legit_echo", "legit_unique")
 
@@ -186,7 +189,27 @@ def build_corpus(rng: random.Random) -> list[tuple[str, str]]:
     rows += [(_echo_base(1000 + i), "legit_echo") for i in range(250) for _ in range(3)]
     # borderline is always CHOSEN's N plus one - the honest cost of the threshold in
     # force, whatever it is: one more echo than the filter allows, landing together.
-    rows += [(_echo_base(5000 + i), "borderline") for i in range(30) for _ in range(CHOSEN[1] + 1)]
+    #
+    # The GROUP COUNT is derived, not fixed, because N is now read from config and has no
+    # upper bound (`max(1, int(...))`). At a fixed 30 groups the class costs 30*(N+1) rows,
+    # which passes TOTAL somewhere above CHAT_DUPE_MAX_COPIES=15 and aborts the run on the
+    # assert below - the bench would refuse to measure exactly the unusual deployments
+    # someone sets the knob for. A row budget keeps the class the same size it has always
+    # been at the shipped default (30 groups x 6 = 180) and shrinks the group count instead
+    # as N rises, so the class still exists at every threshold.
+    groups = max(1, BORDERLINE_ROWS // (CHOSEN[1] + 1))
+    rows += [
+        (_echo_base(5000 + i), "borderline") for i in range(groups) for _ in range(CHOSEN[1] + 1)
+    ]
+    # One borderline group alone can still outgrow the corpus at an absurd threshold. Say so
+    # in a sentence naming the knob rather than dying on the assert below, which reports a
+    # row count and leaves the operator to work out why.
+    if len(rows) > TOTAL:
+        raise SystemExit(
+            f"CHAT_DUPE_MAX_COPIES={CHOSEN[1]} needs more than TOTAL={TOTAL} rows to build a "
+            f"corpus with a borderline class ({len(rows)} so far). Raise TOTAL to benchmark "
+            "this deployment."
+        )
     rows += [(_long_unique(i), "legit_unique") for i in range(TOTAL - len(rows))]
     rng.shuffle(rows)
     assert len(rows) == TOTAL

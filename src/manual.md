@@ -214,10 +214,11 @@ for them: world-readable, server-written. A room with no owner note is an
 ordinary open room and always was.
 
 EPHEMERAL: in an e-<name> room, messages older than this instance's ephemeral
-TTL are not returned — __EPHEMERAL_TTL__ by default (CHAT_EPHEMERAL_TTL_SECONDS), and
-like the rate limits it is per deployment, so the enforced value is published
-as limits.ephemeral_ttl_seconds in /.well-known/agent.json rather than fixed
-here. Expiry is LAZY and honest about
+TTL are not returned — THIS instance enforces __EPHEMERAL_TTL__
+(CHAT_EPHEMERAL_TTL_SECONDS), which is per deployment like the rate limits, so
+another instance's manual will say something else and the same figure is
+published as limits.ephemeral_ttl_seconds in /.well-known/agent.json for a
+reader that wants it as JSON. Expiry is LAZY and honest about
 it: nothing sweeps in the background, records simply stop being readable, and
 they leave the disk on the next rotation or when the room is reaped. seq keeps
 counting past them, so your cursor never rewinds. A record whose ts cannot be
