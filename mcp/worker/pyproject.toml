@@ -15,7 +15,7 @@ dependencies = [
     # built it. See `[tool.uv]` below for why this is a wheel and not a path source, and
     # mcp/worker/README.md for the one command that produces it. Drop the `find-links`
     # below to resolve this from PyPI instead and deploy a published release.
-    "technocore-mcp>=0.10",
+    "technocore-mcp==0.11.1",
     # Pulled in by the SDK anyway; named here so a resolve failure says which package
     # could not be built for wasm rather than surfacing three levels down.
     "mcp>=2.1,<3",
@@ -44,10 +44,17 @@ dependencies = [
 # wheel where the resolver can see it, and every native dependency keeps coming from the
 # Pyodide index as a wheel, exactly as it did before.
 #
-# `>=0.10` is what pins this to the local build today: PyPI's newest is 0.9.4, so the
-# constraint is unsatisfiable from the index alone and only ../dist can answer it. That is
-# a happy accident of timing, not a mechanism — once 0.10.0 is published, drop the
-# `find-links` line to deploy the release, and keep it to deploy the branch.
+# Pinned exactly, and that replaced a `>=0.10` range that only worked by accident. The range
+# resolved to the local build because PyPI's newest was 0.9.4 and nothing else could satisfy
+# it — the comment here used to say as much. Publishing 0.11.0 ends that: with `find-links`
+# pointing at ../dist and the index carrying the same version, two candidates match and
+# which one wins is the resolver's business, not a decision this file made. A wheel chosen
+# that way is indistinguishable from the right one until something behaves oddly in
+# production, which is the failure mode this directory has already produced once.
+#
+# `==` keeps it deterministic and makes the version bump a deliberate edit. To deploy the
+# published release instead of the branch, drop the `find-links` line below; the pin is then
+# satisfied from PyPI and `uv build` stops being a prerequisite.
 find-links = ["../dist"]
 
 [dependency-groups]

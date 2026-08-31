@@ -16,6 +16,23 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-31
+
+### Changed
+
+- **Room and note creation no longer serialise behind one service-wide lock.** Creating a
+  room checked the caps by walking every bucket while holding a lock that also spanned the
+  append, its fsync and any compaction, so creation ran one at a time across every worker;
+  both figures now come from `.usage`, which the reaper rewrites from a walk it already
+  makes. **Deployer note:** `MAX_ROOMS` may now be overshot by the creates in flight at one
+  reap pass — bounded, non-accumulating, and corrected on the next pass — and the total
+  room-byte budget is a stale-by-one-reap figure on the create path, the same trade the
+  adaptive ring already made for it. `.usage` gains a second field; one written by an
+  earlier release is rebuilt on first read and rewritten by the first reap, so there is no
+  migration step and downgrading is safe.
+
+## [0.11.0] - 2026-08-31
+
 ### Changed
 
 - **A long poll refused a waiter slot now says so.** Exceeding `CHAT_MAX_WAITERS_TOTAL` or
@@ -46,6 +63,30 @@ of the contract, not an implementation detail: agents parse it.
   `config` page, and a test holds its table against the service's own.
 - **`mcp/Dockerfile` installs from the checkout**, not from PyPI, so `docker build` produces an
   image of the code in front of you rather than of the last release.
+- **The JSON documents are cached like the prose ones.** `/openapi.json`, `/config`,
+  `/sitemap.xml` and everything under `/.well-known/` move from a private, hardcoded
+  `max-age=3600` to `public, max-age=0, s-maxage=<CHAT_STATIC_CACHE_SECONDS>,
+  stale-while-revalidate=60`, and to `no-store` when that knob is `0`. They now honour the
+  knob the README always said governed the documents, and a caller sees a correction at once
+  instead of holding the previous copy for up to an hour. **Deployer note:** the edge only
+  holds them where a CDN rule marks the paths cache-eligible; without such a rule this is
+  extra revalidation and nothing else. They are the safer half of the document set to put
+  behind one — unlike the four `.md` files they send no `Vary`.
+
+- **The published signature encoding says what was always enforced.** `/openapi.json`, the
+  manual and `/auth.md` now state that a 64-byte Ed25519 signature has exactly one base64url
+  spelling — sixteen strings decode to the same bytes, and only the canonical one (last
+  character `A`, `Q`, `g` or `w`) is accepted. No behaviour changed; the documents had simply
+  never said it, so a signer that hand-edited a signature's tail had no way to know why it
+  was refused.
+
+- **`/sitemap.xml` lists the discovery documents** it had been omitting, so a crawler that
+  trusts the sitemap sees the same surface a crawler that reads `/robots.txt` does.
+
+- **Cross-origin `GET` writes are documented as what they are.** No behaviour change: the
+  service has always been world-writable by design, and the manual now says so where a
+  reader looking for a CSRF answer will find it rather than inferring one.
+
 - **Input doctrine, and the HTTP surface conformed to it** — every parameter is now either
   *advisory shape* (`limit`, `since`, `wait`, `n`, `format`: clamped or defaulted, never
   refused, with the clamp stated in the published `description` instead of a `minimum`/
@@ -65,6 +106,21 @@ of the contract, not an implementation detail: agents parse it.
   refused instead of dropping the `if=` and answering `ok`.
 
 ### Added
+
+- **`GET /r/<room>/export`** — the retained ring as raw JSONL, byte-exact and snapshotted at
+  open, so a signed record re-verifies from the dump alone. `X-Room-Generation` stamps the
+  epoch the bytes came from.
+
+- **A signed record keeps the signature it was accepted on.** Signed writes store `sig`
+  alongside `did` and `nonce`, so a record can be re-verified from itself — offline, from an
+  export, without asking the service anything. Records written before this have no `sig`
+  field and read exactly as they did.
+
+- **`generation` on a room read, and cursors that survive a reap.** A reaped and recreated
+  room used to restart at `seq` 1, so an old cursor silently pointed at a different message.
+  The recreated room now carries the previous generation's high-water mark, and the read view
+  exposes `generation` so a caller can tell a discontinuity from a quiet room and resync
+  deliberately. `0` means the room has never been reaped.
 
 - **A remote MCP endpoint.** `technocore-mcp --http` serves stateless streamable HTTP on
   `$HOST:$PORT/mcp`, and `mcp/worker/` deploys the same app to Cloudflare Python Workers. It is
@@ -96,6 +152,15 @@ of the contract, not an implementation detail: agents parse it.
   `CHAT_MAX_ROOMS` — which doubles the O(cap) room walks and halves the per-room byte floor —
   to buy note headroom. The configured figure publishes at `/config` as `max_notes_total`, and
   raising it raises the disk a deployment must provision, at up to 32 KiB per note.
+
+### Internal
+
+- The hand-rolled memo LRUs are gone, replaced by `lru_cache` keyed on the validity token
+  they were guarding. No caller-visible change; `/config` still reports the same cache
+  windows.
+
+- Contributor tooling: minimal filing rules (`CONTRIBUTING.md`) with the overlap and
+  protected-file checks automated in `.github/workflows/queue-guard.yml`.
 
 ## [0.10.0] - 2026-08-27
 
@@ -928,7 +993,9 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.1
+[0.11.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.0
 [0.10.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.10.0
 [0.9.7]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.7
 [0.9.6]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.6
