@@ -29,9 +29,12 @@ Growth past a cap needs a new primitive, or belongs in extra.
   the issue form requires it.
 - One issue, one PR: if an open PR already covers it, review or extend that one. CI
   comments on a new PR when open PRs cite the same issue (queue-guard.yml).
-- Never edit CHANGELOG.md or sz-baseline.json in a PR — both are maintainer-regenerated,
-  and CI fails the PR. If a size cap binds, propose the missing primitive or move the
-  change to extra.
+- Never edit CHANGELOG.md or sz-baseline.json in an ordinary PR — both are
+  maintainer-regenerated. Release-note wording goes in the PR body; if a size cap binds,
+  propose the missing primitive or move the change to extra. **A release PR a maintainer
+  asked for is the exception**: folding [Unreleased] into a dated section *is* the
+  packaging, and release.yml refuses to tag a version CHANGELOG.md has no section for.
+  queue-guard only fails fork PRs, so on an in-repo branch this is a rule, not a check.
 - Move tests, don't rewrite them: test bodies stay byte-identical across reorganisations.
 - Size the core with `uv run sz.py` (table) and `uv run sz.py --check`
   (fails if core code-lines grew past `sz-baseline.json`). Its PEP 723 header makes it
