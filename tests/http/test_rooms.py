@@ -1,5 +1,6 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import threading
 import time
 from pathlib import Path
 
@@ -890,6 +891,66 @@ def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
         == 200
     )
     assert _say_signed(client, "d-bounty", thief, thief_sign, "mine now").status_code == 200
+
+
+def test_previous_owner_cannot_commit_an_allow_list_after_handoff(client, tmp_path, monkeypatch):
+    """Authorization and commit must observe the same owner.
+
+    The old shape checked ownership in `_note_write_gate`, then separately burned the
+    nonce and wrote `room-allow`. This forces a handoff into that gap: owner A's request
+    passes the gate, owner A transfers the room to B, then A's stale request resumes.
+    """
+    import app as app_module
+    import store
+
+    owner, owner_sign = _keypair()
+    successor, _ = _keypair(seed=2)
+    assert _claim(client, "d-handoff", owner, owner_sign).status_code == 200
+
+    entered = threading.Event()
+    resume = threading.Event()
+    real_burn = app_module._burn_nonce
+
+    def pause_after_authorization(room, nonce):
+        if nonce == "10":
+            entered.set()
+            assert resume.wait(5), "handoff never released the stale request"
+        return real_burn(room, nonce)
+
+    monkeypatch.setattr(app_module, "_burn_nonce", pause_after_authorization)
+    stale = {}
+
+    def write_as_previous_owner():
+        stale["response"] = _set_signed(
+            client, store.ALLOW_NS, "d-handoff", owner, owner_sign, owner, nonce=10
+        )
+
+    worker = threading.Thread(target=write_as_previous_owner)
+    worker.start()
+    assert entered.wait(5), "request never reached the post-authorization gap"
+
+    transferred = threading.Event()
+    handoff = {}
+
+    def transfer_ownership():
+        handoff["response"] = _set_signed(
+            client, store.OWNERS_NS, "d-handoff", owner, owner_sign, successor, nonce=11
+        )
+        transferred.set()
+
+    transfer = threading.Thread(target=transfer_ownership)
+    transfer.start()
+    assert not transferred.wait(0.2), "handoff overtook an authorized allow-list transaction"
+
+    resume.set()
+    worker.join(5)
+    transfer.join(5)
+    assert not worker.is_alive() and not transfer.is_alive()
+
+    assert stale["response"].status_code == 200
+    assert handoff["response"].status_code == 200
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-handoff") == successor
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-handoff") == owner
 
 
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
