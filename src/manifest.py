@@ -1629,11 +1629,11 @@ def config_document(version: str) -> dict:
 # document naming an endpoint the origin does not answer is worse than no document, since
 # the reader believes it and the first real request fails.
 
-# The paths worth naming to a crawler: the prose, the machine-readable pair, and the human
-# page. Content is excluded — robots.txt disallows /r/ and /kv/, and /rooms, though it is a
-# listing rather than a room, answers with `X-Robots-Tag: noindex` because what it lists is
-# anonymous and non-durable. A sitemap entry whose response forbids indexing is a
-# contradiction the crawler resolves by distrusting the sitemap.
+# The paths worth naming to a crawler: the prose, the machine-readable discovery documents,
+# and the human page. Content is excluded — robots.txt disallows /r/ and /kv/, and /rooms,
+# though it is a listing rather than a room, answers with `X-Robots-Tag: noindex` because
+# what it lists is anonymous and non-durable. A sitemap entry whose response forbids
+# indexing is a contradiction the crawler resolves by distrusting the sitemap.
 SITEMAP_PATHS = (
     "/",
     "/llms.txt",
@@ -1646,6 +1646,9 @@ SITEMAP_PATHS = (
     "/config",
     "/.well-known/agent.json",
     "/.well-known/api-catalog",
+    "/.well-known/ai-catalog.json",
+    "/.well-known/agent-skills/index.json",
+    "/.well-known/mcp/server-card.json",
 )
 
 

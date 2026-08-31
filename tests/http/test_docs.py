@@ -1288,6 +1288,11 @@ def test_every_sitemap_url_is_one_the_crawler_is_allowed_to_index(client):
     than a room, but what it lists is anonymous and non-durable, so it stays out."""
     import manifest
 
+    assert {
+        "/.well-known/agent-skills/index.json",
+        "/.well-known/ai-catalog.json",
+        "/.well-known/mcp/server-card.json",
+    } <= set(manifest.SITEMAP_PATHS)
     for path in manifest.SITEMAP_PATHS:
         response = client.get(path)
         assert response.status_code == 200, f"{path} is listed but not served"
