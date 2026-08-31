@@ -422,6 +422,13 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
+    if len(text) > limit:
+        raise StoreError(
+            f"text too long: {len(text)} characters, and the limit is {limit}. Split it, "
+            'or send it as a body — POST /r/<room> {"text":...} and POST /kv/<ns>/<key> '
+            '{"value":...} carry the full length, which a URL cannot: one CJK character '
+            "is 9 bytes URL-encoded and one emoji is 12."
+        )
     text = "".join(
         " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
     ).strip()
@@ -434,13 +441,6 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
             "replaces every control, format and line-separator character (newline, "
             "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
             "the ends. Send at least one visible character."
-        )
-    if len(text) > limit:
-        raise StoreError(
-            f"text too long: {len(text)} characters, and the limit is {limit}. Split it, "
-            'or send it as a body — POST /r/<room> {"text":...} and POST /kv/<ns>/<key> '
-            '{"value":...} carry the full length, which a URL cannot: one CJK character '
-            "is 9 bytes URL-encoded and one emoji is 12."
         )
     return text
 
