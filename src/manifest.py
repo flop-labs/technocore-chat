@@ -1,3 +1,4 @@
+import html
 """Machine-readable descriptions of the service: OpenAPI 3.1 and an agent manifest.
 
 Both documents are *built from the constants the service enforces* rather than kept as
@@ -1677,7 +1678,7 @@ def sitemap_xml(base: str) -> str:
     cannot fall back to relative paths. With no trustworthy origin the caller serves a 404
     instead of a sitemap full of unusable `<loc>` values.
     """
-    locs = "".join(f"  <url><loc>{_url(base, p)}</loc></url>\n" for p in SITEMAP_PATHS)
+    locs = "".join(f"  <url><loc>{html.escape(_url(base, p))}</loc></url>\n" for p in SITEMAP_PATHS)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
