@@ -127,7 +127,7 @@ def test_the_count_survives_a_lost_file_by_walking(tmp_path) -> None:
 
 
 def test_a_read_outside_the_gate_never_persists_what_it_rebuilt(tmp_path) -> None:
-    """Every write of a count file happens under `.notes-create`. Reading is safe
+    """Every write of a count file happens under that file's own lock. Reading is safe
     unserialised — the replace is atomic — but *persisting* what a read rebuilt is not.
 
     The rebuild is a snapshot of a walk. A create writes its `+1` reservation against the
@@ -534,8 +534,8 @@ def test_a_reap_cannot_lose_a_create_that_has_counted_but_not_written(
     """The concurrent half of the test above, and the one that breached the cap.
 
     A create writes its `+1` reservation and its note at two different moments. Both are
-    inside `.notes-create`, but `_reap` used to rewrite the count from a walk while holding
-    nothing — so a pass landing between the two saw the reservation's note not yet on disk,
+    inside the shared create span, but `_reap` used to rewrite the count from a walk while
+    holding nothing — so a pass between the two saw the reservation's note not yet on disk,
     wrote the lower figure, and the count came out one short of the store. A short count
     admits a note the cap should refuse, which is how MAX_NOTES_TOTAL ended up holding
     `cap + 1`.
