@@ -1464,6 +1464,40 @@ def test_the_static_documents_are_edge_cacheable_and_the_header_is_exact(client)
         assert "no-store" not in cc, path
 
 
+def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(client):
+    """`0` disables, and disabling has to fail closed.
+
+    `_edge_cacheable` sets a header only for a truthy window, so with the knob at zero it
+    returns the response exactly as built. That makes the *initial* header the contract for
+    the disabled case: `text()` starts every response `no-store`, so the prose documents
+    fall back to it, and a bare `Response` would fall back to no `Cache-Control` at all —
+    which does not mean "do not cache", it means a cache may hold it heuristically for as
+    long as it likes, and a CDN rule marking the path eligible would do exactly that.
+
+    So the disabled setting is asserted here for both halves of the document set together.
+    The prose side has always been right; the JSON side was not until the header was seeded
+    before `_static_cacheable` could decline to overwrite it.
+    """
+    import config
+
+    both = (
+        "/llms.txt",
+        "/robots.txt",
+        "/.well-known/security.txt",
+        "/openapi.json",
+        "/config",
+        "/sitemap.xml",
+        "/.well-known/agent.json",
+        "/.well-known/api-catalog",
+        "/.well-known/ai-catalog.json",
+        "/.well-known/agent-skills/index.json",
+        "/.well-known/mcp/server-card.json",
+    )
+    with config.override(STATIC_CACHE_SECONDS=0):
+        for path in both:
+            assert client.get(path).headers["cache-control"] == "no-store", path
+
+
 def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
     """The three that would each be a real defect if held at the edge.
 

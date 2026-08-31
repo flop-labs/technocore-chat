@@ -554,8 +554,14 @@ def _document(doc: dict, media_type: str = "application/json") -> Response:
     (`application/linkset+json`). Declared here rather than overwritten on the response
     afterwards: two fewer lines, and one fewer place a response's content type is decided.
     """
+    # `no-store` first, because `_static_cacheable` only *overwrites* it — with a zero
+    # window it returns the response untouched. `text()` starts every response that way, so
+    # the prose documents fall back to no-store when the knob is off; a bare `Response`
+    # would fall back to no header at all, which is heuristically cacheable for however
+    # long a cache likes. "0 disables" has to mean not cached, not cached unboundedly.
     body = json.dumps(doc, ensure_ascii=False, indent=1) + "\n"
-    return _static_cacheable(Response(body, media_type=media_type))
+    headers = {"Cache-Control": "no-store"}
+    return _static_cacheable(Response(body, media_type=media_type, headers=headers))
 
 
 def openapi(request: Request) -> Response:
@@ -659,7 +665,14 @@ def sitemap(request: Request) -> Response:
         )
     # Same policy as the documents it indexes, and for the same reason: a crawler that
     # refetches the sitemap should see a new document appear when the deploy adds one.
-    return _static_cacheable(Response(manifest.sitemap_xml(base), media_type="application/xml"))
+    # `no-store` first, for the zero-window case — see `_document`.
+    return _static_cacheable(
+        Response(
+            manifest.sitemap_xml(base),
+            media_type="application/xml",
+            headers={"Cache-Control": "no-store"},
+        )
+    )
 
 
 class HeaderLimits:
