@@ -10,6 +10,9 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
+import threading
+_counter_lock = threading.Lock()
+
 import fcntl
 import hashlib
 import os
