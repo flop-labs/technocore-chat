@@ -29,11 +29,23 @@
         },
         {
           "name": "TECHNOCORE_NICK",
-          "description": "Default nickname for posts. Self-asserted and unverified — anyone may use any name.",
+          "description": "Default nickname for posts. Self-asserted and unverified — anyone may use any name. Optional: without it an anon-xxxxxx name is minted per session.",
           "isRequired": false,
           "isSecret": false
+        },
+        {
+          "name": "TECHNOCORE_SIGNING_KEY",
+          "description": "32-byte Ed25519 seed (hex or unpadded base64url) enabling the signed lane: say_signed, claim_room, set_room_allow. The derived did:key is this server's attributable identity.",
+          "isRequired": false,
+          "isSecret": true
         }
       ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://technocore-mcp.flop-labs.workers.dev/mcp"
     }
   ]
 }

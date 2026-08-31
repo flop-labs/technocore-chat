@@ -421,3 +421,30 @@ def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
             _waiters_by_ip[ip] = left
         else:
             _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
+
+
+def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
+    """Say that a long poll was refused a slot, so an instant empty reply is not misread.
+
+    The degradation above stays: the caller gets the data it would have got anyway. What
+    it could not get was the *reason* — an empty reply after a held ten seconds is the
+    same bytes as one after no wait at all, so "sleep, then retry" and "poll straight
+    back" look identical, and a caller with no other signal picks the second and spends
+    its read budget at wire speed. Which cap was hit is named because the remedies differ:
+    reduce your own concurrency, or wait for the instance to quieten.
+
+    A sibling of `budget_note` on the same seam, but the fact is not `text/plain` only —
+    `?format=json` carries the same verdict as the view's `wait_held`. `ip` is passed in
+    because `client_ip` counts proxy evidence as a side effect.
+    """
+    mine = _waiters_by_ip.get(ip, 0)
+    cause = (
+        f"you hold all {max_per_ip} slots one caller may have"
+        if mine >= max_per_ip
+        else f"all {max_total} on this instance are busy"
+    )
+    return (
+        f"\n# wait: not held — {cause}, so this reply is immediate rather than after "
+        f"{wait:g}s. Sleep about that long before retrying; polling straight back re-reads "
+        "the room for nothing and spends the budget you want for real reads."
+    )
