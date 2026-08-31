@@ -1606,15 +1606,6 @@ def note_write(request: Request) -> Response:
 
 
 def _burn_nonce(room: str, nonce: str) -> Response | None:
-    """Spend a nonce for a room's signed ownership writes, or refuse the replay.
-
-    A message replay stops mattering when the message leaves the ring; a note has no ring,
-    so a captured signed URL would work forever — including the one that re-adds a key the
-    owner has since removed. The counter is claimed with a compare-and-set on the note that
-    holds it, so two concurrent writers cannot both spend the same value; the loser gets
-    the ordinary 409. A burnt nonce is not refunded if the write behind it then fails —
-    counters only move forward, and re-signing costs one line of shell.
-    """
     current = store.note_get(config.ROOT, store.NONCE_NS, room)
     if current is not None and not (current.isdigit() and int(nonce) > int(current)):
         return text(
@@ -1623,14 +1614,19 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             403,
         )
     store.note_set(
-        config.ROOT,
-        store.NONCE_NS,
-        room,
-        nonce,
-        expect=current,
-        expect_absent=current is None,
+        config.ROOT, store.NONCE_NS, room, nonce, expect=current, expect_absent=current is None
     )
     return None
+
+
+def _write_protected_note(
+    ns: str, key: str, value: str, signer: str | None, nonce: str | None, condition: tuple
+) -> dict | Response:
+    with store._locked(config.ROOT / ".ownership" / key):
+        denied = _note_write_gate(ns, key, value, signer) or (
+            _burn_nonce(key, nonce) if signer is not None and nonce is not None else None
+        )
+        return denied or store.note_set(config.ROOT, ns, key, value, *condition)
 
 
 def note_write_signed(request: Request) -> Response:
@@ -1644,18 +1640,13 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
-        return denied
-    denied = _burn_nonce(key, nonce)
-    if denied:
-        return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    meta = _write_protected_note(ns, key, value, signer, nonce, _condition(request.query_params))
+    if isinstance(meta, Response):
+        return meta
     return respond(
         request,
         meta,
-        f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']} "
-        f"signed by {didkey.abbreviate(signer)}",
+        f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']} signed by {didkey.abbreviate(signer)}",
         budget_note("write", left, RATE_WRITE),
     )
 
@@ -1675,6 +1666,7 @@ async def note_post(request: Request) -> Response:
     value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
     did = _field(payload, "did").strip()
     signer = None
+    nonce = None
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
@@ -1686,14 +1678,9 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
-        if denied:
-            return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
-                return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        meta = _write_protected_note(ns, key, value, signer, nonce, condition)
+        if isinstance(meta, Response):
+            return meta
         return respond(
             request,
             meta,
