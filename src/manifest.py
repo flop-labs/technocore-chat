@@ -57,7 +57,7 @@ def public_base(scheme: str, host: str, configured: str = "") -> str:
     """
     if configured:
         return configured.rstrip("/")
-    if host and _HOST_RE.match(host.lower()) and scheme in ("http", "https"):
+    if host and _HOST_RE.fullmatch(host.lower()) and scheme in ("http", "https"):
         return f"{scheme}://{host.lower()}"
     return ""
 
