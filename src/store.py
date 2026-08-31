@@ -906,22 +906,78 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
     return generation, chunks()
 
 
-def _seq_state_path(root: Path) -> Path:
-    return root / ".seqstate"
+def _seq_state_path(root: Path, room: str = "") -> Path:
+    """The file holding `room`'s floor and generation — one of 256 shards, keyed by the same
+    `_shard` that resolves the room's own bucket. No `room` names the pre-shard map, which is
+    the migration's source and, while it survives, the fallback for a name no shard holds.
+
+    Sharded because one file was read *and parsed in full on every room read*: `read_messages`
+    asks for the generation, and nothing ever removed an entry, so the map grew with every
+    room the service had ever reaped. At the ~90k of a live deployment that was 3.2 MB parsed
+    per request — 42 ms, 99% of the read — and the same map was rewritten under one global
+    lock on every create and every reap (#489). A shard is ~1/256 of that.
+
+    Flat at the root, beside `.counters` and `.usage`, and deliberately NOT inside the room's
+    bucket: `_scan` and `_walk` only ever match `*.jsonl` under `rooms/`, so nothing here is
+    walked, counted or reaped as a room — and a per-room sidecar would keep every bucket a
+    reaped room ever used permanently non-empty, which is exactly the litter `_prune` exists
+    to reclaim (see `last_seq`). 256 files bounded by the shard width, not one per room name
+    the service has ever seen.
+    """
+    return root / (f".seqstate.{_shard(room)}" if room else ".seqstate")
 
 
-def _read_seq_state(root: Path) -> dict:
+def _read_seq_state(path: Path) -> dict:
+    # A shard that parses to anything but an object is not a map of rooms: `[]` used to reach
+    # `.get` and raise AttributeError out of a room read. Absent, torn and hand-edited all
+    # have to mean the same thing here — no state — because this answers a request.
     try:
-        return orjson.loads(_seq_state_path(root).read_bytes())
+        state = orjson.loads(path.read_bytes())
     except (OSError, orjson.JSONDecodeError):
         return {}
+    return state if isinstance(state, dict) else {}
 
 
-def _write_seq_state(root: Path, state: dict) -> None:
-    # Atomic rewrite so concurrent readers never see a torn map. Best-effort: if the store
-    # is read-only or the write fails, the floor/generation is a nice-to-have, not a gate.
+def _seq_field(root: Path, room: str, key: str) -> int:
+    """`room`'s `floor` or `gen`, always as a non-negative int.
+
+    Its shard first; the pre-shard map only when the shard has no entry, which after
+    `_split_seq_state` has run is one failed `open` and no parse. That fallback is what makes
+    the migration invisible rather than a flag day — a name whose state has not been split yet
+    still answers correctly — and it stays safe afterwards because the split renames the old
+    file away rather than leaving a second copy to read.
+
+    Coerces here rather than at each caller: both fields are read on the request path, so a
+    hand-edited or truncated map must degrade to 0 (never existed) and never raise.
+    """
+    entry = _read_seq_state(_seq_state_path(root, room)).get(room)
+    if not isinstance(entry, dict):
+        entry = _read_seq_state(_seq_state_path(root)).get(room)
+    value = entry.get(key) if isinstance(entry, dict) else None
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
+    """Record `room`'s floor and generation in its shard, under that shard's lock.
+
+    `floor=None` is a (re)create: the generation advances and the floor clears. An int is a
+    reap: that high-water mark becomes the floor and the generation is preserved. The old
+    generation is read *inside* the lock, so two rooms sharing a shard cannot lose each
+    other's update — the point of a lock this narrow is that they no longer wait on the other
+    255 shards' rooms, not that they stop being ordered against their own.
+
+    `t` is when the entry was last touched. Nothing reads it yet: it is here so that reclaiming
+    entries for rooms long gone — the half of #489 this change does not do, and the one the map
+    was unbounded for — needs no second migration to date what it finds. Best effort, like
+    `_bump`: the caller's write has already succeeded and must not be failed by bookkeeping.
+    """
+    path = _seq_state_path(root, room)
     try:
-        _replace(_seq_state_path(root), orjson.dumps(state), fsync=config.FSYNC)
+        with _locked(path):
+            gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
+            state = _read_seq_state(path)
+            state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
+            _replace(path, orjson.dumps(state), fsync=config.FSYNC)
     except OSError:
         pass
 
@@ -940,14 +996,8 @@ def last_seq(root: Path, room: str) -> int:
     # seeing new messages instead of starving on a restarted sequence (#139 dir #2): a
     # reader's `since` stays below the new first_seq, so the new messages are not silently
     # invisible. Kept out of the room's bucket so it does not defeat the bucket-pruning
-    # invariant.
-    entry = _read_seq_state(root).get(room)
-    if entry:
-        try:
-            return int(entry.get("floor", 0))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    # invariant — sharded 256 ways at the root instead (see `_seq_state_path`).
+    return _seq_field(root, room, "floor")
 
 
 def room_generation(root: Path, room: str) -> int:
@@ -958,14 +1008,11 @@ def room_generation(root: Path, room: str) -> int:
     which leaves a stateful client watching a different conversation under the same name
     with no way to know; the generation is the explicit signal to resync. 0 = never
     existed. A reaped room keeps its last generation — `_reap` preserves it in the seq
-    state on purpose — until the name is recreated, which bumps it."""
-    entry = _read_seq_state(root).get(room)
-    if entry:
-        try:
-            return int(entry.get("gen", 0))
-        except (TypeError, ValueError):
-            return 0
-    return 0
+    state on purpose — until the name is recreated, which bumps it.
+
+    Read on every `read_messages`, which is why the map it consults is sharded: this was one
+    3.2 MB parse per request at a live deployment's history (#489)."""
+    return _seq_field(root, room, "gen")
 
 
 # Engagement tripwires (docs/research/moltbook-adoption-analysis.md §II.2.2) are computed from
@@ -1367,6 +1414,56 @@ def _reconcile_note_count(root: Path) -> None:
         pass
 
 
+def _split_seq_state(root: Path) -> None:
+    """Partition the pre-shard map into its 256 shards, once, and retire it.
+
+    Grouped before any shard is opened, so this costs one pass over the map and one lock per
+    *shard* rather than one per room.
+
+    Which side of the merge wins is decided by whether the backup already exists, and the two
+    cases are opposite for the same reason — the later write is the true one:
+
+      - **The first split.** No backup yet, so every entry in the map predates this pass, and
+        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
+        wins.
+      - **A map that came back.** The backup exists, so this map was written *after* a split
+        had already consumed and renamed the original — which only an old worker still running
+        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
+        the shard's is stale, so the map wins. Getting this backwards silently drops that
+        worker's reap or create: the room's floor regresses and cursors past it miss messages,
+        or a generation bump is lost and a stateful reader is told nothing changed.
+
+    The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
+    pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
+    would leave a downgrade reading a map that had lost almost every room it once knew.
+
+    The old file is renamed, never deleted — `.seqstate.pre-shard`, which the `??` glob the
+    sweep below uses cannot match. A downgrade puts the old code back in front of a map it
+    still understands, so this is the one step of the change that is not self-reversing and
+    it costs a rename to keep it that way. An operator who has finished with it can remove it.
+
+    Best effort and idempotent: a failure leaves the map in place, `_seq_entry` keeps reading
+    it as the fallback, and the next reap tries again. Runs once in the life of a store — and
+    the reap it rides is throttled, so the window where reads still pay the old parse is at
+    most one REAP_EVERY after the first write.
+    """
+    legacy = _seq_state_path(root)
+    shards: dict[Path, dict] = {}
+    try:
+        with _locked(legacy):
+            first = not (backup := legacy.with_suffix(".pre-shard")).exists()
+            for room, entry in _read_seq_state(legacy).items():
+                shards.setdefault(_seq_state_path(root, room), {})[room] = entry
+            for path, entries in shards.items():
+                with _locked(path):
+                    shard = _read_seq_state(path)
+                    merged = {**entries, **shard} if first else {**shard, **entries}
+                    _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
+            legacy.replace(backup) if first else legacy.unlink()
+    except OSError:
+        pass
+
+
 def _sweep_orphan_locks(root: Path, now: float) -> None:
     """Unlink sidecar locks whose data file is gone and that have been idle as long as any
     reaped room. `now` is the caller's, so every reapability decision in one pass is made
@@ -1489,20 +1586,13 @@ def _reap(root: Path) -> None:
                             # Leave the previous generation's high-water mark behind so a
                             # recreated room continues the sequence instead of restarting at 1
                             # and stranding every cursor pointing past it (#139 dir #2). Stored
-                            # in a root-level map under the seq-state lock. Also preserves the
+                            # in the name's own shard of the seq state. Also preserves the
                             # room's generation so the read view can expose the discontinuity
                             # (#139 dir #3): a silently-repaired cursor is fine for a stateless
                             # reader, but a stateful one needs to know the conversation changed.
                             # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
                             room = p.name[: -len(".jsonl")]
-                            with _locked(root / ".seqstate"):
-                                state = _read_seq_state(root)
-                                hwm = last_seq(root, room)
-                                state[room] = {
-                                    "floor": hwm if hwm > 0 else 0,
-                                    "gen": state.get(room, {}).get("gen", 0),
-                                }
-                                _write_seq_state(root, state)
+                            _set_seq_entry(root, room, max(0, last_seq(root, room)))
                         p.unlink(missing_ok=True)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
@@ -1514,6 +1604,7 @@ def _reap(root: Path) -> None:
     _reconcile_note_count(root)
     _sweep_orphan_locks(root, now)
     _drop_emptied_namespaces(root)
+    _split_seq_state(root)  # once in the life of a store; a no-op every pass after
     # The room figures, and then the buckets — one span, because both want the same thing that
     # `_reconcile_note_count` wants and there is no reason to wait for it twice. Creates are
     # held off for the length of this block (they hold the same span shared), which is what
@@ -2197,11 +2288,7 @@ def _write_record(
         # discontinuity and resync instead of silently watching a different conversation
         # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
         # has taken up the sequence where the old one left off, so it must not be reused.
-        with _locked(root / ".seqstate"):
-            state = _read_seq_state(root)
-            gen = int(state.get(room, {}).get("gen", 0)) + 1
-            state[room] = {"floor": 0, "gen": gen}
-            _write_seq_state(root, state)
+        _set_seq_entry(root, room, None)
     return rec, created
 
 
