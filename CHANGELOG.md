@@ -16,6 +16,21 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-31
+
+### Changed
+
+- **Room and note creation no longer serialise behind one service-wide lock.** Creating a
+  room checked the caps by walking every bucket while holding a lock that also spanned the
+  append, its fsync and any compaction, so creation ran one at a time across every worker;
+  both figures now come from `.usage`, which the reaper rewrites from a walk it already
+  makes. **Deployer note:** `MAX_ROOMS` may now be overshot by the creates in flight at one
+  reap pass — bounded, non-accumulating, and corrected on the next pass — and the total
+  room-byte budget is a stale-by-one-reap figure on the create path, the same trade the
+  adaptive ring already made for it. `.usage` gains a second field; one written by an
+  earlier release is rebuilt on first read and rewritten by the first reap, so there is no
+  migration step and downgrading is safe.
+
 ## [0.11.0] - 2026-08-31
 
 ### Changed
@@ -978,7 +993,9 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.1
+[0.11.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.0
 [0.10.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.10.0
 [0.9.7]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.7
 [0.9.6]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.9.6
