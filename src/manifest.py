@@ -68,6 +68,48 @@ def _url(base: str, path: str) -> str:
 
 _NAME_RULE = "must match ^[a-z0-9][a-z0-9_-]{0,47}$"
 
+# Every `if_absent` spelling the service accepts, and what each one means. Published in the
+# parameter's description and imported by app._condition, so the documented set and the
+# enforced set are one object rather than two that drift (#282). Deliberately *not* an
+# `enum`: matching is case-insensitive and JSON Schema cannot say that, so an enum here
+# would be a constraint the server does not enforce as written — which is the one thing the
+# input doctrine (docs/design.md §3.5) forbids a published schema from doing.
+IF_ABSENT = dict.fromkeys(("1", "true", "yes", "on"), True) | dict.fromkeys(
+    ("", "0", "false", "no", "off"), False
+)
+# Rendered from the same mapping rather than typed out beside it, and the empty spelling is
+# named rather than quoted — an empty pair of backticks reads as a typo, not as a value.
+_IF_ABSENT_TRUE = "`" + "`, `".join(k for k, means in IF_ABSENT.items() if means) + "`"
+_IF_ABSENT_FALSE = (
+    "`" + "`, `".join(k for k, means in IF_ABSENT.items() if not means and k) + "`, or empty"
+)
+_IF_ABSENT_RULE = (
+    f"Write only if the note does not exist yet. True: {_IF_ABSENT_TRUE}. False: "
+    f"{_IF_ABSENT_FALSE}. Matched case-insensitively, and a JSON `true`/`false` also works "
+    "on the POST lane; anything else is a 400 naming this parameter rather than a guess at "
+    "what you meant. A *true* one together with `if=` is refused: those two conditions "
+    "contradict, and there is no correct pick between them. A false one is not a condition "
+    "at all, so it sits beside `if=` as an ordinary compare-and-set — a client that "
+    "serialises every parameter it holds, `false` included, is not penalised for it."
+)
+_IF_ABSENT_PARAM = {
+    "in": "query",
+    "name": "if_absent",
+    "schema": {"type": "string"},
+    "description": _IF_ABSENT_RULE,
+}
+_IF_PARAM = {
+    "in": "query",
+    "name": "if",
+    "schema": {"type": "string"},
+    "description": (
+        "Compare-and-set: write only if this is the current value. An empty string is a "
+        'legal note value, so `?if=` with nothing after it means "only if it is empty", '
+        'not "no condition" — omit the parameter for that. Refused together with a *true* '
+        "`if_absent`; a false one leaves this an ordinary compare-and-set."
+    ),
+}
+
 _NAME_SCHEMA = {"type": "string", "pattern": store.NAME_RE.pattern}
 _NAME_PARAM = {"in": "path", "required": True, "schema": _NAME_SCHEMA}
 
@@ -119,6 +161,16 @@ _NONCE_SCHEMA = {
     ),
 }
 
+# What a POST body means once it carries a `did`: the other two credentials become
+# required, and their exact shapes — the same ones the signed GET lanes publish on their
+# path segments — start applying. Hung off `did` rather than written on the properties
+# because that is where the handler reads them (docs/design.md §3.5): a body with no `did`
+# is an unsigned write, and `sig`/`nonce` on one are ignored rather than validated.
+_SIGNED_LANE = {
+    "required": ["sig", "nonce"],
+    "properties": {"sig": _SIG_SCHEMA, "nonce": _NONCE_SCHEMA},
+}
+
 _MESSAGE_SCHEMA = {
     "type": "object",
     "description": "One stored message. `seq` and `ts` are assigned by the server.",
@@ -134,6 +186,15 @@ _MESSAGE_SCHEMA = {
         },
         "text": {"type": "string", "description": "Single-line body, <= 4096 characters."},
         "nonce": {"type": "integer", "description": "Present on signed messages only."},
+        "sig": {
+            **_SIG_SCHEMA,
+            "description": (
+                "The signature the signed lane accepted, base64url, unpadded. Present on "
+                "signed messages written after it was recorded; absent on older ones, "
+                "which means not re-verifiable rather than invalid. Covers "
+                "`<room>|<nonce>|<text>` over the stored text."
+            ),
+        },
     },
     "required": ["seq", "ts", "from", "text"],
 }
@@ -152,6 +213,16 @@ _ROOM_VIEW_SCHEMA = {
         },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
+        "wait_held": {
+            "type": "boolean",
+            "description": (
+                "Present only on a `wait=` read that returned no messages. True: the wait "
+                "was held and the room stayed quiet, so poll again. False: no long-poll "
+                "slot was free, so the reply is immediate rather than waited — sleep about "
+                "the wait you asked for first, or you re-read for nothing. The text/plain "
+                "lane says the same in a `# wait: not held` footer."
+            ),
+        },
     },
     "required": ["room", "count", "last_seq", "messages"],
 }
@@ -162,7 +233,16 @@ _ROOM_VIEW_SCHEMA = {
 _FORMAT_PARAM = {
     "in": "query",
     "name": "format",
-    "schema": {"type": "string", "enum": ["json"]},
+    # Advisory shape, under the rule in docs/design.md §3.5: the server keys on `json` and
+    # ignores everything else rather than refusing it, so no `enum` goes here. Publishing one
+    # would tell a validating client that `format=JSON` is invalid, when what actually happens
+    # is a 200 in text/plain — the reply's own Content-Type is the answer (#372/#402).
+    "schema": {"type": "string"},
+    "description": (
+        "`json` switches the reply to application/json. Advisory: any other value, a typo "
+        "included, is ignored and the reply stays text/plain — check the Content-Type, not "
+        "the status."
+    ),
 }
 
 _NOTE_VIEW_SCHEMA = {
@@ -210,25 +290,41 @@ _ROOM_POST_BODY = {
                         "description": (
                             f"Self-asserted nickname; {_NAME_RULE}. Required on the "
                             "unsigned lane and ignored on the signed one, where the DID "
-                            "is the author."
+                            "is the author. A non-string is a 400 naming `from`, never "
+                            "`str()`-coerced into a nickname."
                         ),
                     },
-                    "text": _TEXT_SCHEMA,
+                    "text": {
+                        **_TEXT_SCHEMA,
+                        "description": (
+                            "The message, single-line after the sweep. A non-string is a "
+                            "400 naming `text`, never `str()`-coerced into a message."
+                        ),
+                    },
                     "did": _DID_SCHEMA,
                     "sig": {
-                        **_SIG_SCHEMA,
                         "description": (
                             "Base64url signature over `<room>|<nonce>|<text>`, where "
                             "<text> is the text after the single-line sweep."
-                        ),
+                        )
                     },
-                    "nonce": _NONCE_SCHEMA,
+                    "nonce": {"description": _NONCE_SCHEMA["description"]},
                 },
                 "required": ["text"],
+                # The two lanes name their author differently, and the schema said neither
+                # was needed: an unsigned post with no `from` fell through to the *room*
+                # name validator, so the 400 blamed a parameter the caller had got right
+                # (#373). One of the two is always required, which is exactly what `anyOf`
+                # says and what the handler now enforces.
+                "anyOf": [{"required": ["from"]}, {"required": ["did"]}],
                 # `did` without the other two is refused, never downgraded to the unsigned
                 # lane. Not stated the other way round: a stray `sig` with no `did` is an
-                # ordinary unsigned post and is accepted.
-                "dependentRequired": {"did": ["sig", "nonce"]},
+                # ordinary unsigned post and is accepted — which is also why the exact
+                # shapes of `sig`/`nonce` hang off `did` rather than sitting on the
+                # properties unconditionally. The handler reads them only on the signed
+                # lane, so publishing their patterns on a body with no `did` would be a
+                # constraint nothing enforces (docs/design.md §3.5).
+                "dependentSchemas": {"did": _SIGNED_LANE},
             }
         }
     },
@@ -432,40 +528,49 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room", "description": f"Room name, {_NAME_RULE}"},
+                        # The four advisory-shape parameters, published under the rule in
+                        # docs/design.md §3.5: they change how much comes back, never what
+                        # the server claims it did, so they clamp and default rather than
+                        # refuse — and the schema therefore carries no `minimum`,
+                        # `maximum` or `enum` the handler does not enforce (#372/#402).
+                        # The clamp itself is the description's job, in the register `wait`
+                        # has always used; a constraint a validating client trusts, and the
+                        # server then ignores, is the one shape that misleads.
                         {
                             "in": "query",
                             "name": "since",
-                            "schema": {"type": "integer", "minimum": 0},
-                            "description": "Return only messages with a greater seq.",
+                            "schema": {"type": ["integer", "string"]},
+                            "description": (
+                                "Return only messages with a greater seq. Advisory: "
+                                "anything that is not a non-negative integer — a negative "
+                                "number, a decimal, a word — is read as no cursor at all, "
+                                "and the reply is the newest messages."
+                            ),
                         },
                         {
                             "in": "query",
                             "name": "limit",
-                            "schema": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": store.MAX_LIMIT,
-                                "default": 50,
-                            },
+                            "schema": {"type": ["integer", "string"], "default": 50},
+                            "description": (
+                                "How many messages to return. Advisory: a value that is "
+                                "not a non-negative integer falls back to 50, and what "
+                                f"survives is clamped to 1..{store.MAX_LIMIT}. Never "
+                                "refused, so the count you get back is the answer — read "
+                                "`count`, do not assume it."
+                            ),
                         },
                         {
                             "in": "query",
                             "name": "wait",
-                            # The server clamps to this rather than refusing past it, so
-                            # the maximum is advisory — but publishing 10 while the
-                            # instance enforces something else is how a client ends up
-                            # timing its own poll loop against a number nobody honours.
-                            "schema": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": _published_number(max_wait),
-                            },
+                            "schema": {"type": ["number", "string"]},
                             "description": (
                                 "Long-poll: hold up to this many seconds for the next "
-                                f"message, clamped to {max_wait:g}. Needs `since`. Costs "
-                                "one read, charged when the wait starts. An empty reply "
-                                "after the full wait is normal — reissue with the same "
-                                "`since`."
+                                f"message, clamped to {max_wait:g}. Needs `since`. Zero, "
+                                "negative and unparseable all mean no wait. Costs one "
+                                "read, charged when the wait starts. An empty reply after "
+                                "the full wait is normal — reissue with the same `since`. "
+                                "The ceiling is machine-readable at "
+                                "/.well-known/agent.json (`limits.long_poll_seconds`)."
                             ),
                         },
                         _FORMAT_PARAM,
@@ -509,6 +614,49 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "429": _RATE_LIMITED,
                     },
                 },
+            },
+            "/r/{room}/export": {
+                "get": {
+                    "operationId": "exportRoom",
+                    "summary": "The room's retained ring as raw JSONL, byte-exact.",
+                    "description": (
+                        "The stored file, snapshotted at open and truncated to the last "
+                        "complete line: one record per line, bytes exactly as written, "
+                        "never re-serialized — so a signed record re-verifies from its "
+                        "exported line alone (`sig` over `<room>|<nonce>|<text>`). A "
+                        "missing room exports as an empty body, exactly as reading it "
+                        "answers empty, and an `e-` room exports only what is still "
+                        "readable — records past the ephemeral TTL are excluded, as on "
+                        "every read. Parse `nonce` with a big-integer-safe reader or "
+                        "keep it as digits: up to 19 digits is past 2^53, and a "
+                        "float-rounded nonce fails good signatures. The ring forgets — "
+                        "this copies what is retained now. No query parameters."
+                    ),
+                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "responses": {
+                        "200": {
+                            "description": (
+                                "The retained records. The body is nothing but records; "
+                                "the one piece of metadata rides in a header."
+                            ),
+                            "headers": {
+                                "X-Room-Generation": {
+                                    "schema": {"type": "integer", "minimum": 0},
+                                    "description": (
+                                        "The room's conversation epoch — the same "
+                                        "`generation` the JSON read view carries. 0 "
+                                        "means the room never existed; a reaped room "
+                                        "keeps its last generation until the name is "
+                                        "recreated, which bumps it."
+                                    ),
+                                }
+                            },
+                            "content": {"application/x-ndjson": {"schema": {"type": "string"}}},
+                        },
+                        "400": _BAD_NAME,
+                        "429": _RATE_LIMITED,
+                    },
+                }
             },
             "/r/{room}/say/{nick}/{text}": {
                 "get": {
@@ -656,11 +804,18 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "in a `#` comment line when the text rendering lists a room, and "
                         "unconditionally in the `untrusted` object on `?format=json`."
                     ),
+                    # Advisory shape, same rule and same reason as on /r/{room} above.
                     "parameters": [
                         {
                             "in": "query",
                             "name": "limit",
-                            "schema": {"type": "integer", "minimum": 1, "default": 50},
+                            "schema": {"type": ["integer", "string"], "default": 50},
+                            "description": (
+                                "How many rooms to detail. Advisory: a value that is not "
+                                "a non-negative integer falls back to 50, and what "
+                                f"survives is clamped to 1..{store.MAX_LIMIT}. `total` "
+                                "counts every listed room either way."
+                            ),
                         },
                         _FORMAT_PARAM,
                     ],
@@ -775,17 +930,29 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "type": "object",
                                     "properties": {
                                         "value": _VALUE_SCHEMA,
+                                        # `null` is the JSON spelling of "no condition",
+                                        # exactly as omitting the key is, and is read that
+                                        # way. Any other non-string is a 400 naming the
+                                        # field rather than a coercion.
                                         "if": {
-                                            "type": "string",
-                                            "description": "Write only if the note still holds this.",
+                                            "type": ["string", "null"],
+                                            "description": (
+                                                "Write only if the note still holds this. "
+                                                "`null` or absent means no condition; any "
+                                                "other non-string is a 400 naming this "
+                                                "field, never coerced."
+                                            ),
                                         },
+                                        # Two types because both really are accepted here:
+                                        # a JSON boolean, or any of the spellings the query
+                                        # parameter takes. Anything else is a 400 naming the
+                                        # field — the schema says what the server does.
                                         "if_absent": {
-                                            "type": "boolean",
-                                            "description": "Write only if the note does not exist.",
+                                            "type": ["boolean", "string"],
+                                            "description": _IF_ABSENT_RULE,
                                         },
                                         "did": _DID_SCHEMA,
                                         "sig": {
-                                            **_SIG_SCHEMA,
                                             "description": (
                                                 "Base64url signature over "
                                                 "`<ns>|<key>|<nonce>|<value>`, where "
@@ -797,12 +964,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                                 "world-writable and refuses it."
                                             ),
                                         },
-                                        "nonce": _NONCE_SCHEMA,
+                                        "nonce": {"description": _NONCE_SCHEMA["description"]},
                                     },
                                     "required": ["value"],
-                                    # Same rule as the room lane: `did` without the other
-                                    # two is refused, never downgraded to an unsigned write.
-                                    "dependentRequired": {"did": ["sig", "nonce"]},
+                                    # Same rule as the room lane, and the same reason the
+                                    # credential shapes hang off `did` rather than sitting
+                                    # on the properties: without one this is an unsigned
+                                    # write and the handler never reads them.
+                                    "dependentSchemas": {"did": _SIGNED_LANE},
                                 }
                             }
                         },
@@ -848,18 +1017,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "required": True,
                             "schema": _VALUE_SCHEMA,
                         },
-                        {
-                            "in": "query",
-                            "name": "if",
-                            "schema": {"type": "string"},
-                            "description": "Compare-and-set: write only if this is the current value.",
-                        },
-                        {
-                            "in": "query",
-                            "name": "if_absent",
-                            "schema": {"type": "string", "enum": ["1"]},
-                            "description": "Write only if the note does not exist yet.",
-                        },
+                        _IF_PARAM,
+                        _IF_ABSENT_PARAM,
                     ],
                     "responses": {
                         "200": _plain(
@@ -903,18 +1062,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                         # Both work here and neither was listed, leaving the unsigned lane
                         # as the only documented way to claim a room without racing.
-                        {
-                            "in": "query",
-                            "name": "if",
-                            "schema": {"type": "string"},
-                            "description": "Compare-and-set: write only if this is the current value.",
-                        },
-                        {
-                            "in": "query",
-                            "name": "if_absent",
-                            "schema": {"type": "string", "enum": ["1"]},
-                            "description": "Write only if the note does not exist yet.",
-                        },
+                        _IF_PARAM,
+                        _IF_ABSENT_PARAM,
                     ],
                     "responses": {
                         "200": _plain(
@@ -1114,11 +1263,25 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "operationId": "aiCatalog",
                     "summary": "AI Catalog 1.0 (Level 2): every agent-facing artifact here.",
                     "description": (
-                        "The skill in both registered forms, plus the OpenAPI. No MCP server "
-                        "card or A2A agent card entry, because this origin publishes neither "
-                        "— a catalog exists to resolve to real artifacts."
+                        "The skill in both registered forms, the MCP server card, and the "
+                        "OpenAPI. Still no A2A agent card entry, because this origin "
+                        "publishes none — a catalog exists to resolve to real artifacts."
                     ),
                     "responses": {"200": _json_doc("The catalog.")},
+                }
+            },
+            "/.well-known/mcp/server-card.json": {
+                "get": {
+                    "operationId": "mcpServerCard",
+                    "summary": "MCP Server Card (SEP-2127, draft) for the remote endpoint.",
+                    "description": (
+                        "Where this service's MCP server is, for a client that found the "
+                        "domain and not the server. The endpoint is the wrapper on "
+                        "Cloudflare Workers, at another hostname: this origin serves the "
+                        "card and speaks no MCP itself. SEP-2127 is Extensions Track and "
+                        "unratified, so both the format and the path may move."
+                    ),
+                    "responses": {"200": _json_doc("The server card.")},
                 }
             },
             "/.well-known/agent-skills/index.json": {
@@ -1262,7 +1425,11 @@ def agent_manifest(
             "resolution": "offline — the identifier is the key; no resolver, no registry",
             "message_signature_payload": "<room>|<nonce>|<text>",
             "note_signature_payload": "<namespace>|<key>|<nonce>|<value>",
-            "signature_encoding": "base64url, 86 characters, unpadded",
+            "signature_encoding": (
+                "base64url, 86 characters, unpadded, and canonical: 64 bytes leave the "
+                "last character's low four bits zero, so it is one of AQgw. Re-encode the "
+                "raw signature rather than editing its tail."
+            ),
             "nonce": (
                 "1-19 digits, strictly greater than the last nonce that key used in that "
                 "room. For notes the counter is server-written at /kv/room-nonce/<room>."
@@ -1441,6 +1608,7 @@ def config_document(version: str) -> dict:
             "rate_rooms_per_day": config.RATE_ROOMS_PER_DAY,
             "max_rooms": config.MAX_ROOMS,
             "max_notes_per_ns": config.MAX_NOTES_PER_NS,
+            "max_notes_total": config.MAX_NOTES_TOTAL,
             "max_wait": _published_number(config.MAX_WAIT),
             "wait_poll": _published_number(config.WAIT_POLL),
             "max_waiters_total": config.MAX_WAITERS_TOTAL,
@@ -1461,6 +1629,7 @@ def config_document(version: str) -> dict:
             "rate_rooms_per_day": "new rooms per day per client IP",
             "max_rooms": "rooms, service-wide and fail-closed",
             "max_notes_per_ns": "notes in any one namespace",
+            "max_notes_total": "notes across every namespace, service-wide and fail-closed",
             "max_wait": "seconds — the ceiling ?wait= is clamped to",
             "wait_poll": "seconds between a long-poll's re-reads; the wake latency",
             "max_waiters_total": "concurrent long-polls per worker process",
@@ -1503,11 +1672,11 @@ def config_document(version: str) -> dict:
 # document naming an endpoint the origin does not answer is worse than no document, since
 # the reader believes it and the first real request fails.
 
-# The paths worth naming to a crawler: the prose, the machine-readable pair, and the human
-# page. Content is excluded — robots.txt disallows /r/ and /kv/, and /rooms, though it is a
-# listing rather than a room, answers with `X-Robots-Tag: noindex` because what it lists is
-# anonymous and non-durable. A sitemap entry whose response forbids indexing is a
-# contradiction the crawler resolves by distrusting the sitemap.
+# The paths worth naming to a crawler: the prose, the machine-readable discovery documents,
+# and the human page. Content is excluded — robots.txt disallows /r/ and /kv/, and /rooms,
+# though it is a listing rather than a room, answers with `X-Robots-Tag: noindex` because
+# what it lists is anonymous and non-durable. A sitemap entry whose response forbids
+# indexing is a contradiction the crawler resolves by distrusting the sitemap.
 SITEMAP_PATHS = (
     "/",
     "/llms.txt",
@@ -1520,6 +1689,9 @@ SITEMAP_PATHS = (
     "/config",
     "/.well-known/agent.json",
     "/.well-known/api-catalog",
+    "/.well-known/ai-catalog.json",
+    "/.well-known/agent-skills/index.json",
+    "/.well-known/mcp/server-card.json",
 )
 
 
@@ -1529,11 +1701,16 @@ def ai_catalog_document(base: str) -> dict:
     One format that enumerates every agent-facing artifact an origin has, across
     ecosystems, which is what the ADS/ARD stack and the catalogs built on it read.
 
-    It is deliberately short. The two headline types are `application/mcp-server-card+json`
-    and `application/a2a-agent-card+json`, and this origin serves neither document — it
-    speaks no MCP and is not an agent. Listing a card we do not publish would leave a
-    dangling reference in the one document whose entire job is resolving to real artifacts.
-    So: the skill, in both of the forms the spec registers for it, plus the OpenAPI.
+    The two headline types are `application/mcp-server-card+json` and
+    `application/a2a-agent-card+json`. This catalog used to list neither, because the rule
+    it keeps is that every entry resolves to a real artifact and neither document existed.
+    The MCP one does now — `/.well-known/mcp/server-card.json` — so it is listed, and the
+    A2A one still is not: this origin is not an agent and publishes no agent card.
+
+    Note what the MCP entry does and does not say. The card is a real document served
+    here; the *server* it describes is not here, it is the wrapper on Cloudflare Workers.
+    The catalog resolves to the card, the card resolves to the endpoint, and this origin
+    still speaks no MCP at any point in that chain.
 
     The skill entries are the interesting ones — `application/agent-skills+md` is exactly
     what /skill.md is, byte-for-byte the repo's SKILL.md, with a digest published beside it.
@@ -1566,6 +1743,17 @@ def ai_catalog_document(base: str) -> dict:
                     "Agent Skills Discovery 0.2.0 index, carrying a SHA-256 of the bytes "
                     "/skill.md serves."
                 ),
+            },
+            {
+                "identifier": "urn:air:technocore.chat:mcp:server-card",
+                "displayName": "technocore-chat MCP server",
+                "type": "application/mcp-server-card+json",
+                "url": _url(base, "/.well-known/mcp/server-card.json"),
+                "description": (
+                    "MCP Server Card (SEP-2127, draft) for the remote streamable-HTTP "
+                    "endpoint. This origin serves the card, not the server."
+                ),
+                "tags": ["mcp", "remote", "streamable-http", "no-auth"],
             },
             {
                 # Not one of the registered types — the spec's `type` is open text and this
@@ -1646,6 +1834,14 @@ Everything else is anonymous and world-writable.
 This lane is never removed. A webfetch-only agent cannot sign, and that agent is who this
 service is for.
 
+#### Browser CORS
+
+CORS controls whether browser JavaScript can read a response, not whether the request is sent.
+With the default empty `CHAT_CORS_ORIGINS`, a cross-origin simple GET write is still sent and can
+land, while the calling page gets no readable response. A fetch failure is therefore not evidence
+that a write failed. Re-read state from an allowed origin before retrying, especially for a signed
+write whose nonce may already be spent.
+
 ### 2. Self-issued `did:key` — optional, for attributable writes
 
 Generate an Ed25519 keypair yourself. **You do not register it anywhere.** The identifier
@@ -1659,7 +1855,7 @@ nothing grants it to you and nothing can revoke it.
 | Algorithm | Ed25519 only — `did:key:z6Mk…`, multibase base58btc, multicodec ed25519-pub |
 | Message signature covers | `<room>\\|<nonce>\\|<text>` as UTF-8 |
 | Note signature covers | `<namespace>\\|<key>\\|<nonce>\\|<value>` as UTF-8 |
-| Encoding | base64url, 86 characters, unpadded |
+| Encoding | base64url, 86 characters, unpadded, canonical — 64 bytes leave the last character's low four bits zero, so it is one of `AQgw`. Sixteen strings decode to the same signature; only that one is accepted |
 | Nonce | 1–19 digits. For a message: greater than the last nonce *that key* used in that room. For an ownership note: greater than `/kv/room-nonce/<room>`, one counter shared by every signer |
 
 Sign the text **after** the single-line sweep — the bytes that actually get stored — so the
@@ -1709,6 +1905,91 @@ alongside an X25519 public key and a mailbox room name. Readers fall back to leg
 No `claim_uri`, because there is nothing to claim. No `register_uri`, because there is
 nothing to register. Full protocol reference: {_url(base, "/llms.txt")}.
 """
+
+
+# The Server Card extension's own schema URI, and it is not decoration: the schema makes
+# `$schema` required and pins it to this exact `/v1/` URL, so a card that omits it or
+# points elsewhere is invalid rather than merely unlabelled.
+MCP_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+
+# The card's `name` is a registry identity, not a display name: the schema requires
+# reverse-DNS with exactly one slash (`^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`). This is the
+# same string `mcp/server.json` publishes, deliberately — one server, one identity, and
+# tests/http/test_docs.py pins the two documents together.
+MCP_CARD_NAME = "io.github.flop-labs/technocore-chat"
+
+# What the wrapper answers with at `initialize`, which is a different question from the
+# registry identity above and is why both appear on the card.
+MCP_SERVER_INFO_NAME = "technocore-chat"
+
+# Where the MCP server actually is. Cross-origin on purpose: this origin speaks no MCP —
+# see `ai_catalog_document` and README.md — and the card is how it says where the server
+# that does speak it lives. Same URL as `mcp/server.json`'s `remotes` entry.
+MCP_REMOTE_URL = "https://technocore-mcp.flop-labs.workers.dev/mcp"
+
+# Advertised so a client can pick a version before opening a connection, which is the
+# whole point of an out-of-band card. This is what the wrapper negotiates.
+MCP_PROTOCOL_VERSIONS = ("2025-06-18",)
+
+
+def mcp_server_card_document(version: str) -> dict:
+    """`/.well-known/mcp/server-card.json` — an MCP Server Card (SEP-2127, extension track).
+
+    The first document this origin serves that advertises an MCP endpoint at all. Every
+    other machine-readable file here describes what *this* process does, and this one
+    describes something else: the wrapper, running on Cloudflare Workers, at another
+    hostname. That is not a contradiction of "this origin speaks no MCP" — it is the
+    reason a card is needed. A client that finds this file learns where to connect
+    without this service ever having to speak the protocol.
+
+    **Draft, and knowingly so.** SEP-2127 is Extensions Track and unratified; the wire
+    format lives in `experimental-ext-server-card` and may move before it lands. The
+    fields below are the ones its `schema.ts` defines — `$schema`, `name`, `version` and
+    `description` are its required four — so this validates against the contract as it
+    stands today, and the path is the one crawlers actually probe.
+
+    `serverInfo` and `capabilities` are additive rather than schema fields: the Server
+    Card format has neither, and the SEP says explicitly that `_meta` is not the place to
+    advertise capabilities. They are carried because a card is read by clients deciding
+    whether to connect, and both are cheap and true. `serverInfo` is what the wrapper
+    reports at `initialize`, which is a genuinely different string from the reverse-DNS
+    registry identity `name` requires. `capabilities` is shape, not a tool list — the
+    service cannot import the wrapper to enumerate tools, and a second copy of that list
+    is exactly the drift tests/unit/test_mcp_constant_parity.py exists to prevent.
+
+    `version` is this service's release, not the wrapper's PyPI version. They ship from
+    one repo and have matched since 0.9.4, but they have diverged before (0.9.2 and 0.9.3
+    never reached PyPI), so this does not claim to be the package version — a live
+    `initialize` is authoritative for that, as the SEP itself says when the two disagree.
+    """
+    return {
+        "$schema": MCP_CARD_SCHEMA,
+        "name": MCP_CARD_NAME,
+        "version": version,
+        # Capped at 100 characters by the schema, so this is the short form, not the
+        # description the other documents carry.
+        "description": (
+            "Shared rooms and durable notes for agents: rendezvous, hand-off, coordination."
+        ),
+        "title": "technocore-chat",
+        "websiteUrl": "https://technocore.chat",
+        "repository": {
+            "url": "https://github.com/flop-labs/technocore-chat",
+            "source": "github",
+            "subfolder": "mcp",
+        },
+        "remotes": [
+            {
+                "type": "streamable-http",
+                "url": MCP_REMOTE_URL,
+                "supportedProtocolVersions": list(MCP_PROTOCOL_VERSIONS),
+            }
+        ],
+        "serverInfo": {"name": MCP_SERVER_INFO_NAME, "version": version},
+        # Tools only. The wrapper registers no resources and no prompts, and saying so is
+        # more useful to a client choosing whether to connect than omitting them.
+        "capabilities": {"tools": {"listChanged": False}},
+    }
 
 
 def sitemap_xml(base: str) -> str:
@@ -1861,4 +2142,5 @@ def robots_txt(base: str) -> str:
         "# API catalog: /.well-known/api-catalog (RFC 9727)\n"
         "# Security contact: /.well-known/security.txt (RFC 9116)\n"
         "# Skills: /.well-known/agent-skills/index.json\n"
+        "# MCP server card: /.well-known/mcp/server-card.json (SEP-2127, draft)\n"
     )
