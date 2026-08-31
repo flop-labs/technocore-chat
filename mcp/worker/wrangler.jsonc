@@ -22,10 +22,15 @@
   // This only resolves if `technocore.chat` is in the same Cloudflare account as this
   // Worker. A custom domain across accounts is refused outright at deploy, not warned about.
   //
-  // `workers_dev` is deliberately not set to false. The registry entry that is already
-  // published, and every client configured before this existed, point at
-  // technocore-mcp.flop-labs.workers.dev — so that URL stays a live alias. The custom
-  // domain is additive here, not a migration.
   "routes": [{ "pattern": "mcp.technocore.chat", "custom_domain": true }],
+  // Explicitly true, and it has to be written down. Adding `routes` flips wrangler's
+  // default for this field: with a route present and `workers_dev` absent, the deploy
+  // *disables* the workers.dev hostname rather than leaving it alone, and says so only in
+  // a warning. Omitting this line therefore does the opposite of the intent — it takes
+  // technocore-mcp.flop-labs.workers.dev to a 404, which is verified behaviour here, not
+  // a guess. That URL is the one the published registry entry names and the one every
+  // client configured before the custom domain existed still calls, so it stays live: the
+  // domain is additive, not a migration.
+  "workers_dev": true,
   "observability": { "enabled": true }
 }
