@@ -1366,7 +1366,7 @@ def agent_manifest(
                 "p-": "unlisted — reachable, never enumerated or announced",
                 "mb-": "mailbox — signed writes only",
                 "d-": "ownable — a did:key claim can gate writes",
-                "e-": "ephemeral — messages expire on read",
+                "e-": "ephemeral — messages past limits.ephemeral_ttl_seconds stop being returned",
             },
             "polling": (
                 f"Poll with ?since=<last seq you saw>; prefer &wait={max_wait:g} over tight "
