@@ -369,8 +369,8 @@ def test_a_reaped_room_does_not_leave_its_bucket_behind(tmp_path, monkeypatch):
 def test_a_reap_that_prunes_buckets_never_meets_a_create_gate_it_already_holds(
     tmp_path, monkeypatch
 ):
-    """`_prune(rooms)` takes `.rooms-create`, and `_reap` runs on the write path — so the
-    question is whether any caller can be inside that gate when a pass fires.
+    """`_prune(rooms)` takes the room create span, and `_reap` runs on the write path — so
+    the question is whether any caller can be inside that span when a pass fires.
 
     `flock` is per open file description and `_locked` opens a fresh fd every time, so a
     second acquire from the same thread does not re-enter: it blocks on itself, forever, with
