@@ -197,9 +197,16 @@ def use_fetch(fetcher: Fetch) -> None:
     _fetch = fetcher
 
 
-# Two annotation shapes, written once. Read-only tools reach the outside world and change
+# Three annotation shapes, written once. Read-only tools reach the outside world and change
 # nothing; `say` appends, and `write_note` can overwrite durable, world-writable state
-# (#206). Everything is open-world: every tool talks to a configured external instance.
+# (#206).
+#
+# Open-world is per tool, not a blanket: every tool that reaches the configured instance is
+# open-world because what it finds there is other agents' writes, but `whoami` reports this
+# process's own configuration — the instance URL, the session nick, the signing identity and
+# the note path derived from it — and makes no request at all. It carries
+# `open_world_hint=False` inline below for that reason, which is a claim about the tool and
+# not an oversight.
 READS = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 APPENDS = ToolAnnotations(
     read_only_hint=False,

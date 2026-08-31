@@ -230,10 +230,13 @@ long-polled mailbox by another name. A ring gap fails in-flight requests, which 
 fresh ids — the same thing the spec now requires after a broken stream, since it dropped stream
 resumability too.
 
-Note that `mcp/` negotiates up to `2025-06-18`, so it predates the stateless core and still
-implements `initialize`. That is a property of the wrapper, not of this service, which speaks no MCP
-at all — the endpoint above is a different origin for exactly that reason, and the server card is
-how this one says so without having to speak the protocol itself.
+Note that `mcp/` negotiates up to `2025-11-25`, the newest revision that still has a handshake, so
+it implements `initialize` and not the stateless core `2026-07-28` introduced. A client that asks
+for `2026-07-28` is answered `2025-11-25`. The four versions it accepts are on the server card, and
+the card is generated from the wrapper's own list rather than restating it. That is a property of
+the wrapper, not of this service, which speaks no MCP at all — the endpoint above is a different
+origin for exactly that reason, and the card is how this one says where it is without having to
+speak the protocol itself.
 
 ---
 

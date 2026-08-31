@@ -1723,20 +1723,31 @@ def test_the_mcp_server_card_is_served_and_conforms_to_the_extension_schema(clie
 
     The schema is unratified and lives outside this repo, so a network fetch would make
     this suite depend on a draft moving under it. What is pinned instead is the contract as
-    of the SEP-review snapshot: `$schema`, `name`, `version` and `description` are required;
-    `name` is reverse-DNS with exactly one slash; `description` is capped at 100 characters;
-    a remote's `type` is one of two strings. Those are the ways a card is invalid rather
-    than merely unfashionable, and they are cheap to keep true.
+    of the SEP-review snapshot: `name`, `version` and `description` are required; `name` is
+    reverse-DNS with exactly one slash; `description` is capped at 100 characters; a
+    remote's `type` is one of two strings. Those are the ways a card is invalid rather than
+    merely unfashionable, and they are cheap to keep true.
+
+    `$schema` is the SEP's fourth required field and is deliberately absent, so this asserts
+    its absence rather than its value. It used to be asserted equal to
+    `.../schemas/v1/server-card.schema.json`, a URL that 404s and always has — the registry
+    serves schemas under dated paths and publishes none for the card at all. Pinning the
+    literal made this test agree with the code and both of them wrong about the world, which
+    is the failure mode a test like this is supposed to prevent. What is worth pinning is
+    the decision: no `$schema` until one resolves, and never a guessed URL.
     """
+    import manifest
+
     card = client.get("/.well-known/mcp/server-card.json")
     assert card.status_code == 200
     assert card.headers["content-type"].startswith("application/json")
     doc = card.json()
 
-    for required in ("$schema", "name", "version", "description"):
+    for required in ("name", "version", "description"):
         assert doc.get(required), required
-    assert doc["$schema"] == (
-        "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+    assert "$schema" not in doc, (
+        "no schema is published for this format; a $schema that 404s fails a strict "
+        "validator that an absent one would not"
     )
     assert re.fullmatch(r"[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+", doc["name"]), doc["name"]
     assert 3 <= len(doc["name"]) <= 200
@@ -1745,7 +1756,10 @@ def test_the_mcp_server_card_is_served_and_conforms_to_the_extension_schema(clie
     (remote,) = doc["remotes"]
     assert remote["type"] == "streamable-http"  # the enum's other member is the dead `sse`
     assert remote["url"].startswith("https://")
-    assert remote["supportedProtocolVersions"]
+    # Non-empty is not the assertion that matters — a stale list is non-empty, which is how
+    # this card advertised a two-revision-old version for all of 0.11.x. The versions are
+    # held to the wrapper's own in tests/unit/test_mcp_constant_parity.py.
+    assert remote["supportedProtocolVersions"] == list(manifest.MCP_PROTOCOL_VERSIONS)
 
 
 def test_the_server_card_reports_the_running_version_and_the_handshake_name(client):

@@ -1867,7 +1867,22 @@ nothing to register. Full protocol reference: {_url(base, "/llms.txt")}.
 # The Server Card extension's own schema URI, and it is not decoration: the schema makes
 # `$schema` required and pins it to this exact `/v1/` URL, so a card that omits it or
 # points elsewhere is invalid rather than merely unlabelled.
-MCP_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+# No `$schema`, deliberately, and this is the one field the card omits on purpose.
+#
+# It used to carry `https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`,
+# which 404s and always did: the registry publishes its schemas under a dated path
+# (`/schemas/2025-09-29/server.schema.json`, what `mcp/server.json` uses and which resolves),
+# and SEP-2127 — Extensions Track, unratified — publishes no schema for the *card* at any
+# path. The `v1` URL named a document that has never existed.
+#
+# A dangling `$schema` is worse than an absent one. Absent, a validator has nothing to
+# check against and says so. Present and unresolvable, a validator fetches it, fails, and
+# a strict one reports the card invalid — so the field cost conformance rather than buying
+# it. The SEP lists it among its required fields; a required field naming a 404 is a defect
+# in the draft, not a contract this service can satisfy by guessing a URL.
+#
+# When the SEP ratifies and a schema is published at a real path, this is where it goes,
+# and tests/http/test_docs.py is what will notice it is still missing.
 
 # The card's `name` is a registry identity, not a display name: the schema requires
 # reverse-DNS with exactly one slash (`^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`). This is the
@@ -1884,9 +1899,25 @@ MCP_SERVER_INFO_NAME = "technocore-chat"
 # that does speak it lives. Same URL as `mcp/server.json`'s `remotes` entry.
 MCP_REMOTE_URL = "https://mcp.technocore.chat/mcp"
 
-# Advertised so a client can pick a version before opening a connection, which is the
-# whole point of an out-of-band card. This is what the wrapper negotiates.
-MCP_PROTOCOL_VERSIONS = ("2025-06-18",)
+# Advertised so a client can pick a version before opening a connection, which is the whole
+# point of an out-of-band card — and therefore the one field here where being stale costs a
+# caller something real: a client that trusts a card naming only an old revision opens at
+# that revision, and never learns the server would have spoken a newer one.
+#
+# It was stale. This said `("2025-06-18",)` from before the wrapper moved onto the official
+# SDK (#539), while the SDK's `HANDSHAKE_PROTOCOL_VERSIONS` had four members and negotiated
+# up to `2025-11-25` — so the card undersold the server by two revisions for the whole of
+# 0.11.x, and nothing failed, because the only assertion on this field was that it was
+# non-empty.
+#
+# The handshake versions, not `KNOWN_PROTOCOL_VERSIONS`: `2026-07-28` removed `initialize`
+# and is what the SDK calls a *modern* version, which this server does not serve — a client
+# asking for it is answered `2025-11-25`. Advertising it would be advertising a downgrade.
+#
+# A literal rather than an import because the service cannot import the wrapper (see
+# `mcp_server_card_document`), so `tests/unit/test_mcp_constant_parity.py` holds the two
+# together instead — the same trade the name grammar and the limit ceiling already make.
+MCP_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
 
 def mcp_server_card_document(version: str) -> dict:
@@ -1900,10 +1931,11 @@ def mcp_server_card_document(version: str) -> dict:
     without this service ever having to speak the protocol.
 
     **Draft, and knowingly so.** SEP-2127 is Extensions Track and unratified; the wire
-    format lives in `experimental-ext-server-card` and may move before it lands. The
-    fields below are the ones its `schema.ts` defines — `$schema`, `name`, `version` and
-    `description` are its required four — so this validates against the contract as it
-    stands today, and the path is the one crawlers actually probe.
+    format lives in `experimental-ext-server-card` and may move before it lands. The fields
+    below are the ones its `schema.ts` defines, with one deliberate omission: `$schema` is
+    among its required four and there is no published schema for it to name, so the card
+    carries the other three and no dangling URL (see the comment on that above). The path
+    is the one crawlers actually probe.
 
     `serverInfo` and `capabilities` are additive rather than schema fields: the Server
     Card format has neither, and the SEP says explicitly that `_meta` is not the place to
@@ -1920,7 +1952,6 @@ def mcp_server_card_document(version: str) -> dict:
     `initialize` is authoritative for that, as the SEP itself says when the two disagree.
     """
     return {
-        "$schema": MCP_CARD_SCHEMA,
         "name": MCP_CARD_NAME,
         "version": version,
         # Capped at 100 characters by the schema, so this is the short form, not the
