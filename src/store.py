@@ -2455,3 +2455,54 @@ def list_notes(root: Path, ns: str) -> list[str]:
     keep = _listable.__wrapped__  # not the cache: see _listable
     names = (e.name[: -len(".txt")] for e in _walk(_note_ns_dir(root, ns), ".txt"))
     return sorted(n for n in names if keep(n))
+
+
+
+def _sweep_seq_state(root: Path, now: float) -> None:
+    seq_dir = root / "seq"
+    if not seq_dir.exists():
+        return
+    for f in seq_dir.glob("*.json"):
+        try:
+            if now - f.stat().st_mtime > 86400 * 7:
+                f.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+def _compact_counters(root: Path) -> None:
+    log = root / COUNTERS_FILE
+    snap = log.with_suffix(".snapshot")
+    try:
+        with _locked(log):
+            if not log.exists() or log.stat().st_size == 0:
+                return
+            log.rename(snap)
+    except OSError:
+        return
+
+    data = {}
+    try:
+        if snap.exists():
+            for line in snap.read_bytes().splitlines():
+                try:
+                    chunk = orjson.loads(line)
+                    if isinstance(chunk, dict):
+                        for k, v in chunk.items():
+                            if isinstance(v, int):
+                                data[k] = data.get(k, 0) + v
+                except ValueError:
+                    pass
+            
+            if data:
+                _bump(root, **data)
+            
+            snap.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+
+
+
+
+
