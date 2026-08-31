@@ -1,0 +1,64 @@
+# The Worker's own project, separate from mcp/pyproject.toml on purpose: this one is never
+# published, and it exists so `pywrangler` has a dependency set to resolve against Pyodide.
+#
+# `pywrangler dev` / `pywrangler deploy` run `uv pip compile` against the Pyodide wheel
+# index for the interpreter the compat flags select, write pylock.toml, and bundle the
+# result into the Worker. Nothing here is installed on CPython.
+[project]
+name = "technocore-mcp-worker"
+version = "0.1.0"
+description = "Cloudflare Worker entry point for the technocore-chat MCP server"
+requires-python = ">=3.14"
+dependencies = [
+    # The wrapper itself, from the wheel built out of the checkout beside this file rather
+    # than from PyPI, so `pywrangler dev` serves the branch you are on — once you have
+    # built it. See `[tool.uv]` below for why this is a wheel and not a path source, and
+    # mcp/worker/README.md for the one command that produces it. Drop the `find-links`
+    # below to resolve this from PyPI instead and deploy a published release.
+    "technocore-mcp==0.11.1",
+    # Pulled in by the SDK anyway; named here so a resolve failure says which package
+    # could not be built for wasm rather than surfacing three levels down.
+    "mcp>=2.1,<3",
+]
+
+[tool.uv]
+# `technocore-mcp` comes from a wheel in ../dist, not from a `[tool.uv.sources]` path
+# source, and the difference is not stylistic. pywrangler resolves *and* installs against
+# the Pyodide wheel index with `--no-build` (pywrangler/resolve.py, pywrangler/sync.py):
+# only prebuilt wheels, because building a Pyodide-platformed wheel fails. A path source
+# is a directory with no wheel in it, so the install ends on the one package the whole
+# deployment is for:
+#
+#   error: Package `technocore-mcp` can't be installed because it is marked as
+#   `--no-build` but has no binary distribution
+#
+# The tempting fix — `[tool.pywrangler] allow-build = true` — is worse than the problem.
+# It is global, and it drops `--no-build` from the *compile* as well, so the resolve stops
+# being restricted to versions that have emscripten wheels: it selects the newest cffi,
+# cryptography, pydantic-core and rpds-py, all of which are native, and then tries to build
+# them for wasm. cffi shells out to pkg-config and dies on `emscripten does not support
+# processes`. Trading one unbuildable package for four is not a trade.
+#
+# So leave `--no-build` alone and satisfy it. The wrapper is pure Python; hatchling builds
+# it `py3-none-any`, which installs anywhere including emscripten. `find-links` puts that
+# wheel where the resolver can see it, and every native dependency keeps coming from the
+# Pyodide index as a wheel, exactly as it did before.
+#
+# Pinned exactly, and that replaced a `>=0.10` range that only worked by accident. The range
+# resolved to the local build because PyPI's newest was 0.9.4 and nothing else could satisfy
+# it — the comment here used to say as much. Publishing 0.11.0 ends that: with `find-links`
+# pointing at ../dist and the index carrying the same version, two candidates match and
+# which one wins is the resolver's business, not a decision this file made. A wheel chosen
+# that way is indistinguishable from the right one until something behaves oddly in
+# production, which is the failure mode this directory has already produced once.
+#
+# `==` keeps it deterministic and makes the version bump a deliberate edit. To deploy the
+# published release instead of the branch, drop the `find-links` line below; the pin is then
+# satisfied from PyPI and `uv build` stops being a prerequisite.
+find-links = ["../dist"]
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]

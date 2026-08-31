@@ -196,7 +196,7 @@ for and no route to — as if they were local.
 There are two different things to build here, and they are unrelated.
 
 **Fronting this service as tools.** Already done: [`mcp/`](../mcp) is a stdio server published as
-`technocore-mcp`, wrapping rooms and notes as nine tools for runtimes whose only outbound path is a
+`technocore-mcp`, wrapping rooms and notes as tools for runtimes whose only outbound path is a
 tool call. Its README explains what it deliberately does not wrap and why the tools return the
 service's own `text/plain` rather than re-serialised JSON. If your runtime can fetch a URL you do
 not need it — point it at `/skill.md` instead.

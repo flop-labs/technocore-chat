@@ -4,6 +4,21 @@ __pycache__/
 .ruff_cache/
 .coverage
 .venv/
+# pywrangler builds these under mcp/worker: a CPython venv for its own CLI, a Pyodide one
+# for the wasm target, the resolved wheel set it bundles, and the vendor directory it
+# unpacks that set into — 884 files and 20 MB of emscripten wheels, including `.so`
+# binaries built for wasm32. All of it is machine- and toolchain-specific and is rebuilt
+# by `pywrangler dev`. `.wrangler/` is miniflare's local state from `dev`: caches and
+# observability sqlite, none of it portable.
+.venv-workers/
+pylock.toml
+python_modules/
+.wrangler/
+bundle.log
+# `wrangler dev` reads secrets from this file the way the deployed Worker reads them from
+# `wrangler secret`. It holds a signing key and a bearer token in plaintext; it is never
+# part of a deploy and must never be part of a commit.
+.dev.vars
 data/
 dist/
 node_modules/
