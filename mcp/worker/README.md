@@ -50,7 +50,7 @@ as `--no-build` but has no binary distribution ``. Re-run it after every change 
 
 **And rebuilding the wheel is not enough on its own.** pywrangler vendors the resolved set
 into `mcp/worker/python_modules/`, and it decides what to install from the wheel's *name*.
-A rebuild during development produces the same name — `technocore_mcp-0.10.0-py3-none-any.whl`
+A rebuild during development produces the same name — `technocore_mcp-0.11.1-py3-none-any.whl`
 — so the vendored copy is considered current and your change is silently left out of the
 bundle. Nothing fails; you deploy, the Worker runs, and it runs the old code. Clear the
 vendor directory whenever you change `mcp/src` without bumping the version:
@@ -91,12 +91,13 @@ That needs a Cloudflare account and `wrangler login`; the endpoint lands at
 first if you would rather it were called something else.
 
 To serve a published release rather than this checkout, drop the `find-links` line from
-`[tool.uv]` in `pyproject.toml`. The dependency is already an ordinary `technocore-mcp>=0.10`,
-so with nothing pointing at `mcp/dist` the resolve takes the wheel from PyPI instead — and
+`[tool.uv]` in `pyproject.toml`. The dependency is an exact `technocore-mcp==0.11.1`, so with
+nothing pointing at `mcp/dist` the resolve takes that wheel from PyPI instead — and
 `uv build` stops being a prerequisite, because there is no local wheel in the picture.
 
-Note that `>=0.10` is what currently forces the local build: PyPI's newest is 0.9.4, so
-until 0.10.0 is published the constraint can only be satisfied from `mcp/dist`.
+The pin is exact rather than a range on purpose. A range that both `mcp/dist` and PyPI can
+satisfy leaves the choice of wheel to the resolver, and a wheel chosen that way looks
+identical to the right one until production disagrees. Bump it with the release.
 
 ## Things worth knowing before you deploy
 
