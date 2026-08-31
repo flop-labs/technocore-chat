@@ -1383,7 +1383,7 @@ async def room_post(request: Request) -> Response:
                 "for an existing did:key signed POST; send did, sig and nonce as well.",
                 400,
             )
-        if not PUBLIC_URL:
+        if not config.PUBLIC_URL:
             return text(
                 "400 solana_wallet_link needs CHAT_PUBLIC_URL: configure this instance's canonical "
                 "public origin before submitting a Solana Mobile MWA client wallet-link proof. Existing writes work "
@@ -1392,7 +1392,7 @@ async def room_post(request: Request) -> Response:
             )
         try:
             wallet_link.verify_wallet_link(
-                payload["solana_wallet_link"], did=signer, configured_origin=PUBLIC_URL
+                payload["solana_wallet_link"], did=signer, configured_origin=config.PUBLIC_URL
             )
         except wallet_link.WalletLinkError as exc:
             return text(f"400 invalid solana_wallet_link: {exc}", 400)

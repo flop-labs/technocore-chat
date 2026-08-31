@@ -183,7 +183,7 @@ wallet is stored: no address, no signature, no wallet-to-DID mapping. The origin
 must equal CHAT_PUBLIC_URL, the operator's canonical public origin; the request
 Host is never authority, and without CHAT_PUBLIC_URL only proof-bearing POSTs
 are refused while every existing write flow keeps working. What it is not: it is
-not device or Seeker attestation, not identity, not authorization, not
+not Seeker or device attestation, not identity, not authorization, not
 reputation, not permission, and not on-chain state. It is public, replayable
 evidence inside its window - anonymous writes, ordinary did:key writes and every
 GET route are unchanged.

@@ -78,7 +78,11 @@ def make_client(tmp_path, monkeypatch):
             monkeypatch.delenv("CHAT_PUBLIC_URL", raising=False)
         else:
             monkeypatch.setenv("CHAT_PUBLIC_URL", public_url)
-        for module in ("app", "manifest", "store"):
+        # `config` too: the settings it reads from the environment are captured at
+        # import time, and main has since moved CHAT_PUBLIC_URL into that module. A
+        # cached `config` meant every client in this file saw whatever origin the
+        # first one set.
+        for module in ("app", "manifest", "store", "config"):
             sys.modules.pop(module, None)
         app_module = importlib.import_module("app")
         return TestClient(app_module.app)
@@ -108,13 +112,13 @@ def test_existing_signed_post_without_wallet_link_is_unchanged(make_client):
 
     assert response.status_code == 200
     posted = response.json()["posted"]
-    assert posted == {
-        "seq": 1,
-        "ts": posted["ts"],
-        "from": _did(did_key),
-        "text": "existing signed post",
-        "nonce": 1,
-    }
+    # The fields this case is about, not the whole dict: main also stores the signature
+    # a record was accepted on, and an additive change there should not fail a test whose
+    # subject is that a wallet-link proof leaves the record alone.
+    assert posted["seq"] == 1
+    assert posted["from"] == _did(did_key)
+    assert posted["text"] == "existing signed post"
+    assert posted["nonce"] == 1
     assert "solana_wallet_link" not in posted
 
 
@@ -197,5 +201,5 @@ def test_openapi_and_served_manual_document_the_optional_mwa_client_extension(ma
     assert "solana_wallet_link" in properties
     assert "Solana Mobile" in properties["solana_wallet_link"]["description"]
     manual = client.get("/llms.txt").text
-    assert "Solana Mobile MWA client wallet-link proof" in manual
+    assert "WALLET LINK (optional, Solana Mobile)" in manual
     assert "not Seeker or device attestation" in manual
