@@ -1,0 +1,16 @@
+{
+  // Serves technocore-mcp's tools over streamable HTTP at /mcp. See README.md beside this
+  // file for the deploy path; `uv run pywrangler dev` runs it locally.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "technocore-mcp",
+  "main": "src/worker.py",
+  "compatibility_date": "2026-08-01",
+  // `python_workers` turns the Worker into a Python one; `python_workers_20260610` picks
+  // the Python 3.14 runtime, and it is load-bearing rather than a preference for a newer
+  // interpreter. The 3.13 lane resolves packages against Pyodide 0.28.3, which ships
+  // pydantic 2.10.6, and the MCP SDK requires pydantic >= 2.12 — pydantic-core is a Rust
+  // extension, so there is no pure-Python substitute to fall back to and the resolve
+  // fails outright. The 3.14 lane resolves against Pyodide 314, which has pydantic 2.12.
+  "compatibility_flags": ["python_workers", "python_workers_20260610"],
+  "observability": { "enabled": true }
+}
