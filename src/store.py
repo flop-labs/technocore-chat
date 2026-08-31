@@ -751,18 +751,27 @@ def _cutoff(room: str) -> float | None:
     return time.time() - EPHEMERAL_TTL_SECONDS if is_ephemeral(room) else None
 
 
+def _ts(rec: dict) -> float | None:
+    """The record's timestamp as an epoch second, or None where it cannot be read.
+
+    Split out of `_expired` because the two questions it used to answer together are not
+    the same question. "Older than the cutoff" is monotone along an append-ordered file and
+    is what `_export_start` bisects on; "undated" is not, and a record that fails closed on
+    a `ts` nothing can parse can sit anywhere. Folding them made every undated record look
+    like a boundary."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(str(rec.get("ts")), fmt).replace(tzinfo=UTC).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
 def _expired(rec: dict, cutoff: float) -> bool:
     """Fail closed on an unreadable `ts`: an `e-` room promises the record is gone by now,
     and a record whose age cannot be established cannot honour that promise. Elsewhere `ts`
-    stays what it always was — an opaque string nothing parses."""
-    ts = rec.get("ts")
-    if isinstance(ts, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-            try:
-                return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
-            except ValueError:
-                continue
-    return True
+    stays what it always was, an opaque string nothing parses."""
+    return (ts := _ts(rec)) is None or ts < cutoff
 
 
 def _parse(line: bytes) -> dict | None:
@@ -837,21 +846,41 @@ def _export_start(f, cutoff: float | None, end: int) -> int:
     Ephemeral expiry is drop-on-read and a raw dump is a read: streaming records the class
     promises have stopped being readable would make export the one lane that ignores the
     TTL. Records are append-ordered, so the expired records are a prefix, and the export
-    starts at the first line whose record is still readable — judged by the same `_expired`
-    the tail read uses, unparsable `ts` failing closed with it. Costs one forward parse of
-    the bytes being dropped, on the `e-` class only; every other room starts at 0 for free.
-    """
+    starts at the first line whose record is still readable, judged by the same cutoff the
+    tail read uses. On the `e-` class only; every other room starts at 0 for free.
+
+    Halved rather than scanned, and "the expired records are a prefix" above is what pays
+    for it: the same property `read_messages` spends when it stops at the first expired
+    record instead of filtering the file. A forward parse made this the one read lane
+    bounded by nothing but the room. Compaction fires only *over* the ring, so an `e-` room
+    parked just under MAX_ROOM_BYTES keeps its whole expired prefix on disk, and dumping
+    one cost an `orjson.loads` and a `strptime` per record to answer with an empty body:
+    69,059 pairs and 659 ms of CPU at 10 MiB, against one parse for the tail read of that
+    same room, for one read token and repeatable until the room idles out.
+
+    `lo` is a line start with nothing readable before it, `hi` a line start known readable
+    or `end`, and each pass reads one dated record to move one of them. A midpoint lands
+    mid-line, so the probe is the next line start after it. Undated lines are stepped over
+    rather than decided on (see `_ts`): they carry no boundary, so a half holding only
+    those, or none at all, decides nothing and the pass spends its read on `lo`'s own line
+    instead, which always moves `lo`. That case is also the whole of a half too small to
+    hold a line, so it needs no separate floor."""
     if cutoff is None:
         return 0
-    f.seek(0)
-    pos = 0
-    while pos < end:
-        line = f.readline()
-        rec = _parse(line)
-        if rec is not None and not _expired(rec, cutoff):
-            return pos
-        pos += len(line)
-    return end
+    lo, hi = 0, end
+    while lo < hi:
+        f.seek(lo + (half := (hi - lo) // 2))
+        if half:
+            f.readline()  # past the partial line the midpoint landed in
+        probe, ts = f.tell(), None
+        while probe < hi and ts is None:
+            if (ts := _ts(_parse(line := f.readline()) or {})) is None:
+                probe += len(line)
+        if ts is None:
+            f.seek(probe := lo)
+            ts = _ts(_parse(line := f.readline()) or {})
+        lo, hi = (lo, probe) if ts is not None and ts >= cutoff else (probe + len(line), hi)
+    return hi
 
 
 def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
