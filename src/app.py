@@ -529,20 +529,33 @@ def _base_url(request: Request) -> str:
 
 
 def _document(doc: dict, media_type: str = "application/json") -> Response:
-    """JSON with a short cache. The other JSON on this service is no-store because it is
-    room content that changes per second; these describe the *shape* of the service — or,
-    for /config, the settings of the process serving it — which changes per release or per
-    deploy, and registries and crawlers refetch them on a schedule.
+    """A JSON document, cached the way the prose documents are. The other JSON here is
+    no-store because it is room content that changes per second; these describe the *shape*
+    of the service — or, for /config, the settings of the process serving it — which changes
+    per release or per deploy, and registries and crawlers refetch them on a schedule.
+
+    This used to be its own hardcoded `public, max-age=3600`, and the difference from
+    `_static_cacheable` was not a decision anyone made. It mattered in two ways. `max-age`
+    is a *client* directive, so an agent that read /.well-known/mcp/server-card.json held it
+    for an hour — a wrong endpoint included, on the one document whose job is saying where
+    to connect. And the window ignored CHAT_STATIC_CACHE_SECONDS, which the README presents
+    as the knob for the documents, so an operator shortening it to push a change out found
+    these unaffected.
+
+    `max-age=0` now, so every caller revalidates and a correction lands at once; the edge
+    holds the copy instead, and `stale-while-revalidate` lets it answer from that copy while
+    the origin is briefly unwell rather than passing on a 503. **The CDN needs a rule making
+    these paths cache-eligible for any of that to happen** — without one this only adds
+    revalidations. These are the safer half of the document set to put behind such a rule:
+    unlike the four `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
+    a cache key to get wrong.
 
     `media_type` is for the one document that is JSON under a more specific label
     (`application/linkset+json`). Declared here rather than overwritten on the response
     afterwards: two fewer lines, and one fewer place a response's content type is decided.
     """
-    return Response(
-        json.dumps(doc, ensure_ascii=False, indent=1) + "\n",
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    body = json.dumps(doc, ensure_ascii=False, indent=1) + "\n"
+    return _static_cacheable(Response(body, media_type=media_type))
 
 
 def openapi(request: Request) -> Response:
@@ -644,11 +657,9 @@ def sitemap(request: Request) -> Response:
             "/.well-known/agent.json all fall back to relative URLs and stay correct.",
             status=404,
         )
-    return Response(
-        manifest.sitemap_xml(base),
-        media_type="application/xml",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    # Same policy as the documents it indexes, and for the same reason: a crawler that
+    # refetches the sitemap should see a new document appear when the deploy adds one.
+    return _static_cacheable(Response(manifest.sitemap_xml(base), media_type="application/xml"))
 
 
 class HeaderLimits:
