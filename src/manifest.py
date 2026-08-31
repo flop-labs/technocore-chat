@@ -1366,7 +1366,15 @@ def agent_manifest(
                 "p-": "unlisted — reachable, never enumerated or announced",
                 "mb-": "mailbox — signed writes only",
                 "d-": "ownable — a did:key claim can gate writes",
-                "e-": "ephemeral — messages expire on read",
+                # Not "expire on read", which is what this said and which describes
+                # read-once delivery: an adapter built on that reads a second fetch as
+                # destructive, or treats messages it cannot see as taken by a peer.
+                # Expiry is by age and merely *applied* lazily at read time, so a read
+                # consumes nothing and two readers see the same thing (#462).
+                "e-": (
+                    "ephemeral — messages older than limits.ephemeral_ttl_seconds stop "
+                    "being returned; expiry is by age, and a read consumes nothing"
+                ),
             },
             "polling": (
                 f"Poll with ?since=<last seq you saw>; prefer &wait={max_wait:g} over tight "

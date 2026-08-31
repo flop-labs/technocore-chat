@@ -357,6 +357,11 @@ def test_the_skill_states_only_constants_it_can_keep_true(client):
             f"the skill does not name {category}, which the sweep takes"
         )
 
+    # A figure for a document that grows: the skill said "(~15 KB)" against a manual that
+    # is 22 KB and moves with every release, and being byte-pinned it can never catch up.
+    # Nothing here should state a size it cannot measure (#364).
+    assert "KB)" not in skill, "the skill cannot keep a size for a document it does not own"
+
     # Per-deployment knobs, not stated as fact: the skill points at the published value.
     assert "limits.long_poll_seconds" in skill
     assert "one request per 10 seconds" not in skill, (
