@@ -1097,19 +1097,21 @@ def _room_write_gate(request: Request, room: str, signer: str | None) -> Respons
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
     a signature refuses the unsigned lane outright, and the reply says what to send.
 
-    The name grammar decides before any class does. A class is the leading `<class>-` markers
-    of a name, so `mb-FOO` carries one while being a name this service will never store — and
-    the checks below then answered *"this is a mailbox, send a signature"* about a room that
-    cannot exist. `GET /r/mb-FOO` says 400, and so does the `say-signed` lane that 403 named
-    as its own correction, because that lane reaches `store.append`. One write, two answers,
-    and the one an agent acts on was the wrong one: 403 says "this room refuses you", 400 says
-    "that name can never exist here", and only the second was ever true. It also put a segment
-    that had passed nothing into a server-authored `text/plain` body, where `{room}` matches
-    the raw newline `{text:path}` deliberately does not.
+    The grammar decides before any class does. A class is the leading `<class>-` markers of a
+    name, so `mb-FOO` carries one while being a name this service will never store. The
+    checks below then answered *"this is a mailbox, send a signature"* about a room that
+    cannot exist, naming as the correction the `say-signed` lane that answers 400 for the same
+    name because it reaches `store.append` (#109). 403 says "this room refuses you". 400 says
+    "that name can never exist here", which is the only one that was ever true, and it is the
+    difference a caller acts on. Validating here also keeps a `{room}` segment, which matches
+    the raw newline `{text:path}` deliberately does not, out of a `text/plain` body the
+    server authored.
+
+    Line-neutral against the core size cap: the grammar check is paid for by folding the
+    events refusal below into the assign-and-test form `store._resolve` already uses.
     """
     room = store.valid_name(room)
-    denied = _reject_if_events_room(room)
-    if denied:
+    if denied := _reject_if_events_room(room):
         return denied
     if store.is_mailbox(room) and signer is None:
         return text(
@@ -1486,7 +1488,8 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     Grammar first, exactly as in `_room_write_gate` and for the same reason: `ownable(key)`
     reads a `<class>-` prefix whether or not the whole name is one this service accepts, so
     `room-owners/D-FOO` answered "cannot be owned" while `room-allow/D-FOO` answered 400 for
-    the identical key — the sibling namespace reads the owner note first, and that validates.
+    the identical key, because the sibling namespace reads the owner note first and `note_get`
+    validates. Line-neutral the same way: the owner read below folds into assign-and-test.
     """
     ns, key = store.valid_name(ns), store.valid_name(key)
     if ns == store.NONCE_NS:
@@ -1550,8 +1553,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 403,
             )
         return None
-    owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
-    if owner is None:
+    if (owner := store.note_get(config.ROOT, store.OWNERS_NS, key)) is None:
         return text(
             f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing "
             f"with the key you are storing: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>"
