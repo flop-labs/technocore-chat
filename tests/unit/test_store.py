@@ -86,6 +86,10 @@ def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypat
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 400)
     store.append(tmp_path, "room0", "bot", "x" * 300)  # room0 + events ≈ 452B, over budget
+    # The reaper is what establishes the byte figure the cap reads (#578): the create path
+    # stopped walking every bucket per new room, so the budget bites off the last pass.
+    (tmp_path / ".reaped").unlink()
+    store._reap(tmp_path)
     with pytest.raises(store.StoreError, match="room storage is full") as refused:
         store.append(tmp_path, "overflow", "bot", "hi")
     message = str(refused.value)
@@ -126,7 +130,7 @@ def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypat
 
     # Now make the budget look spent, as a reap pass would have recorded it, and keep
     # writing. The room that receives the writes yields back to its guaranteed floor.
-    (tmp_path / store.USAGE_FILE).write_text(str(store.MAX_TOTAL_ROOM_BYTES + 1))
+    (tmp_path / store.USAGE_FILE).write_text(f"2 {store.MAX_TOTAL_ROOM_BYTES + 1}")
     assert fill("second") <= store.RESERVED_ROOM_BYTES
     assert fill("first") <= store.RESERVED_ROOM_BYTES, "an existing large room must yield too"
 
@@ -143,15 +147,18 @@ def test_the_byte_budget_binds_at_the_cap_and_not_one_byte_past_it(tmp_path, mon
 
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
     store.append(tmp_path, "room0", "bot", "hi")
-    used = store._scan(tmp_path / "rooms", ".jsonl", sized=True)[1]
+    count, used = store._count_rooms(tmp_path)
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", used)  # exactly at the budget
+    # The figure the cap compares against is the one the last reap recorded (#578), so put
+    # the store exactly on the number there rather than only on disk.
+    store._write_note_count(tmp_path, count, used, name=store.USAGE_FILE)
 
     with pytest.raises(store.StoreError, match="room storage is full"):
         store.append(tmp_path, "overflow", "bot", "hi")
 
     # The same equality on the growth half: at the budget a room gets its floor, not the
     # full ring, or "the budget bounds growth" is off by one byte.
-    (tmp_path / store.USAGE_FILE).write_text(str(used))
+    (tmp_path / store.USAGE_FILE).write_text(f"{count} {used}")
     assert store._ring_limit(tmp_path) == store.RESERVED_ROOM_BYTES
 
 
@@ -181,7 +188,7 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
     # shifts that produce it are one character from reporting megabytes as terabytes.
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 3 << 20)
-    monkeypatch.setattr(store, "_scan", lambda *a, **k: (1, 5 << 20))  # 5 MiB on disk
+    store._write_note_count(tmp_path, 1, 5 << 20, name=store.USAGE_FILE)  # 5 MiB on disk
     with pytest.raises(store.StoreError, match="5 MiB of a 3 MiB budget"):
         store.append(tmp_path, "overflow", "bot", "hi")
 

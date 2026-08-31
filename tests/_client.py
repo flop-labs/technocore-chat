@@ -167,11 +167,11 @@ def _race_before_lock(monkeypatch, store, path, action):
     fired = []
 
     @contextmanager
-    def hook(target):
+    def hook(target, shared=False):
         if target == path and not fired:
             fired.append(True)
             action()
-        with real_locked(target):
+        with real_locked(target, shared):
             yield
 
     monkeypatch.setattr(store, "_locked", hook)
