@@ -1253,6 +1253,16 @@ def test_a_name_the_grammar_refuses_never_gets_a_class_answer(client):
                 ):
                     assert lane.status_code == 400 and "bad name" in lane.text, (ns, key, lane.text)
 
+        # The same reordering on the one other lane that answered before the grammar ran: a
+        # signed write to a namespace that takes no signature used to be told to retry
+        # unsigned at `/kv/BAD-NS/k/set/<value>`, which is a correction that then 400s for
+        # the name. Both answers are 400; this one names the thing that is actually wrong.
+        signed_bad_ns = client.get(f"/kv/BAD-NS/k/set-signed/{did}/{sign('BAD-NS|k|1|v')}/1/v")
+        assert signed_bad_ns.status_code == 400 and "bad name 'BAD-NS'" in signed_bad_ns.text
+        # …and a signed write to a valid namespace that takes no signature still says so.
+        valid_bad_ns = client.get(f"/kv/plans/k/set-signed/{did}/{sign('plans|k|1|v')}/1/v")
+        assert valid_bad_ns.status_code == 400 and "only accepted for" in valid_bad_ns.text
+
         # …and the classes still gate, so none of the above passes by dropping their checks.
         assert client.get("/r/mb-inbox/say/bot/hi").status_code == 403
         assert _say_signed(client, "mb-inbox", did, sign, "a real letter").status_code == 200

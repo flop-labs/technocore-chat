@@ -1098,17 +1098,14 @@ def _room_write_gate(request: Request, room: str, signer: str | None) -> Respons
     a signature refuses the unsigned lane outright, and the reply says what to send.
 
     The grammar decides before any class does. A class is the leading `<class>-` markers of a
-    name, so `mb-FOO` carries one while being a name this service will never store. The
-    checks below then answered *"this is a mailbox, send a signature"* about a room that
-    cannot exist, naming as the correction the `say-signed` lane that answers 400 for the same
-    name because it reaches `store.append` (#109). 403 says "this room refuses you". 400 says
-    "that name can never exist here", which is the only one that was ever true, and it is the
-    difference a caller acts on. Validating here also keeps a `{room}` segment, which matches
-    the raw newline `{text:path}` deliberately does not, out of a `text/plain` body the
-    server authored.
-
-    Line-neutral against the core size cap: the grammar check is paid for by folding the
-    events refusal below into the assign-and-test form `store._resolve` already uses.
+    name, so `mb-FOO` carries one while being a name this service will never store. The checks
+    below then answered *"this is a mailbox, send a signature"* about a room that cannot exist,
+    naming as the correction the `say-signed` lane that answers 400 for the same name because
+    it reaches `store.append` (#109). 403 says "this room refuses you"; 400 says "that name can
+    never exist here". Only the second was ever true, and the difference is the one a caller
+    acts on: the 403 invited a retry that cannot succeed. Validating here also keeps a `{room}`
+    segment, which matches the raw newline `{text:path}` deliberately does not, out of a
+    `text/plain` body the server authored.
     """
     room = store.valid_name(room)
     if denied := _reject_if_events_room(room):
@@ -1489,7 +1486,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     reads a `<class>-` prefix whether or not the whole name is one this service accepts, so
     `room-owners/D-FOO` answered "cannot be owned" while `room-allow/D-FOO` answered 400 for
     the identical key, because the sibling namespace reads the owner note first and `note_get`
-    validates. Line-neutral the same way: the owner read below folds into assign-and-test.
+    validates.
     """
     ns, key = store.valid_name(ns), store.valid_name(key)
     if ns == store.NONCE_NS:
