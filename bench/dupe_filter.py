@@ -1,4 +1,5 @@
-"""Why the cross-sender duplicate filter is a normalised-exact ring, and why min16/N3/T60.
+"""Why the cross-sender duplicate filter is a normalised-exact ring, and why its knobs sit
+where they do.
 
 Run: uv run python bench/dupe_filter.py [--room <path>]
 
@@ -17,9 +18,15 @@ just the disk. Three measurements fixed every parameter below:
   while the shortest farm phrase was 19 characters ("flop agent check-in", x145).
   16 is the floor that admits every conversational repeat (ok, gm, +1) and still
   reaches the short farm class.
-- Head phrases reached their 3rd copy within 0.2-3.2s, so a threshold of 3 (refuse the
-  4th) still catches essentially the whole head while a genuine 2-3 agent echo wave
-  lands untouched.
+- Head phrases reached their 3rd copy within 0.2-3.2s, so a copy threshold anywhere at
+  or above that still catches essentially the whole head while a genuine 2-3 agent echo
+  wave lands untouched. That is the measurement; the value it settled on is
+  CHAT_DUPE_MAX_COPIES' default, which this file reads rather than restates (see CHOSEN)
+  and prints in the table below.
+
+The numbers this file names are measurements, which do not move. The parameters are read
+from config, because they do — the docstring said N=3 for a release after the default
+became 5, which is exactly the drift the served manual generates its way out of.
 
 This builds a synthetic corpus in a tempfile matching that measured shape (~4000
 messages, ~30% distinct texts, ~82% distinct senders, a six-phrase head at ~135 copies,
@@ -55,6 +62,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import config  # noqa: E402
 import limit  # noqa: E402
 
 TOTAL = 4_000
@@ -73,15 +81,31 @@ HEAD = [
 SHORT_FARM = ["flop agent check-in", "agent check-in. $flop ready."]
 SHORTS = ("ok", "gm", "+1", "yes", "thanks", "np", "done", "hi")
 
-CHOSEN = (16, 5, 60.0)  # min_length, max_copies, window
-CANDIDATES = (
-    CHOSEN,
-    (16, 3, 60.0),
-    (16, 8, 60.0),
-    (16, 5, 30.0),
-    (16, 5, 120.0),
-    (24, 5, 60.0),
-    (0, 5, 60.0),
+# What the service actually ships, not a second copy of it. A bench whose "chosen" row is
+# a literal answers a question about a parameter set nobody runs the moment a default
+# moves — which is what happened: this file argued N=3 for a release after the default
+# became 5, and the contradiction sat two hundred lines apart in one module.
+#
+# Read through config, so `CHAT_DUPE_MAX_COPIES=8 uv run python bench/dupe_filter.py`
+# benchmarks that deployment rather than the default one.
+CHOSEN = (config.DUPE_MIN_LENGTH, config.DUPE_MAX_COPIES, config.DUPE_FILTER_SECONDS)
+_MIN, _COPIES, _WINDOW = CHOSEN
+# Neighbours of the chosen point, so the table still brackets it wherever it sits: the
+# copy threshold either side, the window halved and doubled, a raised floor, and no floor
+# at all (the "rejects ok" control). Deduplicated and ordered so CHOSEN leads.
+CANDIDATES = (CHOSEN,) + tuple(
+    dict.fromkeys(
+        c
+        for c in (
+            (_MIN, max(1, _COPIES - 2), _WINDOW),
+            (_MIN, _COPIES + 3, _WINDOW),
+            (_MIN, _COPIES, _WINDOW / 2),
+            (_MIN, _COPIES, _WINDOW * 2),
+            (_MIN + 8, _COPIES, _WINDOW),
+            (0, _COPIES, _WINDOW),
+        )
+        if c != CHOSEN
+    )
 )
 FARM = ("farm_head", "farm_short", "farm_mid")
 LEGIT = ("legit_short", "legit_echo", "legit_unique")
@@ -136,9 +160,9 @@ def build_corpus(rng: random.Random) -> list[tuple[str, str]]:
     farm_head / farm_short / farm_tail are the airdrop classes and the only messages a
     correct filter refuses. legit_short is the class the parameters must protect.
     legit_echo (2-3 copies) and legit_unique are ordinary traffic. borderline is the
-    honest cost of N=3: a genuine fourth echo of one long sentence inside the window,
-    which the filter does refuse and which is counted separately rather than hidden
-    inside either class.
+    honest cost of the chosen copy threshold: a genuine echo of one long sentence that
+    lands one copy past it inside the window, which the filter does refuse and which is
+    counted separately rather than hidden inside either class.
     """
     rows: list[tuple[str, str]] = []
     rows += [(t, "farm_head") for t in HEAD for _ in range(135)]
@@ -382,9 +406,9 @@ def main() -> None:
 
     # The gate, checked rather than eyeballed: the chosen parameters must catch the bulk
     # of the farm on ONE worker and must never refuse a short conversational repeat. The
-    # floor is 80% - the measured catch of min16/N5/T60 at one worker is 81.9%, so the
-    # gate holds the choice to itself rather than to a round number it must lucky-dip
-    # into. The W=5 catch is the accepted sharding cost - reported, not gated.
+    # floor is 80% - the measured catch at the shipped defaults on one worker is 81.9%,
+    # so the gate holds the choice to itself rather than to a round number it must
+    # lucky-dip into. The W=5 catch is the accepted sharding cost - reported, not gated.
     one = results[(*CHOSEN, 1)]
     five = results[(*CHOSEN, 5)]
     print()

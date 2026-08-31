@@ -39,10 +39,14 @@ MAX_ROOM_BYTES = 10 << 20  # 10 MiB per room, then compacted
 # *above* the ring and re-compact on every single append. The budget is right either way.
 # COMPACT_MAX_LINES only bounds how much the compactor holds in memory at once (worst
 # case ≈ COMPACT_KEEP_BYTES, which is what actually caps it on a 128 MiB container).
-COMPACT_KEEP_BYTES = MAX_ROOM_BYTES // 2
-COMPACT_MAX_LINES = 5000
+COMPACT_KEEP_BYTES, COMPACT_MAX_LINES = MAX_ROOM_BYTES // 2, 5000
 READ_BUDGET = 1 << 20  # never read more than 1 MiB to answer a tail request
-MAX_LIMIT = 200
+# The ceiling a caller may ask for, and the window they get if they ask for nothing. One
+# statement because they are one decision about one parameter — and named, rather than
+# literals at each call site, because the manual states both. A default written into prose
+# beside a different default in the signature is exactly the drift manifest.manual_tokens
+# exists to end.
+MAX_LIMIT, DEFAULT_LIMIT = 200, 50
 
 # Disk is the only unbounded cost on a world-writable service: MAX_ROOM_BYTES caps each
 # room, but nothing capped how many rooms a stranger may create. The first answer was to
@@ -321,11 +325,11 @@ def valid_name(name: str) -> str:
         # causes in order of how often they actually happen turns this into a fix: the
         # overwhelming majority of rejections here are an uppercase name or a space.
         raise StoreError(
-            f"bad name {name!r}: expected /^[a-z0-9][a-z0-9_-]{{0,47}}$/ — lowercase "
-            "letters, digits, - and _, 1-48 characters, starting with a letter or digit. "
-            "Usual causes: uppercase (lowercase it), a space or %20 (use - instead), a "
-            "dot or slash, an empty segment, or over 48 characters. This rule covers "
-            "<room>, <nick>, <ns> and <key>; only <text> and <value> are free-form."
+            f"bad name {name!r}: expected /{NAME_RE.pattern}/ — lowercase letters, digits, - "
+            "and _, 1-48 characters, starting with a letter or digit. Usual causes: uppercase "
+            "(lowercase it), a space or %20 (use - instead), a dot or slash, an empty segment, "
+            "or over 48 characters. It covers <room>, <nick>, <ns> and <key>; only <text> and "
+            "<value> are free-form."
         )
     return name
 
@@ -769,7 +773,9 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
-def read_messages(root: Path, room: str, limit: int = 50, since: int | None = None) -> dict:
+def read_messages(
+    root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
+) -> dict:
     """Return the newest `limit` messages (oldest-first) with seq > `since`."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
@@ -1187,7 +1193,7 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = 50) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement

@@ -66,7 +66,7 @@ def _url(base: str, path: str) -> str:
     return f"{base}{path}" if base else path
 
 
-_NAME_RULE = "must match ^[a-z0-9][a-z0-9_-]{0,47}$"
+_NAME_RULE = f"must match {store.NAME_RE.pattern}"
 
 # Every `if_absent` spelling the service accepts, and what each one means. Published in the
 # parameter's description and imported by app._condition, so the documented set and the
@@ -2101,3 +2101,70 @@ def robots_txt(base: str) -> str:
         "# Skills: /.well-known/agent-skills/index.json\n"
         "# MCP server card: /.well-known/mcp/server-card.json (SEP-2127, draft)\n"
     )
+
+
+def _english_list(items: tuple[str, ...]) -> str:
+    """`("a", "b", "c")` -> `a, b and c`. For prose that names a set the code owns.
+
+    The sweep categories were written out by hand in three documents and a docstring, and a
+    category added to `INVISIBLE_CATEGORIES` would have moved none of them. Rendering the
+    tuple means the prose cannot say five when the sweep does six.
+    """
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _duration(seconds: int) -> str:
+    """A whole-unit duration for prose: 900 -> `15 minutes`, 604800 -> `7 days`.
+
+    Falls back to seconds rather than inventing a fraction, because a deployment that sets
+    an odd TTL should read an exact number it can check against `/config`, not a rounded
+    one it cannot.
+    """
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size and seconds % size == 0:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{seconds} seconds"
+
+
+def manual_tokens(free_paths: str, max_wait: float) -> dict[str, str]:
+    """Every `__TOKEN__` in manual.md, and the constant each one renders from.
+
+    The manual is the one served document written as prose rather than assembled as a
+    structure, so it is the one that can state a number without anything checking it — and
+    it did, for a whole release, after the caps moved underneath it. This is the table that
+    stops it: a value here is read from the same constant the handler enforces and the
+    other documents publish, so `/llms.txt`, `/openapi.json` and `/config` cannot disagree
+    about a figure without the disagreement being a code change someone made on purpose.
+
+    Lives here rather than beside the template because that is the rule this module already
+    is: `_NAME_RULE`, `_NAME_SCHEMA` and `limits` in `/.well-known/agent.json` are the same
+    constants rendered for machines. The manual is the human-readable rendering of them.
+
+    `free_paths` and `max_wait` are passed rather than imported: they are app's, and
+    manifest importing app would be a cycle. Everything else is store's or config's.
+    """
+    return {
+        "__FREE_PATHS__": free_paths,
+        "__MAX_WAIT__": f"{max_wait:g}",
+        "__MAX_ROOMS__": str(store.MAX_ROOMS),
+        "__MAX_NOTES__": str(store.MAX_NOTES_TOTAL),
+        "__MAX_NOTES_NS__": str(store.MAX_NOTES_PER_NS),
+        "__ROOM_BYTES_TOTAL__": fmt_bytes(store.MAX_TOTAL_ROOM_BYTES),
+        "__ROOM_RING__": fmt_bytes(store.MAX_ROOM_BYTES),
+        "__ROOM_FLOOR__": fmt_bytes(store.RESERVED_ROOM_BYTES),
+        "__NAME_RULE__": store.NAME_RE.pattern,
+        "__MAX_TEXT__": str(store.MAX_TEXT_CHARS),
+        "__MAX_VALUE__": str(store.MAX_VALUE_CHARS),
+        "__MAX_LIMIT__": str(store.MAX_LIMIT),
+        "__DEFAULT_LIMIT__": str(store.DEFAULT_LIMIT),
+        "__SWEEP_CATEGORIES__": _english_list(store.INVISIBLE_CATEGORIES),
+        "__TOPIC_PREVIEW__": str(store.TOPIC_PREVIEW_CHARS),
+        "__READ_BUDGET__": fmt_bytes(store.READ_BUDGET),
+        "__EPHEMERAL_TTL__": _duration(store.EPHEMERAL_TTL_SECONDS),
+        "__IDLE_DAYS__": str(store.IDLE_SECONDS // 86400),
+        "__STILLBORN_HOURS__": str(store.STILLBORN_SECONDS // 3600),
+        "__MCP_REMOTE__": MCP_REMOTE_URL,
+    }

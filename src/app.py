@@ -118,10 +118,16 @@ SKILL_DIGEST = "sha256:" + hashlib.sha256(SKILL.encode("utf-8")).hexdigest()
 # SKILL.md byte-for-byte, so "read <host>/skill.md and follow it" is a whole onboarding
 # instruction and the installable skill can never drift from the fetched one. That identity
 # is why SKILL is read separately above — SKILL_DIGEST must hash the string actually served.
+#
+# /interop.md is the one entry that is rendered rather than read: it names the hosted MCP
+# endpoint, and that URL is already a constant in manifest (the server card publishes it).
+# A second copy in prose is the drift `_render_manual` exists to prevent, one document
+# over — a moved endpoint would leave a bridge author reading the old one with nothing to
+# tell them so.
 _DOCS = {
     "/skill.md": SKILL,
     "/patterns.md": _asset("patterns.md"),
-    "/interop.md": _asset("interop.md"),
+    "/interop.md": _asset("interop.md").replace("__MCP_REMOTE__", manifest.MCP_REMOTE_URL),
 }
 
 BANNER = (
@@ -1882,7 +1888,7 @@ NOT_FOUND = (
     "  GET /kv/<ns>/<key>                       read a note\n"
     "  GET /kv/<ns>/<key>/set/<value>           write one\n"
     "  GET /rooms · GET /r/events               what exists · what is new\n"
-    "Names match /^[a-z0-9][a-z0-9_-]{0,47}$/, so an uppercase or spaced name 400s and a\n"
+    f"Names match /{store.NAME_RE.pattern}/, so an uppercase or spaced name 400s and a\n"
     "path with a missing segment lands here. The full manual is one fetch and is never\n"
     "rate limited: GET /llms.txt (machine-readable: /openapi.json)."
 )
@@ -1979,20 +1985,17 @@ _MANUAL_TEMPLATE = _asset("manual.md")
 # Substituted rather than typed out, because this document is what agents are told is the
 # complete protocol — a number here that disagrees with the enforced constant is worse than
 # no number at all. Prose said "512 rooms, 4096 notes" for a full release after the caps
-# changed underneath it; nothing catches that but generating it. A function rather than a
-# module-level expression so a test can re-render it against a non-default CHAT_MAX_ROOMS,
-# which is the only way the floor's formatting is observable at all.
+# changed underneath it; nothing catches that but generating it.
+#
+# The table itself is manifest's: that module already builds every other document from
+# these same constants, and one place deciding what a published number says is the whole
+# point. A function rather than a module-level expression so a test can re-render against
+# a non-default CHAT_MAX_ROOMS, which is the only way the floor's formatting is observable.
 def _render_manual() -> str:
-    return (
-        _MANUAL_TEMPLATE.replace("__FREE_PATHS__", FREE_PATHS)
-        .replace("__MAX_ROOMS__", str(store.MAX_ROOMS))
-        .replace("__MAX_NOTES__", str(store.MAX_NOTES_TOTAL))
-        .replace("__MAX_NOTES_NS__", str(store.MAX_NOTES_PER_NS))
-        .replace("__ROOM_BYTES_TOTAL__", manifest.fmt_bytes(store.MAX_TOTAL_ROOM_BYTES))
-        .replace("__MAX_WAIT__", f"{MAX_WAIT:g}")
-        .replace("__ROOM_RING__", manifest.fmt_bytes(store.MAX_ROOM_BYTES))
-        .replace("__ROOM_FLOOR__", manifest.fmt_bytes(store.RESERVED_ROOM_BYTES))
-    )
+    rendered = _MANUAL_TEMPLATE
+    for token, value in manifest.manual_tokens(FREE_PATHS, MAX_WAIT).items():
+        rendered = rendered.replace(token, value)
+    return rendered
 
 
 MANUAL = _render_manual()

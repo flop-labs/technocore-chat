@@ -87,6 +87,74 @@ def test_the_served_manual_states_the_caps_it_actually_enforces(client):
     assert "at most 512 rooms" not in manual and "4096 notes" not in manual
 
 
+def test_the_manual_template_hardcodes_no_constant_it_could_render(client):
+    """The generalisation of the two tests around this one, and the reason they can stop
+    being written one cap at a time.
+
+    Both of those exist because prose drifted from a constant, and each was fixed by
+    tokenising the one number that had already gone wrong. That leaves every *other*
+    number in the template waiting its turn — the manual restated the name grammar, both
+    character caps, the limit bound and default, the topic preview, the ephemeral TTL, the
+    nonce scan window and the reap ages, none of them generated, all of them stated to
+    agents as the complete protocol.
+
+    So this asserts the property rather than the instances: for each constant the renderer
+    knows how to substitute, its literal value must not appear in the *template*. Adding a
+    knob and writing its value into the prose fails here, at the commit that does it,
+    instead of at the release that moves the knob.
+
+    The template, not the rendered document: the rendered one is *supposed* to contain
+    every one of these. That is the point of rendering it.
+    """
+    import app as app_module
+    import store
+
+    # Value -> the token that should be carrying it. Only unambiguous literals: a bare
+    # `50` or `200` matches a byte count or an HTTP status somewhere in the prose, so
+    # those are checked in the phrases the manual actually uses them in.
+    forbidden = {
+        store.NAME_RE.pattern: "__NAME_RULE__",
+        str(store.MAX_TEXT_CHARS): "__MAX_TEXT__",
+        str(store.MAX_VALUE_CHARS): "__MAX_VALUE__",
+        f"1..{store.MAX_LIMIT}": "__MAX_LIMIT__",
+        f"last {store.DEFAULT_LIMIT} messages": "__DEFAULT_LIMIT__",
+        f"previews {store.TOPIC_PREVIEW_CHARS}": "__TOPIC_PREVIEW__",
+        ", ".join(store.INVISIBLE_CATEGORIES[:2]): "__SWEEP_CATEGORIES__",
+    }
+    template = app_module._MANUAL_TEMPLATE
+    for literal, token in forbidden.items():
+        assert literal not in template, (
+            f"manual.md hardcodes {literal!r}; use {token} so it is rendered from the constant"
+        )
+        assert token in template, f"{token} is substituted but no longer used in manual.md"
+
+    # And the substitution is exhaustive: no token survives into what agents are served.
+    assert "__" not in app_module.MANUAL
+
+
+def test_the_manual_renders_durations_and_sets_from_the_constants(client):
+    """The two helpers that let prose name a set or a period without restating it.
+
+    `_english_list` is why "Cc, Cf, Cs, Co, Zl and Zp" cannot say five when the sweep does
+    six; `_duration` is why the ephemeral TTL reads as "15 minutes" without 900 being
+    written anywhere but the knob. Both are asserted against a *changed* value, because an
+    identity-looking helper passes every test at the default and none off it.
+    """
+    import manifest
+
+    assert manifest._english_list(("Cc", "Cf", "Cs")) == "Cc, Cf and Cs"
+    assert manifest._english_list(("Cc", "Cf")) == "Cc and Cf"
+    assert manifest._english_list(("Cc",)) == "Cc"
+    assert manifest._english_list(()) == ""
+
+    assert manifest._duration(900) == "15 minutes"
+    assert manifest._duration(60) == "1 minute"
+    assert manifest._duration(3600) == "1 hour"
+    assert manifest._duration(7 * 86400) == "7 days"
+    # Not a whole unit: an exact second count beats a rounded one an operator cannot check.
+    assert manifest._duration(90) == "90 seconds"
+
+
 def test_the_manual_names_every_category_the_sweep_actually_takes(client):
     """The same drift the caps test guards, on the sweep (#171).
 
@@ -255,6 +323,47 @@ def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     assert "Disallow: /r/" in body and "Disallow: /kv/" in body
     assert "Allow: /" in body and "/llms.txt" in body
     assert client.get("/r/lobby").headers["x-robots-tag"] == "noindex"
+
+
+def test_the_skill_states_only_constants_it_can_keep_true(client):
+    """SKILL.md cannot be rendered, so it needs the guard the manual does not.
+
+    Every other served document interpolates its numbers (`app._render_manual`), but this
+    one is published byte-for-byte with a SHA-256 in
+    /.well-known/agent-skills/index.json — the installable file and the served one are one
+    artifact, deliberately, so substituting into it would break the digest that makes
+    "read <host>/skill.md and follow it" checkable. A test is therefore the only thing
+    that can hold its numbers to the code.
+
+    Two rules, and the split is what matters. A *code constant* may be stated: it moves
+    only with a release, and the skill ships with the release. A *per-deployment knob* may
+    not, because this file is byte-identical on every instance and the knob is not — it
+    has to name where the enforced value is published instead.
+
+    The unit is part of the claim: the note cap is code points, and a note of 4-byte
+    characters is four times the byte figure. Saying "8 KiB" was wrong twice over.
+    """
+    import store
+
+    skill = client.get("/skill.md").text
+
+    # Code constants, stated: these are true wherever this file is served.
+    assert store.NAME_RE.pattern in skill
+    assert f"Messages ≤ {store.MAX_TEXT_CHARS} chars" in skill
+    assert f"notes ≤ {store.MAX_VALUE_CHARS} chars" in skill
+    assert "characters,\nnot bytes" in skill, "the note cap is code points; the unit must say so"
+    for category in store.INVISIBLE_CATEGORIES:
+        assert f"`{category}`" in skill, (
+            f"the skill does not name {category}, which the sweep takes"
+        )
+
+    # Per-deployment knobs, not stated as fact: the skill points at the published value.
+    assert "limits.long_poll_seconds" in skill
+    assert "one request per 10 seconds" not in skill, (
+        "CHAT_MAX_WAIT is per deployment; a byte-pinned file cannot assert its value"
+    )
+    # The regression this replaces: a byte figure for a character cap.
+    assert "8 KiB" not in skill
 
 
 def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
