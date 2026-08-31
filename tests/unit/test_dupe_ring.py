@@ -15,11 +15,13 @@ from __future__ import annotations
 import itertools
 import sys
 import threading
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import limit  # noqa: E402
+import store  # noqa: E402
 
 # The values under test, chosen here: 60s window, 16-char floor, fifth copy allowed
 # (sixth refused). Deliberate numbers, not echoes of limit.py's defaults.
@@ -204,3 +206,94 @@ def test_concurrent_writers_never_corrupt_the_ring() -> None:
     assert not errors, [repr(exc) for exc in errors[:3]]
     assert len(limit._dupes) <= cap, "the bound has to hold under concurrency too"
     limit._dupes.clear()
+
+
+# --------------------------------------------------------- the sweep rung, exhaustively
+#
+# normalize_text carries a sweep rung it does not obviously need, because store.append
+# sweeps too. Its docstring gives the reason: "the unsigned lanes reach this BEFORE
+# store.append runs clean_text - keying the unswept bytes there and the swept bytes on the
+# signed lane would make one text two keys." That is true of the code as written -
+# room_say reserves with the raw path text, room_say_signed with clean_text(text) - so the
+# rung is load-bearing for a property no single-lane test can see, and the two below are
+# the differential check on it.
+#
+# Both are exhaustive rather than exemplary on purpose. The rung reconciles two orderings
+# (NFKC-then-sweep against sweep-then-NFKC-then-sweep) and whether they agree is a fact
+# about the Unicode tables, not about this file: it can stop being true with no commit
+# here at all, which is precisely the drift a handful of examples does not catch.
+
+
+def _one_char_probe(char: str) -> str:
+    """A text long enough to reach the ring, differing from its neighbours in one char.
+
+    The padding is plain ASCII so it can never be the thing that differs, and it is long
+    enough that the normalised form clears any floor a caller might set (21 characters
+    against a 16-character floor), because a probe the floor exempts asserts nothing.
+    """
+    return "duplicate-text-" + char + "-tail"
+
+
+def test_a_pre_swept_text_keys_to_the_same_slot_as_the_raw_one() -> None:
+    """The signed lanes hand the ring text that clean_text has already swept; the
+    unsigned lanes hand it the raw bytes. One text must not become two slots, or a caller
+    alternating lanes buys max_copies again per lane and the filter's threshold is a
+    quarter of what it says.
+
+    Checked over every code point either transform touches - 144,681 of them: the
+    invisible categories plus everything NFKC rewrites. Outside that set clean_text and
+    NFKC are both the identity on the character, so the two sides are the same expression
+    and there is nothing left to compare.
+    """
+    active = [
+        cp
+        for cp in range(0x110000)
+        if unicodedata.category(chr(cp)) in store.INVISIBLE_CATEGORIES
+        or unicodedata.normalize("NFKC", chr(cp)) != chr(cp)
+    ]
+    assert len(active) > 100_000, f"only {len(active)} code points selected; the filter is wrong"
+
+    divergent = []
+    for cp in active:
+        raw = _one_char_probe(chr(cp))
+        if limit.normalize_text(raw) != limit.normalize_text(store.clean_text(raw)):
+            divergent.append(cp)
+
+    assert not divergent, (
+        f"{len(divergent)} code points key differently depending on whether the lane swept "
+        f"first, e.g. U+{divergent[0]:04X}: the signed and unsigned lanes would take one "
+        f"ring slot each for one text, so alternating them doubles a sender's copy budget"
+    )
+
+
+def test_nfkc_moves_no_character_across_the_swept_boundary() -> None:
+    """Why the test above passes, pinned separately because it is a property of
+    unicodedata and not of this repo.
+
+    Sweeping after NFKC agrees with sweeping before it only while NFKC never rewrites a
+    visible character into an invisible one, or the reverse. Nothing in the standard
+    promises that: a future table could give some format character a compatibility
+    decomposition and silently split one text into two ring keys. Asserting it here means
+    that arrives as a red test naming the character, rather than as a filter quietly
+    catching half of what it reports.
+
+    Holds on unicodedata 15.0.0 and 15.1.0, measured.
+    """
+    crossings = []
+    for cp in range(0x110000):
+        char = chr(cp)
+        was_swept = unicodedata.category(char) in store.INVISIBLE_CATEGORIES
+        folded = unicodedata.normalize("NFKC", char)
+        # "Invisible after folding" means every character of the decomposition is swept:
+        # that is what decides whether the sweep can still see it.
+        now_swept = bool(folded) and all(
+            unicodedata.category(c) in store.INVISIBLE_CATEGORIES for c in folded
+        )
+        if was_swept != now_swept:
+            crossings.append(cp)
+
+    assert not crossings, (
+        f"NFKC crosses the swept boundary at {len(crossings)} code points, e.g. "
+        f"U+{crossings[0]:04X} ({unicodedata.category(chr(crossings[0]))}): normalize_text "
+        f"sweeps after folding and clean_text sweeps before, so the two now disagree"
+    )

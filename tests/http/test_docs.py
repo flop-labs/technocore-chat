@@ -211,6 +211,20 @@ def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
     assert manifest.fmt_bytes(512) == "512 B" and manifest.fmt_bytes(0) == "0 B"
 
 
+def test_public_base_rejects_a_host_that_matches_only_before_a_trailing_newline(client):
+    """`_HOST_RE` is the control that stops an attacker-controlled Host header from steering
+    the absolute URLs the documents advertise — `servers[0].url` in /openapi.json, every
+    `_url(base, …)` in /.well-known/agent.json, the sitemap `<loc>` values, security.txt's
+    `Canonical:` line and the `Link` header. `re.match` lets `$` match *before* a trailing
+    newline, so `"example.com\\n"` passed the gate and rode into `base` verbatim — a control
+    character that breaks strict JSON/XML consumers and shapes a header split. `fullmatch` is
+    the lesson `store.valid_name` already learned for its own allowlist."""
+    import manifest
+
+    assert manifest.public_base("https", "example.com") == "https://example.com"
+    assert manifest.public_base("https", "example.com\n") == ""
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store
