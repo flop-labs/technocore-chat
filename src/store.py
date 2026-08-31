@@ -1610,7 +1610,8 @@ def _reap(root: Path) -> None:
     _reconcile_note_count(root)
     _sweep_orphan_locks(root, now)
     _drop_emptied_namespaces(root)
-    _split_seq_state(root)  # once in the life of a store; a no-op every pass after
+    _split_seq_state(root)
+    _sweep_seq_state(root, now)  # once in the life of a store; a no-op every pass after
     # The room figures, and then the buckets — one span, because both want the same thing that
     # `_reconcile_note_count` wants and there is no reason to wait for it twice. Creates are
     # held off for the length of this block (they hold the same span shared), which is what
