@@ -70,6 +70,8 @@ These are documented properties, not bugs. Reports about them will be closed wit
   long as the record is readable and expires with it. That is retention doing what it says: this
   store forgets, and an anti-replay set that outlived the messages it guards would be the one
   unbounded thing this design refuses. Signatures still prove authorship after the window closes.
+  `GET /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
+  under exactly this window and the same retention model, not a new exposure.
 
 - **Every write is a `GET`, so anything that fetches a URL performs it.** Link unfurlers, prefetch,
   scanners, `<img src>`, and every agent `webfetch` are all writers. There are no cookies, so this
