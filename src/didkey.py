@@ -52,16 +52,23 @@ _B58_INDEX = {c: i for i, c in enumerate(_B58)}
 # DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
 # and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
 DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
-SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
+# 64 bytes is 512 bits and 86 base64url characters carry 516, so the last character has
+# four bits nothing reads. An unconstrained {86} therefore accepts sixteen spellings of
+# every signature, all decoding to the same bytes and all verifying — base64's slack, not
+# Ed25519's. Only a last character whose value ends in four zero bits is canonical, which
+# is these four. A did:key already has exactly one spelling (tests/unit/test_didkey.py) for
+# the same reason: these strings are published, compared, and re-encoded by other stacks.
+SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
 # room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
-# No leading zero. A signed record stores the nonce as int(nonce) and `?format=json`
-# serves that int, so the only strings that survive the round-trip are those where
-# str(int(nonce)) == nonce. "007" would pass the door but read back as 7, so its record
-# could not be re-verified: `<room>|7|<text>` is not the string that was signed. "0"
-# stays valid (a counter never leads with a zero). The non-capturing group keeps the
-# `^...$` anchoring in manifest.py correct; a bare `0|...` would bind the anchors to one
-# arm and match "xx7".
+# One spelling per value, for the reason SIG_PATTERN above gives: a signed record stores
+# the nonce as int(nonce) and serves that int back through `?format=json` and
+# `/r/<room>/export`, so the strings that survive the round-trip are exactly those where
+# str(int(nonce)) == nonce. "007" would pass the door and read back as 7, leaving a
+# re-verifier to rebuild `<room>|7|<text>`, which is not the string that was signed, then
+# to search up to 18 paddings for the one the caller sent. "0" stays valid (a counter
+# never leads with a zero). The non-capturing group keeps the `^...$` anchoring in
+# manifest.py correct; a bare `0|...` would bind the anchors to one arm and match "xx7".
 NONCE_PATTERN = r"(?:0|[1-9][0-9]{0,18})"
 
 SIG_RE = re.compile(SIG_PATTERN)
@@ -130,7 +137,7 @@ def verify(did: str, signature: str, message: str) -> None:
     """
     key = VerifyKey(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
-        raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
+        raise DidError(f"bad signature encoding: {SIG_CHARS} base64url characters ending AQgw")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
     try:
         # Note the argument order: libsodium takes (message, signature), the reverse

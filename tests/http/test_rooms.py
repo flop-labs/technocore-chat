@@ -240,10 +240,10 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
 
     monkeypatch.setattr(app_module.store, "room_stats", counted)
     with config.override(ROOMS_CACHE_SECONDS=0):
-        app_module._rooms_cache.clear()
+        app_module._rooms_walk.cache_clear()
         client.get("/rooms?limit=7")
         client.get("/rooms?limit=7")
-        assert calls == [7, 7] and app_module._rooms_cache == {}
+        assert calls == [7, 7] and app_module._rooms_walk.cache_info().currsize == 0
         # Zero is also the exactness escape hatch, now that message recency is otherwise
         # bounded by the clock rather than by the stamp: with the cache off, a message is
         # on the very next listing rather than up to ROOMS_CACHE_SECONDS later.
@@ -253,10 +253,13 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         assert listed["first"]["last_seq"] == 2
 
     with config.override(ROOMS_CACHE_SECONDS=60):
-        monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
-        for limit in (1, 2, 3):
+        # The bound is the LRU's maxsize, fixed when the cache is built, so the flood is the
+        # real one rather than a shrunk stand-in: every distinct `limit` is a walk that
+        # wants an entry, and eight more of them than the cache can ever hold.
+        app_module._rooms_walk.cache_clear()
+        for limit in range(1, app_module.MAX_ROOMS_CACHE + 9):
             client.get(f"/rooms?limit={limit}")
-        assert list(app_module._rooms_cache) == [2, 3]
+        assert app_module._rooms_walk.cache_info().currsize == app_module.MAX_ROOMS_CACHE
 
 
 def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkeypatch):
@@ -264,27 +267,28 @@ def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkey
 
     `store._bump` is best effort on purpose — an unwritable `.counters` must not fail a
     write that already landed — so a bump can go missing and a create then moves no stamp.
-    A hit needs the stamp to match *and* the entry to be inside the window, so the cost of
-    that is one window, not a listing that is wrong until the next structural write.
+    A hit needs the stamp to match *and* the window to be the one the entry is keyed under,
+    so the cost of that is one window, not a listing that is wrong until the next structural
+    write.
     """
-    import app as app_module
     import config
     import store
 
     monkeypatch.setattr(store, "_bump", lambda *a, **k: None)  # every counter now lies
-    window = 60  # far above anything this test spends, so only the ageing below expires it
+    window = 60  # far above anything this test spends, so only the move below expires it
     with config.override(ROOMS_CACHE_SECONDS=window):
         client.get("/r/first/say/bot/hi")
         client.get("/rooms")  # populates the cache, under a stamp that will not move again
         client.get("/r/second/say/bot/hi")
         assert "second" not in client.get("/rooms").text, "the cost: the stamp did not move"
 
-        # Age the entry past the window rather than sleeping out a short one. The claim is
-        # that the clock releases it, and the clock is the one thing a loaded CI runner
-        # will not hold still for: a 0.25s window is a test that passes locally and fails
-        # on a runner that spends it before the assertion.
-        stamp, _, view = app_module._rooms_cache[50]  # 50 is the default `limit`
-        app_module._rooms_cache[50] = (stamp, time.monotonic() - window, view)
+        # Move the clock into the next window rather than sleeping out a short one. The
+        # claim is that the clock releases it, and the clock is the one thing a loaded CI
+        # runner will not hold still for: a 0.25s window is a test that passes locally and
+        # fails on a runner that spends it before the assertion. The window is key material
+        # now (store._time_bucket), so the next one is simply a key the entry is not under —
+        # and the fixture pins the buckets, so bucket 1 is exactly one window on.
+        monkeypatch.setattr(store, "_time_bucket", lambda now, ttl: 1)
         assert "second" in client.get("/rooms").text, "the clock must expire it regardless"
 
 
@@ -309,33 +313,46 @@ def test_a_cached_view_is_never_served_under_a_different_root(client, tmp_path):
         assert "/r/first" in client.get("/rooms").text  # and the first root still answers
 
 
-def test_a_rewalked_entry_is_the_newest_and_the_oldest_is_what_leaves(client, monkeypatch):
+def test_a_used_entry_is_the_newest_and_the_coldest_is_what_leaves(client, monkeypatch):
     """The eviction path, which entries outliving a write made reachable: a caller cycling
-    `?limit=` keeps the cache full, so the evictor now runs while other requests are still
-    walking. Re-walking an existing key is a pop and an insert rather than a write and a
-    `move_to_end` — the key can be evicted between the two, where `move_to_end` raises and
-    `pop` does not — and the entry it leaves behind is the newest, not the next to go.
+    `?limit=` keeps the cache full, so the evictor runs while other requests are still
+    walking. Nothing in that path promotes an entry after finding it any more — the key
+    already carries everything that decides whether the entry is current, and the ordering
+    is the LRU's own bookkeeping — so there is no window between a hit and a promotion for
+    an eviction to land in, which is what used to make this reachable path a 500.
 
-    Ordering is by last walk, not by last *hit*: a request served from the cache does not
-    reinsert, so a cycling caller can still push a hot `limit` out. Bounded (the key space
-    is one reply per clamped limit) and unchanged by this — noted so the next reader knows
-    it is the policy and not an oversight.
+    The policy that replaces it is the stricter one, and the change is deliberate: ordering
+    is by last *use*, where the hand-rolled memo ordered by last walk and a request served
+    from the cache did not reinsert. A cycling caller could push out a `limit` it was
+    hitting on every single request; it cannot now. Asserted so it stays the policy.
     """
     import app as app_module
     import config
+    import store
 
+    walked = []
+    real = store.room_stats
+    monkeypatch.setattr(
+        store, "room_stats", lambda *a, **k: (walked.append(k["limit"]), real(*a, **k))[1]
+    )
     client.get("/r/first/say/bot/hi")
     with config.override(ROOMS_CACHE_SECONDS=60):
-        monkeypatch.setattr(app_module, "MAX_ROOMS_CACHE", 2)
-        app_module._rooms_cache.clear()
-        for limit in (1, 2, 3):
-            client.get(f"/rooms?limit={limit}")
-        assert list(app_module._rooms_cache) == [2, 3]
-        client.get("/r/second/say/bot/hi")  # structural: every entry is now stale
-        client.get("/rooms?limit=2")  # so this one is re-walked, and lands at the end
-        assert list(app_module._rooms_cache) == [3, 2]
-        client.get("/rooms?limit=4")
-        assert list(app_module._rooms_cache) == [2, 4], "the oldest walk is what leaves"
+        # _rooms_view rather than the route: this needs more distinct limits than the read
+        # budget of one IP allows requests, and the cache sits under the route, not in it.
+        app_module._rooms_walk.cache_clear()
+        bound = app_module.MAX_ROOMS_CACHE
+        app_module._rooms_view(1)
+        for other in range(2, bound + 1):
+            app_module._rooms_view(other)
+            app_module._rooms_view(1)  # served from the cache, and that is what keeps it
+        assert app_module._rooms_walk.cache_info().currsize == bound, "full, and no fuller"
+        walked.clear()
+        for other in range(bound + 1, bound + 9):
+            app_module._rooms_view(other)  # eight entries in, eight of the coldest out
+        app_module._rooms_view(1)
+        assert 1 not in walked, "the one entry every cycle touched must not be the victim"
+        app_module._rooms_view(2)
+        assert 2 in walked, "and the coldest of them is what left"
 
 
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
@@ -579,7 +596,7 @@ def test_one_reply_is_one_cache_entry_however_the_limit_was_spelled(client, monk
         walks += 1
         return real(*a, **k)
 
-    app._rooms_cache.clear()
+    app._rooms_walk.cache_clear()
     monkeypatch.setattr(store, "room_stats", counting)
     bodies = [client.get(f"/rooms?limit={n}").text for n in (200, 1000000, 1000001, 0, 1)]
     assert walks == 2, f"two distinct replies (>=200 and 1), {walks} walks"

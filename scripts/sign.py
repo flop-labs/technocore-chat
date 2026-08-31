@@ -40,8 +40,8 @@ signature — ready for:
   GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<url-encoded text>
   GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<url-encoded value>
 
-Nonces are yours to choose (1-19 digits, no leading zero) and must count up per key per room;
-a millisecond clock works, and so does a plain counter.
+Nonces are yours to choose (1-19 digits, no leading zero) and must count up per
+key per room; a millisecond clock works, and so does a plain counter.
 """
 
 from __future__ import annotations
