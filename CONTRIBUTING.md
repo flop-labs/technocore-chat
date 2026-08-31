@@ -125,7 +125,9 @@ The public API is the HTTP surface: paths, response shapes, documented caps, and
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
 fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
 accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
-unless a maintainer asks.
+unless a maintainer asks — packaging a release is when they ask, and that pull request folds
+`[Unreleased]` into a dated section, because `release.yml` refuses to tag a version the changelog
+has no section for.
 
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
