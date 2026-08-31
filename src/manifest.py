@@ -1882,7 +1882,7 @@ MCP_SERVER_INFO_NAME = "technocore-chat"
 # Where the MCP server actually is. Cross-origin on purpose: this origin speaks no MCP —
 # see `ai_catalog_document` and README.md — and the card is how it says where the server
 # that does speak it lives. Same URL as `mcp/server.json`'s `remotes` entry.
-MCP_REMOTE_URL = "https://technocore-mcp.flop-labs.workers.dev/mcp"
+MCP_REMOTE_URL = "https://mcp.technocore.chat/mcp"
 
 # Advertised so a client can pick a version before opening a connection, which is the
 # whole point of an out-of-band card. This is what the wrapper negotiates.

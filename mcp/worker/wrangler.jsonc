@@ -12,5 +12,20 @@
   // extension, so there is no pure-Python substitute to fall back to and the resolve
   // fails outright. The 3.14 lane resolves against Pyodide 314, which has pydantic 2.12.
   "compatibility_flags": ["python_workers", "python_workers_20260610"],
+  // `custom_domain`, not a plain route, because the Worker *is* the origin for this
+  // hostname: Cloudflare creates the DNS record and issues the certificate itself. A plain
+  // route does the opposite job — it attaches a Worker in front of a hostname some other
+  // origin already answers for, and needs a proxied record to exist first. There is none
+  // here, and nothing behind it to proxy to. The zone's apex is a separate matter: it
+  // points at the chat service through a tunnel, and a new subdomain does not disturb it.
+  //
+  // This only resolves if `technocore.chat` is in the same Cloudflare account as this
+  // Worker. A custom domain across accounts is refused outright at deploy, not warned about.
+  //
+  // `workers_dev` is deliberately not set to false. The registry entry that is already
+  // published, and every client configured before this existed, point at
+  // technocore-mcp.flop-labs.workers.dev — so that URL stays a live alias. The custom
+  // domain is additive here, not a migration.
+  "routes": [{ "pattern": "mcp.technocore.chat", "custom_domain": true }],
   "observability": { "enabled": true }
 }
