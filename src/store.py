@@ -1418,8 +1418,24 @@ def _split_seq_state(root: Path) -> None:
     """Partition the pre-shard map into its 256 shards, once, and retire it.
 
     Grouped before any shard is opened, so this costs one pass over the map and one lock per
-    *shard* rather than one per room. Shard entries win the merge: anything already there was
-    written by `_set_seq_entry` after the split began, so it is the newer fact.
+    *shard* rather than one per room.
+
+    Which side of the merge wins is decided by whether the backup already exists, and the two
+    cases are opposite for the same reason — the later write is the true one:
+
+      - **The first split.** No backup yet, so every entry in the map predates this pass, and
+        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
+        wins.
+      - **A map that came back.** The backup exists, so this map was written *after* a split
+        had already consumed and renamed the original — which only an old worker still running
+        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
+        the shard's is stale, so the map wins. Getting this backwards silently drops that
+        worker's reap or create: the room's floor regresses and cursors past it miss messages,
+        or a generation bump is lost and a stateful reader is told nothing changed.
+
+    The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
+    pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
+    would leave a downgrade reading a map that had lost almost every room it once knew.
 
     The old file is renamed, never deleted — `.seqstate.pre-shard`, which the `??` glob the
     sweep below uses cannot match. A downgrade puts the old code back in front of a map it
@@ -1435,13 +1451,15 @@ def _split_seq_state(root: Path) -> None:
     shards: dict[Path, dict] = {}
     try:
         with _locked(legacy):
+            first = not (backup := legacy.with_suffix(".pre-shard")).exists()
             for room, entry in _read_seq_state(legacy).items():
                 shards.setdefault(_seq_state_path(root, room), {})[room] = entry
             for path, entries in shards.items():
                 with _locked(path):
-                    merged = {**entries, **_read_seq_state(path)}  # a newer shard entry wins
+                    shard = _read_seq_state(path)
+                    merged = {**entries, **shard} if first else {**shard, **entries}
                     _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
-            legacy.replace(legacy.with_suffix(".pre-shard"))
+            legacy.replace(backup) if first else legacy.unlink()
     except OSError:
         pass
 

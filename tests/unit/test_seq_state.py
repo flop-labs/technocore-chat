@@ -128,6 +128,30 @@ def test_a_shard_entry_wins_the_split_against_the_old_map(tmp_path, monkeypatch)
     assert store.last_seq(tmp_path, "gone") == 99, "the split clobbered a newer shard entry"
 
 
+def test_a_map_written_after_the_split_wins_over_the_shard(tmp_path) -> None:
+    """The mixed-version window, and the case where the merge has to go the *other* way.
+
+    A worker still running the pre-shard code writes `.seqstate` — recreating a file this
+    change has already consumed and renamed. That entry is newer than the shard's by
+    construction, so a later split must take it. Letting the shard win instead drops that
+    worker's reap: the room's floor regresses and every cursor past it misses messages.
+    """
+    import store
+
+    _legacy(tmp_path, {"gone": {"floor": 5, "gen": 1}})
+    _reap_now(tmp_path)
+    assert (tmp_path / ".seqstate.pre-shard").exists(), "premise: the first split has run"
+
+    _legacy(tmp_path, {"gone": {"floor": 500, "gen": 9}})  # an old worker, post-split
+    _reap_now(tmp_path)
+
+    assert store.last_seq(tmp_path, "gone") == 500, "the old worker's floor was dropped"
+    assert store.room_generation(tmp_path, "gone") == 9, "its generation bump was dropped"
+    assert not (tmp_path / ".seqstate").exists(), "the recovered map was not consumed"
+    kept = orjson.loads((tmp_path / ".seqstate.pre-shard").read_bytes())
+    assert kept == {"gone": {"floor": 5, "gen": 1}}, "the backup lost the original state"
+
+
 # --------------------------------------------------------------------------- reads
 
 
