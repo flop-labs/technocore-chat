@@ -51,8 +51,11 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 
 Several pull requests racing one issue cost more review than they save. Two checks are
 automated in `.github/workflows/queue-guard.yml`: a new pull request gets one comment listing
-open PRs that cite the same issues, and a PR touching `CHANGELOG.md` or `sz-baseline.json` —
-both maintainer-regenerated — fails. What only you can do:
+open PRs that cite the same issues, and a *fork* PR touching `CHANGELOG.md` or
+`sz-baseline.json` — both maintainer-regenerated — fails. The file rule is the same either
+way; only the enforcement differs, because the check returns early for a branch in this
+repository and for OWNER/MEMBER/COLLABORATOR authors, which is where the release exception
+below lives. Do not read a green check as permission. What only you can do:
 
 - Verify claims against current `main`, not a cached copy of the source, and name the commit.
 - If an open PR already addresses the issue, review or build on it — with credit — rather than
@@ -125,7 +128,9 @@ The public API is the HTTP surface: paths, response shapes, documented caps, and
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
 fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
 accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
-unless a maintainer asks.
+unless a maintainer asks — packaging a release is when they ask, and that pull request folds
+`[Unreleased]` into a dated section, because `release.yml` refuses to tag a version the changelog
+has no section for.
 
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.

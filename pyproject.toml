@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.10.0"
+version = "0.11.1"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
