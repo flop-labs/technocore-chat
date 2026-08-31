@@ -151,7 +151,12 @@ def test_it_is_never_rate_limited_and_stays_indexable(client):
             response = client.get("/config")
             assert response.status_code == 200
     assert "x-robots-tag" not in response.headers, "it is documentation, not room content"
-    assert response.headers["cache-control"] == "public, max-age=3600"
+    # The document policy, not a private one: /config is static per *deploy* rather than
+    # per release, which is exactly the case `max-age=0` serves — a caller revalidates and
+    # sees the new settings, instead of holding the previous deploy's for an hour.
+    assert response.headers["cache-control"] == (
+        "public, max-age=0, s-maxage=300, stale-while-revalidate=60"
+    )
 
 
 def test_a_published_setting_is_a_number_json_can_carry(client):
