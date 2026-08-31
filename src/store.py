@@ -861,12 +861,15 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    head_seq: int | None = None
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
                 rec = _parse(raw)
                 if rec is None:
                     continue
+                if head_seq is None:
+                    head_seq = rec["seq"]
                 if since is not None and rec["seq"] <= since:
                     break
                 if cutoff is not None and _expired(rec, cutoff):
@@ -875,11 +878,20 @@ def read_messages(
                 if len(out) >= limit:
                     break
     out.reverse()
+    # Clamp a since-past-head cursor so the next poll self-heals
+    # instead of following the dead cursor forever (#565).
+    last_seq: int
+    if out:
+        last_seq = out[-1]["seq"]
+    elif since is not None and since > 0 and head_seq is not None and since > head_seq:
+        last_seq = head_seq
+    else:
+        last_seq = since or 0
     return {
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": last_seq,
         "generation": room_generation(root, room),
         "messages": out,
     }

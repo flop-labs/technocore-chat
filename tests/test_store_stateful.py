@@ -265,7 +265,19 @@ class StoreLifecycle(RuleBasedStateMachine):
         if since is not None:
             assert all(s > since for s in seqs), "`since` returned something already seen"
         assert view["first_seq"] == (seqs[0] if seqs else None)
-        assert view["last_seq"] == (seqs[-1] if seqs else (since or 0))
+        # When since is past the head, last_seq is clamped to the actual head
+        # so the next poll self-heals (#565). Only clamps when there are records
+        # on disk — a reaped room with no records leaves since unchanged.
+        if seqs:
+            assert view["last_seq"] == seqs[-1]
+        elif since is not None and since > 0 and store.room_path(self.root, room).exists():
+            head = store.last_seq(self.root, room)
+            if head > 0 and since > head:
+                assert view["last_seq"] == head, f"since={since} > head={head} should clamp"
+            else:
+                assert view["last_seq"] == since
+        else:
+            assert view["last_seq"] == (since or 0)
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 

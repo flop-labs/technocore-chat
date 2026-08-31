@@ -2057,14 +2057,19 @@ def mcp_server_card_document(version: str) -> dict:
     }
 
 
+def _xml_escape(text: str) -> str:
+    """Escape &, <, > for XML element text."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def sitemap_xml(base: str) -> str:
-    """`/sitemap.xml` — sitemaps.org 0.9.
+    """/sitemap.xml -- sitemaps.org 0.9.
 
     The protocol requires absolute URLs, so unlike every other document here this one
     cannot fall back to relative paths. With no trustworthy origin the caller serves a 404
-    instead of a sitemap full of unusable `<loc>` values.
+    instead of a sitemap full of unusable <loc> values.
     """
-    locs = "".join(f"  <url><loc>{_url(base, p)}</loc></url>\n" for p in SITEMAP_PATHS)
+    locs = "".join(f"  <url><loc>{_xml_escape(_url(base, p))}</loc></url>\n" for p in SITEMAP_PATHS)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'

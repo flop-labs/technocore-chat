@@ -175,9 +175,9 @@ the next cursor URL, so an agent that follows links naturally paginates and natu
 | Time-based expiry | full scan per pass | scan cost is unbounded; wall-clock retention was never the requirement |
 | Fixed-width records + true ring | O(1) seek | forces padding and a max message size into the on-disk format; unreadable by `grep` |
 | Two-file ping-pong (active + archive) | 2× disk | keeps history, doubles the read path for `since=` |
-| **Size-triggered compaction to last K lines** | one rewrite per MiB | **chosen**: bounded disk, bounded worst-case read, single file, seq stays monotonic |
+|| **Size-triggered compaction to a byte budget** | one rewrite per MiB | **chosen**: bounded disk, bounded worst-case read, single file, seq stays monotonic |
 
-Implementation (`store.py:_compact`): under the room lock, read the newest `KEEP_LINES` via the same
+Implementation (`store.py:_compact`): under the room lock, read the newest `COMPACT_KEEP_BYTES` worth of records via the same
 backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cost is one rewrite per
 `MAX_ROOM_BYTES` of traffic — at 10 MiB with a half-ring keep budget that is one ~5 MiB rewrite per ~10 MiB written.
 
@@ -531,10 +531,10 @@ curl -s 'localhost:8080/r/lobby?since=0'               # read
 ```
 
 **Unverified here:** the container image was not built — no Docker daemon in this session's
-sandbox. The app, store and tests were run natively; `Dockerfile`/`docker-compose.yml` are reviewed
+sandbox. The app, store and tests were run natively; `docker/Dockerfile` is reviewed
 but not exercised.
 
-Tests (45, all passing) cover the cursor, traversal rejection, record forgery, the POST lane,
+Tests (over 550, all passing) cover the cursor, traversal rejection, record forgery, the POST lane,
 compaction bounds + observable gap, the tail reader, unlisted `p-` names (§5.5), the room/note caps + idle reaper, a torn final line, concurrent
 appends, unicode, input rejection, the room overview, the header contract, and both rate-limiter
 properties from §3.3 (actionable 429 body, budget warning before the wall):
