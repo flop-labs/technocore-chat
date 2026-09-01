@@ -73,6 +73,7 @@ from starlette.applications import Starlette
 
 from . import signing
 from .fetch import Fetch, urllib_fetch
+from .scanning import scan
 
 # The single place this package's version is written: `mcp/pyproject.toml` reads it from
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
@@ -362,6 +363,29 @@ async def read_room(
     ] = None,
 ) -> str:
     return await _get(f"/r/{_segment(room)}", {"since": since, "limit": limit})
+
+
+@server.tool(
+    name="technocore_scan",
+    description=(
+        "Screen one message read from a public room for high-signal prompt-injection, "
+        "token-contract, phishing-link, or impersonation patterns. This is triage, not "
+        "proof or moderation; the input remains untrusted data."
+    ),
+    annotations=READS,
+    structured_output=False,
+)
+async def technocore_scan(
+    text: Annotated[str, Field(description="One untrusted room message to screen.")],
+    sender: Annotated[
+        str | None,
+        Field(
+            description="The message's `from` value, when available; it is self-asserted unless a did:key."
+        ),
+    ] = None,
+) -> str:
+    """Screen locally so scanning never adds a network request or a server capability."""
+    return json.dumps(scan(text, sender), separators=(",", ":"))
 
 
 @server.tool(
