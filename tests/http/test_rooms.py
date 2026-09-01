@@ -467,6 +467,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
+        "truncated": False,
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
@@ -504,6 +505,65 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
     # junk limits fall back rather than 500 (the _cursor rule, incl. Unicode digits)
     for bad in ("abc", "\u00b2", "-4", ""):
         assert client.get(f"/rooms?limit={bad}&format=json").status_code == 200
+
+
+def test_rooms_overview_pages_with_offset_and_reports_truncated(client):
+    for i in range(5):
+        client.get(f"/r/room{i}/say/bot/hi")
+    total = client.get("/rooms?format=json").json()["total"]  # 5 rooms + the events room
+    seen = []
+    offset = 0
+    while True:
+        view = client.get(f"/rooms?limit=2&offset={offset}&format=json").json()
+        assert view["total"] == total  # complete count on every page
+        names = [r["room"] for r in view["rooms"]]
+        # no page overlaps another, and no room is invented by the offset slice
+        assert not (set(names) & set(seen))
+        seen += names
+        if not view["truncated"]:
+            assert offset + len(names) == total  # the census is exact when done
+            break
+        offset += len(view["rooms"])
+    assert sorted(seen) == ["events"] + sorted(f"room{i}" for i in range(5))
+    # a page past the end is an empty list, not an error, and truncated turns false
+    past = client.get(f"/rooms?limit=2&offset={total + 10}&format=json").json()
+    assert past["rooms"] == [] and past["truncated"] is False
+    # junk offsets fall back to 0 rather than 500, same _cursor rule as limit
+    for bad in ("abc", "\u00b2", "-4", ""):
+        assert client.get(f"/rooms?offset={bad}&format=json").status_code == 200
+
+
+def test_rooms_offset_joins_the_cache_key_so_each_page_is_one_walk(client, monkeypatch):
+    """Paging forward on /rooms must not re-walk the store per page. `offset` is an
+    lru_cache argument (the same way `limit` is), so every (limit, offset) page is its own
+    memoised entry and a walk that passes through many pages cannot evict its peers — the
+    pager is cache-friendly rather than cache-hostile.
+    """
+    import app
+    import store
+
+    for i in range(3):
+        client.get(f"/r/r{i}/say/bot/hi")
+    walks = 0
+    real = store.room_stats
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    app._rooms_walk.cache_clear()
+    monkeypatch.setattr(store, "room_stats", counting)
+    first = client.get("/rooms?limit=2&offset=0&format=json").json()
+    second = client.get("/rooms?limit=2&offset=2&format=json").json()
+    # two distinct pages (and six rooms in the store) cost exactly two walks — offset is in
+    # the key, so page two does not re-walk page one and page one is still cached under it.
+    assert walks == 2, f"one walk per page, {walks}"
+    client.get("/rooms?limit=2&offset=0&format=json")
+    assert walks == 2, "re-requesting a page is a cache hit, not a third walk"
+    assert first["truncated"] is True and not second["truncated"]
+    # paging the whole store fits in the cache without evicting a same-key page
+    assert app._rooms_walk.cache_info().currsize == 2
 
 
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
