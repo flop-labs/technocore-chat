@@ -858,6 +858,13 @@ def _export_start(f, cutoff: float | None, end: int) -> int:
     69,059 pairs and 659 ms of CPU at 10 MiB, against one parse for the tail read of that
     same room, for one read token and repeatable until the room idles out.
 
+    Precondition, and load-bearing in a way it was not before: `ts` is non-decreasing down
+    the file. It holds because a record is appended under the room lock with a `ts` from
+    `_now()`, never from a caller, and compaction copies a prefix out rather than reordering
+    one. A forward scan tolerated any order; halving cannot, so a path that lets a caller
+    supply `ts`, or a clock that steps backwards mid-file, moves this lane from slow to
+    wrong rather than merely slow.
+
     `lo` is a line start with nothing readable before it, `hi` a line start known readable
     or `end`, and each pass reads one dated record to move one of them. A midpoint lands
     mid-line, so the probe is the next line start after it. Undated lines are stepped over
