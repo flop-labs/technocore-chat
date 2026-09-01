@@ -126,7 +126,11 @@ def load(spec: str) -> Signer:
             seed = None
     if seed is None and re.fullmatch(r"[A-Za-z0-9_-]{43}=?", spec):
         try:
-            seed = base64.urlsafe_b64decode(spec.rstrip("=") + "==")
+            unpadded = spec.removesuffix("=")
+            candidate = base64.urlsafe_b64decode(unpadded + "==")
+            canonical = base64.urlsafe_b64encode(candidate).decode().rstrip("=")
+            if canonical == unpadded:
+                seed = candidate
         except ValueError:
             seed = None
     if seed is None or len(seed) != 32:
