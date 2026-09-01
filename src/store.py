@@ -683,36 +683,121 @@ def _now() -> str:
 
 
 def counters(root: Path) -> dict:
-    """The lifetime counters, with every key present. Read without the lock: the file is
-    replaced atomically, so a reader either sees the old bytes or the new ones."""
-    try:
-        data = orjson.loads((root / COUNTERS_FILE).read_bytes())
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    """The lifetime counters, with every key present. Lock-free read."""
+    live = root / COUNTERS_FILE
+    snapshot = root / ".counters.snapshot"
+
+    while True:
+        try:
+            st1 = live.stat()
+            ino1 = st1.st_ino
+        except OSError:
+            ino1 = None
+        
+        snap_lines = []
+        try:
+            with snapshot.open("rb") as f:
+                snap_lines = f.readlines()
+        except OSError:
+            pass
+        
+        try:
+            st2 = live.stat()
+            ino2 = st2.st_ino
+        except OSError:
+            ino2 = None
+        
+        if ino1 == ino2:
+            break
+
+    live_lines = []
+    if ino1 is not None:
+        try:
+            with live.open("rb") as f:
+                live_lines = f.readlines()
+        except OSError:
+            pass
+
     out = {}
-    for key in COUNTER_KEYS:
-        value = data.get(key, 0)
-        out[key] = value if isinstance(value, int) and value >= 0 else 0
-    return out
+    has_fold = False
+
+    def parse_into(lines_list, target):
+        nonlocal has_fold
+        for line in lines_list:
+            try:
+                rec = orjson.loads(line)
+                if not isinstance(rec, dict):
+                    continue
+                if rec.pop("_fold", False):
+                    has_fold = True
+                for k in COUNTER_KEYS:
+                    v = rec.get(k)
+                    if isinstance(v, int):
+                        target[k] = target.get(k, 0) + v
+            except (ValueError, TypeError, UnicodeDecodeError):
+                pass
+
+    parse_into(live_lines, out)
+    if not has_fold:
+        parse_into(snap_lines, out)
+
+    return {k: max(0, out.get(k, 0)) for k in COUNTER_KEYS}
 
 
 def _bump(root: Path, **deltas: int) -> None:
-    """Add to the lifetime counters, atomically.
-
-    Best effort, exactly like `_log_event`: the caller's write has already succeeded by
-    the time this runs, so an unwritable counter must never turn that success into an
-    error. The cost of that choice is a possible undercount, which is the right way round
-    — a digest that reports slightly low is recoverable, a write that 500s is not.
-    """
+    """Add to the lifetime counters, atomically via lock-free append."""
     path = root / COUNTERS_FILE
     try:
-        with _locked(path):
-            current = counters(root)
-            for key, delta in deltas.items():
-                current[key] = current.get(key, 0) + delta
-            _replace(path, orjson.dumps(current))
+        line = orjson.dumps(deltas) + b"\n"
+        size = path.stat().st_size if path.exists() else 0
+        if size:
+            with path.open("rb") as f:
+                f.seek(size - 1)
+                if f.read(1) != b"\n":
+                    line = b"\n" + line
+        with path.open("ab") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+def _compact_counters(root: Path) -> None:
+    """Rotate and fold the append-only counter log."""
+    live = root / COUNTERS_FILE
+    snapshot = root / ".counters.snapshot"
+    
+    try:
+        with _locked(root / ".counters.lock"):
+            if snapshot.exists():
+                snap_out = {}
+                with snapshot.open("rb") as f:
+                    for line in f:
+                        try:
+                            rec = orjson.loads(line)
+                            if not isinstance(rec, dict):
+                                continue
+                            for k in COUNTER_KEYS:
+                                v = rec.get(k)
+                                if isinstance(v, int):
+                                    snap_out[k] = snap_out.get(k, 0) + v
+                        except (ValueError, TypeError, UnicodeDecodeError):
+                            pass
+                
+                if snap_out:
+                    snap_out["_fold"] = True
+                    line = orjson.dumps(snap_out) + b"\n"
+                    size = live.stat().st_size if live.exists() else 0
+                    if size:
+                        with live.open("rb") as f:
+                            f.seek(size - 1)
+                            if f.read(1) != b"\n":
+                                line = b"\n" + line
+                    with live.open("ab") as f:
+                        f.write(line)
+                
+                snapshot.unlink()
+            
+            if live.exists():
+                live.rename(snapshot)
     except OSError:
         pass
 
@@ -1607,11 +1692,11 @@ def _reap(root: Path) -> None:
                 continue  # racing writer or vanished file: next pass picks it up
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room
         _bump(root, **reaped)
+    _compact_counters(root)
     _reconcile_note_count(root)
     _sweep_orphan_locks(root, now)
     _drop_emptied_namespaces(root)
     _split_seq_state(root)
-    _sweep_seq_state(root, now)  # once in the life of a store; a no-op every pass after
     # The room figures, and then the buckets — one span, because both want the same thing that
     # `_reconcile_note_count` wants and there is no reason to wait for it twice. Creates are
     # held off for the length of this block (they hold the same span shared), which is what
