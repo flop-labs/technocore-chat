@@ -19,11 +19,18 @@ Two loops against one room, and a durable cursor between them.
 ```python
 import json
 
-cursor = load_cursor(room)
-cold_start = cursor is None
-since = cursor or 0
+checkpoint = load_checkpoint(room)
+cold_start = checkpoint is None
+generation = None if cold_start else checkpoint["generation"]
+since = 0 if cold_start else checkpoint["last_delivered_seq"]
 while True:
     view = get(f"{BASE}/r/{room}", params={"since": since, "wait": 10, "format": "json"}).json()
+    if cold_start:
+        generation = view["generation"]
+    elif view["generation"] != generation:
+        raise RuntimeError(
+            f"room {room} was recreated: generation {generation} -> {view['generation']}"
+        )
     messages = view["messages"]
 
     # A normal read is the newest window, not the oldest records after `since`. If the
@@ -41,19 +48,20 @@ while True:
         if m.get("from") != BRIDGE_DID:  # not our own write, coming back around
             deliver_to_far_side(m)
     since = messages[-1]["seq"] if messages else view["last_seq"]
-    save_cursor(room, since)
+    save_checkpoint(room, {"generation": generation, "last_delivered_seq": since})
     cold_start = False
 ```
 
 Room reads deliberately return the newest `limit` records. A bridge that was paused can therefore
 receive a `first_seq` greater than its cursor plus one even while the skipped records remain in the
 larger retained ring. The slow path above downloads that ring through `/export`, filters forward
-from the durable cursor, and checks both continuity and room generation before delivering anything.
-On a cold start there is no prior observation to continue from, so begin at the first retained
-record. After a cursor has been saved, if the export also starts beyond that cursor, those records
-have genuinely left the ring: stop and surface the gap rather than advancing the cursor and
-presenting an incomplete mirror as complete. The export costs one ordinary read and is needed only
-after a detected gap.
+from the durable checkpoint, and checks both continuity and room generation before delivering
+anything. On a cold start there is no prior observation to continue from, so adopt the observed
+generation and begin at the first retained record. After a checkpoint has been saved, a generation
+change means the room was deleted and recreated: stop before delivering from the new conversation.
+If the export starts beyond a saved sequence, those records have genuinely left the ring: stop and
+surface the gap rather than advancing the checkpoint and presenting an incomplete mirror as
+complete. The export costs one ordinary read and is needed only after a detected sequence gap.
 
 Inbound is the mirror: a foreign event becomes one signed write. Three things make the difference
 between a bridge that works and one that looks like it does.
@@ -67,15 +75,12 @@ so minting a durable `@alice@bridge.example` for whoever typed `alice` first han
 a stranger. Collapse every unsigned writer into one shared actor and put the claimed name in the
 body, where the service's own `~alice` marker already puts it.
 
-**Qualify object ids with a room epoch.** `seq` is contiguous within one lifetime of a room, and a
-room that is reaped and recreated starts again at 1 — so `…/r/lobby/1284` eventually names two
-different messages, which downstream protocols deduplicate on and silently drop.
-
-Detecting that takes a **cursor-free** read. A poll carrying `since=` echoes your own cursor back as
-`last_seq` when nothing is newer, so the rewind is invisible to the loop above; a bare
-`GET /r/<room>?format=json` reports the room's actual tail. Probe periodically, and when that tail
-is below your cursor the room is a new one: bump the epoch, reset the cursor, and carry the epoch in
-every id you mint.
+**Qualify object ids with the room generation.** A reaped and recreated room is a new conversation.
+Its sequence continues above the old high-water mark so existing cursors do not starve, while the
+read view's `generation` increments to expose the replacement. Persist `{generation, seq}` as one
+checkpoint, compare the saved generation with every poll before delivery, and carry the generation
+in every id you mint. Do not silently resync on a mismatch: stop and let the operator decide whether
+and how to bridge the new conversation.
 
 Foreign identifiers rarely fit the service's name grammar. Fingerprint them the way `/patterns.md`
 fingerprints DIDs — the first 16 hex characters of SHA-256, sharded — and keep the reverse map in
