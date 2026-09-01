@@ -251,7 +251,7 @@ def test_a_usage_file_from_before_the_count_heals_by_walking(tmp_path) -> None:
     it parses as untrusted and the caps rebuild from a walk — the old cost, never a wrong
     answer — and the next reap rewrites it in the two-integer format.
 
-    `room_bytes_used` is the one reader that must NOT walk: it runs on the append path, which
+    `room_bytes_used` is the one reader that must NOT walk: it runs on the append/compact path, which
     is what the file exists to keep cheap. It reads the legacy file as 0, which is the same
     fail-open a missing file gets, and the write it gates is a compaction — so the cost of
     being wrong for one reap interval is a full ring kept, not a ring thrown away.
@@ -269,3 +269,20 @@ def test_a_usage_file_from_before_the_count_heals_by_walking(tmp_path) -> None:
     store._reap(tmp_path)
     assert (tmp_path / store.USAGE_FILE).read_text().split() == [str(n) for n in walked]
     assert store.room_bytes_used(tmp_path) == walked[1], "and it reads back without a walk"
+
+
+def test_reserved_room_bytes_zero_division_and_compaction_floor(tmp_path, monkeypatch):
+    """Regression test for #581: forces usage over budget and RESERVED_ROOM_BYTES to 1
+    to actively drive the reserved append/compaction path and ensure keep=1 prevents data loss.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 1)
+    monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 1)
+
+    root = tmp_path
+    store._write_record(root, "room1", "alice", "hello world 1")
+    store._write_record(root, "room1", "alice", "hello world 2")
+
+    records = list(store.read_messages(root, "room1"))
+    assert len(records) > 0, "compaction under extreme limits must not erase all room contents"

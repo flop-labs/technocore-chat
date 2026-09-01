@@ -84,7 +84,7 @@ MAX_TOTAL_ROOM_BYTES = 5 << 30
 #
 # = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: the floor times the cap is the budget, so
 # even the worst case — every room at its floor — lands exactly on the number.
-RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
+RESERVED_ROOM_BYTES = max(1, MAX_TOTAL_ROOM_BYTES // MAX_ROOMS)
 # How many rooms exist and how many bytes they occupy — "count bytes", the same two-integer
 # format and the same machinery as NOTES_FILE below, so one atomic replace keeps both halves
 # describing the same store.
@@ -2363,7 +2363,7 @@ def _write_record(
                 os.fsync(f.fileno())
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
-            _compact(path, cutoff=_cutoff(room), keep=limit // 2)
+            _compact(path, cutoff=_cutoff(room), keep=max(1, limit // 2))
     if created:
         # Bump the room's generation: a (re)created room is a new conversation, and the read
         # view exposes the old generation's number so a stateful client can detect the
