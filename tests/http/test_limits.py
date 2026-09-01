@@ -465,6 +465,46 @@ def test_an_empty_trusted_proxy_header_falls_back_to_the_socket_peer(client, mon
         assert "" not in identities and "198.51.100.7" not in identities
 
 
+def test_an_oversized_trusted_proxy_header_falls_back_to_the_socket_peer(client):
+    """The limiter's caps bound how many entries exist, not how large one key is.
+
+    `_buckets` (MAX_BUCKETS) and `_identities` (MAX_IDENTITIES) both hold the string
+    client_ip() returns, and with CHAT_CLIENT_IP_HEADER set that string is chosen by the
+    caller. HeaderLimits bounds the whole header BLOCK at MAX_HEADER_BYTES, so one header
+    can carry very nearly 8 KiB on its own: 20_000 buckets plus 50_000 identities at that
+    size is several hundred MiB of long-lived strings against a 128 MiB container. An entry
+    cap becomes a memory amplifier.
+
+    Falling back to the peer rather than truncating is the point of the assertions below: a
+    truncated prefix is still attacker-chosen and still plentiful, whereas the peer means
+    every malformed-header caller shares the proxy's single bucket — stricter, never looser.
+    """
+    import app as app_module
+    import config
+    import limit
+
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        app_module._buckets.clear()
+        app_module._identities.clear()
+        # Well under HeaderLimits, so the request is served rather than refused at the edge —
+        # which is exactly why the bound has to exist here and not only in the middleware.
+        for i in range(4):
+            over = f"{i:04d}" + "a" * 4000
+            client.get("/r/lobby", headers={"cf-connecting-ip": over})
+
+        identities = {ip for ip, kind in app_module._buckets if kind == "read"}
+        assert identities == {"testclient"}, "an oversized header minted its own bucket"
+        assert app_module._identities == {"testclient"}
+        assert max(len(ip) for ip, _ in app_module._buckets) <= limit.MAX_IDENTITY_CHARS
+
+        # The bound is on length only. A value at the limit is still honoured, because an
+        # operator may legitimately point the knob at something that is not IP-shaped, and
+        # refusing those on shape would collapse every caller into one shared bucket.
+        at_limit = "for=" + "b" * (limit.MAX_IDENTITY_CHARS - 4)
+        client.get("/r/lobby", headers={"cf-connecting-ip": at_limit})
+        assert (at_limit, "read") in app_module._buckets
+
+
 def _dockerfile_cmd() -> list[str]:
     """The argv the shipped image actually runs, out of the CMD JSON array."""
     raw = (Path(__file__).resolve().parents[2] / "docker" / "Dockerfile").read_text()

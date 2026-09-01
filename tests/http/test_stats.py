@@ -86,6 +86,27 @@ def test_the_stats_404_is_byte_identical_to_a_path_that_was_never_routed(stats_c
         assert probe.text == missing.text
 
 
+def test_a_non_ascii_stats_token_is_refused_like_any_other_wrong_one(stats_client):
+    """The 404-not-401 promise has to hold for bytes the comparison cannot represent.
+
+    Starlette decodes header values as latin-1, and `secrets.compare_digest` raises
+    TypeError on a str that is not ASCII-only rather than returning False — so any byte
+    above 0x7F in X-Stats-Token used to reach the handler as a non-ASCII str and come back
+    as a 500. That 500 was the oracle the surrounding tests exist to prevent: it only
+    happens once STATS_TOKEN is configured, so it distinguished a token-gated /stats from a
+    path that was never routed. The comparison runs on bytes now, so this is an ordinary
+    mismatch.
+    """
+    missing = stats_client.get("/definitely-not-a-route")
+    # Bytes, not str: this is what a probe actually puts on the wire. 0xFF is not valid
+    # UTF-8 either, so it cannot be a legitimate token however the operator encoded theirs.
+    probe = stats_client.get("/stats", headers={"X-Stats-Token": b"\xff"})
+    assert probe.status_code == missing.status_code == 404
+    assert probe.text == missing.text
+    # And the configured token still works, so the fix refused the input rather than the gate.
+    assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
 def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     """A 401 would confirm the endpoint is there to keep probing."""
     assert stats_client.get("/stats").status_code == 404
