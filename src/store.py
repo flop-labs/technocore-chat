@@ -714,6 +714,11 @@ _PENDING: dict[Path, Counter[str]] = {}
 # another thread's arithmetic, which is the whole reason this is cheaper than the flock it
 # replaces on the contended path.
 _PENDING_LOCK = threading.Lock()
+# How many messages may ride in the bucket before one pays for a write anyway. It bounds
+# what /stats and the snapshot ring can trail by, and what a hard exit can lose, on a store
+# quiet enough that no structural bump comes along to flush it — the reaper is no backstop
+# here, since it only bumps on a pass that actually reaped something.
+BATCH_MESSAGES = 64
 
 
 def _bump(root: Path, **deltas: int) -> None:
@@ -723,6 +728,9 @@ def _bump(root: Path, **deltas: int) -> None:
     the time this runs, so an unwritable counter must never turn that success into an
     error. The cost of that choice is a possible undercount, which is the right way round
     — a digest that reports slightly low is recoverable, a write that 500s is not.
+
+    Two things keep it cheap, and they are separate. The rule above decides whether to
+    write at all; LOCK_NB decides what happens when the write cannot get the lock.
 
     That contract is what pays for LOCK_NB here. Every append in the service ran through
     this one lock and *waited* on it, so writes to unrelated rooms serialised behind each
@@ -746,7 +754,14 @@ def _bump(root: Path, **deltas: int) -> None:
     """
     batch: Counter[str] = Counter()
     with _PENDING_LOCK:
-        _PENDING.setdefault(root, Counter()).update(deltas)
+        (pending := _PENDING.setdefault(root, Counter())).update(deltas)
+        # `messages` is the only counter bumped per append, and the only one nothing reads
+        # for freshness: app.py's ROOMS_STAMP_KEYS leaves it out on purpose, so no cache
+        # anywhere is waiting for it. Every other key marks a structural event — a create, a
+        # reap, a topic write — that another worker's stamp *is* waiting for, and those keep
+        # paying for their write immediately. So a bump that is only messages rides along.
+        if deltas.keys() == {"messages"} and pending["messages"] < BATCH_MESSAGES:
+            return
     try:
         with _locked(root / COUNTERS_FILE, nb=True):
             # Under the flock: read the authoritative file, not a cached snapshot, so a
@@ -1733,6 +1748,11 @@ def _snapshot(root: Path) -> None:
                     return
             except FileNotFoundError:
                 pass
+            # Flush this worker's batched counter deltas first: `_bump` lets a plain message
+            # ride in memory, and a sample taken over the unflushed bucket is exactly the
+            # reading this ring exists to get right — one window short, the next one long.
+            # Only this process's bucket, so a sample can still trail other workers'.
+            _bump(root)
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))

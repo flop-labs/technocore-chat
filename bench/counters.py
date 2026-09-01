@@ -58,7 +58,7 @@ sys.path.insert(0, SRC)
 import store  # noqa: E402
 
 MIXES = ("lobby", "mixed", "spread")
-ARMS = ("blocking", "batched", "none")
+ARMS = ("blocking", "oppo", "batched", "none")
 # Not a proposal and not shippable under #588's constraints (it gives up immediate
 # persistence on the uncontended path): an arm that flushes only once the bucket holds
 # DEFER deltas, to price what deliberate deferral would buy over opportunistic batching.
@@ -81,6 +81,7 @@ root, arm, mix, index, threads, writes, go = (
     store.Path(sys.argv[1]), sys.argv[2], sys.argv[3],
     int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), store.Path(sys.argv[7]),
 )
+burst = int(sys.argv[9])
 
 
 def _bump_blocking(root, **deltas):
@@ -94,6 +95,29 @@ def _bump_blocking(root, **deltas):
             store._replace(path, orjson.dumps(current))
     except OSError:
         pass
+
+
+def _bump_oppo(root, **deltas):
+    """The opportunistic variant: every bump attempts the flock, batching only what collides.
+
+    Kept here so "before the messages-only rule" stays reproducible after the source moved on.
+    """
+    from collections import Counter
+
+    batch = Counter()
+    with store._PENDING_LOCK:
+        store._PENDING.setdefault(root, Counter()).update(deltas)
+    try:
+        with store._locked(root / store.COUNTERS_FILE, nb=True):
+            with store._PENDING_LOCK:
+                batch = store._PENDING.pop(root, Counter())
+            store._replace(
+                root / store.COUNTERS_FILE,
+                orjson.dumps(dict(Counter(store.counters(root)) + batch)),
+            )
+    except OSError:
+        with store._PENDING_LOCK:
+            store._PENDING.setdefault(root, Counter()).update(batch)
 
 
 _real_bump = store._bump
@@ -112,6 +136,8 @@ def _bump_deferred(root, **deltas):
 
 if arm == "blocking":
     store._bump = _bump_blocking
+elif arm == "oppo":
+    store._bump = _bump_oppo
 elif arm == "none":
     store._bump = lambda *a, **k: None
 elif arm == "deferred":
@@ -168,6 +194,8 @@ def room_for(t, i):
 def worker(t):
     mine = latency[t]
     for i in range(writes):
+        if burst and i and i % burst == 0:
+            time.sleep(0.025)  # idle between spikes: the shape a steady stream never makes
         room = room_for(t, i)
         started = time.perf_counter()
         store.append(root, room, "bench", "m%d-%d-%d" % (index, t, i))
@@ -205,14 +233,15 @@ print(json.dumps({{
 def _percentiles(values: list[float]) -> dict[str, float]:
     """p50/p95/p99 in milliseconds, from every append in the round."""
     ordered = sorted(values)
-    return {
+    out = {
         f"p{p}": ordered[min(len(ordered) - 1, int(len(ordered) * p / 100))] * 1000
         for p in (50, 95, 99)
     }
+    return {**out, "max": ordered[-1] * 1000}
 
 
 def _round(
-    root: Path, arm: str, mix: str, procs: int, threads: int, writes: int, fsync: str
+    root: Path, arm: str, mix: str, procs: int, threads: int, writes: int, fsync: str, burst: int
 ) -> dict:
     """One round: pre-create every room, then run `procs` workers over it at once."""
     rooms = [f"room{i:02d}" for i in range(procs * threads)]
@@ -242,6 +271,7 @@ def _round(
                 str(writes),
                 str(go),
                 json.dumps(rooms),
+                str(burst),
             ],
             stdout=subprocess.PIPE,
             env=env,
@@ -276,7 +306,15 @@ def _round(
 
 
 def run(
-    arms, mixes, procs: int, threads: int, writes: int, rounds: int, raw: bool, fsync: str
+    arms,
+    mixes,
+    procs: int,
+    threads: int,
+    writes: int,
+    rounds: int,
+    raw: bool,
+    fsync: str,
+    burst: int,
 ) -> None:
     print(
         f"{procs} processes x {threads} threads x {writes} writes, {rounds} rounds, "
@@ -285,16 +323,16 @@ def run(
     for mix in mixes:
         print(f"\n--- {mix}")
         print(
-            f"{'arm':<10}{'writes/s':>12}{'p50 ms':>10}{'p95 ms':>10}{'p99 ms':>10}{'bumps/flush':>13}  counters"
+            f"{'arm':<10}{'writes/s':>12}{'p50 ms':>10}{'p95 ms':>10}{'p99 ms':>10}{'max ms':>9}{'bumps/flush':>13}  counters"
         )
         for arm in arms:
             got = []
             for _ in range(rounds):
                 with tempfile.TemporaryDirectory() as tmp:
-                    got.append(_round(Path(tmp), arm, mix, procs, threads, writes, fsync))
+                    got.append(_round(Path(tmp), arm, mix, procs, threads, writes, fsync, burst))
             median = {
                 k: statistics.median([g[k] for g in got])
-                for k in ("throughput", "p50", "p95", "p99")
+                for k in ("throughput", "p50", "p95", "p99", "max")
             }
             exact = [g["exact"] for g in got]
             drained = all(g["drained"] for g in got)
@@ -308,7 +346,7 @@ def run(
             batch = f"{statistics.median(sizes):.2f}" if sizes else "-"
             print(
                 f"{arm:<10}{median['throughput']:>12,.0f}{median['p50']:>10.2f}"
-                f"{median['p95']:>10.2f}{median['p99']:>10.2f}{batch:>13}  {verdict}"
+                f"{median['p95']:>10.2f}{median['p99']:>10.2f}{median['max']:>9.1f}{batch:>13}  {verdict}"
             )
             if raw:  # every round, so a small median difference can be read against the spread
                 print(f"{'':10}rounds: " + "  ".join(f"{g['throughput']:,.0f}" for g in got))
@@ -328,6 +366,7 @@ def main() -> None:
     ap.add_argument("--arms", default=",".join(ARMS))
     ap.add_argument("--raw", action="store_true", help="print every round, not just the median")
     ap.add_argument("--fsync", default="1", choices=("0", "1"), help="CHAT_FSYNC for the run")
+    ap.add_argument("--burst", type=int, default=0, help="idle 25ms every N writes (0: steady)")
     args = ap.parse_args()
     run(
         [a for a in args.arms.split(",") if a],
@@ -338,6 +377,7 @@ def main() -> None:
         args.rounds,
         args.raw,
         args.fsync,
+        args.burst,
     )
 
 
