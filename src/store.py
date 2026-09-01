@@ -20,7 +20,7 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -1009,29 +1009,33 @@ def _read_seq_state(path: Path) -> dict:
     # `.get` and raise AttributeError out of a room read. Absent, torn and hand-edited all
     # have to mean the same thing here — no state — because this answers a request.
     try:
-        state = orjson.loads(path.read_bytes())
+        return state if isinstance((state := orjson.loads(path.read_bytes())), dict) else {}
     except (OSError, orjson.JSONDecodeError):
         return {}
-    return state if isinstance(state, dict) else {}
 
 
+# A generation never decreases. A positive floor is also a witnessed high-water mark: a
+# recreate clears the stored field only because the live room then carries a still higher
+# sequence, not because the earlier floor stopped being true. Their maxima are therefore safe
+# independently when alternating workers leave each copy newer in a different field.
+# Invalid fields contribute nothing, as they did on the read path before.
+def _seq_entry(*entries: object) -> dict:
+    def valid(entry: object, key: str) -> int:
+        value = entry.get(key) if isinstance(entry, dict) else None
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    return {key: max(valid(entry, key) for entry in entries) for key in ("floor", "gen")}
+
+
+# Reconcile the shard with the pre-shard map on every read. Normally the latter is absent;
+# during a rolling upgrade an old worker can recreate it after the split, and either copy can
+# then hold the newer floor or generation. `_seq_entry` encodes the lifecycle ordering rather
+# than guessing freshness from which file exists. Coercing here means a hand-edited or
+# truncated map degrades to 0 (never existed) on every request path and never raises.
 def _seq_field(root: Path, room: str, key: str) -> int:
-    """`room`'s `floor` or `gen`, always as a non-negative int.
-
-    Its shard first; the pre-shard map only when the shard has no entry, which after
-    `_split_seq_state` has run is one failed `open` and no parse. That fallback is what makes
-    the migration invisible rather than a flag day — a name whose state has not been split yet
-    still answers correctly — and it stays safe afterwards because the split renames the old
-    file away rather than leaving a second copy to read.
-
-    Coerces here rather than at each caller: both fields are read on the request path, so a
-    hand-edited or truncated map must degrade to 0 (never existed) and never raise.
-    """
-    entry = _read_seq_state(_seq_state_path(root, room)).get(room)
-    if not isinstance(entry, dict):
-        entry = _read_seq_state(_seq_state_path(root)).get(room)
-    value = entry.get(key) if isinstance(entry, dict) else None
-    return value if isinstance(value, int) and value >= 0 else 0
+    """`room`'s `floor` or `gen`, always as a non-negative int."""
+    entries = (_read_seq_state(_seq_state_path(root, item)).get(room) for item in (room, ""))
+    return _seq_entry(*entries)[key]
 
 
 def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
@@ -1049,14 +1053,11 @@ def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
     `_bump`: the caller's write has already succeeded and must not be failed by bookkeeping.
     """
     path = _seq_state_path(root, room)
-    try:
-        with _locked(path):
-            gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
-            state = _read_seq_state(path)
-            state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
-            _replace(path, orjson.dumps(state), fsync=config.FSYNC)
-    except OSError:
-        pass
+    with suppress(OSError), _locked(path):
+        gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
+        state = _read_seq_state(path)
+        state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
+        _replace(path, orjson.dumps(state), fsync=config.FSYNC)
 
 
 def last_seq(root: Path, room: str) -> int:
@@ -1497,18 +1498,10 @@ def _split_seq_state(root: Path) -> None:
     Grouped before any shard is opened, so this costs one pass over the map and one lock per
     *shard* rather than one per room.
 
-    Which side of the merge wins is decided by whether the backup already exists, and the two
-    cases are opposite for the same reason — the later write is the true one:
-
-      - **The first split.** No backup yet, so every entry in the map predates this pass, and
-        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
-        wins.
-      - **A map that came back.** The backup exists, so this map was written *after* a split
-        had already consumed and renamed the original — which only an old worker still running
-        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
-        the shard's is stale, so the map wins. Getting this backwards silently drops that
-        worker's reap or create: the room's floor regresses and cursors past it miss messages,
-        or a generation bump is lost and a stateful reader is told nothing changed.
+    Whole-file precedence cannot order a rolling upgrade: an old worker can update the flat
+    map and a new worker can update the shard before this pass. `_seq_entry` instead preserves
+    the maximum proven floor and generation independently. This also keeps the first split's
+    race safe, where a new worker may have populated the shard after the flat map was read.
 
     The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
     pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
@@ -1534,8 +1527,9 @@ def _split_seq_state(root: Path) -> None:
             for path, entries in shards.items():
                 with _locked(path):
                     shard = _read_seq_state(path)
-                    merged = {**entries, **shard} if first else {**shard, **entries}
-                    _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
+                    for room, entry in entries.items():
+                        shard[room] = _seq_entry(shard.get(room), entry)
+                    _replace(path, orjson.dumps(shard), fsync=config.FSYNC)
             legacy.replace(backup) if first else legacy.unlink()
     except OSError:
         pass
