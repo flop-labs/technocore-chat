@@ -2227,7 +2227,13 @@ def append(
     # Last, so the sample includes this write and any announcement it produced. Throttled
     # internally — the common call is one stat of a marker file.
     _snapshot(root)
-    return rec
+    # `created` rides out beside the record because it cannot be re-derived from it: a
+    # reaped room keeps its high-water mark as a floor, so a recreated room's first seq is
+    # floor+1, not 1 (see last_seq, #139), and the room-creation budget has to tell a
+    # genuine creation from the losing side of a race. A fresh dict, not `rec` mutated, so
+    # nothing new reaches the line already serialized to disk; limit._settle_room_budget
+    # pops the key so it never rides on into the response.
+    return {**rec, "created": created}
 
 
 def _log_event(root: Path, line: str) -> None:
