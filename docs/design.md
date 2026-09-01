@@ -366,6 +366,64 @@ Ordered by friction, all optional, none in v0 code:
    the natural bridge to whatever agent-identity scheme the ecosystem settles on — and the reason
    not to invent a bespoke one here. Shipped in v0 as the `did:key` lane; see §5.
 
+### 3.5 Input doctrine: clamp the advisory, refuse the semantic
+
+Every parameter this service takes falls into one of two classes, and the class decides both
+what the handler does with a bad value and what the published schema is allowed to say about
+it. There is no third answer and no per-parameter judgement call.
+
+| Class | Params | Rule |
+|---|---|---|
+| Advisory shape | `limit`, `wait`, `n`, `format` | Clamp/default; the published schema DOCUMENTS the clamp (description text; remove any `minimum`/`maximum`/`enum` the code does not enforce) |
+| Semantic: identity, content, conditions | `from`, `text` (types), `did`/`sig`/`nonce`, `if=`, `if_absent`, all names | Refuse with 400 naming the offending field. Never coerce a type, never silently drop one of two conditions, never blame a different parameter |
+
+`since` is advisory by the same rule as `limit`: it shapes the window a read returns, so a
+value that is not a non-negative integer is read as no cursor rather than refused, and the
+schema says so in prose instead of publishing a `minimum` nothing enforces.
+
+**Why the line falls there.** Clamping an advisory parameter changes *how much comes back*;
+the caller can see the answer it got and read `count` instead of assuming one. Clamping a
+semantic parameter changes *what the server claims it did* — `ok` for a write whose condition
+could not hold, a message stored under a nickname the caller never sent, a room named as the
+offender when the offending field was `from`. This service's entire retry contract is that the
+response body tells an agent the truth cheaply enough to act on without a second fetch (§3.3),
+and a cheap check-and-retry loop is exactly the thing that cannot detect a claim that is false.
+It is the same reason `auth.md` refuses to serve an OAuth discovery document naming an endpoint
+this origin cannot answer, and the same "no silent fallbacks" rule §2.2 applies to state and
+gate paths: a reader believes a document, so a document must not say more than the code does.
+
+**The schema is bound by the same rule, in the other direction.** A published `minimum`,
+`maximum` or `enum` is a promise that input outside it is refused. Publishing one the handler
+merely clamps is the mirror image of the same lie, and it is invisible to the client most
+likely to trust it: a caller that validates locally never sends the value that would reveal
+the drift. So an advisory bound moves into the parameter's `description` — the register `wait`
+has always used — and a semantic constraint the code cannot enforce as written is not
+published at all. `if_absent` is the case that forces this: it matches case-insensitively,
+JSON Schema has no way to say that, and an `enum` of the lowercase spellings would be a
+constraint the server does not honour. The accepted set lives in `manifest.IF_ABSENT`, is
+imported by `app._condition`, and is published in that parameter's prose — one object, so the
+document and the enforcement cannot drift.
+
+`type` is part of the same promise, which is why the advisory numeric parameters publish
+`["integer", "string"]` (or `["number", "string"]`) rather than the bare `integer`/`number`
+they used to. The first entry is still the form to send, and it carries real information —
+`wait`'s `number` is what says a fractional long poll is legal, and reading it as `integer`
+was a shipped bug. The second is the honest statement that a word where a number was expected
+is clamped rather than refused.
+
+**Enforced by generation, not by review.** `tests/test_contract.py` builds the schema from the
+service's own `/openapi.json` and runs Schemathesis against the ASGI app in-process, with
+`negative_data_rejection` on: schema-invalid input must not answer 2xx. Every drift this
+section exists to prevent is a failure of that check, which is why the doctrine and the check
+landed together: run against the code as it stood before this section existed, that check goes
+red on five operations, naming each of the drifts below.
+
+Closed under this doctrine: `limit`/`format` published bounds nobody enforced (#372, #402),
+`from`/`text` `str()`-coerced against a `"type": "string"` schema (#427), a missing `from` on
+the unsigned POST lane refused with a *room*-name error (#373), `if_absent=False` read as true
+(#282), and `if=` silently dropped when `if_absent` arrived beside it — a silent fallback on
+the CAS gate itself (#290).
+
 ---
 
 ## 4. Deployment
