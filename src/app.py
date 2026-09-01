@@ -1650,7 +1650,22 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    # Ownership namespaces: enforce server-side CAS + re-validate gate under fresh read
+    # to close TOCTOU (gate outside lock -> unconditional LWW). First claim: expect_absent,
+    # handover/allow update: expect=current. Prevents concurrent first-claims
+    # with distinct nonces (1 vs 2) both passing gate and last-write-winning.
+    if ns in (store.OWNERS_NS, store.ALLOW_NS):
+        # Re-read fresh and re-validate gate conditions before CAS - stale gate would allow takeover
+        fresh_denied = _note_write_gate(ns, key, value, signer)
+        if fresh_denied:
+            return fresh_denied
+        current = store.note_get(config.ROOT, ns, key)
+        if current is None:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+        else:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+    else:
+        meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
     return respond(
         request,
         meta,
@@ -1693,7 +1708,17 @@ async def note_post(request: Request) -> Response:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        if ns in (store.OWNERS_NS, store.ALLOW_NS) and signer is not None:
+            fresh_denied = _note_write_gate(ns, key, value, signer)
+            if fresh_denied:
+                return fresh_denied
+            current = store.note_get(config.ROOT, ns, key)
+            if current is None:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+            else:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+        else:
+            meta = store.note_set(config.ROOT, ns, key, value, *condition)
         return respond(
             request,
             meta,
