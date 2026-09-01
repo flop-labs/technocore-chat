@@ -790,8 +790,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "How many newest rooms to skip, so a census can page past "
                                 "the `limit` cap. Advisory, same rule as `limit`: a value "
                                 "that is not a non-negative integer falls back to 0, and "
-                                "what survives is clamped into the listing, so a page past "
-                                "the end is an empty `rooms` list with `truncated` false."
+                                "what survives is clamped into the listing (and to the "
+                                "room capacity), so a page past the end is an empty "
+                                "`rooms` list with `truncated` false.",
                             ),
                         },
                         {

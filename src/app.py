@@ -909,10 +909,13 @@ def rooms(request: Request) -> Response:
     # incrementing it walked every room on every request and evicted everyone else's view
     # out of a 64-entry cache while doing it. Now the key space is the reply space, and the
     # offset joins it the same way — the pager is cache-friendly rather than cache-hostile.
+    # `offset` is clamped to the room capacity (MAX_ROOMS), because a value past the end
+    # still renders the same empty page: unbounded, a caller could churn _rooms_walk with
+    # ever-larger offsets instead of evicting a bounded reply space.
     # `tail`, not `limit`: the local must not shadow the limit module the refusal above
     # calls into.
     tail = min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT)
-    view = _rooms_view(tail, _cursor(q.get("offset"), 0) or 0)
+    view = _rooms_view(tail, min(_cursor(q.get("offset"), 0) or 0, store.MAX_ROOMS))
     n = view["notes"]
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.
