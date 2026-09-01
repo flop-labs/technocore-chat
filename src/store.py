@@ -682,122 +682,120 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _get_segments(root: Path) -> list[Path]:
+    """Mevcut tüm sayaç segmentlerini numara sırasına göre döndürür."""
+    segments = [p for p in root.glob(f"{COUNTERS_FILE}.*") if p.suffix.lstrip('.').isdigit()]
+    segments.sort(key=lambda p: int(p.suffix.lstrip('.')))
+    return segments
+
+
 def counters(root: Path) -> dict:
     """The lifetime counters, with every key present. Lock-free read."""
-    live = root / COUNTERS_FILE
-    snapshot = root / ".counters.snapshot"
-
     while True:
-        try:
-            st1 = live.stat()
-            ino1 = st1.st_ino
-        except OSError:
-            ino1 = None
+        out = {}
+        segments = _get_segments(root)
+        if not segments:
+            return {k: 0 for k in COUNTER_KEYS}
         
-        snap_lines = []
-        try:
-            with snapshot.open("rb") as f:
-                snap_lines = f.readlines()
-        except OSError:
-            pass
-        
-        try:
-            st2 = live.stat()
-            ino2 = st2.st_ino
-        except OSError:
-            ino2 = None
-        
-        if ino1 == ino2:
-            break
-
-    live_lines = []
-    if ino1 is not None:
-        try:
-            with live.open("rb") as f:
-                live_lines = f.readlines()
-        except OSError:
-            pass
-
-    out = {}
-    has_fold = False
-
-    def parse_into(lines_list, target):
-        nonlocal has_fold
-        for line in lines_list:
+        success = False
+        for seg in reversed(segments):
             try:
-                rec = orjson.loads(line)
-                if not isinstance(rec, dict):
-                    continue
-                if rec.pop("_fold", False):
-                    has_fold = True
-                for k in COUNTER_KEYS:
-                    v = rec.get(k)
-                    if isinstance(v, int):
-                        target[k] = target.get(k, 0) + v
-            except (ValueError, TypeError, UnicodeDecodeError):
-                pass
+                with seg.open("rb") as f:
+                    seg_lines = f.readlines()
+                success = True
+            except OSError:
+                continue
+            
+            seg_has_fold = False
+            for line in seg_lines:
+                try:
+                    rec = orjson.loads(line)
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.pop("_fold", False):
+                        seg_has_fold = True
+                    for k in COUNTER_KEYS:
+                        v = rec.get(k)
+                        if isinstance(v, int):
+                            out[k] = out.get(k, 0) + v
+                except (ValueError, TypeError, UnicodeDecodeError):
+                    pass
+                    
+            if seg_has_fold:
+                break
+        
+        if success or not _get_segments(root):
+            return {k: max(0, out.get(k, 0)) for k in COUNTER_KEYS}
 
-    parse_into(live_lines, out)
-    if not has_fold:
-        parse_into(snap_lines, out)
 
-    return {k: max(0, out.get(k, 0)) for k in COUNTER_KEYS}
+def _get_active_segment(root: Path) -> Path:
+    """Mevcut en yüksek numaralı log segmentini bulur."""
+    segments = _get_segments(root)
+    if not segments:
+        return root / f"{COUNTERS_FILE}.0"
+    return segments[-1]
 
 
 def _bump(root: Path, **deltas: int) -> None:
-    """Add to the lifetime counters, atomically via lock-free append."""
-    path = root / COUNTERS_FILE
+    """Dosyayı rename ile kaydırmadan aktif segmente atomik ekleme yapar."""
     try:
         line = orjson.dumps(deltas) + b"\n"
-        size = path.stat().st_size if path.exists() else 0
+        active = _get_active_segment(root)
+        
+        size = active.stat().st_size if active.exists() else 0
         if size:
-            with path.open("rb") as f:
+            with active.open("rb") as f:
                 f.seek(size - 1)
                 if f.read(1) != b"\n":
                     line = b"\n" + line
-        with path.open("ab") as f:
+                    
+        with active.open("ab") as f:
             f.write(line)
     except OSError:
         pass
 
+
 def _compact_counters(root: Path) -> None:
-    """Rotate and fold the append-only counter log."""
-    live = root / COUNTERS_FILE
-    snapshot = root / ".counters.snapshot"
-    
+    """Eski verileri okuyup yeni bir sıra numaralı segmente katlar (fold)."""
     try:
-        with _locked(root / ".counters.lock"):
-            if snapshot.exists():
-                snap_out = {}
-                with snapshot.open("rb") as f:
+        with _locked(root / f"{COUNTERS_FILE}.lock"):
+            segments = _get_segments(root)
+            if not segments:
+                return
+            
+            snap_out = {}
+            for seg in segments:
+                if not seg.exists():
+                    continue
+                with seg.open("rb") as f:
                     for line in f:
                         try:
                             rec = orjson.loads(line)
-                            if not isinstance(rec, dict):
-                                continue
-                            for k in COUNTER_KEYS:
-                                v = rec.get(k)
-                                if isinstance(v, int):
-                                    snap_out[k] = snap_out.get(k, 0) + v
-                        except (ValueError, TypeError, UnicodeDecodeError):
+                            if isinstance(rec, dict):
+                                for k in COUNTER_KEYS:
+                                    if isinstance(rec.get(k), int):
+                                        snap_out[k] = snap_out.get(k, 0) + rec[k]
+                        except Exception:
                             pass
-                
-                if snap_out:
-                    snap_out["_fold"] = True
-                    line = orjson.dumps(snap_out) + b"\n"
-                    size = live.stat().st_size if live.exists() else 0
-                    if size:
-                        with live.open("rb") as f:
-                            f.seek(size - 1)
-                            if f.read(1) != b"\n":
-                                line = b"\n" + line
-                    with live.open("ab") as f:
-                        f.write(line)
-                
-                snapshot.unlink()
             
-            if live.exists():
-                live.rename(snapshot)
+            if snap_out:
+                snap_out["_fold"] = True
+                line = orjson.dumps(snap_out) + b"\n"
+                
+                active_seq = int(segments[-1].suffix.lstrip('.'))
+                next_segment = root / f"{COUNTERS_FILE}.{active_seq + 1}"
+                
+                # 1. Yeni segmenti diske güvenle yaz
+                with next_segment.open("ab") as f:
+                    f.write(line)
+                
+                # 2. Rename kullanmadan, sadece işi biten eski segmentleri sil
+                for seg in segments:
+                    try:
+                        if seg != next_segment:
+                            seg.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     except OSError:
         pass
 
