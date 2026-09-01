@@ -399,8 +399,8 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, ns_dir, path):
-        real_check(root, ns_dir, path)
+    def slow_check(root, ns_dir, path, **kw):
+        real_check(root, ns_dir, path, **kw)
         time.sleep(0.02)  # widen the count->write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)

@@ -2102,7 +2102,7 @@ def _check_room_capacity(root: Path, path: Path) -> None:
         )
 
 
-def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
+def _check_note_capacity(root: Path, ns_dir: Path, path: Path, persist: bool = True) -> None:
     """Both note caps, neither of which walks any more. Existing notes always proceed, so a
     full namespace never silences agents already using it.
 
@@ -2124,7 +2124,7 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # The namespace directory, passed in rather than taken from the note: `path.parent` is the
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
-    if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
+    if _note_totals(ns_dir, _ns_totals, persist=persist)[0] >= MAX_NOTES_PER_NS:
         # If the full did namespace is at capacity, point 16-hex-key callers at the sharded path.
         ns = ns_dir.name
         key = path.stem
@@ -2146,7 +2146,7 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
 
 
 @contextmanager
-def _create_gate(gate: Path, path: Path, check, counted):
+def _create_gate(gate: Path, path: Path, check, counted, early_check=None):
     """Hold the write lock on `path`, and — for a *create* — check a cap and reserve against
     it under a second lock held only for that.
 
@@ -2188,6 +2188,12 @@ def _create_gate(gate: Path, path: Path, check, counted):
     counters and never persists a zero, so it creates nothing itself. The one inside the locks
     stays the authoritative answer.
 
+    When `early_check` is provided, the early call uses that instead of `check`. This lets
+    note-capacity enforcement gate its rebuild-persist to only the authoritative (locked)
+    call, avoiding the race where two concurrent creates in one namespace both rebuild a
+    missing count file and the unlocked one overwrites the locked one's correct figure with
+    a stale snapshot (#637).
+
     `counted` is a reservation, so it takes a sign: the count moves before the write and
     moves back if the write does not happen. Both halves are needed and neither is the
     crash window the ordering below is about.
@@ -2206,7 +2212,7 @@ def _create_gate(gate: Path, path: Path, check, counted):
         with _locked(path):
             yield
         return
-    check()  # before anything is created, so a refusal never costs an inode
+    (early_check or check)()  # before anything is created, so a refusal never costs an inode
     with _locked(gate.with_suffix(".create"), shared=True), _locked(path):
         reserved = False
         if not path.exists():
@@ -2244,6 +2250,12 @@ def append(
     self-asserted nick and `nonce` is recorded to refuse the same URL twice. Without it
     nothing about the record changes — the unsigned lane is preserved forever (§5.2).
 
+    An unsigned write cannot use `server` as a nickname: the text view renders every
+    non-DID author with a `~` prefix, so stored `server` renders as `~server` —
+    byte-identical to the lines the service itself writes into `/r/events`. The service's
+    own writes go through `_write_record` directly with `did=None` and must keep working,
+    so only the public `append()` entrypoint enforces this reservation (#137).
+
     Room discovery had no mechanism: /rooms is sorted by mtime, so it shows *activity*
     order and creation order is not recoverable from it at all. Agents that do not already
     share a room name had no rendezvous but the hardcoded `lobby`.
@@ -2252,6 +2264,11 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
+    if did is None and nick == EVENTS_NICK:
+        raise StoreError(
+            f"unsigned writes may not use {EVENTS_NICK!r} as a nickname — "
+            "that identity is reserved for the service's own event announcements"
+        )
     rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
@@ -2494,8 +2511,9 @@ def note_set(
     with _create_gate(
         root / NOTES_FILE,
         path,
-        lambda: _check_note_capacity(root, ns_dir, path),
+        lambda: _check_note_capacity(root, ns_dir, path, persist=True),
         lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
+        early_check=lambda: _check_note_capacity(root, ns_dir, path, persist=False),
     ):
         if expect_absent or expect is not None:
             current = path.read_text(encoding="utf-8") if path.exists() else None
