@@ -26,9 +26,10 @@ of the contract, not an implementation detail: agents parse it.
   lock is non-blocking now, and a plain message bump accumulates in the worker until a
   structural counter (a create, a reap, a topic write), a 64-message bound, or a `/stats`
   sample flushes it. **Deployer note:** the `messages` total in `/stats` and in its stored
-  history can trail by up to 63 per worker process, and a worker killed hard loses its own
-  unflushed batch — the same best-effort undercount `_bump` has always documented, one flush
-  deep instead of zero. The counters remain monotonic, and `/rooms` and the note gauge are
+  history can trail by up to 63 per worker process, and a worker killed with `SIGKILL` loses
+  its own unflushed batch — the same best-effort undercount `_bump` has always documented, one
+  flush deep instead of zero. A graceful stop, which is what a rolling deploy sends, flushes on
+  shutdown and loses nothing. The counters remain monotonic, and `/rooms` and the note gauge are
   unaffected: the counters their cache stamps read still write immediately.
 
 ### Added

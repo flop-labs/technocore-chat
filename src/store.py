@@ -748,7 +748,8 @@ def _bump(root: Path, **deltas: int) -> None:
 
     What it costs: `.counters` lags by whatever is pending while the lock is contended
     (bounded by one holder's read-modify-replace, and caught up by the next bump), and a
-    worker killed hard loses its own unflushed batch. Both are the undercount this
+    worker killed hard loses its own unflushed batch — hard specifically, since app.py's
+    lifespan flushes this bucket on a graceful stop, which is what a rolling deploy sends. Both are the undercount this
     function's contract already allows — deeper by one flush than before, never wrong in
     the direction that matters, and never able to make a counter go backwards.
     """
