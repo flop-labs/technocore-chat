@@ -37,8 +37,8 @@ def _race_under_lock(monkeypatch, store, action):
     real_locked = store._locked
 
     @contextmanager
-    def hook(target):
-        with real_locked(target):
+    def hook(target, shared=False, nb=False):
+        with real_locked(target, shared, nb):
             action(target)
             yield
 
