@@ -37,8 +37,8 @@ def _race_under_lock(monkeypatch, store, action):
     real_locked = store._locked
 
     @contextmanager
-    def hook(target, shared=False, nb=False):
-        with real_locked(target, shared, nb):
+    def hook(target):
+        with real_locked(target):
             action(target)
             yield
 
@@ -950,7 +950,6 @@ def test_message_counter_survives_the_reaper(tmp_path):
 
     for i in range(3):
         store.append(tmp_path, "doomed", "bot", f"m{i}")
-    store._bump(tmp_path)  # a plain message rides in `_PENDING` until something flushes it
     assert store.counters(tmp_path)["messages"] == 3
 
     for room in ("doomed", "events"):
@@ -986,7 +985,6 @@ def test_message_counter_survives_compaction(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 1024)
     for i in range(60):
         store.append(tmp_path, "busy", "bot", f"message number {i} with some padding text")
-    store._bump(tmp_path)  # as above: flush before reading the counter, not after reaping
     on_disk = sum(1 for _ in store.room_path(tmp_path, "busy").open("rb"))
     assert on_disk < 60  # the ring dropped lines
     assert store.counters(tmp_path)["messages"] == 60  # the counter did not
