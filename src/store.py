@@ -1264,13 +1264,18 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
     memoized against that same stat — so a walk re-reads only rooms that changed since
     the last one. See WINDOW_BYTES for the per-room worst-case bound.
+
+    `limit` is capped to MAX_LIMIT and `offset` is clamped into the listing, so a page
+    past the tail is an empty list with `truncated` False — a caller pages forward by
+    advancing `offset` while `truncated` is True, and `total` stays the full count so a
+    completed census is `offset + len(rooms)` catching up to it.
     """
     now = time.time()
     entries = []
@@ -1284,12 +1289,14 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
             continue  # reaped between the readdir and the stat
         entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     entries.sort(reverse=True)
+    offset = min(max(0, offset), len(entries))
+    page = entries[offset : offset + max(1, min(int(limit), MAX_LIMIT))]
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root)["topics_written"], root_key)
     mono = time.monotonic()
-    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+    for mtime, size, name, mtime_ns in page:
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
@@ -1307,6 +1314,10 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         "total": len(entries),
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
+        # Whether more rooms exist past this page (`offset + len(rooms) < total`). Always
+        # present so a client parses a shape it can rely on and pages forward while it is
+        # true; `total` is the full count so a completed census is exact.
+        "truncated": offset + len(shown) < len(entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.

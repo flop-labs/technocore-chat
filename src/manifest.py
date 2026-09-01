@@ -778,7 +778,20 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "How many rooms to detail. Advisory: a value that is not "
                                 "a non-negative integer falls back to 50, and what "
                                 f"survives is clamped to 1..{store.MAX_LIMIT}. `total` "
-                                "counts every listed room either way."
+                                "counts every listed room either way. Rooms past the cap "
+                                "are reachable by advancing `offset`."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "offset",
+                            "schema": {"type": ["integer", "string"], "default": 0},
+                            "description": (
+                                "How many newest rooms to skip, so a census can page past "
+                                "the `limit` cap. Advisory, same rule as `limit`: a value "
+                                "that is not a non-negative integer falls back to 0, and "
+                                "what survives is clamped into the listing, so a page past "
+                                "the end is an empty `rooms` list with `truncated` false."
                             ),
                         },
                         {
@@ -800,6 +813,15 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "properties": {
                                     "rooms": {"type": "array", "items": {"type": "object"}},
                                     "total": {"type": "integer"},
+                                    "truncated": {
+                                        "type": "boolean",
+                                        "description": (
+                                            "Whether more rooms exist past this page "
+                                            "(`offset + len(rooms) < total`). Page forward "
+                                            "with `offset` while this is true; `total` is "
+                                            "the full count so a completed census is exact."
+                                        ),
+                                    },
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
                                     "notes": {"type": "object"},

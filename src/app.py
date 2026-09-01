@@ -832,14 +832,14 @@ def _note_stats() -> dict:
     return view
 
 
-def _rooms_payload(limit: int) -> dict:
-    """The /rooms walk for `limit`, uncached — everything a cache entry is made of.
+def _rooms_payload(limit: int, offset: int = 0) -> dict:
+    """The /rooms walk for one page, uncached — everything a cache entry is made of.
 
     Split out so the cache is one decorator and the disabled path is one call: with
     ROOMS_CACHE_SECONDS at 0 this runs and nothing is stored, which is the same "no reuse"
     the old guarded read/insert pair gave and is now unmistakable at a glance.
     """
-    view = store.room_stats(config.ROOT, limit=limit)
+    view = store.room_stats(config.ROOT, limit=limit, offset=offset)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
@@ -859,7 +859,7 @@ def _rooms_payload(limit: int) -> dict:
 
 
 @lru_cache(maxsize=MAX_ROOMS_CACHE)
-def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
+def _rooms_walk(limit: int, offset: int, stamp: tuple, bucket: int) -> dict:
     """_rooms_payload under an LRU, keyed on everything that decides whether it is current.
 
     There is no read-then-validate and no pop-then-insert here to get wrong. The pair that
@@ -869,14 +869,20 @@ def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
     threadsafe, so the bookkeeping stays coherent however Starlette's threadpool interleaves
     two /rooms requests, and no part of the argument for that rests on GIL scheduling.
 
+    `offset` is deliberately the head of the key with `limit`: both choose which rooms the
+    walk visits and therefore what the answer contains, so a caller paging forward gets one
+    memoised reply per page rather than re-walking the store on every `?offset=`.
+    `offset` is an lru_cache argument, not a mutable default, so each page is its own entry
+    and paging all the way through cannot evict the oldest page mid-walk.
+
     The dict it returns is shared by every caller that gets this entry, as it always was:
     _rooms_payload finishes building it before it is stored, and `rooms` only reads it.
     """
-    return _rooms_payload(limit)
+    return _rooms_payload(limit, offset)
 
 
-def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+def _rooms_view(limit: int, offset: int = 0) -> dict:
+    """The /rooms payload for one page, from cache when one is both fresh and still valid.
 
     Deliberately caching the *store walk* and not the rendered response: the text and JSON
     renderings differ, and the budget footer is per-caller, so a response cache would have
@@ -889,8 +895,8 @@ def _rooms_view(limit: int) -> dict:
     stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
     ttl = config.ROOMS_CACHE_SECONDS
     if ttl <= 0:
-        return _rooms_payload(limit)
-    return _rooms_walk(limit, stamp, store._time_bucket(time.monotonic(), ttl))
+        return _rooms_payload(limit, offset)
+    return _rooms_walk(limit, offset, stamp, store._time_bucket(time.monotonic(), ttl))
 
 
 def rooms(request: Request) -> Response:
@@ -898,11 +904,15 @@ def rooms(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
-    # Clamped here rather than only inside room_stats, because this number is the cache
+    # Clamped here rather than only inside room_stats, because these numbers are the cache
     # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
     # incrementing it walked every room on every request and evicted everyone else's view
-    # out of a 64-entry cache while doing it. Now the key space is the reply space.
-    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
+    # out of a 64-entry cache while doing it. Now the key space is the reply space, and the
+    # offset joins it the same way — the pager is cache-friendly rather than cache-hostile.
+    # `tail`, not `limit`: the local must not shadow the limit module the refusal above
+    # calls into.
+    tail = min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT)
+    view = _rooms_view(tail, _cursor(q.get("offset"), 0) or 0)
     n = view["notes"]
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.

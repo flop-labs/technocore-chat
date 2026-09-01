@@ -1124,6 +1124,38 @@ def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_pa
     assert (info.currsize, info.maxsize) == (held + 1, store._WINDOW_MEMO_MAX)
 
 
+def test_room_stats_pages_with_offset_and_clamps_past_end(tmp_path):
+    """A page slices the sorted listing and reports `truncated`; offset is clamped so a
+    page past the end is empty with hindsight, never an error or a re-read of the top.
+    """
+    import store
+
+    store._cached_window.cache_clear()
+    for name in ("one", "two", "three", "four", "five"):
+        store.append(tmp_path, name, "bot", "hi")
+
+    first = store.room_stats(tmp_path, limit=2, offset=0)
+    second = store.room_stats(tmp_path, limit=2, offset=2)
+    third = store.room_stats(tmp_path, limit=2, offset=4)
+    # creating the first room also writes the server's own `events` discovery log, so the
+    # listing is events + five, newest first; the offset pages never overlap.
+    assert [r["room"] for r in first["rooms"]] == ["events", "five"]
+    assert [r["room"] for r in second["rooms"]] == ["four", "three"]
+    assert [r["room"] for r in third["rooms"]] == ["two", "one"]
+    assert first["truncated"] and second["truncated"] and not third["truncated"]
+    assert first["total"] == second["total"] == third["total"] == 6
+
+    past = store.room_stats(tmp_path, limit=2, offset=99)
+    assert past["rooms"] == [] and past["truncated"] is False and past["total"] == 6
+
+    # a negative offset behaves like 0 (the app clamps it with _cursor, and the store
+    # clamps again into the listing)
+    assert [r["room"] for r in store.room_stats(tmp_path, limit=2, offset=-3)["rooms"]] == [
+        "events",
+        "five",
+    ]
+
+
 def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
     """A topic set is a note write, so it bumps notes_written and shows up immediately;
     a deletion the counter cannot see (the reaper's) ages out with the TTL."""
