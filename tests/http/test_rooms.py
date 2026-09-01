@@ -566,6 +566,34 @@ def test_rooms_offset_joins_the_cache_key_so_each_page_is_one_walk(client, monke
     assert app._rooms_walk.cache_info().currsize == 2
 
 
+def test_offsets_past_the_end_collapse_instead_of_churning_the_cache(client, monkeypatch):
+    """`offset` is part of the cache key, so a value past the listing must not open an
+    unbounded set of entries. Like `limit`, it is clamped at the route — to the room
+    capacity — *before* it keys the LRU, because any page past the end renders the same
+    empty result: ever-larger offsets are one memoised entry, not a fresh walk each.
+    """
+    import app
+    import store
+
+    client.get("/r/alpha/say/bot/hi")
+    walks = 0
+    real = store.room_stats
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    app._rooms_walk.cache_clear()
+    monkeypatch.setattr(store, "room_stats", counting)
+    bodies = [
+        client.get(f"/rooms?limit=2&offset={n}").text for n in (store.MAX_ROOMS, 1000000, 1000001)
+    ]
+    assert walks == 1, f"all past-capacity offsets are one reply, {walks} walks"
+    assert bodies[0] == bodies[1] == bodies[2], "clamped to MAX_ROOMS, so one cache entry"
+    assert app._rooms_walk.cache_info().currsize == 1
+
+
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
     (tmp_path / "rooms").mkdir(parents=True)
     (tmp_path / "rooms" / "junk.jsonl").write_bytes(b"not a record\n")
