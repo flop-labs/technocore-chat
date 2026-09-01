@@ -15,8 +15,10 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -603,9 +605,13 @@ def _prune(d: Path | str) -> bool:
 
 
 @contextmanager
-def _locked(target: Path, shared: bool = False):
+def _locked(target: Path, shared: bool = False, nb: bool = False):
     """Exclusive lock held on a sidecar file, so compaction can replace the data
     file inode without writers holding a lock on the orphan.
+
+    `nb` adds LOCK_NB, which raises BlockingIOError (EAGAIN) instead of waiting when the
+    lock is held. Only `_bump` takes it: everything else here is holding the lock to make a
+    decision that has to be made, and would have to wait again anyway.
 
     `shared` takes LOCK_SH instead, which is what lets a lock mean "a create is in flight"
     without meaning "one create at a time" (see `_create_gate`): any number of holders
@@ -617,7 +623,7 @@ def _locked(target: Path, shared: bool = False):
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
@@ -698,6 +704,23 @@ def counters(root: Path) -> dict:
     return out
 
 
+# Deltas wait here between flushes, one bucket per store root. Fixed size whatever the write
+# rate — six keys and an int each, a bucket and not a log — so nothing here grows with
+# traffic the way an append-only counter file would, and the key is dropped when its bucket
+# is drained, so a process that runs a thousand temporary roots keeps none of them.
+_PENDING: dict[Path, Counter[str]] = {}
+# Guards `_PENDING` and nothing else. Held for a dict lookup and an add, never across a file
+# read, a write, a rename or a flock: no thread may wait here for anything slower than
+# another thread's arithmetic, which is the whole reason this is cheaper than the flock it
+# replaces on the contended path.
+_PENDING_LOCK = threading.Lock()
+# How many messages may ride in the bucket before one pays for a write anyway. It bounds
+# what /stats and the snapshot ring can trail by, and what a hard exit can lose, on a store
+# quiet enough that no structural bump comes along to flush it — the reaper is no backstop
+# here, since it only bumps on a pass that actually reaped something.
+BATCH_MESSAGES = 64
+
+
 def _bump(root: Path, **deltas: int) -> None:
     """Add to the lifetime counters, atomically.
 
@@ -705,16 +728,64 @@ def _bump(root: Path, **deltas: int) -> None:
     the time this runs, so an unwritable counter must never turn that success into an
     error. The cost of that choice is a possible undercount, which is the right way round
     — a digest that reports slightly low is recoverable, a write that 500s is not.
+
+    Two things keep it cheap, and they are separate. The rule above decides whether to
+    write at all; LOCK_NB decides what happens when the write cannot get the lock.
+
+    That contract is what pays for LOCK_NB here. Every append in the service ran through
+    this one lock and *waited* on it, so writes to unrelated rooms serialised behind each
+    other on a counter neither of them reads (#588). Now a writer that finds the lock held
+    leaves its delta in `_PENDING` and returns; the next writer that does get the lock
+    persists the whole accumulated batch in the same single read-modify-replace one bump
+    used to cost. Uncontended — one process, no overlap — that is still a write per bump,
+    exactly as before, so nothing about a quiet store changes.
+
+    The batch is taken out of `_PENDING` only *after* the flock is held, so a caller that
+    cannot get the lock never removes deltas another thread is counting on, and there is
+    never a moment where a batch is out of the bucket and no one holds the lock to persist
+    it. A replace that fails hands the batch back rather than dropping it, and the
+    successful path never reaches that handler, so a batch cannot be applied twice.
+
+    What it costs: `.counters` lags by whatever is pending while the lock is contended
+    (bounded by one holder's read-modify-replace, and caught up by the next bump), and a
+    worker killed hard loses its own unflushed batch — hard specifically, since app.py's
+    lifespan flushes this bucket on a graceful stop, which is what a rolling deploy sends. Both are the undercount this
+    function's contract already allows — deeper by one flush than before, never wrong in
+    the direction that matters, and never able to make a counter go backwards.
     """
-    path = root / COUNTERS_FILE
+    batch: Counter[str] = Counter()
+    with _PENDING_LOCK:
+        (pending := _PENDING.setdefault(root, Counter())).update(deltas)
+        # `messages` is the only counter bumped per append, and the only one nothing reads
+        # for freshness: app.py's ROOMS_STAMP_KEYS leaves it out on purpose, so no cache
+        # anywhere is waiting for it. Every other key marks a structural event — a create, a
+        # reap, a topic write — that another worker's stamp *is* waiting for, and those keep
+        # paying for their write immediately. So a bump that is only messages rides along.
+        if deltas.keys() == {"messages"} and pending["messages"] < BATCH_MESSAGES:
+            return
     try:
-        with _locked(path):
-            current = counters(root)
-            for key, delta in deltas.items():
-                current[key] = current.get(key, 0) + delta
-            _replace(path, orjson.dumps(current))
+        # LOCK_NB for a message flush only. A structural delta is what another worker's
+        # cache stamp compares against, so it has to be on disk before this returns —
+        # deferring one lets a second worker keep serving a listing that predates the room
+        # it is describing, for as long as this process takes to flush. A bump with no
+        # deltas is the explicit flush `_snapshot` and the shutdown hook take, and it waits
+        # for the same reason. Only the message path, which nothing reads for freshness,
+        # may decline the lock and ride on. `.counters.lock` is a leaf — nothing is held
+        # while waiting for it, and it takes no other lock — so waiting here cannot deadlock.
+        with _locked(root / COUNTERS_FILE, nb=deltas.keys() == {"messages"}):
+            # Under the flock: read the authoritative file, not a cached snapshot, so a
+            # batch from any other process or worker is added to what is really there.
+            with _PENDING_LOCK:
+                batch = _PENDING.pop(root, Counter())
+            _replace(root / COUNTERS_FILE, orjson.dumps(dict(Counter(counters(root)) + batch)))
     except OSError:
-        pass
+        # BlockingIOError — EAGAIN, the lock being busy — is a subclass of OSError and is
+        # the ordinary path here rather than a failure; a real IO error lands here too and
+        # is swallowed exactly as it was before. Either way the deltas go back: `batch` is
+        # empty unless the flock was held and the replace then failed, which is the one
+        # case that has taken deltas out of the bucket and must return them.
+        with _PENDING_LOCK:
+            _PENDING.setdefault(root, Counter()).update(batch)
 
 
 # --------------------------------------------------------------------------- reading
@@ -1686,6 +1757,11 @@ def _snapshot(root: Path) -> None:
                     return
             except FileNotFoundError:
                 pass
+            # Flush this worker's batched counter deltas first: `_bump` lets a plain message
+            # ride in memory, and a sample taken over the unflushed bucket is exactly the
+            # reading this ring exists to get right — one window short, the next one long.
+            # Only this process's bucket, so a sample can still trail other workers'.
+            _bump(root)
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))

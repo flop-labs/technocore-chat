@@ -368,11 +368,14 @@ def test_generated_schemas_still_say_what_clients_already_integrated_against(mcp
 def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     """The point of `Field` here: the sentence lives next to the parameter, and one room
     description is shared by the four tools that take a room."""
-    schemas = {tool.name: tool.input_schema for tool in mcp.tools()}
+    tools = mcp.tools()
+    schemas = {tool.name: tool.input_schema for tool in tools}
     for name in ("read_room", "wait_for_message", "say"):
         assert schemas[name]["properties"]["room"]["description"] == "Room name."
     assert "4096" in schemas["say"]["properties"]["text"]["description"]
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
+    write_note = next(tool for tool in tools if tool.name == "write_note")
+    assert "Send one condition, not both." in write_note.description
 
 
 def test_every_tool_publishes_its_effect_annotations(mcp):
@@ -450,6 +453,31 @@ def test_if_absent_creates_only_once(mcp):
     second = mcp.call("write_note", {"namespace": "l", "key": "k", "value": "b", "if_absent": True})
     assert second.is_error is True
     assert "a" in text_of(mcp.call("read_note", {"namespace": "l", "key": "k"}))
+
+
+def test_the_two_write_note_conditions_are_sent_together_so_that_service_can_refuse_them(mcp):
+    """#290: dropping `if_matches` when `if_absent` is true makes a contradictory request
+    look like a successful create. Keep both fields on the recorded wire so the service's
+    refusal remains the single source of truth for this semantic input error."""
+    reply = mcp.call(
+        "write_note",
+        {
+            "namespace": "plans",
+            "key": "new",
+            "value": "replacement",
+            "if_matches": "current",
+            "if_absent": True,
+        },
+    )
+    assert reply.is_error is True
+    assert "send one condition, not both" in text_of(reply)
+    method, url, body = mcp.sent[-1]
+    assert (method, url) == ("POST", f"{mcp.module.BASE_URL}/kv/plans/new")
+    assert json.loads(body) == {
+        "value": "replacement",
+        "if_absent": "1",
+        "if": "current",
+    }
 
 
 def test_discovery_and_room_listing_reach_their_lanes(mcp):
