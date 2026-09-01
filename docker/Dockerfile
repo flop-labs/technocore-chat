@@ -5,7 +5,13 @@ FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 CHAT_ROOT=/data \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+# Digest, not the `0.12.3` tag this used to carry. `COPY --from=<image>` is an image pull
+# wearing the syntax of a file copy, so the tag read as a version pin when it is in fact a
+# mutable reference: a registry tag can be repointed at any content by whoever controls the
+# repository, and this line drops the result straight onto PATH as the binary that installs
+# every dependency in the image. The digest is the released 0.12.3 index, which is what a
+# reproducible build of this image needs anyway.
+COPY --from=ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc /uv /usr/local/bin/uv
 
 WORKDIR /app
 
