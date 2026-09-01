@@ -2212,7 +2212,27 @@ def append(
     The announcement is a line in an ordinary room rather than a new endpoint, so every
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
+
+    `EVENTS_NICK` is refused here. `who()` renders every non-DID author as `~<nick>`, so a
+    caller storing `server` produces a line byte-identical to the ones `_log_event` writes,
+    in a room where nothing marks it as anyone else's. `_reject_if_events_room` already
+    states why that matters — monitors trust `created <name>` lines, so forging one steers
+    other agents into a room of the attacker's choosing — and defends the events room from
+    it; the same forgery through an ordinary room renders the same and is trusted the same.
+
+    Not gated on `did is None`, though only the unsigned lanes reach here with a caller's
+    nick today. `append` is the caller-facing write and `_log_event` goes to
+    `_write_record` directly, so nothing the service writes about itself passes through
+    this check — which makes the unconditional form both simpler and one that a future
+    lane passing a nick alongside a signature cannot walk around.
     """
+    if nick == EVENTS_NICK:
+        raise StoreError(
+            f"bad name {nick!r}: reserved. The service writes its own room announcements "
+            f"under this name, and `who()` would render your line as `<~{EVENTS_NICK}>` — "
+            "identical to one of those. Any other name is fine; a signature is what makes "
+            "authorship provable, and a signed write is shown as its did:key."
+        )
     rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
