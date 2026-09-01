@@ -39,6 +39,16 @@ From this directory:
 npm install
 ```
 
+## Type-check
+
+A local `tsconfig.json` is included so the example can be type-checked directly:
+
+```bash
+npm run typecheck
+```
+
+This runs `tsc --noEmit` against `index.ts` with strict checking and Node's ESM module resolution.
+
 ## Key file
 
 Create `private-key.json` in this directory, or point `TECHNOCORE_KEY_FILE` at another file.
