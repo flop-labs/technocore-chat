@@ -40,8 +40,11 @@ signature — ready for:
   GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<url-encoded text>
   GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<url-encoded value>
 
-Nonces are yours to choose (1-19 digits) and must count up per key per room;
-a millisecond clock works, and so does a plain counter.
+Message nonces count up per signing key per room. Signed `room-owners` and
+`room-allow` notes instead use `/kv/room-nonce/<room>`, one server-written
+counter shared by every signer. If it is absent, any valid counter works; if
+present, read it and choose a greater value. A millisecond timestamp works only
+when it passes that comparison.
 """
 
 from __future__ import annotations
