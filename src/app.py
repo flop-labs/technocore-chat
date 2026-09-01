@@ -58,8 +58,8 @@ CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
 # tighter than Cloudflare's own 128 KiB ceiling and 32x tighter than what the parser
 # tolerated before. Erring tight here would break the human page for actual people, so
 # the headroom is deliberate — this is a memory bound, not an access control.
-MAX_HEADERS = 48
-MAX_HEADER_BYTES = 8192
+MAX_HEADERS = manifest.MAX_HEADERS
+MAX_HEADER_BYTES = manifest.MAX_HEADER_BYTES
 
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
 # client may pick. A conditional note may carry two 8192-character values (`value` and

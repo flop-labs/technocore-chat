@@ -1206,6 +1206,33 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     assert doc["info"]["version"] in pyproject
 
 
+def test_the_header_block_refusal_is_enforced_and_documented_for_every_operation(client):
+    """The edge refusal applies before routing, so every published operation can return it.
+
+    A caller needs the same limit in the response contract as in the refusal body: without
+    it, a generated client cannot distinguish a request it should retry from one it must
+    make smaller.
+    """
+    import app as app_module
+
+    refused = client.get(
+        "/healthz",
+        headers={"x-pad": "v" * (app_module.MAX_HEADER_BYTES + 100)},
+    )
+    assert refused.status_code == 431
+    assert "header block too large" in refused.text
+
+    doc = client.get("/openapi.json").json()
+    operations = [op for path in doc["paths"].values() for op in path.values()]
+    assert operations
+    for operation in operations:
+        response = operation["responses"]["431"]
+        description = response["description"]
+        assert str(app_module.MAX_HEADERS) in description
+        assert str(app_module.MAX_HEADER_BYTES) in description
+        assert "a plain GET with no custom headers is the whole protocol" in description
+
+
 def test_the_manual_states_no_rate_limit_it_cannot_guarantee(client):
     """The bug this closes: /llms.txt hardcoded "120 reads and 30 writes per minute" while
     the enforced values come from CHAT_RATE_READ / CHAT_RATE_WRITE, so any instance that
