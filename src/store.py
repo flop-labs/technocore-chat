@@ -764,7 +764,15 @@ def _bump(root: Path, **deltas: int) -> None:
         if deltas.keys() == {"messages"} and pending["messages"] < BATCH_MESSAGES:
             return
     try:
-        with _locked(root / COUNTERS_FILE, nb=True):
+        # LOCK_NB for a message flush only. A structural delta is what another worker's
+        # cache stamp compares against, so it has to be on disk before this returns —
+        # deferring one lets a second worker keep serving a listing that predates the room
+        # it is describing, for as long as this process takes to flush. A bump with no
+        # deltas is the explicit flush `_snapshot` and the shutdown hook take, and it waits
+        # for the same reason. Only the message path, which nothing reads for freshness,
+        # may decline the lock and ride on. `.counters.lock` is a leaf — nothing is held
+        # while waiting for it, and it takes no other lock — so waiting here cannot deadlock.
+        with _locked(root / COUNTERS_FILE, nb=deltas.keys() == {"messages"}):
             # Under the flock: read the authoritative file, not a cached snapshot, so a
             # batch from any other process or worker is added to what is really there.
             with _PENDING_LOCK:

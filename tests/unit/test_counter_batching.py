@@ -172,6 +172,33 @@ def test_a_snapshot_flushes_the_bucket_before_it_samples(tmp_path, monkeypatch) 
     assert sampled == 2, "the sample was taken over deltas still sitting in memory"
 
 
+def test_a_snapshot_is_exact_even_when_the_lock_is_contended(tmp_path, monkeypatch) -> None:
+    """The uncontended snapshot test above is not enough: `_snapshot` flushes through `_bump`,
+    and if that flush were allowed to decline a busy lock the sample would silently record the
+    figure the ring exists to get right — one window short, the next long — while the process
+    stayed healthy. The flush has no deltas of its own, so it is not a message bump and waits.
+    """
+    import store
+
+    store.append(tmp_path, "lobby", "bot", "one")
+    store.append(tmp_path, "lobby", "bot", "two")
+    assert store._PENDING[tmp_path] == {"messages": 1}, "the second message should be riding"
+    monkeypatch.setattr(store, "SNAPSHOT_EVERY", 0)
+    sampled = []
+
+    def sample() -> None:
+        store._snapshot(tmp_path)
+        sampled.append(store.snapshots(tmp_path)[-1]["counters"]["messages"])
+
+    with _lock_held(tmp_path):
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+        assert not sampler.join(0.25) and not sampled, "it sampled over an unflushed bucket"
+
+    sampler.join(timeout=10)
+    assert sampled == [2], "the sample missed a delta that was still in memory"
+
+
 def test_a_bump_that_cannot_write_at_all_still_does_not_raise(tmp_path) -> None:
     """The contract this function has always had: the caller's write already succeeded, so a
     counter that cannot be written must never turn that success into an error. The new code
@@ -191,17 +218,19 @@ def test_a_bump_that_cannot_write_at_all_still_does_not_raise(tmp_path) -> None:
 # ------------------------------------------------------------------------- under contention
 
 
-def test_a_held_lock_does_not_make_a_writer_wait(tmp_path) -> None:
-    """The bug itself. Under a watchdog rather than a stopwatch: the claim is "this returns
-    without the holder releasing", which a join timeout states exactly and a wall-clock
-    threshold only approximates — and only the latter fails on a loaded CI runner.
+def test_a_message_flush_does_not_wait_for_a_held_lock(tmp_path) -> None:
+    """The bug itself, on the only path still allowed to decline the lock. Under a watchdog
+    rather than a stopwatch: the claim is "this returns without the holder releasing", which a
+    join timeout states exactly and a wall-clock threshold only approximates — and only the
+    latter fails on a loaded CI runner.
     """
     import store
 
     done = threading.Event()
 
     def bump() -> None:
-        store._bump(tmp_path, rooms_created=1)  # structural: this one really wants the lock
+        for _ in range(store.BATCH_MESSAGES):  # the last one reaches the bound and the lock
+            store._bump(tmp_path, messages=1)
         done.set()
 
     with _lock_held(tmp_path):
@@ -212,7 +241,40 @@ def test_a_held_lock_does_not_make_a_writer_wait(tmp_path) -> None:
         assert done.is_set(), "the bump is still waiting on a lock it must never wait on"
         assert not (tmp_path / store.COUNTERS_FILE).exists(), "it wrote under another holder"
 
-    assert store._PENDING[tmp_path]["rooms_created"] == 1, "and the delta is kept, not dropped"
+    assert store._PENDING[tmp_path] == {"messages": store.BATCH_MESSAGES}, "deltas were dropped"
+
+
+def test_a_structural_bump_waits_for_the_lock_rather_than_deferring(tmp_path) -> None:
+    """The ordering contract the `/rooms` cache stamp rests on, and the one thing the
+    non-blocking path must not be allowed to break.
+
+    A structural counter is what another worker compares to decide its cached listing is
+    stale. Deferring one means a second worker keeps serving a listing that predates the room
+    it should describe, for as long as this process takes to flush — unbounded if it goes
+    quiet. So a structural bump waits for the lock and is on disk when it returns, exactly as
+    it was before batching. Waiting is safe because `.counters.lock` is a leaf: nothing is
+    held while waiting for it and it takes no other lock.
+    """
+    import store
+
+    done = threading.Event()
+
+    def bump() -> None:
+        store._bump(tmp_path, rooms_created=1)
+        done.set()
+
+    with _lock_held(tmp_path):
+        writer = threading.Thread(target=bump, daemon=True)
+        writer.start()
+        # A negative check, so it cannot fail spuriously on a slow runner: completing here
+        # would mean the flock was granted while another holder had it.
+        assert not done.wait(0.25), "a structural bump returned without persisting"
+        assert not (tmp_path / store.COUNTERS_FILE).exists()
+
+    writer.join(timeout=10)
+    assert done.is_set(), "the bump never completed once the lock was free"
+    assert _persisted(tmp_path)["rooms_created"] == 1
+    assert tmp_path not in store._PENDING
 
 
 def test_deltas_accumulate_while_the_lock_is_held(tmp_path) -> None:
@@ -224,9 +286,9 @@ def test_deltas_accumulate_while_the_lock_is_held(tmp_path) -> None:
 
     with _lock_held(tmp_path):
         for _ in range(5):
-            store._bump(tmp_path, rooms_created=1)
+            store._bump(tmp_path, messages=1)
 
-        assert store._PENDING[tmp_path] == {"rooms_created": 5}
+        assert store._PENDING[tmp_path] == {"messages": 5}
         assert not (tmp_path / store.COUNTERS_FILE).exists()
 
 
@@ -238,15 +300,16 @@ def test_the_first_bump_after_contention_flushes_the_backlog_exactly_once(tmp_pa
     import store
 
     with _lock_held(tmp_path):
-        store._bump(tmp_path, rooms_created=2)
-        store._bump(tmp_path, rooms_created=3)
+        for _ in range(store.BATCH_MESSAGES):  # the bound is reached, but the lock is busy
+            store._bump(tmp_path, messages=1)
+        assert not (tmp_path / store.COUNTERS_FILE).exists()
 
-    store._bump(tmp_path, rooms_created=1)
+    store._bump(tmp_path, messages=1)
 
-    assert _persisted(tmp_path)["rooms_created"] == 6
+    assert _persisted(tmp_path)["messages"] == store.BATCH_MESSAGES + 1
     assert tmp_path not in store._PENDING
     _drain(tmp_path)
-    assert _persisted(tmp_path)["rooms_created"] == 6, "a drained batch is not applied again"
+    assert _persisted(tmp_path)["messages"] == store.BATCH_MESSAGES + 1, "applied twice"
 
 
 def test_a_batch_keeps_its_keys_apart(tmp_path) -> None:
@@ -255,10 +318,9 @@ def test_a_batch_keeps_its_keys_apart(tmp_path) -> None:
     """
     import store
 
-    with _lock_held(tmp_path):
-        store._bump(tmp_path, messages=1, rooms_created=1)
-        store._bump(tmp_path, notes_written=2)
-        store._bump(tmp_path, messages=1)
+    store._bump(tmp_path, messages=1)
+    store._bump(tmp_path, messages=1, rooms_created=1)
+    store._bump(tmp_path, notes_written=2)
 
     _drain(tmp_path)
 
