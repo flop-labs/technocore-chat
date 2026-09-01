@@ -771,7 +771,7 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        if _signer is not None and host not in _LOOPBACK:
+        if _signer is not None and host.lower() not in _LOOPBACK:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "

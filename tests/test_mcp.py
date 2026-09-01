@@ -1339,18 +1339,21 @@ def test_http_refuses_to_serve_a_signing_key_off_loopback(monkeypatch):
     monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))
     monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--http"])
 
-    monkeypatch.setenv("HOST", "0.0.0.0")  # noqa: S104 - the address under test
-    with pytest.raises(SystemExit) as refused:
-        mcp_server.main()
-    assert "public signing" in str(refused.value)
+    for host in ("0.0.0.0", "example.com"):
+        monkeypatch.setenv("HOST", host)  # noqa: S104 - the address under test
+        with pytest.raises(SystemExit) as refused:
+            mcp_server.main()
+        assert "public signing" in str(refused.value)
+        assert host in str(refused.value)
 
     # ...and the same key on loopback is exactly the case this must not break.
     ran = []
     monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k.get("host")))
-    for host in ("127.0.0.1", "localhost", "::1"):
+    loopback_hosts = ("127.0.0.1", "localhost", "LOCALHOST", "LoCaLhOsT", "::1")
+    for host in loopback_hosts:
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
-    assert ran == ["127.0.0.1", "localhost", "::1"]
+    assert ran == list(loopback_hosts)
 
 
 def test_the_worker_token_check_answers_a_non_ascii_header_rather_than_crashing():
