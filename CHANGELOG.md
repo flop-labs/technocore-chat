@@ -16,6 +16,37 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-09-01
+
+### Changed
+
+- **The lifetime counters no longer serialise every write behind one lock.** Every append
+  bumped `.counters` under a blocking service-wide `flock` held across a read-modify-replace,
+  so writes to unrelated rooms queued behind each other on a file neither of them reads; the
+  lock is non-blocking now, and a plain message bump accumulates in the worker until a
+  structural counter (a create, a reap, a topic write), a 64-message bound, or a `/stats`
+  sample flushes it. **Deployer note:** the `messages` total in `/stats` and in its stored
+  history can trail by up to 63 per worker process, and a worker killed hard loses its own
+  unflushed batch — the same best-effort undercount `_bump` has always documented, one flush
+  deep instead of zero. The counters remain monotonic, and `/rooms` and the note gauge are
+  unaffected: the counters their cache stamps read still write immediately.
+
+### Added
+
+- **The MCP Worker answers on `mcp.technocore.chat`**, which is now the canonical remote MCP
+  endpoint. Additive rather than a migration — `technocore-mcp.flop-labs.workers.dev` stays a
+  live alias, so already-configured clients keep working unchanged.
+
+### Fixed
+
+- The manual's numbers are rendered from the constants that enforce them instead of being
+  typed into the prose, and three claims the MCP card made about the wrapper are corrected.
+
+### Internal
+
+- The queue guard's overlap check verifies that a search hit actually cites the issue, so a
+  measurement in a pull request body no longer reads as a reference to another one.
+
 ## [0.11.1] - 2026-08-31
 
 ### Changed
@@ -993,7 +1024,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.2
 [0.11.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.1
 [0.11.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.0
 [0.10.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.10.0
