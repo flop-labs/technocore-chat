@@ -1522,7 +1522,7 @@ def _drop_emptied_namespaces(root: Path) -> None:
     Under the create span, taken exclusively, for a nearer reason than the count's. A create
     makes its namespace directory inside `_locked`, one `mkdir` before the `open` that creates
     the sidecar lock in it, and the directory is still empty in between — precisely what this
-    rmdir looks for. Removing it in that gap does not merely lose a reside, it fails the create:
+    rmdir looks for. Removing it in that gap does not merely lose a race, it fails the create:
     creating a file in a directory being removed is EINVAL on APFS, measured here and needing
     O_CREAT to reproduce at all, where a directory merely *gone* gives the ENOENT POSIX
     specifies — the errno this was expected to be and never was. Either way the note write
