@@ -768,7 +768,7 @@ def _rooms_stamp() -> tuple:
     storing it beside the value is also what leaves no read-then-validate window between
     finding an entry and using it, so there is nothing here for a concurrent eviction to
     race (the bug class of #376/#229). What it costs is that a superseded entry is not
-    reclaimed when its stamp moves; MAX_ROOMS_CACHE is what bounds that.
+    reclaimed when its stamp moves; MAX_ROOMS_CACHE is bounds that.
 
     That argument holds for every key here, and `messages` is deliberately not one of them.
     It is a single global lifetime counter, not per-room, so one message anywhere aged out
