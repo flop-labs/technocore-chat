@@ -18,12 +18,13 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-21, 56 checks, all passing — expected shape:
+ * Checked 2026-09-02, 66 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
+ *   delayed send    a room A response cannot erase a newer room B draft
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
  *   webmcp          eight tools register on load, measured through the browser's own
  *                   getTools()/executeTool() (Chrome 151 + --enable-features=WebMCP, set
@@ -180,6 +181,81 @@ const browser = await chromium.launch({
     await context.close();
   }
 }
+
+// -------------------------------------------------------------- delayed successful sends
+// This section posts messages and therefore runs after the layout checks that depend on the
+// initial room ordering and row heights.
+async function delayedSendCase({ label, draftEdits = [], nextRoom, expected }) {
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  let releaseResponse;
+  let markPosted;
+  const mayRespond = new Promise((resolve) => { releaseResponse = resolve; });
+  const posted = new Promise((resolve) => { markPosted = resolve; });
+
+  await page.route(`${BASE}/r/lobby`, async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const response = await route.fetch();       // the write landed; hold only its response
+    markPosted();
+    await mayRespond;
+    await route.fulfill({ response });
+  });
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "networkidle" });
+
+  await page.fill("#text", "sent to room A");
+  await page.locator("#send").click();
+  await posted;
+  if (nextRoom) {
+    await page.fill("#room", nextRoom);
+    await page.locator("#join").click();
+  }
+  for (const draft of draftEdits) await page.fill("#text", draft);
+
+  const postResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST"
+      && new URL(response.url()).pathname === "/r/lobby",
+  );
+  const currentRoom = nextRoom || "lobby";
+  const responsePoll = page.waitForRequest((request) =>
+    request.method() === "GET"
+      && new URL(request.url()).pathname === `/r/${currentRoom}`
+      && new URL(request.url()).searchParams.get("format") === "json",
+  );
+  releaseResponse();
+  const response = await postResponse;
+  await responsePoll; // send() clears or preserves the draft before starting this poll
+  check(`${label}: POST succeeded`, response.ok(), `HTTP ${response.status()}`);
+  const actual = await page.inputValue("#text");
+  check(label, actual === expected, JSON.stringify(actual));
+  await context.close();
+}
+
+console.log("delayed successful sends");
+await delayedSendCase({
+  label: "an unchanged draft clears",
+  expected: "",
+});
+await delayedSendCase({
+  label: "a newer draft in the same room survives",
+  draftEdits: ["newer lobby draft"],
+  expected: "newer lobby draft",
+});
+await delayedSendCase({
+  label: "an edited draft restored to the same text survives",
+  draftEdits: ["temporary edit", "sent to room A"],
+  expected: "sent to room A",
+});
+await delayedSendCase({
+  label: "a room switch preserves the unchanged composer",
+  nextRoom: "standup",
+  expected: "sent to room A",
+});
+await delayedSendCase({
+  label: "room A's response preserves room B's draft",
+  nextRoom: "standup",
+  draftEdits: ["unsent room B draft"],
+  expected: "unsent room B draft",
+});
 
 // ------------------------------------------------------------------------------- WebMCP
 // Driven through the browser's own ModelContext where the launch flag above enabled it:
