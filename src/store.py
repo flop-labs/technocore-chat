@@ -1182,6 +1182,36 @@ def list_rooms(root: Path) -> list[str]:
     return sorted(n for n in names if _listable(n))
 
 
+_ROOMS_TOTAL_MAX = 64
+
+
+@lru_cache(maxsize=_ROOMS_TOTAL_MAX)
+def _rooms_total(root: str, stamp: tuple) -> int:
+    """The /rooms listing size, keyed on the rooms stamp the page cache rides.
+
+    The count moves with structural writes — a room created or reaped — every one of which
+    bumps the stamp, so a count served under a current stamp is exact and a stale stamp is
+    a key nobody asks for any more, exactly like the page cache. The /rooms route
+    canonicalizes an offset against this *before* keying the page LRU, so every offset past
+    the current end lands on the same (empty) end-page entry rather than opening a fresh
+    cache slot per value.
+
+    readdir-only, and deliberately lighter than room_stats: it lists names, it does not
+    stat every room or touch any tail, so the count costs far less than the walk it keys.
+    """
+    return len(list_rooms(Path(root)))
+
+
+def _rooms_offset(root: Path, stamp: tuple, offset: int) -> int:
+    """The offset to key a /rooms page on: clamped to the current listing size.
+
+    Every value past the end renders the same empty page, so they must share one cache
+    entry — min(offset, total). `_rooms_total` is keyed on the stamp, so this is exact for
+    the current structural state and costs a readdir, never a stat of every room or a tail.
+    """
+    return min(offset, _rooms_total(str(root), stamp))
+
+
 def _time_bucket(now: float, ttl: float) -> int:
     """A coarse clock for a cache whose validity window is part of its key.
 

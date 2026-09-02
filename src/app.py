@@ -891,12 +891,17 @@ def _rooms_view(limit: int, offset: int = 0) -> dict:
     Zero means no reuse, and it means it for entries already in the cache too: the knob is
     read here, per call, and at zero the walk goes straight past the cache rather than
     trying to expire what is in it.
+
+    `offset` is canonicalized to the shape of the cache key — min(offset, total) via
+    store._rooms_offset — before it keys the LRU: every value past the current end renders
+    the same empty page, so they must share one entry rather than open a cache slot per value.
+    store.room_stats clamps the same offset into the page itself.
     """
     stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
-    ttl = config.ROOMS_CACHE_SECONDS
-    if ttl <= 0:
+    if config.ROOMS_CACHE_SECONDS <= 0:
         return _rooms_payload(limit, offset)
-    return _rooms_walk(limit, offset, stamp, store._time_bucket(time.monotonic(), ttl))
+    bucket = store._time_bucket(time.monotonic(), config.ROOMS_CACHE_SECONDS)
+    return _rooms_walk(limit, store._rooms_offset(config.ROOT, stamp, offset), stamp, bucket)
 
 
 def rooms(request: Request) -> Response:
@@ -907,15 +912,13 @@ def rooms(request: Request) -> Response:
     # Clamped here rather than only inside room_stats, because these numbers are the cache
     # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
     # incrementing it walked every room on every request and evicted everyone else's view
-    # out of a 64-entry cache while doing it. Now the key space is the reply space, and the
-    # offset joins it the same way — the pager is cache-friendly rather than cache-hostile.
-    # `offset` is clamped to the room capacity (MAX_ROOMS), because a value past the end
-    # still renders the same empty page: unbounded, a caller could churn _rooms_walk with
-    # ever-larger offsets instead of evicting a bounded reply space.
+    # out of a 64-entry cache while doing it. Now the key space is the reply space. The
+    # offset's reply space is tiny and only known to the store, so _rooms_view normalizes it
+    # there (store._rooms_offset) to the current listing size before it keys the LRU.
     # `tail`, not `limit`: the local must not shadow the limit module the refusal above
     # calls into.
     tail = min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT)
-    view = _rooms_view(tail, min(_cursor(q.get("offset"), 0) or 0, store.MAX_ROOMS))
+    view = _rooms_view(tail, _cursor(q.get("offset"), 0) or 0)
     n = view["notes"]
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.

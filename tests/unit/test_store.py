@@ -1156,6 +1156,25 @@ def test_room_stats_pages_with_offset_and_clamps_past_end(tmp_path):
     ]
 
 
+def test_rooms_offset_clamps_to_the_live_count_before_the_cache_keys(tmp_path):
+    """The offset a /rooms page is keyed on is min(offset, total): every value past the
+    current end collapses onto the same end-page entry, so an abuser advancing `?offset=`
+    cannot open an unbounded set of cache keys where the listing is already short."""
+    import store
+
+    store._rooms_total.cache_clear()
+    for i in range(3):
+        store.append(tmp_path, f"r{i}", "bot", "hi")
+    total = len(store.list_rooms(tmp_path))  # the live count, whatever it is
+    stamp = ("any-key", "the-stamp-is-only-a-key-shape")  # count is readdir-based
+    assert store._rooms_offset(tmp_path, stamp, 0) == 0
+    assert store._rooms_offset(tmp_path, stamp, 1) == 1
+    assert store._rooms_offset(tmp_path, stamp, total) == total  # at the end: the empty page
+    assert store._rooms_offset(tmp_path, stamp, total + 1) == total  # past end: collapse
+    assert store._rooms_offset(tmp_path, stamp, total + 9_999) == total
+    assert store._rooms_offset(tmp_path, stamp, 10**9) == total
+
+
 def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
     """A topic set is a note write, so it bumps notes_written and shows up immediately;
     a deletion the counter cannot see (the reaper's) ages out with the TTL."""
