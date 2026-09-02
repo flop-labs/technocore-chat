@@ -659,8 +659,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var ctl = new AbortController();
     var timer = setTimeout(function () { ctl.abort(); }, ROOMS_DEADLINE_MS);
     fetch('/rooms?format=json&limit=200', { signal: ctl.signal })
-      .then(function (r) { clearTimeout(timer); return r.json(); })
-      .then(function (v) { roomsView = v; renderRooms(); })
+      // The timer is cleared after the parse, not after the headers. fetch() resolves as
+      // soon as the response head arrives, so clearing it on `r` would leave a stalled or
+      // dribbling body running until the browser's own timeout — the hang this deadline
+      // exists to end, moved one step later and harder to see. The signal reaches the body
+      // read too, so an abort here rejects the parse and lands in the catch below.
+      .then(function (r) { return r.json(); })
+      .then(function (v) { clearTimeout(timer); roomsView = v; renderRooms(); })
       .catch(function () {
         clearTimeout(timer);
         // Only when there is nothing else to show. This refreshes every 5 seconds, and
