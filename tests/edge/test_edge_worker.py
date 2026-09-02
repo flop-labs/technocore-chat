@@ -35,14 +35,18 @@ def _snapshot_module():
 
 
 def _wrangler_routes() -> set[str]:
-    """The path half of every route in wrangler.jsonc, as a URL path."""
+    """The path half of every route in wrangler.jsonc, as a URL path.
+
+    A trailing `*` is dropped: it decides *matching*, not which path is served, and every
+    caller of this helper is asking the second question.
+    """
     raw = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
     stripped = re.sub(r"^\s*//.*$", "", raw, flags=re.M)
     config = json.loads(stripped)
     paths = set()
     for route in config["routes"]:
         _, _, path = route["pattern"].partition("/")
-        paths.add("/" + path)
+        paths.add("/" + path.rstrip("*"))
     return paths
 
 
@@ -390,3 +394,24 @@ def test_the_snapshot_script_needs_nothing_but_the_standard_library():
             imported.add(node.module)
     external = {m.split(".")[0] for m in imported} - set(sys.stdlib_module_names) - {"__future__"}
     assert not external, f"snapshot.py must run under a bare python3, but imports {external}"
+
+
+def test_a_path_whose_reply_varies_by_query_is_routed_with_a_wildcard():
+    """Route patterns are matched against the whole URL, query string included, so
+    `technocore.chat/rooms` matches a bare /rooms and not /rooms?format=json — the request
+    never reaches the Worker and the lane silently does nothing at all. That is how the first
+    deploy of this lane behaved: bare /rooms came back with x-edge-stamp and s-maxage=86400,
+    /rooms?format=json with the origin's own headers.
+
+    Only paths whose reply depends on the query need this, which is why the document routes
+    are exact: EDGE_KEY naming a path is what says its reply varies.
+    """
+    raw = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
+    patterns = {
+        r["pattern"] for r in json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))["routes"]
+    }
+    for path in _snapshot_module().rooms_key():
+        assert f"technocore.chat{path}*" in patterns, (
+            f"{path}'s reply varies by query string, so its route must end in * or the "
+            "Worker never sees the requests that carry one"
+        )

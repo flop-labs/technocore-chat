@@ -40,7 +40,12 @@
     // Edge-cached, never snapshotted — see EDGE_CACHED in snapshot.py.
     { "pattern": "technocore.chat/healthz", "zone_name": "technocore.chat" },
     // Served from the edge copy always, refreshed in the background — EDGE_REVALIDATE.
-    { "pattern": "technocore.chat/rooms", "zone_name": "technocore.chat" },
+    // The trailing * is load-bearing: a route pattern is matched against the whole URL,
+    // query string included, so "technocore.chat/rooms" matches a bare /rooms and nothing
+    // else. Every caller that matters sends one — /humans asks for ?format=json&limit=200
+    // and agents for ?format=json — so without it the lane is attached to the one form of
+    // the request nobody makes. This is the only route whose reply depends on its query.
+    { "pattern": "technocore.chat/rooms*", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/robots.txt", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/sitemap.xml", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/openapi.json", "zone_name": "technocore.chat" },
