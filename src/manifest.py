@@ -153,7 +153,7 @@ _ROOM_VIEW_SCHEMA = {
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
     },
-    "required": ["room", "count", "last_seq", "messages"],
+    "required": ["room", "count", "first_seq", "last_seq", "messages"],
 }
 
 
