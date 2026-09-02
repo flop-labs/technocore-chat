@@ -36,6 +36,14 @@ import ROUTING from "./routing.json";
 // Generous: a slow document is still the correct document, and the snapshot is a worse
 // answer than a late one.
 const ORIGIN_TIMEOUT_MS = 8000;
+// The revalidating lane gets its own, far longer budget: it is a background refresh nobody
+// is waiting on, and the walk it covers has measured over 30s. Cutting it at 8s would mean
+// the copy never refreshes at all on a loaded box, which is exactly when it matters.
+const ORIGIN_REVALIDATE_MS = 120000;
+// How long the edge may hold a copy. Longer than the refresh interval by design: the lane,
+// not the header, decides freshness, and an expiry shorter than the refresh would drop the
+// copy that makes the whole thing non-blocking.
+const EDGE_HOLD_SECONDS = 3600;
 
 const STATIC_FIRST = new Set(ROUTING.static_first);
 
@@ -48,6 +56,19 @@ const STATIC_FIRST = new Set(ROUTING.static_first);
 // including the container healthcheck and the auto-updater's rollback probe (both on
 // 127.0.0.1, neither through this Worker), gets an uncached answer. Only the edge shares it.
 const EDGE_CACHED_SECONDS = ROUTING.edge_cached ?? {};
+
+// Paths served from the edge copy ALWAYS, refreshed behind ctx.waitUntil(). See snapshot.py,
+// which owns the policy. The stale copy is the answer; the refresh is a side effect nobody
+// waits for. `x-edge-stamp` carries when the copy was made, because the Cache API gives no
+// age of its own and `Age` is the CDN's, not this lane's.
+const EDGE_REVALIDATE_SECONDS = ROUTING.edge_revalidate ?? {};
+const STAMP = "x-edge-stamp";
+
+// One refresh per path per isolate. Workers isolates are per-PoP and short-lived, so this is
+// not a global lock — it does not need to be. What it prevents is the case that actually
+// bites: a burst of readers arriving on one PoP against an expired copy, each queueing its
+// own walk at an origin whose thread pool is the thing being protected.
+const inFlight = new Map();
 
 /** A 5xx is the origin failing to answer. A 4xx is the origin answering "no", which is a
  * real reply and must pass through untouched — serving a snapshot over a 404 or a 429 would
@@ -116,10 +137,40 @@ async function edgeCached(request, pathname, seconds) {
   return fresh;
 }
 
+async function fromOrigin(request, cache, pathname) {
+  const fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  if (fresh.status !== 200) return fresh;
+  const body = await fresh.arrayBuffer();
+  const headers = new Headers(fresh.headers);
+  headers.set(STAMP, String(Date.now()));
+  // The edge copy outlives the origin's own short window on purpose: this lane decides when
+  // to refresh, so a header that expires sooner would just hand the decision back.
+  headers.set("Cache-Control", `public, max-age=0, s-maxage=${EDGE_HOLD_SECONDS}`);
+  await cache.put(request, new Response(body, { status: 200, headers }));
+  return new Response(body, { status: 200, headers });
+}
+
+async function revalidating(request, ctx, pathname, seconds) {
+  const cache = caches.default;
+  const hit = await cache.match(request);
+
+  if (!hit) return fromOrigin(request, cache, pathname);  // cold: someone has to be first
+
+  const stamp = Number(hit.headers.get(STAMP) || 0);
+  if (Date.now() - stamp > seconds * 1000 && !inFlight.has(pathname)) {
+    const job = fromOrigin(request, cache, pathname)
+      .catch(() => {})                      // a failed refresh keeps the copy we have
+      .finally(() => inFlight.delete(pathname));
+    inFlight.set(pathname, job);
+    ctx.waitUntil(job);
+  }
+  return hit;  // always, however old — waiting for this walk is the thing being removed
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await route(request, env);
+      return await route(request, env, ctx);
     } catch (err) {
       // Fail open. This Worker sits in front of the liveness endpoint now, so an exception
       // in it must not become the service looking dead: hand the request to the origin and
@@ -129,7 +180,7 @@ export default {
   },
 };
 
-async function route(request, env) {
+async function route(request, env, ctx) {
     // Only GET/HEAD are ever routed here, but a stray method must not be answered from a
     // stored copy: fall through to the origin and let it refuse.
     if (request.method !== "GET" && request.method !== "HEAD") return fetch(request);
@@ -138,6 +189,9 @@ async function route(request, env) {
 
     const cacheFor = EDGE_CACHED_SECONDS[pathname];
     if (cacheFor) return edgeCached(request, pathname, cacheFor);
+
+    const revalidateAfter = EDGE_REVALIDATE_SECONDS[pathname];
+    if (revalidateAfter) return revalidating(request, ctx, pathname, revalidateAfter);
 
     if (STATIC_FIRST.has(pathname)) {
       const copy = await stored(request, env, pathname, { fallback: false });

@@ -57,7 +57,7 @@ def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     whole point of them.
     """
     snapshot = _snapshot_module()
-    accounted = set(snapshot.PATHS) | set(snapshot.EDGE_CACHED)
+    accounted = set(snapshot.PATHS) | set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE)
     assert _wrangler_routes() - accounted == set()
 
 
@@ -69,9 +69,11 @@ def test_a_liveness_path_is_never_snapshotted():
     report a service that is gone as healthy, to every monitor watching it.
     """
     snapshot = _snapshot_module()
-    assert set(snapshot.EDGE_CACHED) & set(snapshot.PATHS) == set()
-    assert set(snapshot.EDGE_CACHED) & set(snapshot.STATIC_FIRST) == set()
+    live = set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE)
+    assert live & set(snapshot.PATHS) == set()
+    assert live & set(snapshot.STATIC_FIRST) == set()
     assert "/healthz" not in snapshot.PATHS
+    assert "/rooms" not in snapshot.PATHS
 
 
 def test_the_edge_cache_window_is_long_enough_to_be_worth_having():
@@ -216,3 +218,28 @@ def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
     assert "max-age=0, s-maxage=${seconds}" in worker, (
         "the edge-cached copy must not carry a private max-age"
     )
+
+
+def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
+    """The property the lane exists for, asserted on the source because there is no JS
+    harness here — and it is the one a later edit would quietly remove.
+
+    /rooms is an O(total-rooms) walk that measured 52.7% of worker thread-time at 0.9 req/s,
+    with a single uncached call taking 32.6s. Plain caching cannot cover a walk that outlasts
+    its own window: the reader who arrives after it closes pays the whole cost *and* holds an
+    anyio thread while doing so, which is why unrelated room reads on the same box measured
+    3.3s to 21.4s for 17 KB. Returning the stale copy unconditionally is what breaks that.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = worker[worker.index("async function revalidating(") :]
+    lane = lane[: lane.index("export default")]
+    assert "return hit;" in lane, "the cached copy must be returned whatever its age"
+    assert "ctx.waitUntil(" in lane, "the refresh must not be awaited on the request path"
+    assert "inFlight" in lane, "a burst on one PoP must not queue one walk per reader"
+
+
+def test_the_revalidate_interval_outlives_the_walk_it_covers():
+    """A window shorter than the walk is the bug this lane replaces: the origin header is
+    s-maxage=5 with swr=25, a 30s budget against a 32.6s walk, so it always closed first."""
+    for path, seconds in _snapshot_module().EDGE_REVALIDATE.items():
+        assert seconds >= 30, f"{path} at {seconds}s is inside the measured walk time"

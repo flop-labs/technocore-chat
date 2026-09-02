@@ -84,6 +84,24 @@ STATIC_FIRST = {"/skill.md": "SKILL.md", "/patterns.md": "src/patterns.md"}
 # minutes arrived through the tunnel, 10.4% of all traffic).
 EDGE_CACHED = {"/healthz": 10}
 
+# Served from the edge copy ALWAYS, refreshed in the background at most this often. Never
+# snapshotted: like /healthz these are live figures, and a stored answer for them would
+# outlive the service that produced it.
+#
+# This lane exists because /rooms cannot be made fast enough to wait for. It is an
+# O(total-rooms) walk (technocore-chat#576) that measured 52.7% of worker thread-time at
+# 0.9 req/s, and a single uncached call took 32.6s. Plain caching cannot cover that: the
+# origin header is s-maxage=5 with stale-while-revalidate=25, a 30s window against a walk
+# that outlasts it, so the window always closes first and some reader pays the whole cost.
+# Worse, that reader occupies an anyio thread for the duration, which is why an unrelated
+# /r/<room> read on the same box measured 3.3s to 21.4s for 17 KB — queueing, not work.
+#
+# Serving the stale copy unconditionally and refreshing behind ctx.waitUntil() inverts that:
+# no reader ever waits for a walk, and the data is as fresh as the origin can actually
+# produce rather than as fresh as we are willing to make people wait. The interval also
+# bounds how often the origin is asked, which is the part that frees the thread pool.
+EDGE_REVALIDATE = {"/rooms": 60}
+
 
 def asset_name(path: str) -> str:
     """Where a URL path is stored under public/.
@@ -146,7 +164,12 @@ def main() -> int:
 
     pathlib.Path(args.manifest).write_text(
         json.dumps(
-            {"types": types, "static_first": sorted(STATIC_FIRST), "edge_cached": EDGE_CACHED},
+            {
+                "types": types,
+                "static_first": sorted(STATIC_FIRST),
+                "edge_cached": EDGE_CACHED,
+                "edge_revalidate": EDGE_REVALIDATE,
+            },
             indent=2,
             sort_keys=True,
         )
