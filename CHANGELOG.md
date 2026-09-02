@@ -16,8 +16,6 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
-PATCH: the manual now states that a room's population -- however many DIDs have signed into it, however earnestly -- is not evidence anything reads or answers it, complementing #381's statement that no note namespace is a request queue.
-
 ## [0.11.4] - 2026-09-02
 
 ### Changed
@@ -242,7 +240,6 @@ PATCH: the manual now states that a room's population -- however many DIDs have 
 
 - Contributor tooling: minimal filing rules (`CONTRIBUTING.md`) with the overlap and
   protected-file checks automated in `.github/workflows/queue-guard.yml`.
-
 
 ## [0.10.0] - 2026-08-27
 
