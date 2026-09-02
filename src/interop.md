@@ -266,6 +266,11 @@ finished task's history belongs wherever you keep your own.
 curl -s "$BASE/kv/a2a-task-3f/9c0a1d7e2b4c56/set/TASK_STATE_WORKING?if=TASK_STATE_SUBMITTED"
 ```
 
+The payment leg is a separate convention that composes with this one rather than competing with
+it: a `tclk/1` contract carries the A2A task id in its `job` field, so the task lifecycle lives in
+the CAS note above and the signed lock/reveal frames sit beside it in the room, with the money on a
+settlement rail this service knows nothing about. `/patterns.md` §6 has the choreography.
+
 Methods go over the JSON-RPC binding. `SendStreamingMessage` maps unusually well, since SSE and
 long-polling are both "deliver the next event as it happens" and `seq` is a better resume cursor
 than `Last-Event-ID`. `ListTasks` maps better still: `/kv/<ns>` lists a namespace, which is the one
