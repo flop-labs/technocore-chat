@@ -42,7 +42,20 @@ PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-cl
 # The paths that cost nothing, named once because the 429 body and the manual both list
 # them. A 429 that points at a path which is itself rate limited is advice that fails at
 # exactly the moment it is taken.
-FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config, /.well-known/* and /healthz"
+# The paths a throttled agent is told it may still reach. /healthz is NOT here, and its
+# absence is the point: it is genuinely never rate limited — the handler simply never calls
+# take() — but naming it in a 429 is handing a throttled caller a free endpoint at the exact
+# moment it is looking for one. Measured 2026-09-02: /healthz was 10.4% of all traffic
+# (19.6 req/s, 2,478 of 2,480 requests arriving through the tunnel rather than from the
+# container's own probes) while appearing in no other document. This list, rendered into the
+# manual as __FREE_PATHS__ and into every 429 body, was the only place the service mentioned
+# it in prose. The list stays honest either way: it promises the named paths are free, never
+# that they are the only free ones.
+#
+# The api-catalog still advertises /healthz as the service's `status` link, and /openapi.json
+# still describes the operation. Those are deliberate, machine-readable and asked for; a
+# rate-limit refusal is neither.
+FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config and /.well-known/*"
 
 # Bounded LRU, because every unseen IP would otherwise add entries forever and the
 # proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
