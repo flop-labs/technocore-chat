@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Snapshot the document surface into edge/public/ for the fallback Worker.
+
+Run against a live instance immediately before `wrangler deploy`, so the stored copy is the
+one that release actually serves:
+
+    uv run edge/snapshot.py --base https://technocore.chat
+
+Why fetched rather than rendered from source: several of these documents are assembled from
+the *running* configuration — /llms.txt carries MAX_ROOMS, MAX_NOTES_PER_NS and the duplicate
+window, /openapi.json and /.well-known/agent.json carry the version and the whole `limits`
+object. Rendering them here would mean a second implementation of that assembly, which is
+the drift this repo has already been bitten by once. Asking the service what it serves has
+exactly one source of truth.
+
+The content type of each path is recorded beside the bytes. Six of these paths have no file
+extension (/humans, /config, /.well-known/api-catalog, ...), and an asset server guessing
+from the name would hand a browser text/plain HTML or octet-stream JSON.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+import urllib.request
+
+# Every route in app.py that renders a document. Deliberately explicit: this list and the
+# `routes` in wrangler.jsonc describe the same surface and are checked against each other
+# by test_edge_snapshot_covers_every_routed_document.
+PATHS = (
+    "/",
+    "/llms.txt",
+    "/skill.md",
+    "/patterns.md",
+    "/interop.md",
+    "/auth.md",
+    "/humans",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/openapi.json",
+    "/config",
+    "/.well-known/agent.json",
+    "/.well-known/api-catalog",
+    "/.well-known/ai-catalog.json",
+    "/.well-known/agent-skills/index.json",
+    "/.well-known/mcp/server-card.json",
+    "/.well-known/security.txt",
+)
+
+
+# Served from the stored copy without asking the origin at all, and therefore restricted to
+# documents whose bytes owe nothing to the running configuration.
+#
+# /robots.txt is NOT here, though it looks like it belongs: manifest.robots_txt embeds an
+# absolute Sitemap URL built from CHAT_PUBLIC_URL, so an operator moving the public origin
+# is exactly the compose-time change this split exists to survive. It stays origin-first.
+#
+# Their bytes are taken from THIS CHECKOUT rather than from the fetch below. On every deploy
+# after the first, --base is already routed through the deployed Worker, which answers these
+# paths from its own stored copy without asking the origin — so a fetch would re-capture the
+# previous snapshot and freeze these two documents at their first upload forever. Reading
+# the source tree also ties them to the release being deployed, which is the thing a reader
+# hitting the static lane should get.
+#
+# The tradeoff taken: these change on a RELEASE, so a stored copy is stale until deploy.sh
+# runs again. That is accepted because they are the documents a reader needs when the origin
+# is degraded rather than down — the 2026-09-01 outage spent hours slow-but-alive, where
+# origin-first waits out its timeout before falling back — and because a release is a
+# controlled moment where re-running deploy.sh is a checklist item, unlike a compose edit.
+STATIC_FIRST = {"/skill.md": "SKILL.md", "/patterns.md": "src/patterns.md"}
+
+
+def asset_name(path: str) -> str:
+    """Where a URL path is stored under public/.
+
+    `/` becomes index.html because that is the one filename an asset server resolves the
+    root to; everything else is stored at its own path verbatim so the Worker can look it
+    up with the request URL unchanged.
+    """
+    return "index.html" if path == "/" else path.lstrip("/")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--base", default="https://technocore.chat")
+    ap.add_argument("--out", default=str(pathlib.Path(__file__).parent / "public"))
+    ap.add_argument(
+        "--manifest", default=str(pathlib.Path(__file__).parent / "src" / "routing.json")
+    )
+    args = ap.parse_args()
+
+    out = pathlib.Path(args.out)
+    types: dict[str, str] = {}
+    failed: list[str] = []
+
+    for path in PATHS:
+        url = args.base.rstrip("/") + path
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                if r.status != 200:
+                    failed.append(f"{path} -> HTTP {r.status}")
+                    continue
+                body = r.read()
+                ctype = r.headers.get("content-type", "application/octet-stream")
+        except Exception as exc:  # noqa: BLE001 - any failure is a failed snapshot
+            failed.append(f"{path} -> {type(exc).__name__}: {exc}")
+            continue
+
+        dest = out / asset_name(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(body)
+        types[path] = ctype
+        print(f"  {path:44} {len(body):>7}B  {ctype}")
+
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    for path, source in STATIC_FIRST.items():
+        if path not in types:
+            continue  # its fetch failed; the error below is the one worth reporting
+        body = (repo / source).read_bytes()
+        (out / asset_name(path)).write_bytes(body)
+        print(f"  {path:44} {len(body):>7}B  <- {source} (static-first, from the tree)")
+
+    if failed:
+        # Fail loudly and write nothing further. A partial snapshot deployed as a fallback
+        # is worse than no fallback: it answers some paths and 503s the rest, and which is
+        # which depends on what happened to be up when this ran.
+        print("\nsnapshot FAILED:", file=sys.stderr)
+        for line in failed:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+
+    pathlib.Path(args.manifest).write_text(
+        json.dumps({"types": types, "static_first": sorted(STATIC_FIRST)}, indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"\n{len(types)} documents -> {out}")
+    print(f"routing policy   -> {args.manifest}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
