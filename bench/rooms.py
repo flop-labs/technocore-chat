@@ -58,6 +58,25 @@ from pathlib import Path
 # would only measure the setup. Set before `store` is imported: config reads env at import.
 os.environ.setdefault("CHAT_FSYNC", "0")
 
+
+def _requested(flag: str, argv: list[str]) -> str | None:
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return None
+
+
+# --rooms is read here rather than from the parsed args, because MAX_ROOMS is an import-time
+# read of CHAT_MAX_ROOMS and the room-creation gate refuses past it: a ladder asking for more
+# rooms than the cap does not measure a bigger store, it dies in setup. The deployed cap is a
+# config value and not the code default, and since the walk is O(rooms on disk) it is the
+# single knob that decides what this benchmark is measuring. Raise both together or neither.
+_rooms = _requested("--rooms", sys.argv[1:])
+if _rooms:
+    os.environ["CHAT_MAX_ROOMS"] = _rooms
+
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 sys.path.insert(0, SRC)
 

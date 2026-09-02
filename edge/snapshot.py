@@ -26,6 +26,10 @@ import pathlib
 import sys
 import urllib.request
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
+
+import store  # noqa: E402  — for MAX_LIMIT only; see ROOMS_KEY_MATCH below
+
 # Every route in app.py that renders a document. Deliberately explicit: this list and the
 # `routes` in wrangler.jsonc describe the same surface and are checked against each other
 # by test_edge_snapshot_covers_every_routed_document.
@@ -105,6 +109,36 @@ EDGE_CACHED = {"/healthz": 10}
 # bounds how often the origin is asked, which is the part that frees the thread pool.
 EDGE_REVALIDATE = {"/rooms": 60}
 
+# What a /rooms cache key is made of. The handler reads exactly two query parameters and
+# clamps one of them, so /rooms?limit=999999999, /rooms?limit=200 and /rooms?limit=200&x=1
+# are one reply — and a cache keyed on the raw URL stores them as three, which hands a caller
+# a way to force a cold walk on every request by incrementing a digit. app.py fixed exactly
+# this for its own cache ("the key space is the reply space"); a lane that caches in front of
+# it has to carry the same fix, or it reintroduces the bug one layer out.
+#
+# `match` names a parameter that matters only when it equals one value: `format=json` picks
+# the rendering and every other value, a typo included, is ignored. `clamped` names a numeric
+# one and carries its bounds.
+#
+# The ceiling is read from the tree rather than from the served schema, which is the opposite
+# of what this file does everywhere else and is deliberate: /rooms' `limit` is an *advisory*
+# parameter, so by the input doctrine it publishes no `minimum`/`maximum` at all — bounds in
+# a schema say a value outside them is refused, and this one clamps (test_input_doctrine.py
+# asserts their absence). store.MAX_LIMIT is a plain constant rather than a config knob, so
+# the checkout being deployed is an exact source for it, and the alternative is a second copy
+# of the number in JS.
+ROOMS_KEY_MATCH = {"format": "json"}
+
+
+def rooms_key() -> dict:
+    """The /rooms cache-key spec, with the ceiling taken from the code being deployed."""
+    return {
+        "/rooms": {
+            "match": dict(ROOMS_KEY_MATCH),
+            "clamped": {"limit": {"min": 1, "max": store.MAX_LIMIT}},
+        }
+    }
+
 
 def asset_name(path: str) -> str:
     """Where a URL path is stored under public/.
@@ -165,6 +199,15 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
+    edge_key = rooms_key()
+    unspecified = sorted(set(EDGE_REVALIDATE) - set(edge_key))
+    if unspecified:
+        # Fail closed. Without a key spec the Worker would have to key on the raw URL, which
+        # is the multiplication bug above — a deploy that silently did that is worse than one
+        # that stops here, because nothing downstream would report it.
+        print(f"\nsnapshot FAILED: no cache-key spec for {unspecified}", file=sys.stderr)
+        return 1
+
     pathlib.Path(args.manifest).write_text(
         json.dumps(
             {
@@ -172,6 +215,7 @@ def main() -> int:
                 "static_first": sorted(STATIC_FIRST),
                 "edge_cached": EDGE_CACHED,
                 "edge_revalidate": EDGE_REVALIDATE,
+                "edge_key": edge_key,
             },
             indent=2,
             sort_keys=True,

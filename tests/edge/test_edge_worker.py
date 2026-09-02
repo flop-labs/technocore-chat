@@ -17,6 +17,8 @@ import re
 import _client
 import pytest
 
+import store
+
 EDGE = pathlib.Path(__file__).resolve().parents[2] / "edge"
 
 client = _client.client  # the shared TestClient fixture
@@ -235,7 +237,7 @@ def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
     lane = lane[: lane.index("export default")]
     assert "return hit;" in lane, "the cached copy must be returned whatever its age"
     assert "ctx.waitUntil(" in lane, "the refresh must not be awaited on the request path"
-    assert "inFlight" in lane, "a burst on one PoP must not queue one walk per reader"
+    assert "fill(" in lane, "a burst on one PoP must not queue one walk per reader"
 
 
 def test_the_revalidating_lane_refreshes_less_often_than_the_cached_one():
@@ -254,3 +256,89 @@ def test_the_revalidating_lane_refreshes_less_often_than_the_cached_one():
             f"{path} refreshes every {seconds}s, inside the {longest_cached}s edge-cached "
             "window — a path refreshed that often belongs in EDGE_CACHED"
         )
+
+
+def _between(text: str, start: str, end: str) -> str:
+    """One function's source, for the assertions there is no JS harness to make properly."""
+    body = text[text.index(start) :]
+    return body[: body.index(end)]
+
+
+def test_the_cold_fill_is_single_flighted_too():
+    """The refresh was deduplicated from the start and the cold path was not — but a cold PoP
+    is where a burst costs most, because there is no copy to serve and every reader would
+    otherwise start its own walk at the origin whose thread pool this lane protects.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = _between(worker, "async function revalidating(", "export default")
+    assert "fromOrigin(" not in lane, "the lane must reach the origin only through fill()"
+    cold = lane[lane.index("if (!hit)") :]
+    assert "fill(" in cold[: cold.index("\n")], "the cold path must join the shared fill"
+
+
+def test_a_caller_specific_reply_never_becomes_the_shared_copy():
+    """/rooms carries a budget footer once a caller's read allowance runs low, and the handler
+    keeps that reply out of any shared cache on purpose (`return resp if note else
+    _edge_cacheable(resp)`). This lane rewrites Cache-Control on whatever it stores, so
+    without the check it would publish one caller's pacing to every reader of the key.
+    """
+    fill = _between(
+        (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),
+        "async function fromOrigin(",
+        "function fill(",
+    )
+    assert fill.index("no-store") < fill.index("caches.default.put"), (
+        "the no-store check must come before the copy is stored, not after"
+    )
+
+
+def test_the_edge_hold_outlives_a_sustained_refresh_outage():
+    """An expiry reachable while refreshes are failing breaks the one promise this lane makes.
+    The copy would expire exactly when nothing can replace it and the next reader would be
+    back on the walk — the failure the lane exists to remove, in the situation it was built
+    for. The policy is that the copy survives a hundred consecutive failed refreshes.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    found = re.search(r"EDGE_HOLD_SECONDS = (\d+)", worker)
+    assert found, "the lane must declare how long the edge may hold a copy"
+    hold = int(found.group(1))
+    longest = max(_snapshot_module().EDGE_REVALIDATE.values(), default=0)
+    assert hold >= longest * 100, f"a {hold}s hold does not outlive a {longest}s refresh lapse"
+
+
+def test_every_revalidating_path_has_a_cache_key_spec():
+    """Without one the Worker would have to key on the raw URL, which is the bug below."""
+    snapshot = _snapshot_module()
+    spec = snapshot.rooms_key()
+    assert set(snapshot.EDGE_REVALIDATE) <= set(spec)
+
+
+def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
+    """The edge copy is keyed on the clamped limit rather than on the raw query string. The
+    ceiling comes from store.MAX_LIMIT, so assert it against the handler's actual behaviour:
+    if the two ever parted, the edge would serve one caller's row count to another.
+
+    This is the bug app.py fixed for its own cache — "?limit=200 and ?limit=1000000 are one
+    reply and were two entries" — reappearing one layer out, so it is checked the same way.
+    """
+    rule = _snapshot_module().rooms_key()["/rooms"]
+    limit = rule["clamped"]["limit"]
+    assert limit["max"] == store.MAX_LIMIT
+    assert rule["match"] == {"format": "json"}
+    # The doctrine reason this number comes from the tree and not from the served schema:
+    # an advisory parameter publishes no bounds, because bounds mean refusal and this clamps.
+    schema = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["parameters"]
+    published = next(p for p in schema if p["name"] == "limit")["schema"]
+    assert "maximum" not in published and "minimum" not in published
+
+    for name in ("edgekey-a", "edgekey-b", "edgekey-c"):
+        client.get(f"/r/{name}/say/nick/hello")
+
+    def listed(query: str) -> list[str]:
+        payload = client.get(f"/rooms?format=json&{query}").json()
+        return [r["room"] for r in payload["rooms"]]
+
+    # Everything at or past the ceiling is one reply, which is what lets the key collapse it.
+    assert listed(f"limit={limit['max']}") == listed(f"limit={limit['max'] * 100000}")
+    # And zero means one, the handler's `or 1` — the edge arithmetic mirrors it exactly.
+    assert listed("limit=0") == listed("limit=1")

@@ -41,10 +41,13 @@ const ORIGIN_TIMEOUT_MS = 8000;
 // (bench/rooms.py), which has no useful upper bound. Cutting it at the request timeout would
 // mean the copy never refreshes on a loaded box, which is exactly when it matters.
 const ORIGIN_REVALIDATE_MS = 120000;
-// How long the edge may hold a copy. Longer than the refresh interval by design: the lane,
-// not the header, decides freshness, and an expiry shorter than the refresh would drop the
-// copy that makes the whole thing non-blocking.
-const EDGE_HOLD_SECONDS = 3600;
+// How long the edge may hold a copy. Far longer than any refresh interval, and the size of
+// that gap is the point: the lane promises the stored copy is served however old it is, and
+// an expiry reachable during an origin outage breaks exactly that promise. The copy would
+// expire precisely when no refresh can replace it, and the next reader would be back to
+// waiting on the walk — the failure this lane exists to remove, reappearing in the one
+// situation it was built for. Staleness is bounded by refreshes succeeding, not by this.
+const EDGE_HOLD_SECONDS = 86400;
 
 const STATIC_FIRST = new Set(ROUTING.static_first);
 
@@ -65,11 +68,48 @@ const EDGE_CACHED_SECONDS = ROUTING.edge_cached ?? {};
 const EDGE_REVALIDATE_SECONDS = ROUTING.edge_revalidate ?? {};
 const STAMP = "x-edge-stamp";
 
-// One refresh per path per isolate. Workers isolates are per-PoP and short-lived, so this is
-// not a global lock — it does not need to be. What it prevents is the case that actually
-// bites: a burst of readers arriving on one PoP against an expired copy, each queueing its
-// own walk at an origin whose thread pool is the thing being protected.
+// The cache-key policy, from snapshot.py, which reads the bounds out of the served schema.
+// A path routed through this lane with no spec is served straight from the origin: keying on
+// the raw URL instead would let a caller multiply entries, which is the whole reason the
+// spec exists. Fail closed, never fall back to the broken key.
+const EDGE_KEY = ROUTING.edge_key ?? {};
+
+// One fill per cache key per isolate, covering the cold path as well as the refresh. Workers
+// isolates are per-PoP and short-lived, so this is not a global lock and does not need to be:
+// what it prevents is the case that actually bites, a burst of readers arriving on one PoP
+// with no copy or an expired one, each starting its own walk at an origin whose thread pool
+// is the thing being protected.
 const inFlight = new Map();
+
+/** The key a path's copy is stored under: the reply space, not the URL space.
+ *
+ * Only parameters the origin actually reads survive, so anything it ignores cannot multiply
+ * entries. Returns null when a value cannot be canonicalised, which means "no shared copy
+ * for this request" rather than "guess". */
+function cacheKey(url, pathname) {
+  const spec = EDGE_KEY[pathname];
+  if (!spec) return null;
+  const keep = new URLSearchParams();
+  for (const [name, wanted] of Object.entries(spec.match ?? {})) {
+    if (url.searchParams.get(name) === wanted) keep.set(name, wanted);
+  }
+  for (const [name, rule] of Object.entries(spec.clamped ?? {})) {
+    const raw = url.searchParams.get(name);
+    // Absent means the origin's own default, which is its own entry — one extra copy, not a
+    // way to make unboundedly many, so it needs no number restated here.
+    if (raw === null) continue;
+    // Only the narrow form both languages read identically is clamped here. Python's int()
+    // also takes underscores, signs, surrounding whitespace and non-ASCII digits, and a JS
+    // reimplementation of that grammar would be a second parser to keep in step — where a
+    // disagreement is not a miss but a wrong answer, one caller's row count served to
+    // another. Anything else gets no shared entry at all.
+    if (!/^[0-9]{1,9}$/.test(raw)) return null;
+    keep.set(name, String(Math.min(Number(raw) || rule.min, rule.max)));
+  }
+  keep.sort();
+  const query = keep.toString();
+  return new Request(url.origin + pathname + (query ? "?" + query : ""), { method: "GET" });
+}
 
 /** A 5xx is the origin failing to answer. A 4xx is the origin answering "no", which is a
  * real reply and must pass through untouched — serving a snapshot over a 404 or a 429 would
@@ -138,32 +178,54 @@ async function edgeCached(request, pathname, seconds) {
   return fresh;
 }
 
-async function fromOrigin(request, cache, pathname) {
+/** Resolves to the parts of a reply rather than to a Response, because one fill is shared by
+ * every reader waiting on it and a Response body can only be consumed once. */
+async function fromOrigin(request, key) {
   const fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
-  if (fresh.status !== 200) return fresh;
   const body = await fresh.arrayBuffer();
   const headers = new Headers(fresh.headers);
+  if (fresh.status !== 200) return { status: fresh.status, body, headers };
+
+  // A reply the origin marked no-store is one caller's, not the shared copy: /rooms carries
+  // a budget footer once a caller's read allowance runs low, and the handler deliberately
+  // keeps that reply out of any shared cache. Overwriting the directive would publish one
+  // caller's pacing to every reader of this key for as long as the copy lived.
+  if (/(^|,)\s*(no-store|private)\b/i.test(headers.get("Cache-Control") ?? "")) {
+    return { status: 200, body, headers };
+  }
   headers.set(STAMP, String(Date.now()));
   // The edge copy outlives the origin's own short window on purpose: this lane decides when
   // to refresh, so a header that expires sooner would just hand the decision back.
   headers.set("Cache-Control", `public, max-age=0, s-maxage=${EDGE_HOLD_SECONDS}`);
-  await cache.put(request, new Response(body, { status: 200, headers }));
-  return new Response(body, { status: 200, headers });
+  await caches.default.put(key, new Response(body, { status: 200, headers }));
+  return { status: 200, body, headers };
 }
 
-async function revalidating(request, ctx, pathname, seconds) {
-  const cache = caches.default;
-  const hit = await cache.match(request);
+/** One origin walk per key, however many readers are waiting on it. */
+function fill(request, key) {
+  const pending = inFlight.get(key.url);
+  if (pending) return pending;
+  const job = fromOrigin(request, key).finally(() => inFlight.delete(key.url));
+  inFlight.set(key.url, job);
+  return job;
+}
 
-  if (!hit) return fromOrigin(request, cache, pathname);  // cold: someone has to be first
+const asResponse = (r) => new Response(r.body, { status: r.status, headers: r.headers });
+
+async function revalidating(request, ctx, pathname, seconds) {
+  const key = cacheKey(new URL(request.url), pathname);
+  // No canonical key for this request: serve it from the origin without touching the shared
+  // copy. Guessing a key would be worse than the walk this lane exists to avoid.
+  if (!key) return fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+
+  const hit = await caches.default.match(key);
+  // Cold: someone has to be first, but only one of them. Every other reader arriving in the
+  // same window joins that fill instead of starting a walk of its own.
+  if (!hit) return asResponse(await fill(request, key));
 
   const stamp = Number(hit.headers.get(STAMP) || 0);
-  if (Date.now() - stamp > seconds * 1000 && !inFlight.has(pathname)) {
-    const job = fromOrigin(request, cache, pathname)
-      .catch(() => {})                      // a failed refresh keeps the copy we have
-      .finally(() => inFlight.delete(pathname));
-    inFlight.set(pathname, job);
-    ctx.waitUntil(job);
+  if (Date.now() - stamp > seconds * 1000) {
+    ctx.waitUntil(fill(request, key).catch(() => {}));  // a failed refresh keeps this copy
   }
   return hit;  // always, however old — waiting for this walk is the thing being removed
 }
