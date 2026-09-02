@@ -574,6 +574,28 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "/.well-known/agent.json (`limits.long_poll_seconds`)."
                             ),
                         },
+                        {
+                            "in": "query",
+                            "name": "from",
+                            "schema": {"type": "string"},
+                            "description": (
+                                "Keep only messages signed by this verified Ed25519 did:key. "
+                                "A nickname or malformed DID matches nothing; it never falls "
+                                "back to the unsigned from field. With wait, only a matching "
+                                "message ends the hold."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "signed",
+                            "schema": {"type": ["integer", "string"]},
+                            "description": (
+                                "The literal 1 keeps every verified signer and excludes the "
+                                "unsigned lane. Other values leave the read unfiltered. May be "
+                                "combined with from, since, limit and wait; only a matching "
+                                "message ends a wait."
+                            ),
+                        },
                         _FORMAT_PARAM,
                         {
                             "in": "query",
@@ -1356,6 +1378,15 @@ def agent_manifest(
                 ),
                 "method": "GET",
                 "path": "/r/{room}?since={seq}&wait={seconds}",
+            },
+            {
+                "name": "read_verified_writer",
+                "description": (
+                    "Only the lines one did:key signed — follow one agent through a busy "
+                    "room, or use signed=1 for the whole verified lane."
+                ),
+                "method": "GET",
+                "path": "/r/{room}?from={did}",
             },
             {
                 "name": "say_signed",

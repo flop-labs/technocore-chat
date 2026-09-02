@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 import orjson
 from starlette.applications import Starlette
@@ -428,7 +429,7 @@ def who(name: str) -> str:
     return didkey.abbreviate(name) if didkey.is_did(name) else f"~{name}"
 
 
-def render(view: dict) -> str:
+def render(view: dict, suffix: str = "") -> str:
     lines = [
         f"# room {view['room']}  messages {view['count']}  "
         f"range {view['first_seq']}..{view['last_seq']}",
@@ -446,18 +447,24 @@ def render(view: dict) -> str:
         if store.is_mailbox(view["room"])
         else f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
     )
-    lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}", say]
+    lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}{suffix}", say]
     return "\n".join(lines)
 
 
-def respond(request: Request, view: dict, body_text: str | None = None, note: str = "") -> Response:
+def respond(
+    request: Request,
+    view: dict,
+    body_text: str | None = None,
+    note: str = "",
+    suffix: str = "",
+) -> Response:
     if request.query_params.get("format") == "json":
         return Response(
             json.dumps(view, ensure_ascii=False, indent=1) + "\n",
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
-    return text((body_text if body_text is not None else render(view)) + note)
+    return text((body_text if body_text is not None else render(view, suffix)) + note)
 
 
 def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
@@ -987,6 +994,21 @@ def __getattr__(name: str):
     return getattr(limit, name)
 
 
+def _filter(writer: str | None, signed: str | None) -> tuple[store.Keep, str]:
+    """Build the verified-writer predicate and the suffix retained by the next cursor."""
+    if writer is None and signed != "1":
+        return None, ""
+    suffix = f"&from={quote(writer, safe=':')}" if writer is not None else ""
+    suffix += "&signed=1" if signed == "1" else ""
+    writer = writer if writer is None or didkey.is_did(writer) else ""
+
+    def keep(message: dict) -> bool:
+        sender = str(message.get("from", ""))
+        return sender.startswith(didkey.PREFIX) and writer in (None, sender)
+
+    return keep, suffix
+
+
 async def room_read(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
@@ -997,29 +1019,43 @@ async def room_read(request: Request) -> Response:
     # shadow the limit module the refusal two lines above calls into.
     tail = _cursor(q.get("limit"), 50)
     room = request.path_params["room"]
+    keep, suffix = _filter(q.get("from"), q.get("signed"))
     # Tail reads are blocking file IO. This route is async for the waiting half, so the
     # read has to go to a thread explicitly — as a sync route Starlette did that for us.
-    view = await run_in_threadpool(store.read_messages, config.ROOT, room, limit=tail, since=since)
+    view = await run_in_threadpool(
+        store.read_messages, config.ROOT, room, limit=tail, since=since, keep=keep
+    )
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
     # newest messages, so there is nothing to wait *for*.
     wait = _seconds(q.get("wait"))
     unheld = ""
     if wait and since is not None and not view["messages"]:
-        fresh, unheld = await _await_messages(request, room, tail, since, wait)
+        fresh, unheld = await _await_messages(
+            request, room, tail, since, wait, keep=keep, initial=view
+        )
         # The JSON lane's half of the note below, since a program gets no footer and must
         # not infer a refusal from latency. Only when a wait returned nothing: one that
         # produced messages was held by definition.
-        view = fresh if fresh is not None else {**view, "wait_held": not unheld}
+        if fresh is not None:
+            view = fresh
+        if not view["messages"]:
+            view = {**view, "wait_held": not unheld}
     # Ahead of the budget footer: a wait that did not happen is what the caller must act
     # on first, and acting on it is what stops the next request being an instant re-poll.
     note = unheld + budget_note("read", left, RATE_READ)
-    resp = respond(request, view, note=note)
+    resp = respond(request, view, note=note, suffix=suffix)
     return resp if wait or note else _edge_cacheable(resp)
 
 
 async def _await_messages(
-    request: Request, room: str, limit: int, since: int, wait: float
+    request: Request,
+    room: str,
+    limit: int,
+    since: int,
+    wait: float,
+    keep: store.Keep = None,
+    initial: dict | None = None,
 ) -> tuple[dict | None, str]:
     """Poll the room until something arrives past `since`, or the budget runs out.
 
@@ -1041,6 +1077,15 @@ async def _await_messages(
     lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
     reader consumes each byte, so N-1 workers miss it).
     """
+    view = initial or {
+        "room": room,
+        "count": 0,
+        "first_seq": None,
+        "last_seq": since,
+        "generation": store.room_generation(config.ROOT, room),
+        "messages": [],
+    }
+    cursor, first = view["last_seq"], view["first_seq"]
     ip = client_ip(request)  # once: client_ip counts proxy evidence as a side effect
     with _waiter_slot(ip) as granted:
         if not granted:
@@ -1052,11 +1097,15 @@ async def _await_messages(
             if await request.is_disconnected():
                 return None, ""
             view = await run_in_threadpool(
-                store.read_messages, config.ROOT, room, limit=limit, since=since
+                store.read_messages, config.ROOT, room, limit=limit, since=cursor, keep=keep
             )
-            if view["messages"]:
+            if (view["first_seq"] or 0) > cursor + 1:
                 return view, ""
-    return None, ""
+            first = view["first_seq"] if first is None else first
+            if view["messages"]:
+                return {**view, "first_seq": first}, ""
+            cursor = view["last_seq"]
+    return {**view, "first_seq": first, "last_seq": cursor}, ""
 
 
 def room_export(request: Request) -> Response:
