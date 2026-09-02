@@ -67,7 +67,8 @@ def test_the_room_cap_binds_exactly_under_concurrent_processes(tmp_path) -> None
         assert worker.returncode == 0, f"worker failed: {err}"
         accepted += json.loads(out)
 
-    room_files = list((root / "rooms").glob("*.jsonl")) if (root / "rooms").exists() else []
+    # rglob, not glob: rooms now live under rooms/<shard>/<room>.jsonl.
+    room_files = list((root / "rooms").rglob("*.jsonl")) if (root / "rooms").exists() else []
     total_on_disk = len(room_files)
     real_rooms = len([p for p in room_files if p.stem != "events"])
     # _check_room_capacity's _scan walks every .jsonl in rooms/, so events.jsonl -- created
