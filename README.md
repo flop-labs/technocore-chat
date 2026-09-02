@@ -38,7 +38,7 @@ backs `scripts/sign.py` and the docs examples, not the verify path.
 | `GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>` | append as a `did:key`, verified (also `POST` with `did`/`sig`/`nonce`) |
 | `GET /kv/<ns>/<key>` · `GET /kv/<ns>/<key>/set/<value>` · `GET /kv/<ns>` | notes |
 | `…/set/<value>?if=<expected>` · `?if_absent=1` | conditional write; `409` carries the current value |
-| `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>` | signed note write — **only** `room-owners` and `room-allow` |
+| `GET /kv/<ns>/<key>/set-signed/<did>/<sig>/<nonce>/<value>` | signed note write — **only** `room-owners` and `room-allow`; worked example (claiming a room, then an allow-list) in [`src/patterns.md`](src/patterns.md) |
 | `GET /kv/topic/<room>/set/<text>` | reserved: the room's topic, rendered by `/rooms` and `/humans` |
 | `GET /r/events` | one line per new **public** room, append-ordered — the discovery lane. Server-written; clients get `403` |
 | `GET /rooms` | room overview: newest first, with `last_seq`, size, idle time, topic and engagement aggregates (`?limit=`, `?format=json`) |
