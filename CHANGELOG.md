@@ -16,6 +16,8 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+MINOR: adds `scripts/operator_digest.py`, a dependency-free CLI that reads `/stats` and flags the capacity and client_identity-misconfiguration patterns README.md already documents in prose. No server change -- a client for the endpoint that already exists, meant to run as the scheduled job `/stats`'s own docstring calls out as its intended caller.
+
 ## [0.11.4] - 2026-09-02
 
 ### Changed

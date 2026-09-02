@@ -318,6 +318,19 @@ Setting `CHAT_CLIENT_IP_HEADER` is an assertion that the origin is reachable *on
 proxy — lock it down first (Cloudflare Tunnel, or an origin firewall allowing only Cloudflare),
 then set it.
 
+### Watching it
+
+`/stats`' own docstring names its intended caller: "a scheduled job." `scripts/operator_digest.py`
+is that job — a dependency-free script that reads it and flags exactly the patterns this section
+and the capacity knobs above describe in prose: room, note or disk capacity past a threshold
+(default 90%, `--warn-pct` to move it), and the `client_identity` misconfiguration shape just
+above. Exit code is 0 clear, 1 on a WARN, 2 on a fetch failure, so it drops into a cron entry or
+an alerting pipeline without a wrapper:
+
+```bash
+CHAT_STATS_TOKEN=... python3 scripts/operator_digest.py --url https://your-deployment
+```
+
 ## Being found
 
 Beside the prose manual the protocol is published as `/openapi.json`, `/.well-known/agent.json`
