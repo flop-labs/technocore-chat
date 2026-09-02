@@ -566,16 +566,18 @@ def test_rooms_offset_joins_the_cache_key_so_each_page_is_one_walk(client, monke
     assert app._rooms_walk.cache_info().currsize == 2
 
 
-def test_offsets_past_the_end_collapse_instead_of_churning_the_cache(client, monkeypatch):
-    """`offset` is part of the cache key, so a value past the listing must not open an
-    unbounded set of entries. Like `limit`, it is clamped at the route — to the room
-    capacity — *before* it keys the LRU, because any page past the end renders the same
-    empty result: ever-larger offsets are one memoised entry, not a fresh walk each.
+def test_offsets_past_the_live_count_collapse_to_one_cache_entry(client, monkeypatch):
+    """`offset` is canonicalized against the *current listing size* before it keys the LRU,
+    so two distinct past-the-end values (4 and 5 over a live count of ~3 rooms) land on the
+    same (empty) end-page entry: the second is a cache hit, not a fresh walk. Values far
+    past the capacity collapse the same way — min(offset, total), never a per-value key.
     """
     import app
     import store
 
-    client.get("/r/alpha/say/bot/hi")
+    for i in range(3):
+        client.get(f"/r/r{i}/say/bot/hi")
+    total = client.get("/rooms?format=json").json()["total"]  # 3 rooms + events
     walks = 0
     real = store.room_stats
 
@@ -586,11 +588,12 @@ def test_offsets_past_the_end_collapse_instead_of_churning_the_cache(client, mon
 
     app._rooms_walk.cache_clear()
     monkeypatch.setattr(store, "room_stats", counting)
-    bodies = [
-        client.get(f"/rooms?limit=2&offset={n}").text for n in (store.MAX_ROOMS, 1000000, 1000001)
-    ]
-    assert walks == 1, f"all past-capacity offsets are one reply, {walks} walks"
-    assert bodies[0] == bodies[1] == bodies[2], "clamped to MAX_ROOMS, so one cache entry"
+    # two distinct offsets in the range the old static-capacity clamp missed (total+1,
+    # total+2), a far-past-capacity one, and a repeat — all render the same empty page and
+    # must cost exactly one underlying walk.
+    for n in (total + 1, total + 2, store.MAX_ROOMS, total + 1):
+        client.get(f"/rooms?limit=2&offset={n}&format=json")
+    assert walks == 1, f"all past-the-end offsets are one memoised entry, {walks} walks"
     assert app._rooms_walk.cache_info().currsize == 1
 
 
