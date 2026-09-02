@@ -7,12 +7,10 @@ on:
   pull_request_target:
     types: [opened, reopened, edited, synchronize]
 
-# Deny by default, then grant per job. Under `pull_request_target` the workflow runs with a
-# token that can write to this repository while the event it describes comes from an
-# untrusted fork, so the blast radius of any mistake in a step is whatever this block says.
-# A workflow-level `pull-requests: write` handed that write to BOTH jobs, including the one
-# that only ever reads a file list — the narrower grant is the one that would still be
-# correct if a future step in that job were less careful than the current one.
+# LEAST-PRIVILEGE PERMISSIONS: Deny by default, then grant per job. 
+# Under `pull_request_target`, the workflow runs with a token that can write to this 
+# repository while the event it describes comes from an untrusted fork. Setting this 
+# empty map explicitly blocks lateral privilege escalation across jobs.
 permissions: {}
 
 jobs:
@@ -21,10 +19,10 @@ jobs:
     permissions:
       pull-requests: read # listFiles only; this job comments on nothing
     steps:
-      # Pinned to a full commit SHA like every other third-party action in this repository:
-      # a tag is mutable and can be repointed at any commit by whoever controls it, which on
-      # `pull_request_target` means arbitrary code running with a write-capable token and
-      # access to this repository's secrets. `v7` and `v7.1.0` both resolve to this commit.
+      # IMMUTABLE COMMIT PINS: Pinned to a full commit SHA like every other third-party 
+      # action in this repository. A tag is mutable and can be repointed at any commit 
+      # by whoever controls it, which on `pull_request_target` means arbitrary code 
+      # running with a write-capable token and access to this repository's secrets.
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
@@ -53,17 +51,17 @@ jobs:
     permissions:
       pull-requests: write # upserts and deletes the one marker comment
     steps:
-      # Same reasoning as above: full commit pin, not the mutable `v7` tag.
+      # IMMUTABLE COMMIT PINS: Full commit pin to protect against mutable tag injections.
       - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
-            // PR text is reduced to bare #N issue numbers before anything reaches the
-            // search query. Extract both literal #N and URL forms (issues/N or pull/N).
-            // The comment is upserted by marker so each PR carries at most one, and it
-            // is removed if the overlap goes away.
+            // PR text is scanned for references. We extract and normalize both #N and 
+            // issues/N | pull/N URL structures using matchAll to ensure URLs aren't skipped.
+            // Negative lookahead (?!\d) ensures we do not partially match larger numbers.
             const pr = context.payload.pull_request;
-            const text = pr.title + ' ' + (pr.body || '');
-            const matches = [...text.matchAll(/(?:#|(?:issues|pull)\/)(\d+)/g)];
+            const text = (pr.title || '') + ' ' + (pr.body || '');
+            const regex = /(?:#|(?:issues|pull)\/)(\d+)(?!\d)/g;
+            const matches = [...text.matchAll(regex)];
             const refs = [...new Set(matches.map(m => '#' + m[1]))];
             const found = new Map();
             
@@ -107,4 +105,3 @@ jobs:
               { ...context.repo, comment_id: mine.id, body });
             else await github.rest.issues.createComment(
               { ...context.repo, issue_number: pr.number, body });
-```[cite: 22]
