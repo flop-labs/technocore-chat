@@ -98,6 +98,9 @@ def _asset(name: str) -> str:
 
 
 HUMANS = _asset("humans.html")
+
+
+HUMANS_CSP = manifest.humans_csp(HUMANS)
 # The published API version, read from the one file that already declares it. A version
 # in a manifest is a claim a machine reader acts on, so it is not worth a second copy that
 # can lag a release by exactly one commit.
@@ -1723,20 +1726,25 @@ def humans(request: Request) -> Response:
 
     It is a *static* file: no message ever passes through the server into markup. The page
     fetches `?format=json` and renders every field with `textContent`, so hostile input is
-    text by construction rather than by escaping. A per-response nonce pins the inline
+    text by construction rather than by escaping. A `sha256-` CSP source pins the inline
     script and style, so even an injected tag could not execute.
+
+    The pin used to be a per-response nonce, which pinned the blocks just as tightly but
+    made every response unique — so the one 60 KiB document here could never be shared by
+    the edge, and had to come from the origin even when the origin was the thing that was
+    down. Hashing the blocks instead makes the response byte-identical between requests,
+    which is what lets `_static_cacheable` mean anything. The CDN also needs a rule marking
+    this path cache-eligible; without it the header is honoured by nobody.
     """
-    nonce = secrets.token_urlsafe(16)
-    return Response(
-        HUMANS.replace("__NONCE__", nonce),
+    resp = Response(
+        HUMANS,
         media_type="text/html; charset=utf-8",
         headers={
-            "Content-Security-Policy": (
-                f"default-src 'none'; connect-src 'self'; img-src 'self' data:; "
-                f"script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
-                f"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
-            ),
+            "Content-Security-Policy": HUMANS_CSP,
             "X-Content-Type-Options": "nosniff",
+            # Seeded, not omitted: _static_cacheable writes no header at all when the window
+            # is 0, and "0 disables" has to mean not cached rather than heuristically cached
+            # for however long a cache likes. Same shape as the other static responses.
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
             # The three service pointers the document lanes carry, in the header rather
@@ -1754,6 +1762,7 @@ def humans(request: Request) -> Response:
             "Link": manifest.link_header(_base_url(request)),
         },
     )
+    return _static_cacheable(resp)
 
 
 def robots(request: Request) -> Response:

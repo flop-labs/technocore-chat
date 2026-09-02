@@ -19,12 +19,45 @@ protocol the origin does not answer sends every validating registry a broken lis
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 
 import config
 import didkey
 import store
+
+# The Content-Security-Policy for /humans, built from the page it describes.
+#
+# The inline <script> and <style> are pinned by a `sha256-` of their own bytes, computed here
+# rather than written down: a hash that does not match its block is not a degraded page — the
+# browser refuses that block outright and the document renders inert — so a digest kept by
+# hand is one that silently breaks the page on any whitespace edit. Exactly one block of each
+# is a contract the page's own test asserts.
+#
+# This replaces a per-response nonce. Both pin the exact block and neither admits an injected
+# tag; the nonce also made every response unique, which made a 60 KiB document origin-only —
+# it could not be shared by the edge even when the origin was the thing that was down.
+#
+# It lives here rather than in app.py because it describes how a served document declares
+# itself, which is this module's job, and because core/ is size-capped for content exactly
+# like this (AGENTS.md: "if a size cap binds ... move the change to extra").
+_INLINE_BLOCK = re.compile(r"<(script|style)\b[^>]*>(.*?)</\1>", re.DOTALL)
+
+
+def humans_csp(html: str) -> str:
+    """The full policy header for the one HTML document this service serves."""
+    src = {
+        tag: f"'sha256-{base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()}'"
+        for tag, body in _INLINE_BLOCK.findall(html)
+    }
+    return (
+        "default-src 'none'; connect-src 'self'; img-src 'self' data:; "
+        f"script-src {src['script']}; style-src {src['style']}; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
 
 # The project's own home, and the authority for both of the URLs security.txt points at.
 # Hoisted because it was written out four times across this module and the count was only

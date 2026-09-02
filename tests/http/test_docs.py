@@ -1634,13 +1634,17 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
     So the disabled setting is asserted here for both halves of the document set together.
     The prose side has always been right; the JSON side was not until the header was seeded
-    before `_static_cacheable` could decline to overwrite it.
+    before `_static_cacheable` could decline to overwrite it. /humans joined them when it
+    stopped minting a per-response nonce and became cacheable, and it arrived with the same
+    defect for the same reason — a bare `Response` whose explicit `no-store` had been
+    removed along with the nonce that required it.
     """
     import config
 
     both = (
         "/llms.txt",
         "/robots.txt",
+        "/humans",
         "/.well-known/security.txt",
         "/openapi.json",
         "/config",
@@ -1657,17 +1661,21 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
 
 def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
-    """The three that would each be a real defect if held at the edge.
+    """The two that would each be a real defect if held at the edge.
 
-    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
-    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
-    rollback probe reads — a cached `ok` would let a broken release pass its own health
-    gate. /stats is token-gated and counts one worker's requests.
+    /healthz is what the autoupdate rollback probe reads — a cached `ok` would let a broken
+    release pass its own health gate. /stats is token-gated and counts one worker's requests.
+
+    /humans used to be the third, because a per-response CSP nonce meant a cached copy
+    pinned one nonce for every visitor and defeated the mechanism it existed for. The pin
+    is a `sha256-` of each inline block now, so the page is byte-identical between requests
+    and there is nothing per-caller left in it to leak. It is deliberately cacheable, and
+    tests/http/test_humans.py asserts that half — a 60 KiB document a reader most needs
+    when the origin is down is the wrong thing to make origin-only.
     """
     import config
 
-    for path in ("/humans", "/healthz"):
-        assert client.get(path).headers["cache-control"] == "no-store", path
+    assert client.get("/healthz").headers["cache-control"] == "no-store"
 
     # With no token configured /stats is a 404, so the gated response has to be provoked
     # or this asserts no-store on a path that was never routed.
