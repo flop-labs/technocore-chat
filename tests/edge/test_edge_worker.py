@@ -223,14 +223,11 @@ def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
 
 
 def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
-    """The property the lane exists for, asserted on the source because there is no JS
-    harness here — and it is the one a later edit would quietly remove.
-
-    /rooms is an O(total-rooms) walk (technocore-chat#576) whose cost under concurrency is
-    dominated by queueing rather than by the walk itself — bench/rooms.py separates the two.
-    No cache window can be made reliably longer than a cost with no upper bound, so the reader
-    who arrives after the window closes pays all of it *and* holds an anyio thread while doing
-    so. Returning the stale copy unconditionally is what breaks that.
+    """The property the lane exists for, asserted on the source for want of a JS harness —
+    and the one a later edit would quietly remove. /rooms is an O(total-rooms) walk (#576)
+    whose cost under concurrency is queueing rather than work (bench/rooms.py), so no cache
+    window is reliably longer than it: whoever arrives after one closes pays the whole cost
+    and holds an anyio thread doing it. Returning the copy unconditionally is what breaks it.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     lane = worker[worker.index("async function revalidating(") :]
@@ -240,21 +237,16 @@ def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
     assert "fill(" in lane, "a burst on one PoP must not queue one walk per reader"
 
 
-def test_the_revalidating_lane_refreshes_less_often_than_the_cached_one():
-    """A revalidate interval inside the edge-cached window is a path in the wrong lane.
-
-    The two lanes differ in what they spend: EDGE_CACHED makes one reader wait for the origin
-    each time its window closes, EDGE_REVALIDATE never makes anyone wait and pays for that
-    with a copy that may be a whole interval old. Staleness is only worth buying for a path
-    the cheaper lane cannot cover, so an interval as short as a cached window is evidence the
-    path belongs in EDGE_CACHED instead.
+def test_the_refresh_interval_is_not_faster_than_the_origin_can_answer(client):
+    """/rooms is activity monitoring, so the interval wants to be short — `idle_seconds` and
+    `last_seq` are the payload and a stale copy misreports them. The floor is the origin's
+    own memo: inside CHAT_ROOMS_CACHE_SECONDS it re-walks nothing and returns what it already
+    has, so refreshing faster than that spends requests for an identical answer.
     """
-    snapshot = _snapshot_module()
-    longest_cached = max(snapshot.EDGE_CACHED.values(), default=0)
-    for path, seconds in snapshot.EDGE_REVALIDATE.items():
-        assert seconds > longest_cached, (
-            f"{path} refreshes every {seconds}s, inside the {longest_cached}s edge-cached "
-            "window — a path refreshed that often belongs in EDGE_CACHED"
+    published = client.get("/config").json()["settings"]["rooms_cache_seconds"]
+    for path, seconds in _snapshot_module().EDGE_REVALIDATE.items():
+        assert seconds >= published, (
+            f"{path} refreshes every {seconds}s, inside the origin's own {published}s window"
         )
 
 
@@ -265,9 +257,8 @@ def _between(text: str, start: str, end: str) -> str:
 
 
 def test_the_cold_fill_is_single_flighted_too():
-    """The refresh was deduplicated from the start and the cold path was not — but a cold PoP
-    is where a burst costs most, because there is no copy to serve and every reader would
-    otherwise start its own walk at the origin whose thread pool this lane protects.
+    """The refresh was deduplicated from the start and the cold path was not — yet a cold PoP
+    is where a burst costs most, having no copy to serve.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     lane = _between(worker, "async function revalidating(", "export default")
@@ -278,9 +269,9 @@ def test_the_cold_fill_is_single_flighted_too():
 
 def test_a_caller_specific_reply_never_becomes_the_shared_copy():
     """/rooms carries a budget footer once a caller's read allowance runs low, and the handler
-    keeps that reply out of any shared cache on purpose (`return resp if note else
-    _edge_cacheable(resp)`). This lane rewrites Cache-Control on whatever it stores, so
-    without the check it would publish one caller's pacing to every reader of the key.
+    keeps that reply out of any shared cache (`return resp if note else _edge_cacheable`).
+    This lane rewrites Cache-Control on what it stores, so without the check it would publish
+    one caller's pacing to every reader of the key.
     """
     fill = _between(
         (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),
@@ -293,10 +284,9 @@ def test_a_caller_specific_reply_never_becomes_the_shared_copy():
 
 
 def test_the_edge_hold_outlives_a_sustained_refresh_outage():
-    """An expiry reachable while refreshes are failing breaks the one promise this lane makes.
-    The copy would expire exactly when nothing can replace it and the next reader would be
-    back on the walk — the failure the lane exists to remove, in the situation it was built
-    for. The policy is that the copy survives a hundred consecutive failed refreshes.
+    """An expiry reachable while refreshes are failing drops the copy exactly when nothing can
+    replace it, putting the next reader back on the walk. The policy: the copy survives a
+    hundred consecutive failed refreshes.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     found = re.search(r"EDGE_HOLD_SECONDS = (\d+)", worker)
@@ -314,12 +304,10 @@ def test_every_revalidating_path_has_a_cache_key_spec():
 
 
 def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
-    """The edge copy is keyed on the clamped limit rather than on the raw query string. The
-    ceiling comes from store.MAX_LIMIT, so assert it against the handler's actual behaviour:
+    """Keyed on the clamped limit, not the raw query string — the bug app.py fixed for its own
+    cache ("?limit=200 and ?limit=1000000 are one reply and were two entries") one layer out.
+    The ceiling comes from store.MAX_LIMIT, so assert it against the handler's real behaviour:
     if the two ever parted, the edge would serve one caller's row count to another.
-
-    This is the bug app.py fixed for its own cache — "?limit=200 and ?limit=1000000 are one
-    reply and were two entries" — reappearing one layer out, so it is checked the same way.
     """
     rule = _snapshot_module().rooms_key()["/rooms"]
     limit = rule["clamped"]["limit"]
@@ -345,12 +333,10 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
 
 
 def test_a_head_request_can_never_become_the_stored_body():
-    """route() sends HEAD into this lane and cacheKey() normalises it to a GET key, so a fill
-    that fetched the caller's own request would read a HEAD's empty body and store it under
-    that GET key — and every later GET for the same canonical query would be served an empty
-    /rooms until the copy was replaced, which at EDGE_HOLD_SECONDS is a day. There is no JS
-    harness here, so this asserts the property on the source: the fill fetches the key, which
-    is a GET by construction, and never the request it was handed.
+    """route() admits HEAD and cacheKey() normalises to a GET key, so a fill that fetched the
+    caller's request would store a HEAD's empty body under it and every later GET would read
+    an empty /rooms until the copy was replaced. Asserted on the source: the fill fetches the
+    key, a GET by construction, never the request it was handed.
     """
     origin = _between(
         (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),

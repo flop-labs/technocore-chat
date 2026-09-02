@@ -89,44 +89,34 @@ STATIC_FIRST = {"/skill.md": "SKILL.md", "/patterns.md": "src/patterns.md"}
 EDGE_CACHED = {"/healthz": 10}
 
 # Served from the edge copy ALWAYS, refreshed in the background at most this often. Never
-# snapshotted: like /healthz these are live figures, and a stored answer for them would
-# outlive the service that produced it.
+# snapshotted: like /healthz these are live figures, and a stored answer would outlive the
+# service that produced it.
 #
-# This lane exists because /rooms cannot be made fast enough to wait for — and the reason is
-# not that the walk is expensive. bench/rooms.py measures it at tens of milliseconds on an
-# idle store, less than half of which is what `limit` buys; the same walk against concurrent
-# writers costs an order of magnitude more at *every* limit, including the limit that reads
-# no room tails at all. The cost is queueing, not work, so walking less does not remove it.
+# Not because the walk is expensive: bench/rooms.py measures it in the hundreds of
+# milliseconds, less than a tenth of which is what `limit` buys. Against concurrent writers it
+# costs an order of magnitude more at *every* limit, including the one that reads no room
+# tails. The cost is queueing, not work, so no cache window can be made reliably longer than
+# it and walking less does not help. Serving the copy and refreshing behind ctx.waitUntil()
+# is what stops a reader ever paying it.
 #
-# Plain caching cannot cover a cost with no upper bound. The origin's window is finite —
-# s-maxage plus stale-while-revalidate, both derived from CHAT_EDGE_CACHE_SECONDS — so
-# whenever a walk outlasts it the next reader pays the whole cost, and occupies an anyio
-# thread while doing so, which is the resource the box actually runs out of.
-#
-# Serving the stale copy unconditionally and refreshing behind ctx.waitUntil() inverts that:
-# no reader ever waits for a walk, and the data is as fresh as the origin can actually
-# produce rather than as fresh as we are willing to make people wait. The interval also
-# bounds how often the origin is asked, which is the part that frees the thread pool.
-EDGE_REVALIDATE = {"/rooms": 60}
+# The interval is short because /rooms is activity monitoring: `idle_seconds` and `last_seq`
+# are the payload, and a stale copy misreports exactly what a reader came for. It has a floor
+# rather than a target — test_the_refresh_interval_is_not_faster_than_the_origin_can_answer.
+EDGE_REVALIDATE = {"/rooms": 5}
 
-# What a /rooms cache key is made of. The handler reads exactly two query parameters and
-# clamps one of them, so /rooms?limit=999999999, /rooms?limit=200 and /rooms?limit=200&x=1
-# are one reply — and a cache keyed on the raw URL stores them as three, which hands a caller
-# a way to force a cold walk on every request by incrementing a digit. app.py fixed exactly
-# this for its own cache ("the key space is the reply space"); a lane that caches in front of
-# it has to carry the same fix, or it reintroduces the bug one layer out.
+# What a /rooms cache key is made of. The handler reads only `limit` and `format` and clamps
+# the first, so /rooms?limit=999999999, ?limit=200 and ?limit=200&x=1 are one reply — and a
+# key built from the raw URL stores them as three, letting a caller force a cold walk per
+# request by incrementing a digit. app.py fixed this for its own cache ("the key space is the
+# reply space"); a lane in front of it has to carry the same fix.
 #
 # `match` names a parameter that matters only when it equals one value: `format=json` picks
-# the rendering and every other value, a typo included, is ignored. `clamped` names a numeric
-# one and carries its bounds.
+# the rendering, every other value is ignored. `clamped` names a numeric one and its bounds.
 #
-# The ceiling is read from the tree rather than from the served schema, which is the opposite
-# of what this file does everywhere else and is deliberate: /rooms' `limit` is an *advisory*
-# parameter, so by the input doctrine it publishes no `minimum`/`maximum` at all — bounds in
-# a schema say a value outside them is refused, and this one clamps (test_input_doctrine.py
-# asserts their absence). store.MAX_LIMIT is a plain constant rather than a config knob, so
-# the checkout being deployed is an exact source for it, and the alternative is a second copy
-# of the number in JS.
+# The ceiling comes from the tree, not the served schema, which is the opposite of what this
+# file does elsewhere: `limit` is advisory, so by the input doctrine it publishes no
+# minimum/maximum — bounds mean refusal and this clamps (test_input_doctrine.py asserts their
+# absence). MAX_LIMIT is a constant rather than a knob, so the checkout is an exact source.
 ROOMS_KEY_MATCH = {"format": "json"}
 
 
