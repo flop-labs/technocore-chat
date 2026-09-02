@@ -10,10 +10,9 @@ The records deliberately include valid signatures over malicious text. A consume
 contains no signing seed or operational key material.
 
 Each case mirrors the HTTP boundary: `room` identifies the requested room, `generation` comes from
-the JSON response envelope or an export's `X-Room-Generation` header, and `record` is the exact
-stored/exported JSON object. A record always has `seq`, `ts`, `from`, and `text`; `nonce` and `sig`
-appear only when stored. The room is part of the signed bytes; generation and the server-assigned
-`seq` and `ts` are not.
+the JSON response envelope, and `record` is the exact stored JSON object. A record always has
+`seq`, `ts`, `from`, and `text`; `nonce` and `sig` appear only when stored. The room is part of the
+signed bytes; generation and the server-assigned `seq` and `ts` are not.
 
 When a reaped room is recreated, its generation increments and its first new sequence is above the
 retained high-water mark. `room_history` records that relationship explicitly. A valid signature
