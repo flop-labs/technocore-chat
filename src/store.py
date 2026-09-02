@@ -1068,7 +1068,13 @@ def last_seq(root: Path, room: str) -> int:
     path = room_path(root, room)
     if path.exists():
         with path.open("rb") as f:
-            for raw in reverse_lines(f, max_bytes=65536):
+            # chunk_size 4 KiB, not the 64 KiB default: this runs under the room lock on
+            # every append and wants exactly one record — the newest. A typical record is
+            # ~120 B, so 4 KiB holds ~34 of them and the first read almost always answers.
+            # reverse_lines loops until it has a complete line, so a room of long records
+            # simply reads again; nothing is lost, and the common case stops reading 60 KiB
+            # it only ever split and threw away.
+            for raw in reverse_lines(f, chunk_size=4096, max_bytes=65536):
                 rec = _parse(raw)
                 if rec is not None:
                     return rec["seq"]
@@ -2367,7 +2373,10 @@ def _write_record(
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
         limit = _ring_limit(root)
-        if path.stat().st_size > limit:
+        # `size + len(line)` rather than another stat(): we hold the exclusive lock, we
+        # just wrote `line`, and `size` was read after the torn-tail heal decided whether
+        # `line` gained a leading newline — so this is exact, not an estimate.
+        if size + len(line) > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     if created:
         # Bump the room's generation: a (re)created room is a new conversation, and the read
