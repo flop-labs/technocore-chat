@@ -143,6 +143,20 @@ _IF_PARAM = {
     ),
 }
 
+# `?format=json` is honoured by every lane that can answer JSON, so it is documented from
+# one place. Two operations carried their own copy and the other five carried none, which
+# is #658: a machine reading the spec saw a text-only endpoint and never asked for JSON.
+_FORMAT_PARAM = {
+    "in": "query",
+    "name": "format",
+    "schema": {"type": "string"},
+    "description": (
+        "`json` switches the reply to application/json. Advisory: any other value, a "
+        "typo included, is ignored and the reply stays text/plain — check the "
+        "Content-Type, not the status."
+    ),
+}
+
 _NAME_SCHEMA = {"type": "string", "pattern": store.NAME_RE.pattern}
 _NAME_PARAM = {"in": "path", "required": True, "schema": _NAME_SCHEMA}
 
@@ -560,17 +574,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "/.well-known/agent.json (`limits.long_poll_seconds`)."
                             ),
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string"},
-                            "description": (
-                                "`json` switches the reply to application/json. Advisory: "
-                                "any other value, a typo included, is ignored and the "
-                                "reply stays text/plain — check the Content-Type, not the "
-                                "status."
-                            ),
-                        },
+                        _FORMAT_PARAM,
                         {
                             "in": "query",
                             "name": "n",
@@ -592,7 +596,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "this exists because a URL cannot carry a long non-Latin message — "
                         "one emoji is 12 bytes URL-encoded."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "parameters": [{**_NAME_PARAM, "name": "room"}, _FORMAT_PARAM],
                     "requestBody": _ROOM_POST_BODY,
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -678,6 +682,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "9 bytes encoded — use POST for long non-Latin text."
                             ),
                         },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -715,6 +720,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "required": True,
                             "schema": _TEXT_SCHEMA,
                         },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -749,6 +755,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "rooms of the attacker's choosing. Private `p-` rooms are never "
                         "announced, not even anonymously."
                     ),
+                    "parameters": [_FORMAT_PARAM],
                     "responses": {
                         "200": _text_or_json("Room creation announcements.", _ROOM_VIEW_SCHEMA),
                         "429": _RATE_LIMITED,
@@ -814,16 +821,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "counts every listed room either way."
                             ),
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string"},
-                            "description": (
-                                "`json` switches the reply to application/json. Advisory: "
-                                "any other value is ignored and the reply stays "
-                                "text/plain."
-                            ),
-                        },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json(
@@ -879,7 +877,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "Namespaces are never enumerated — there is no listing of "
                         "namespaces — and keys named `p-…` are never listed either."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}],
+                    "parameters": [{**_NAME_PARAM, "name": "ns"}, _FORMAT_PARAM],
                     "responses": {
                         "200": _text_or_json("Key names.", {"type": "object"}),
                         "400": _BAD_NAME,

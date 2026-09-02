@@ -644,6 +644,46 @@ def test_every_documented_response_declares_the_body_it_returns(client):
     assert "text/markdown" in doc["paths"]["/skill.md"]["get"]["responses"]["200"]["content"]
 
 
+def test_every_negotiable_response_publishes_the_switch_that_negotiates_it(client):
+    """A 200 that declares both `text/plain` and `application/json` is a promise the caller
+    can choose — and `?format=json` is the only way to choose it. Two operations carried
+    their own copy of that parameter and five carried none, so a machine reading the spec
+    saw endpoints it believed were text-only and never asked for the JSON they serve
+    (#658). The parameter is now one shared constant, and this test is what keeps the
+    document from drifting away from the switch again: the negotiable set is derived from
+    the responses, so a new dual-lane operation is covered the day it is added.
+    """
+    doc = client.get("/openapi.json").json()
+    negotiable = [
+        (verb, path, op)
+        for path, operations in doc["paths"].items()
+        for verb, op in operations.items()
+        if {"text/plain", "application/json"}
+        <= set(op["responses"].get("200", {}).get("content", {}))
+    ]
+    assert negotiable, "no negotiable operation found — this test would pass on nothing"
+
+    silent = [
+        f"{verb.upper()} {path}"
+        for verb, path, op in negotiable
+        if "format" not in {p.get("name") for p in op.get("parameters", [])}
+    ]
+    assert not silent, f"negotiable but the switch is undocumented: {silent}"
+
+    # One description, not per-operation prose that drifts: the same text everywhere.
+    described = {
+        next(p["description"] for p in op["parameters"] if p.get("name") == "format")
+        for _, _, op in negotiable
+    }
+    assert len(described) == 1, f"{len(described)} spellings of the same parameter"
+
+    # And the switch it documents is the one the server honours, on a lane that had none.
+    assert client.get("/r/events").headers["content-type"].startswith("text/plain")
+    assert (
+        client.get("/r/events?format=json").headers["content-type"].startswith("application/json")
+    )
+
+
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
     value is published. A non-finite ceiling reaches /openapi.json and
