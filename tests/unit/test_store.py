@@ -37,8 +37,8 @@ def _race_under_lock(monkeypatch, store, action):
     real_locked = store._locked
 
     @contextmanager
-    def hook(target):
-        with real_locked(target):
+    def hook(target, shared=False, nb=False):
+        with real_locked(target, shared, nb):
             action(target)
             yield
 
@@ -950,6 +950,7 @@ def test_message_counter_survives_the_reaper(tmp_path):
 
     for i in range(3):
         store.append(tmp_path, "doomed", "bot", f"m{i}")
+    store._bump(tmp_path)  # a plain message rides in `_PENDING` until something flushes it
     assert store.counters(tmp_path)["messages"] == 3
 
     for room in ("doomed", "events"):
@@ -985,6 +986,7 @@ def test_message_counter_survives_compaction(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 1024)
     for i in range(60):
         store.append(tmp_path, "busy", "bot", f"message number {i} with some padding text")
+    store._bump(tmp_path)  # as above: flush before reading the counter, not after reaping
     on_disk = sum(1 for _ in store.room_path(tmp_path, "busy").open("rb"))
     assert on_disk < 60  # the ring dropped lines
     assert store.counters(tmp_path)["messages"] == 60  # the counter did not
@@ -1170,3 +1172,97 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_a_room_idle_for_exactly_the_threshold_is_not_reapable_yet(tmp_path):
+    """The retention promise is four comparisons, and this pins two of their boundaries.
+
+    `_age` asks callers for "the threshold plus a margin", so the thresholds themselves
+    were only ever tested from outside them: `>` and `>=` behaved identically for every
+    existing caller, and an off-by-one in a retention rule does not fail — it deletes a
+    day early or keeps data a week too long, and nobody finds out from a stack trace.
+    `_reapable` takes `now` as an argument, so the boundary is exact here, not raced.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_text('{"seq":1,"ts":"t","from":"a","text":"hi"}\n', encoding="utf-8")
+    mtime = os.stat(p).st_mtime
+
+    assert store._reapable(p, mtime + store.IDLE_SECONDS, stillborn_rule=False) is None
+    assert store._reapable(p, mtime + store.IDLE_SECONDS + 1, stillborn_rule=False) == "idle"
+
+    # The stillborn rule has its own threshold and the same boundary question. One record
+    # is at STILLBORN_MESSAGES, so this file qualifies on content and only the clock decides.
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS, stillborn_rule=True) is None
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS + 1, stillborn_rule=True) == (
+        "stillborn"
+    )
+
+
+def test_a_room_holding_undecodable_bytes_is_counted_not_crashed_on(tmp_path):
+    """ "An unreadable file is not stillborn" has to survive bytes that are not text.
+
+    _stillborn opens the file in binary and lets _parse refuse a line, which is what keeps
+    a torn write from either crashing the reaper or condemning a live room. Read as text
+    instead, the same file raises UnicodeDecodeError on iteration — a ValueError, which the
+    `except OSError` here does not catch — and the reaper dies on a room it was only
+    counting. Nothing exercised that: every room a test hands the reaper is valid UTF-8.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_bytes(
+        b'{"seq":1,"ts":"t","from":"a","text":"one"}\n'
+        b"\xff\xfe not utf-8, a torn write at EOF\n"
+        b'{"seq":2,"ts":"t","from":"b","text":"two"}\n'
+    )
+    # Two real records is past STILLBORN_MESSAGES, so the room is answered, not stillborn —
+    # and reaching that answer at all is the half the binary mode buys.
+    assert store._stillborn(p) is False
+    assert store._reapable(p, os.stat(p).st_mtime, stillborn_rule=True) is None
+
+
+def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path):
+    """Retention is the byte budget, at every record size.
+
+    `COMPACT_MAX_LINES` sits beside the budget in `_compact`, and the comment on it says it
+    "only bounds how much the compactor holds in memory at once". A flat 5000 made that
+    false: it bound first for any record under ~1 KB, which is every ordinary message. A
+    full ring of ~81-byte records compacted to 5000 records / 400 KB — 7.6% of the floor
+    the ring model promises, with every `since=` cursor further back than 5000 losing
+    history the ring still owed it.
+
+    Deriving the cap from the budget restores the stated meaning: at the smallest record
+    the write path emits (~73 B) the byte budget always stops the scan first, so the count
+    can only ever bind on malformed input, which is the memory case it is for.
+
+    Asserted at the small end because that is the end that broke, and against `keep` rather
+    than a record count so it keeps holding if the record shape changes.
+    """
+    import json
+
+    import store
+
+    path = tmp_path / "small.jsonl"
+    record = {"seq": 0, "ts": "2026-08-27T00:00:00.000000Z", "from": "bot", "text": "hi"}
+    written = size = 0
+    with path.open("wb") as handle:  # built directly: 140k append() calls is not a unit test
+        while size <= store.MAX_ROOM_BYTES:
+            written += 1
+            record["seq"] = written
+            line = (json.dumps(record) + "\n").encode()
+            handle.write(line)
+            size += len(line)
+
+    store._compact(path, cutoff=None, keep=store.COMPACT_KEEP_BYTES)
+
+    data = path.read_bytes()
+    seqs = [json.loads(line)["seq"] for line in data.splitlines()]
+    # Within one record of the budget, not merely "more than the old cap".
+    assert len(data) > store.COMPACT_KEEP_BYTES - 200, (
+        f"retained {len(data)} of a {store.COMPACT_KEEP_BYTES} byte budget"
+    )
+    assert len(data) <= store.COMPACT_KEEP_BYTES
+    assert seqs == sorted(seqs), "compaction must leave the file ascending by seq"
+    assert seqs[-1] == written, "the newest record must survive compaction"

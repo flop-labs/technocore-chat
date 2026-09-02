@@ -1,0 +1,102 @@
+/**
+ * Edge policy for the document surface: two lanes, chosen by whether a document's bytes
+ * depend on the running configuration.
+ *
+ *   static-first  /skill.md, /patterns.md, /robots.txt
+ *                 Served from the stored copy without asking the origin. Nothing in them
+ *                 comes from config — enforced by tests/edge/, which renders each under two
+ *                 different configs and requires identical bytes.
+ *
+ *   origin-first  everything else
+ *                 Proxied to the origin; the stored copy is served only when the origin
+ *                 fails to answer at all. /llms.txt carries MAX_ROOMS and MAX_NOTES_PER_NS,
+ *                 /openapi.json and /.well-known/agent.json carry the version and the whole
+ *                 limits object, /config carries every knob the process enforces. A stored
+ *                 copy of those served in preference to the origin publishes stale limits
+ *                 the moment an operator changes a knob — and knobs get changed during
+ *                 incidents, which is when these get read. Measured 2026-09-01: three
+ *                 compose knobs changed on the box that day, none of them via a release.
+ *
+ * Why the split rather than origin-first for everything: origin-first already survives an
+ * outage, so the static lane is not about the origin being *down* — it is about the origin
+ * being *slow*. That outage spent hours degraded rather than dead, and origin-first waits
+ * out its timeout before falling back, so the three documents a reader most needs in order
+ * to back off and retry would each have cost a multi-second stall.
+ *
+ * The cost, accepted: the static three change on a release, so a stored copy is stale until
+ * deploy.sh runs again. A release is a controlled moment; a compose edit is not.
+ *
+ * Not in front of /r/ or /kv/. Those are ~80% of traffic, are writes as often as reads, and
+ * none of it is fallback-able — see the per-path routes in wrangler.jsonc.
+ */
+
+import ROUTING from "./routing.json";
+
+// How long to wait for the origin on the proxied lane before serving the stored copy.
+// Generous: a slow document is still the correct document, and the snapshot is a worse
+// answer than a late one.
+const ORIGIN_TIMEOUT_MS = 8000;
+
+const STATIC_FIRST = new Set(ROUTING.static_first);
+
+/** A 5xx is the origin failing to answer. A 4xx is the origin answering "no", which is a
+ * real reply and must pass through untouched — serving a snapshot over a 404 or a 429 would
+ * invent content for a path the service deliberately refused. */
+const isOriginFailure = (status) => status >= 500;
+
+/** The stored copy, with the Content-Type the origin gave it when it was captured.
+ *
+ * The type comes from the manifest rather than the asset server's guess because six of
+ * these paths carry no file extension (/humans, /config, /.well-known/api-catalog among
+ * them), and a guess hands a browser HTML labelled text/plain or JSON as octet-stream.
+ */
+async function stored(request, env, pathname, { fallback }) {
+  const asset = await env.ASSETS.fetch(new URL(request.url));
+  if (!asset || asset.status !== 200) return null;
+
+  const headers = new Headers(asset.headers);
+  const recorded = ROUTING.types[pathname];
+  if (recorded) headers.set("Content-Type", recorded);
+  if (fallback) {
+    // Say so, in a header a reader can check and an operator can grep the edge logs for. A
+    // snapshot indistinguishable from the live document is how a stale limit gets believed.
+    headers.set("X-Origin-Fallback", "1");
+    // Short: this copy is only correct until the origin returns, and the shared cache must
+    // not hold an outage artefact once the outage is over.
+    headers.set("Cache-Control", "public, max-age=0, s-maxage=30, stale-while-revalidate=30");
+  }
+  return new Response(asset.body, { status: 200, headers });
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    // Only GET/HEAD are ever routed here, but a stray method must not be answered from a
+    // stored copy: fall through to the origin and let it refuse.
+    if (request.method !== "GET" && request.method !== "HEAD") return fetch(request);
+
+    const pathname = new URL(request.url).pathname;
+
+    if (STATIC_FIRST.has(pathname)) {
+      const copy = await stored(request, env, pathname, { fallback: false });
+      // No stored copy — an un-snapshotted deploy — is not a reason to 404 a document the
+      // origin can still serve.
+      if (copy) return copy;
+      return fetch(request);
+    }
+
+    let originResponse = null;
+    try {
+      // `fetch(request)` from a Worker on a route goes to the origin, not back into this
+      // Worker. The timeout turns a hung tunnel into a fallback rather than a hung request.
+      originResponse = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
+      if (!isOriginFailure(originResponse.status)) return originResponse;
+    } catch (err) {
+      // Timeout, DNS, refused connection, tunnel down: indistinguishable here from a 5xx,
+      // and handled the same way.
+    }
+
+    const copy = await stored(request, env, pathname, { fallback: true });
+    // The origin's own failure is a better answer than a 404 we invented.
+    return copy ?? originResponse ?? new Response("origin unavailable\n", { status: 503 });
+  },
+};
