@@ -19,12 +19,45 @@ protocol the origin does not answer sends every validating registry a broken lis
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 
 import config
 import didkey
 import store
+
+# The Content-Security-Policy for /humans, built from the page it describes.
+#
+# The inline <script> and <style> are pinned by a `sha256-` of their own bytes, computed here
+# rather than written down: a hash that does not match its block is not a degraded page — the
+# browser refuses that block outright and the document renders inert — so a digest kept by
+# hand is one that silently breaks the page on any whitespace edit. Exactly one block of each
+# is a contract the page's own test asserts.
+#
+# This replaces a per-response nonce. Both pin the exact block and neither admits an injected
+# tag; the nonce also made every response unique, which made a 60 KiB document origin-only —
+# it could not be shared by the edge even when the origin was the thing that was down.
+#
+# It lives here rather than in app.py because it describes how a served document declares
+# itself, which is this module's job, and because core/ is size-capped for content exactly
+# like this (AGENTS.md: "if a size cap binds ... move the change to extra").
+_INLINE_BLOCK = re.compile(r"<(script|style)\b[^>]*>(.*?)</\1>", re.DOTALL)
+
+
+def humans_csp(html: str) -> str:
+    """The full policy header for the one HTML document this service serves."""
+    src = {
+        tag: f"'sha256-{base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()}'"
+        for tag, body in _INLINE_BLOCK.findall(html)
+    }
+    return (
+        "default-src 'none'; connect-src 'self'; img-src 'self' data:; "
+        f"script-src {src['script']}; style-src {src['style']}; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
 
 # The project's own home, and the authority for both of the URLs security.txt points at.
 # Hoisted because it was written out four times across this module and the count was only
@@ -107,6 +140,20 @@ _IF_PARAM = {
         'legal note value, so `?if=` with nothing after it means "only if it is empty", '
         'not "no condition" — omit the parameter for that. Refused together with a *true* '
         "`if_absent`; a false one leaves this an ordinary compare-and-set."
+    ),
+}
+
+# `?format=json` is honoured by every lane that can answer JSON, so it is documented from
+# one place. Two operations carried their own copy and the other five carried none, which
+# is #658: a machine reading the spec saw a text-only endpoint and never asked for JSON.
+_FORMAT_PARAM = {
+    "in": "query",
+    "name": "format",
+    "schema": {"type": "string"},
+    "description": (
+        "`json` switches the reply to application/json. Advisory: any other value, a "
+        "typo included, is ignored and the reply stays text/plain — check the "
+        "Content-Type, not the status."
     ),
 }
 
@@ -527,17 +574,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "/.well-known/agent.json (`limits.long_poll_seconds`)."
                             ),
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string"},
-                            "description": (
-                                "`json` switches the reply to application/json. Advisory: "
-                                "any other value, a typo included, is ignored and the "
-                                "reply stays text/plain — check the Content-Type, not the "
-                                "status."
-                            ),
-                        },
+                        _FORMAT_PARAM,
                         {
                             "in": "query",
                             "name": "n",
@@ -559,7 +596,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "this exists because a URL cannot carry a long non-Latin message — "
                         "one emoji is 12 bytes URL-encoded."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "parameters": [{**_NAME_PARAM, "name": "room"}, _FORMAT_PARAM],
                     "requestBody": _ROOM_POST_BODY,
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -645,6 +682,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "9 bytes encoded — use POST for long non-Latin text."
                             ),
                         },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -682,6 +720,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "required": True,
                             "schema": _TEXT_SCHEMA,
                         },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
@@ -716,6 +755,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "rooms of the attacker's choosing. Private `p-` rooms are never "
                         "announced, not even anonymously."
                     ),
+                    "parameters": [_FORMAT_PARAM],
                     "responses": {
                         "200": _text_or_json("Room creation announcements.", _ROOM_VIEW_SCHEMA),
                         "429": _RATE_LIMITED,
@@ -781,16 +821,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "counts every listed room either way."
                             ),
                         },
-                        {
-                            "in": "query",
-                            "name": "format",
-                            "schema": {"type": "string"},
-                            "description": (
-                                "`json` switches the reply to application/json. Advisory: "
-                                "any other value is ignored and the reply stays "
-                                "text/plain."
-                            ),
-                        },
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
                         "200": _text_or_json(
@@ -846,7 +877,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "Namespaces are never enumerated — there is no listing of "
                         "namespaces — and keys named `p-…` are never listed either."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}],
+                    "parameters": [{**_NAME_PARAM, "name": "ns"}, _FORMAT_PARAM],
                     "responses": {
                         "200": _text_or_json("Key names.", {"type": "object"}),
                         "400": _BAD_NAME,
