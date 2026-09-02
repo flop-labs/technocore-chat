@@ -169,6 +169,54 @@ def test_quiet_suppresses_the_digest_but_keeps_the_warnings() -> None:
     assert "WARN  rooms:" in result.stdout  # the warning survives
 
 
+def test_an_empty_stats_body_is_a_clean_error_not_a_false_all_clear() -> None:
+    """@yukkie3276's review of #672: build_digest()'s .get(key, 0) defaults let a
+    syntactically valid but empty body sail through as a clean digest -- exit 0, no WARN --
+    which is exactly the false all-clear this script's own docstring says a monitoring
+    check must never produce. {} is valid JSON and a valid dict; it is not a valid /stats
+    body, and validate_stats() is what tells the two apart.
+    """
+    server = _serve({}, 18218)
+    try:
+        result = run(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert result.returncode == 2
+    assert "error" in result.stderr.lower()
+
+
+def test_one_missing_top_level_field_is_a_clean_error_not_a_partial_digest() -> None:
+    """The narrower case the review named: a body with everything except one required
+    field (schema drift, or a body truncated mid-transfer that still happens to end on a
+    valid JSON boundary) must fail the same way a fully empty one does, not silently check
+    only what happened to survive.
+    """
+    stats = json.loads(json.dumps(BASE_STATS))
+    del stats["client_identity"]
+    server = _serve(stats, 18219)
+    try:
+        result = run(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert result.returncode == 2
+    assert "client_identity" in result.stderr
+
+
+def test_a_required_field_present_but_wrong_type_is_also_a_clean_error() -> None:
+    """Present is not the same as well-formed: a caller feeding this a hand-edited or
+    mocked body could easily get the shape wrong (a string instead of an object) while
+    still tripping only a presence check, not a type one."""
+    stats = json.loads(json.dumps(BASE_STATS))
+    stats["rooms"] = "not an object"
+    server = _serve(stats, 18220)
+    try:
+        result = run(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert result.returncode == 2
+    assert "rooms" in result.stderr
+
+
 def test_a_wrong_token_is_a_clean_error_not_a_false_clear() -> None:
     server = _serve(BASE_STATS, 18217)
     try:

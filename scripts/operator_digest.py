@@ -45,6 +45,29 @@ def fetch_stats(url: str, token: str, timeout: float) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def validate_stats(stats: object) -> dict:
+    """Fail loudly rather than defaulting into a false all-clear.
+
+    Every key checked here is present in every real /stats response -- service_stats()
+    always includes rooms, notes, bytes, requests and client_identity, whether or not the
+    numbers inside them are interesting. A response missing one, or where one is present
+    but not the object it should be, is schema drift or a truncated body, not an
+    unconfigured knob -- and build_digest()'s .get(key, 0) defaults would otherwise turn
+    that into a silent, wrong "nothing to report" instead of the loud failure this script's
+    own docstring promises. Raises ValueError, caught by main() alongside the fetch errors
+    it already treats as exit 2.
+    """
+    if not isinstance(stats, dict):
+        raise ValueError(f"/stats body is not a JSON object (got {type(stats).__name__})")
+    required = ("rooms", "notes", "bytes", "requests", "client_identity")
+    missing = [k for k in required if not isinstance(stats.get(k), dict)]
+    if missing:
+        raise ValueError(
+            f"/stats body is missing or has a malformed value for: {', '.join(missing)}"
+        )
+    return stats
+
+
 def check_capacity(name: str, used: int, cap: int, warn_pct: float) -> str | None:
     """One line, or None if this cap isn't close. Division-by-zero-safe: a cap of 0 (a
     deployment that has disabled something) is never a false WARN.
@@ -141,8 +164,14 @@ def main() -> int:
         return 2
 
     try:
-        stats = fetch_stats(args.url, args.token, args.timeout)
-    except (urllib.error.URLError, TimeoutError, RuntimeError, json.JSONDecodeError) as e:
+        stats = validate_stats(fetch_stats(args.url, args.token, args.timeout))
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        RuntimeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as e:
         print(f"error: could not read /stats: {e}", file=sys.stderr)
         return 2
 
