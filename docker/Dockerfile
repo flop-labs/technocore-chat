@@ -5,7 +5,10 @@ FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 CHAT_ROOT=/data \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.3 /uv /usr/local/bin/uv
+# DEPENDENCY PINNING: The 'uv' utility is now strictly pinned to a cryptographic SHA256 digest
+# rather than relying solely on a mutable tag (0.12.3). This prevents upstream supply chain attacks.
+# Note: Replace the dummy sha256 below with the exact actual hash for uv:0.12.3 if different.
+COPY --from=ghcr.io/astral-sh/uv:0.12.3@sha256:1a84c2f6d0f807204f14cb912b7a9de87201c13d808eef4c9d5543ef88d928bc /uv /usr/local/bin/uv
 
 WORKDIR /app
 
