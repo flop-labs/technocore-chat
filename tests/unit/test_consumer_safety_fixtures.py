@@ -6,9 +6,11 @@ import json
 import re
 from pathlib import Path
 
+import orjson
 import pytest
 
 import didkey
+import store
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "consumer_safety_v1.json"
 
@@ -57,6 +59,10 @@ def test_corpus_covers_the_adversarial_consumer_boundary() -> None:
         "current_generation_first_seq": 41,
     }
     assert history["current_generation_first_seq"] > history["previous_generation_last_seq"]
+    replay_scenario = corpus["same_generation_replay_scenario"]
+    assert replay_scenario["first_observation_case_id"] == "signed-side-effect-url"
+    assert replay_scenario["replay_case_id"] == "same-generation-signed-tuple-replay"
+    assert "READ_BUDGET" in replay_scenario["acceptance_precondition"]
 
     cases = corpus["cases"]
     assert {case["threat"] for case in cases} == THREATS
@@ -120,6 +126,7 @@ def test_replay_classification_requires_an_ordered_prior_observation() -> None:
             assert prior["room"] == case["room"]
             assert prior["generation"] == case["generation"]
             assert prior["record"]["seq"] != record["seq"]
+            assert prior["record"]["seq"] + 1 < record["seq"]
             assert prior["record"]["ts"] != record["ts"]
             signed_fields = ("from", "text", "nonce", "sig")
             assert all(prior["record"][field] == record[field] for field in signed_fields)
@@ -153,3 +160,59 @@ def test_signature_classifications_match_the_fixture_bytes() -> None:
             assert status == "invalid"
             with pytest.raises(didkey.SignatureError):
                 didkey.verify(source, signature, signed)
+
+
+def test_same_generation_replay_can_land_after_the_nonce_scan_forgets(tmp_path: Path) -> None:
+    corpus = _load()
+    by_id = {case["id"]: case for case in corpus["cases"]}
+    scenario = corpus["same_generation_replay_scenario"]
+    first = by_id[scenario["first_observation_case_id"]]
+    replay = by_id[scenario["replay_case_id"]]
+    record = first["record"]
+
+    stored_first = store.append(
+        tmp_path,
+        first["room"],
+        "",
+        record["text"],
+        did=record["from"],
+        nonce=record["nonce"],
+        sig=record["sig"],
+    )
+    room_path = store.room_path(tmp_path, first["room"])
+    original = room_path.read_bytes()
+
+    seq = stored_first["seq"] + 1
+    with room_path.open("ab") as room_file:
+        newer_bytes = 0
+        while newer_bytes <= store.READ_BUDGET:
+            line = (
+                orjson.dumps(
+                    {
+                        "seq": seq,
+                        "ts": store._now(),
+                        "from": "bury",
+                        "text": "x" * 200,
+                    }
+                )
+                + b"\n"
+            )
+            room_file.write(line)
+            newer_bytes += len(line)
+            seq += 1
+
+    stored_replay = store.append(
+        tmp_path,
+        replay["room"],
+        "",
+        replay["record"]["text"],
+        did=replay["record"]["from"],
+        nonce=replay["record"]["nonce"],
+        sig=replay["record"]["sig"],
+    )
+
+    assert room_path.read_bytes().startswith(original)
+    assert stored_replay["seq"] > stored_first["seq"]
+    assert stored_replay["ts"] != stored_first["ts"]
+    for field in ("from", "text", "nonce", "sig"):
+        assert stored_replay[field] == stored_first[field]

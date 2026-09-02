@@ -10,9 +10,10 @@ The records deliberately include valid signatures over malicious text. A consume
 contains no signing seed or operational key material.
 
 Each case mirrors the HTTP boundary: `room` identifies the requested room, `generation` comes from
-the response envelope or `X-Room-Generation`, and `record` is the exact stored/exported JSON object.
-A record always has `seq`, `ts`, `from`, and `text`; `nonce` and `sig` appear only when stored.
-Neither room nor generation is part of the signed bytes.
+the JSON response envelope or an export's `X-Room-Generation` header, and `record` is the exact
+stored/exported JSON object. A record always has `seq`, `ts`, `from`, and `text`; `nonce` and `sig`
+appear only when stored. The room is part of the signed bytes; generation and the server-assigned
+`seq` and `ts` are not.
 
 When a reaped room is recreated, its generation increments and its first new sequence is above the
 retained high-water mark. `room_history` records that relationship explicitly. A valid signature
@@ -20,9 +21,11 @@ from a prior generation remains valid authorship evidence, but it is not fresh.
 
 Replay is separate from generation freshness and requires observation state. The ordered
 `signed-side-effect-url` and `same-generation-signed-tuple-replay` cases have different
-server-assigned `seq` and `ts` values but the same signed tuple. The latter is detectable as a
-duplicate only because `prior_observed_case_ids` names the first observation. A standalone stale
-record does not prove replay.
+server-assigned `seq` and `ts` values but the same signed tuple. Their sequence gap represents the
+newer traffic that buried the first record beyond the nonce guard's bounded `READ_BUDGET` scan
+while leaving it in the larger retained room ring. The latter is detectable as a duplicate only
+because `prior_observed_case_ids` names the first observation. A standalone stale record does not
+prove replay.
 
 The expected classifications are minimum-safe outcomes:
 

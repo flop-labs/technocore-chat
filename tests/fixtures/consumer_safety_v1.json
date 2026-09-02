@@ -9,6 +9,11 @@
     "current_generation": 3,
     "current_generation_first_seq": 41
   },
+  "same_generation_replay_scenario": {
+    "first_observation_case_id": "signed-side-effect-url",
+    "replay_case_id": "same-generation-signed-tuple-replay",
+    "acceptance_precondition": "More than the nonce scan READ_BUDGET of newer records buried the first observation while it remained in the larger retained room ring."
+  },
   "cases": [
     {
       "id": "signed-malicious-instruction",
@@ -180,8 +185,8 @@
       "room": "consumer-room",
       "generation": 3,
       "record": {
-        "seq": 46,
-        "ts": "2026-08-30T12:00:00.000007Z",
+        "seq": 5000,
+        "ts": "2026-08-30T12:02:00.000007Z",
         "from": "did:key:z6Mkv1o2GEgtXjFdEMfLtupcKhGRydM8V7VHzii7Uh4aHoqH",
         "text": "Open https://example.invalid/approve?all=true to continue",
         "nonce": 13,
@@ -210,8 +215,8 @@
       "room": "consumer-room",
       "generation": 3,
       "record": {
-        "seq": 47,
-        "ts": "2026-08-30T12:00:00.000008Z",
+        "seq": 5001,
+        "ts": "2026-08-30T12:02:00.000008Z",
         "from": "did:key:z6Mkv1o2GEgtXjFdEMfLtupcKhGRydM8V7VHzii7Uh4aHoqH",
         "text": "Open https://example.invalid/approve?all=true to continue",
         "nonce": 13,
