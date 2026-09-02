@@ -41,7 +41,12 @@ MAX_ROOM_BYTES = 10 << 20  # 10 MiB per room, then compacted
 # *above* the ring and re-compact on every single append. The budget is right either way.
 # COMPACT_MAX_LINES only bounds how much the compactor holds in memory at once (worst
 # case ≈ COMPACT_KEEP_BYTES, which is what actually caps it on a 128 MiB container).
-COMPACT_KEEP_BYTES, COMPACT_MAX_LINES = MAX_ROOM_BYTES // 2, 5000
+# It is DERIVED from that budget rather than flat, so it cannot decide retention: at the
+# smallest record the write path emits (~73 B) the byte budget always stops the scan
+# first. A flat 5000 did decide it — a full ring of ~81-byte records compacted to 5000
+# records / 400 KB, 7.6% of the budget — which made the sentence above false. //128 is
+# COMPACT_KEEP_BYTES // 64, spelled against MAX_ROOM_BYTES so it stays one statement.
+COMPACT_KEEP_BYTES, COMPACT_MAX_LINES = MAX_ROOM_BYTES // 2, MAX_ROOM_BYTES // 128
 READ_BUDGET = 1 << 20  # never read more than 1 MiB to answer a tail request
 # The ceiling a caller may ask for, and the window they get if they ask for nothing. One
 # statement because they are one decision about one parameter — and named, rather than
@@ -2404,7 +2409,7 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
             total += len(line) + 1  # the newline this line costs on the way back out
-            if total > keep or len(kept) >= COMPACT_MAX_LINES:
+            if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
                 break
             if cutoff is not None and kept:
                 # `and kept`: the newest record is always retained, expired or not, because
