@@ -71,6 +71,19 @@ PATHS = (
 # controlled moment where re-running deploy.sh is a checklist item, unlike a compose edit.
 STATIC_FIRST = {"/skill.md": "SKILL.md", "/patterns.md": "src/patterns.md"}
 
+# Held by the edge for a few seconds and NEVER snapshotted — the third lane, and the
+# distinction is the point. A liveness endpoint must not have a stored copy to fall back on,
+# because the only thing a stored "ok" can do is answer for a service that is gone. So this
+# lane caches and never falls back, and these paths are deliberately absent from PATHS.
+#
+# 10s, not 1s: Cloudflare caches per PoP, so 20.7 req/s across the PoP network arrives at any
+# single one far more slowly than the global rate suggests and a 1s window mostly misses. The
+# same fragmentation made a 3s window buy almost nothing for /rooms. 10s cannot reach an
+# alerting decision — monitors alert on two or three consecutive failures — and it removes
+# ~1.78M origin requests a day (measured 2026-09-02: 2,478 of 2,480 /healthz requests in two
+# minutes arrived through the tunnel, 10.4% of all traffic).
+EDGE_CACHED = {"/healthz": 10}
+
 
 def asset_name(path: str) -> str:
     """Where a URL path is stored under public/.
@@ -132,7 +145,11 @@ def main() -> int:
         return 1
 
     pathlib.Path(args.manifest).write_text(
-        json.dumps({"types": types, "static_first": sorted(STATIC_FIRST)}, indent=2, sort_keys=True)
+        json.dumps(
+            {"types": types, "static_first": sorted(STATIC_FIRST), "edge_cached": EDGE_CACHED},
+            indent=2,
+            sort_keys=True,
+        )
         + "\n",
         encoding="utf-8",
     )

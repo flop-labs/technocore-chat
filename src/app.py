@@ -1793,7 +1793,18 @@ def security_txt(request: Request) -> Response:
     return _static_cacheable(text(body, index=True))
 
 
-def healthz(request: Request) -> Response:
+async def healthz(request: Request) -> Response:
+    """`async` deliberately, though the body is a constant.
+
+    Starlette runs a plain `def` endpoint in the anyio threadpool, so every liveness check
+    took one of the 40 threads a worker has — and the moment that matters is the one where
+    there are none. Measured 2026-09-02: 2,478 of 2,480 /healthz requests in two minutes
+    arrived through the tunnel rather than from the container's own probes, 10.4% of all
+    traffic, while the write path had 40 of 42 threads parked in flock. A check that has to
+    queue for a thread to answer "ok" reports the queue, not the service, and the container
+    healthcheck was failing on exactly that. On the event loop it answers in microseconds
+    and needs no thread at all.
+    """
     return text("ok")
 
 

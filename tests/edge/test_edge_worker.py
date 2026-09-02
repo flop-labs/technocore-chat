@@ -47,11 +47,40 @@ def test_every_snapshotted_path_is_routed_to_the_worker():
     assert set(_snapshot_module().PATHS) - _wrangler_routes() == set()
 
 
-def test_every_routed_path_is_snapshotted():
+def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     """The direction that actually breaks: routed but not stored means the fallback has
     nothing to serve, so the Worker hands back the origin's 503 — on the one path someone
-    added to the route list specifically so it would survive an outage."""
-    assert _wrangler_routes() - set(_snapshot_module().PATHS) == set()
+    added to the route list specifically so it would survive an outage.
+
+    The edge-cached lane is the deliberate exception, and has to be named rather than
+    subtracted silently: those paths are routed, are never snapshotted, and that is the
+    whole point of them.
+    """
+    snapshot = _snapshot_module()
+    accounted = set(snapshot.PATHS) | set(snapshot.EDGE_CACHED)
+    assert _wrangler_routes() - accounted == set()
+
+
+def test_a_liveness_path_is_never_snapshotted():
+    """The invariant the third lane exists to hold.
+
+    A stored copy of /healthz is a file that says "ok". The only occasion it would ever be
+    served is the one where the origin cannot answer — so the single thing it can do is
+    report a service that is gone as healthy, to every monitor watching it.
+    """
+    snapshot = _snapshot_module()
+    assert set(snapshot.EDGE_CACHED) & set(snapshot.PATHS) == set()
+    assert set(snapshot.EDGE_CACHED) & set(snapshot.STATIC_FIRST) == set()
+    assert "/healthz" not in snapshot.PATHS
+
+
+def test_the_edge_cache_window_is_long_enough_to_be_worth_having():
+    """1s would mostly miss: Cloudflare caches per PoP, so the per-PoP arrival rate is far
+    below the global one, and a window shorter than the gap between two requests at the same
+    PoP caches nothing. Pinned so a later "make it fresher" edit has to argue with the
+    reason rather than silently neutering the lane."""
+    for path, seconds in _snapshot_module().EDGE_CACHED.items():
+        assert seconds >= 5, f"{path} at {seconds}s is below the per-PoP arrival gap"
 
 
 def test_the_worker_covers_every_document_route_the_app_serves():
@@ -170,3 +199,20 @@ def test_the_origin_first_documents_really_do_carry_configuration(client):
 def test_the_static_first_set_is_a_subset_of_what_is_snapshotted():
     snapshot = _snapshot_module()
     assert set(snapshot.STATIC_FIRST) <= set(snapshot.PATHS)
+
+
+def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
+    """A source assertion, deliberately, and narrow.
+
+    There is no JS harness in this repo, and the difference this guards is behavioural
+    rather than cosmetic: `s-maxage` is a shared-cache directive, so only Cloudflare holds
+    the copy, while a bare `max-age` would let a browser, a monitoring client or a
+    downstream proxy reuse `ok` without contacting the edge at all. That puts liveness
+    staleness outside Cloudflare's control and beyond the reach of a purge — on the one
+    endpoint whose entire job is to be current.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    assert "s-maxage=${seconds}" in worker
+    assert "max-age=0, s-maxage=${seconds}" in worker, (
+        "the edge-cached copy must not carry a private max-age"
+    )

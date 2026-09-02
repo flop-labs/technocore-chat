@@ -39,6 +39,16 @@ const ORIGIN_TIMEOUT_MS = 8000;
 
 const STATIC_FIRST = new Set(ROUTING.static_first);
 
+// Paths the edge holds for a few seconds and never stores a snapshot of; see snapshot.py,
+// which owns the policy so the Worker and the tests cannot disagree about it. A liveness
+// endpoint must never have a stored copy to fall back on — the only thing a stored "ok" can
+// do is answer for a service that is gone — so this lane caches and never falls back.
+//
+// The origin keeps sending `no-store`, and that stays correct: anything asking it directly,
+// including the container healthcheck and the auto-updater's rollback probe (both on
+// 127.0.0.1, neither through this Worker), gets an uncached answer. Only the edge shares it.
+const EDGE_CACHED_SECONDS = ROUTING.edge_cached ?? {};
+
 /** A 5xx is the origin failing to answer. A 4xx is the origin answering "no", which is a
  * real reply and must pass through untouched — serving a snapshot over a 404 or a 429 would
  * invent content for a path the service deliberately refused. */
@@ -68,13 +78,66 @@ async function stored(request, env, pathname, { fallback }) {
   return new Response(asset.body, { status: 200, headers });
 }
 
+async function edgeCached(request, pathname, seconds) {
+  const cache = caches.default;
+  const hit = await cache.match(request);
+  if (hit) return hit;
+
+  let fresh;
+  try {
+    fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
+  } catch (err) {
+    // An origin that will not answer inside the budget IS the health answer, so report it
+    // here rather than letting the timeout escape to the fail-open handler. That handler
+    // retries with no deadline of its own, which on a stalled origin would double the work
+    // during the outage this endpoint exists to report, and would delay the report until
+    // the client gave up instead of ending it at our own deadline.
+    return new Response("origin unavailable\n", {
+      status: 503,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+
+  // Only a healthy answer is worth holding. A 503 from the concurrency limiter is the
+  // service saying it is saturated *right now*, and caching that would keep reporting a
+  // recovered service as down.
+  if (fresh.status === 200) {
+    const body = await fresh.arrayBuffer();
+    const headers = new Headers(fresh.headers);
+    // `max-age=0` is the load-bearing half, exactly as it is in the app's own
+    // _edge_cacheable: `s-maxage` is a shared-cache directive, so only Cloudflare holds
+    // this copy. A bare `max-age` would let a browser, a monitoring client or a downstream
+    // proxy reuse `ok` without contacting the edge at all — liveness staleness outside
+    // Cloudflare's control, and beyond the reach of a purge.
+    headers.set("Cache-Control", `public, max-age=0, s-maxage=${seconds}`);
+    await cache.put(request, new Response(body, { status: 200, headers }));
+    return new Response(body, { status: 200, headers });
+  }
+  return fresh;
+}
+
 export default {
   async fetch(request, env, ctx) {
+    try {
+      return await route(request, env);
+    } catch (err) {
+      // Fail open. This Worker sits in front of the liveness endpoint now, so an exception
+      // in it must not become the service looking dead: hand the request to the origin and
+      // let the origin answer for itself.
+      return fetch(request);
+    }
+  },
+};
+
+async function route(request, env) {
     // Only GET/HEAD are ever routed here, but a stray method must not be answered from a
     // stored copy: fall through to the origin and let it refuse.
     if (request.method !== "GET" && request.method !== "HEAD") return fetch(request);
 
     const pathname = new URL(request.url).pathname;
+
+    const cacheFor = EDGE_CACHED_SECONDS[pathname];
+    if (cacheFor) return edgeCached(request, pathname, cacheFor);
 
     if (STATIC_FIRST.has(pathname)) {
       const copy = await stored(request, env, pathname, { fallback: false });
@@ -98,5 +161,4 @@ export default {
     const copy = await stored(request, env, pathname, { fallback: true });
     // The origin's own failure is a better answer than a 404 we invented.
     return copy ?? originResponse ?? new Response("origin unavailable\n", { status: 503 });
-  },
-};
+}

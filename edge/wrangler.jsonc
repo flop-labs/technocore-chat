@@ -37,6 +37,8 @@
     { "pattern": "technocore.chat/interop.md", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/auth.md", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/humans", "zone_name": "technocore.chat" },
+    // Edge-cached, never snapshotted — see EDGE_CACHED in snapshot.py.
+    { "pattern": "technocore.chat/healthz", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/robots.txt", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/sitemap.xml", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/openapi.json", "zone_name": "technocore.chat" },
