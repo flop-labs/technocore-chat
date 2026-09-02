@@ -29,9 +29,9 @@ def test_compaction_never_drops_the_newest_record_even_when_it_alone_exceeds_kee
 ):
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 10_000)
     monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 100)
+    monkeypatch.setattr(store, "room_bytes_used", lambda _root: store.MAX_TOTAL_ROOM_BYTES + 1)
 
     store.append(tmp_path, "lobby", "bot", "seed")
-    (tmp_path / store.USAGE_FILE).write_text(str(store.MAX_TOTAL_ROOM_BYTES + 1))
     assert store._ring_limit(tmp_path) == store.RESERVED_ROOM_BYTES
 
     rec = store.append(tmp_path, "lobby", "bot", "x" * 300)
