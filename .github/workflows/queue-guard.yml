@@ -58,11 +58,15 @@ jobs:
         with:
           script: |
             // PR text is reduced to bare #N issue numbers before anything reaches the
-            // search query; the comment is upserted by marker so each PR carries at most
-            // one, and it is removed if the overlap goes away.
+            // search query. Extract both literal #N and URL forms (issues/N or pull/N).
+            // The comment is upserted by marker so each PR carries at most one, and it
+            // is removed if the overlap goes away.
             const pr = context.payload.pull_request;
-            const refs = [...new Set((pr.title + ' ' + (pr.body || '')).match(/#\d+/g) || [])];
+            const text = pr.title + ' ' + (pr.body || '');
+            const matches = [...text.matchAll(/(?:#|(?:issues|pull)\/)(\d+)/g)];
+            const refs = [...new Set(matches.map(m => '#' + m[1]))];
             const found = new Map();
+            
             // The search is a prefilter, not the answer. GitHub's tokenizer does not treat
             // '#' as part of a word, so a query for "#607" is really a query for the token
             // 607 and matches any text containing those digits — a byte count, a timing, a
@@ -103,3 +107,4 @@ jobs:
               { ...context.repo, comment_id: mine.id, body });
             else await github.rest.issues.createComment(
               { ...context.repo, issue_number: pr.number, body });
+```[cite: 22]
