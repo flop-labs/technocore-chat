@@ -648,39 +648,33 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // No { cache: 'no-store' } on the polls: that option adds a request Cache-Control:
   // no-cache header, defeating the shared cache the server's s-maxage invites. The
   // response's max-age=0 already keeps the browser revalidating.
-  // A deadline, because /rooms has no useful upper bound on a loaded box. Its cost there is
-  // queueing at the origin rather than the walk itself (bench/rooms.py measures both), and
-  // the browser's own timeout is minutes. The catch below was always meant to explain a load
-  // that failed; without a deadline it does not run until the gateway gives up, so the
-  // honest report of "slow" arrives long after a reader has concluded the page is broken.
+  // A deadline, because /rooms has no useful upper bound on a loaded box and the browser's
+  // own timeout is minutes. The catch below was always meant to explain a failed load; with
+  // nothing to trigger it, "slow" was reported long after a reader gave up on the page.
   var ROOMS_DEADLINE_MS = 15000;
 
   function loadRooms() {
     var ctl = new AbortController();
     var timer = setTimeout(function () { ctl.abort(); }, ROOMS_DEADLINE_MS);
     fetch('/rooms?format=json&limit=200', { signal: ctl.signal })
-      // The timer is cleared after the parse, not after the headers. fetch() resolves as
-      // soon as the response head arrives, so clearing it on `r` would leave a stalled or
-      // dribbling body running until the browser's own timeout — the hang this deadline
-      // exists to end, moved one step later and harder to see. The signal reaches the body
-      // read too, so an abort here rejects the parse and lands in the catch below.
+      // Cleared after the parse, not after the headers: fetch() resolves on the response
+      // head, so clearing it on `r` would leave a stalled body running to the browser's own
+      // timeout — the same hang, one step later. The signal reaches the body read too.
       .then(function (r) { return r.json(); })
       .then(function (v) { clearTimeout(timer); roomsView = v; renderRooms(); })
       .catch(function () {
         clearTimeout(timer);
-        // Only when there is nothing else to show. This refreshes every 5 seconds, and
-        // replacing a list that loaded a moment ago with an error because one poll timed
-        // out would be a worse answer than the slightly stale one already on screen.
+        // Only when there is nothing else to show: this refreshes every 5 seconds, and a
+        // stale list beats an error because one poll timed out.
         if (!roomsView) roomsProblem();
       });
   }
 
-  // The table's own failure state. Until this existed, a /rooms fetch that never resolved
-  // left roomsView null, renderRooms returned at its first line, and the page showed a
-  // header row over nothing for as long as the origin took — with no way for a reader to
-  // tell a slow service from a broken page. The message goes in the table as well as the
-  // stats line because the table is where the reader is already looking, and it names the
-  // way out: room reads are a different endpoint and stay fast when this one does not.
+  // The table's own failure state. Without it a /rooms fetch that never resolved left
+  // roomsView null, renderRooms returned at its first line, and the page showed a header row
+  // over nothing — no way to tell a slow service from a broken page. In the table as well as
+  // the stats line because that is where the reader is looking, and it names the way out:
+  // room reads are a different endpoint and stay fast when this one does not.
   function roomsProblem() {
     var message = 'Could not load the room list \u2014 the service is slow or unreachable. '
                 + 'Rooms still open by name in the Room box below.';
