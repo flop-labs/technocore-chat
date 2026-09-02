@@ -14,6 +14,7 @@ it refuses.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 
 # libsodium rather than OpenSSL: same Ed25519, roughly twice the verifies per second
@@ -110,6 +111,14 @@ def is_did(value: str) -> bool:
     except (DidError, TypeError):
         return False
     return True
+
+
+def fingerprint(did: str) -> str:
+    """The 16 lowercase hex characters that name `did`'s identity slot: sha256 of the
+    exact did:key string (manual, IDENTITY). The write gate enforces it and three
+    documents restate it — this is the enforced copy, the one that counts. Takes the
+    string as given: fingerprinting does not vouch for the key, `public_key` does."""
+    return hashlib.sha256(did.encode("utf-8")).hexdigest()[:16]
 
 
 def abbreviate(did: str) -> str:

@@ -1531,6 +1531,74 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     return expect, absent
 
 
+# The sharded identity namespaces (#96): did-<first 2 hex of the fingerprint>. Lowercase
+# only, and free: the name allowlist rejects uppercase before this runs — [0-9a-f] is
+# about hex, not case.
+_DID_SHARD_NS = re.compile(r"did-[0-9a-f]{2}")
+# What counts as "the" identity in a value: its first did:key token, the same extraction
+# the #199 measurement used. Broad on purpose — a malformed key is refused as malformed,
+# not skipped in favor of a later token.
+_DID_TOKEN = re.compile(r"did:key:z[1-9A-HJ-NP-Za-km-z]+")
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")  # what a slot name must reassemble to
+
+
+def _did_slot_gate(ns: str, key: str, value: str) -> Response | None:
+    """The identity namespaces only accept the identity that names the slot (#199).
+
+    A DID note is found, not browsed: readers fingerprint the did:key and fetch that slot
+    (manual, IDENTITY). A value whose first did:key token does not fingerprint to the slot
+    can never answer that lookup — and the legacy `did` namespace sits at its cap, so a
+    misfiled note does not just use a slot, it uses one up. Anyone may still write any
+    slot; what lands there has to be the identity the slot names. Extra material after
+    the key — x25519, `mailbox:` — stays legal, and a correctly-fingerprinted write to
+    legacy `/kv/did/<16 hex>` stays legal. Runs before capacity accounting and CAS: a
+    refused write stores nothing, burns nothing, and leaks nothing about the slot's
+    current value.
+    """
+    if ns != "did" and not _DID_SHARD_NS.fullmatch(ns):
+        return None
+    # Legacy `did` keys carry the whole fingerprint; a shard's key carries the rest of it.
+    slot = key if ns == "did" else ns[4:] + key
+    if not _FINGERPRINT.fullmatch(slot):
+        # A malformed name keeps the name rule's own diagnosis; a well-formed one that no
+        # SHA-256 prefix can ever equal gets the truth, not an impossible instruction.
+        if not store.NAME_RE.fullmatch(key):
+            return None
+        return text(
+            f"400 /kv/{ns}/{key} cannot name an identity: slots here are the fingerprint "
+            "sha256(did:key)[:16] — 16 lowercase hex, published at /kv/did-<first 2>/"
+            "<remaining 14>. Agent state belongs in /kv/p-<random>/state.",
+            400,
+        )
+    found = _DID_TOKEN.search(value)
+    if found is None:
+        return text(
+            f"400 /kv/{ns}/{key} is an identity slot: the value must carry the did:key "
+            f"whose sha256[:16] is {slot} — either no did:key:z... token is present, or "
+            "it is mistyped beyond recognition. Agent state belongs in a namespace of "
+            "your own; /kv/p-<random>/state is never enumerated.",
+            400,
+        )
+    try:
+        didkey.public_key(found.group())
+    except didkey.DidError as exc:
+        return text(
+            f"400 {exc} — an identity slot only holds a key this server can verify. "
+            "Separate material after the key with a space, and publish the z6Mk... "
+            "key you sign with.",
+            400,
+        )
+    fp = didkey.fingerprint(found.group())
+    if fp != slot:
+        return text(
+            f"400 that did:key fingerprints to {fp}, not {slot} — a reader finds a key "
+            "by its fingerprint, so here it can never be found. Publish it at "
+            f"/kv/did-{fp[:2]}/{fp[2:]}.",
+            400,
+        )
+    return None
+
+
 def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
     """Two reserved namespaces carry room ownership, and only those two take signed writes.
 
@@ -1554,7 +1622,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"/kv/{ns}/{key}/set/<value>.",
                 400,
             )
-        return None
+        return _did_slot_gate(ns, key, value)
     if ns == store.OWNERS_NS:
         if not store.ownable(key):
             return text(
