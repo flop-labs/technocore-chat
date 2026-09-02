@@ -181,7 +181,17 @@ async function edgeCached(request, pathname, seconds) {
 /** Resolves to the parts of a reply rather than to a Response, because one fill is shared by
  * every reader waiting on it and a Response body can only be consumed once. */
 async function fromOrigin(request, key) {
-  const fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  // Always a GET of the canonical URL, never the caller's own request. route() sends HEAD
+  // into this lane and cacheKey() normalises to a GET key, so fetching the caller's request
+  // would read a HEAD's empty body and store *that* under the GET key — every later GET for
+  // the same canonical query would then be served an empty /rooms until the copy was
+  // replaced, which at EDGE_HOLD_SECONDS is a day. Fetching the key also makes the stored
+  // body provably the reply that key names, rather than one that merely came back while the
+  // entry was being built. The caller's headers ride along so the origin still sees whose
+  // request this is for rate accounting; nothing caller-specific reaches the shared copy,
+  // because a reply that carries any is refused storage below.
+  const canonical = new Request(key.url, { method: "GET", headers: request.headers });
+  const fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
   const body = await fresh.arrayBuffer();
   const headers = new Headers(fresh.headers);
   if (fresh.status !== 200) return { status: fresh.status, body, headers };

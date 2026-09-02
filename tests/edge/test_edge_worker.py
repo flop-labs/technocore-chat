@@ -342,3 +342,25 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     assert listed(f"limit={limit['max']}") == listed(f"limit={limit['max'] * 100000}")
     # And zero means one, the handler's `or 1` — the edge arithmetic mirrors it exactly.
     assert listed("limit=0") == listed("limit=1")
+
+
+def test_a_head_request_can_never_become_the_stored_body():
+    """route() sends HEAD into this lane and cacheKey() normalises it to a GET key, so a fill
+    that fetched the caller's own request would read a HEAD's empty body and store it under
+    that GET key — and every later GET for the same canonical query would be served an empty
+    /rooms until the copy was replaced, which at EDGE_HOLD_SECONDS is a day. There is no JS
+    harness here, so this asserts the property on the source: the fill fetches the key, which
+    is a GET by construction, and never the request it was handed.
+    """
+    origin = _between(
+        (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),
+        "async function fromOrigin(",
+        "function fill(",
+    )
+    assert "fetch(request" not in origin, "a fill must not fetch the caller's own request"
+    assert 'new Request(key.url, { method: "GET"' in origin, (
+        "the fill must fetch a GET of the canonical key it is about to write"
+    )
+    assert origin.index("const canonical") < origin.index("await fetch("), (
+        "the canonical GET must be what is fetched, not built after the fact"
+    )
