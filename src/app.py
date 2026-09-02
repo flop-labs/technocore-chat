@@ -1856,15 +1856,11 @@ async def stats(request: Request) -> Response:
     """Aggregates for the operator digest: current values *and* the stored samples behind
     them. Token-gated, JSON only, no names.
 
-    Serving the history is what keeps the growth arithmetic here rather than in the caller:
-    a reader that keeps its own ring reports "no data" for a full day every time it is
-    restarted, and the service is the only thing always running. One fetch answers "now"
-    and "how did we get here" together.
-
-    Not rate limited: the gate is the token, and the one caller is a scheduled job. It is
-    cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
-    bounded tail reads of the engagement rollup — cheap per minute, not per request.
+    Registered with every HTTP method so Starlette never returns a 405 with `Allow`
+    that leaks the route's existence — unsupported methods get the generic 404 body.
     """
+    if request.method not in ("GET", "HEAD"):
+        return text(NOT_FOUND, 404)
     supplied = request.headers.get("x-stats-token", "")
     # `and` order matters: with no token configured the endpoint must not exist at all,
     # and compare_digest("", "") is True.
@@ -2111,7 +2107,7 @@ app = Starlette(
         Route("/robots.txt", robots),
         Route("/.well-known/security.txt", security_txt),
         Route("/healthz", healthz),
-        Route("/stats", stats),
+        Route("/stats", stats, methods=["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS", "PATCH"]),
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),

@@ -112,6 +112,16 @@ def measure_all(root):
     return {label: measure(root / rel) for label, rel in labeled}
 
 
+def _unlisted_src_files(root: Path) -> list[str]:
+    """Return src/*.py files not in CORE_FILES or EXTRA_FILES."""
+    listed = set(CORE_FILES + EXTRA_FILES)
+    return sorted(
+        str(p.relative_to(root))
+        for p in root.glob("src/*.py")
+        if p.is_file() and str(p.relative_to(root)) not in listed
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="compare against sz-baseline.json")
@@ -126,6 +136,15 @@ def main():
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
+    if args.check or args.caps:
+        unlisted = _unlisted_src_files(root)
+        if unlisted:
+            print(
+                f"src/*.py files not listed in CORE_FILES or EXTRA_FILES:"
+                f" {', '.join(unlisted)}",
+                file=sys.stderr,
+            )
+            return 1
     files = measure_all(root)
     core_total = sum(v["code_lines"] for k, v in files.items() if k.startswith("core/"))
     # {} rather than None when unneeded: every branch that subscripts baseline is guarded
