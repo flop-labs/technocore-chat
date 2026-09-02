@@ -224,11 +224,11 @@ def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
     """The property the lane exists for, asserted on the source because there is no JS
     harness here — and it is the one a later edit would quietly remove.
 
-    /rooms is an O(total-rooms) walk that measured 52.7% of worker thread-time at 0.9 req/s,
-    with a single uncached call taking 32.6s. Plain caching cannot cover a walk that outlasts
-    its own window: the reader who arrives after it closes pays the whole cost *and* holds an
-    anyio thread while doing so, which is why unrelated room reads on the same box measured
-    3.3s to 21.4s for 17 KB. Returning the stale copy unconditionally is what breaks that.
+    /rooms is an O(total-rooms) walk (technocore-chat#576) whose cost under concurrency is
+    dominated by queueing rather than by the walk itself — bench/rooms.py separates the two.
+    No cache window can be made reliably longer than a cost with no upper bound, so the reader
+    who arrives after the window closes pays all of it *and* holds an anyio thread while doing
+    so. Returning the stale copy unconditionally is what breaks that.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     lane = worker[worker.index("async function revalidating(") :]
@@ -238,8 +238,19 @@ def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
     assert "inFlight" in lane, "a burst on one PoP must not queue one walk per reader"
 
 
-def test_the_revalidate_interval_outlives_the_walk_it_covers():
-    """A window shorter than the walk is the bug this lane replaces: the origin header is
-    s-maxage=5 with swr=25, a 30s budget against a 32.6s walk, so it always closed first."""
-    for path, seconds in _snapshot_module().EDGE_REVALIDATE.items():
-        assert seconds >= 30, f"{path} at {seconds}s is inside the measured walk time"
+def test_the_revalidating_lane_refreshes_less_often_than_the_cached_one():
+    """A revalidate interval inside the edge-cached window is a path in the wrong lane.
+
+    The two lanes differ in what they spend: EDGE_CACHED makes one reader wait for the origin
+    each time its window closes, EDGE_REVALIDATE never makes anyone wait and pays for that
+    with a copy that may be a whole interval old. Staleness is only worth buying for a path
+    the cheaper lane cannot cover, so an interval as short as a cached window is evidence the
+    path belongs in EDGE_CACHED instead.
+    """
+    snapshot = _snapshot_module()
+    longest_cached = max(snapshot.EDGE_CACHED.values(), default=0)
+    for path, seconds in snapshot.EDGE_REVALIDATE.items():
+        assert seconds > longest_cached, (
+            f"{path} refreshes every {seconds}s, inside the {longest_cached}s edge-cached "
+            "window — a path refreshed that often belongs in EDGE_CACHED"
+        )

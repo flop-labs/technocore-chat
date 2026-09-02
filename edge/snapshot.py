@@ -88,13 +88,16 @@ EDGE_CACHED = {"/healthz": 10}
 # snapshotted: like /healthz these are live figures, and a stored answer for them would
 # outlive the service that produced it.
 #
-# This lane exists because /rooms cannot be made fast enough to wait for. It is an
-# O(total-rooms) walk (technocore-chat#576) that measured 52.7% of worker thread-time at
-# 0.9 req/s, and a single uncached call took 32.6s. Plain caching cannot cover that: the
-# origin header is s-maxage=5 with stale-while-revalidate=25, a 30s window against a walk
-# that outlasts it, so the window always closes first and some reader pays the whole cost.
-# Worse, that reader occupies an anyio thread for the duration, which is why an unrelated
-# /r/<room> read on the same box measured 3.3s to 21.4s for 17 KB — queueing, not work.
+# This lane exists because /rooms cannot be made fast enough to wait for — and the reason is
+# not that the walk is expensive. bench/rooms.py measures it at tens of milliseconds on an
+# idle store, less than half of which is what `limit` buys; the same walk against concurrent
+# writers costs an order of magnitude more at *every* limit, including the limit that reads
+# no room tails at all. The cost is queueing, not work, so walking less does not remove it.
+#
+# Plain caching cannot cover a cost with no upper bound. The origin's window is finite —
+# s-maxage plus stale-while-revalidate, both derived from CHAT_EDGE_CACHE_SECONDS — so
+# whenever a walk outlasts it the next reader pays the whole cost, and occupies an anyio
+# thread while doing so, which is the resource the box actually runs out of.
 #
 # Serving the stale copy unconditionally and refreshing behind ctx.waitUntil() inverts that:
 # no reader ever waits for a walk, and the data is as fresh as the origin can actually

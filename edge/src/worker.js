@@ -37,8 +37,9 @@ import ROUTING from "./routing.json";
 // answer than a late one.
 const ORIGIN_TIMEOUT_MS = 8000;
 // The revalidating lane gets its own, far longer budget: it is a background refresh nobody
-// is waiting on, and the walk it covers has measured over 30s. Cutting it at 8s would mean
-// the copy never refreshes at all on a loaded box, which is exactly when it matters.
+// is waiting on, and what it covers is queueing at a saturated origin rather than work
+// (bench/rooms.py), which has no useful upper bound. Cutting it at the request timeout would
+// mean the copy never refreshes on a loaded box, which is exactly when it matters.
 const ORIGIN_REVALIDATE_MS = 120000;
 // How long the edge may hold a copy. Longer than the refresh interval by design: the lane,
 // not the header, decides freshness, and an expiry shorter than the refresh would drop the
