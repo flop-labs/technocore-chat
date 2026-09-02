@@ -9,10 +9,12 @@ outage the Worker exists for.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import pathlib
 import re
+import sys
 
 import _client
 import pytest
@@ -370,3 +372,21 @@ def test_a_head_request_can_never_become_the_stored_body():
     assert origin.index("const canonical") < origin.index("await fetch("), (
         "the canonical GET must be what is fetched, not built after the fact"
     )
+
+
+def test_the_snapshot_script_needs_nothing_but_the_standard_library():
+    """deploy.sh runs it as `python3 snapshot.py`, not through uv. An import of the service's
+    own modules drags the whole dependency chain in with it and the deploy dies at the
+    snapshot step — which is the worst place for it, since wrangler then never runs and the
+    stored copies on disk are whatever the last deploy left. Restating a constant here and
+    gating it elsewhere is the trade this file makes for that.
+    """
+    tree = ast.parse((EDGE / "snapshot.py").read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):  # parsed, not grepped: prose in a docstring starts with "from"
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            imported.add(node.module)
+    external = {m.split(".")[0] for m in imported} - set(sys.stdlib_module_names) - {"__future__"}
+    assert not external, f"snapshot.py must run under a bare python3, but imports {external}"

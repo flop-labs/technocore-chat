@@ -26,10 +26,6 @@ import pathlib
 import sys
 import urllib.request
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-
-import store  # noqa: E402  — for MAX_LIMIT only; see ROOMS_KEY_MATCH below
-
 # Every route in app.py that renders a document. Deliberately explicit: this list and the
 # `routes` in wrangler.jsonc describe the same surface and are checked against each other
 # by test_edge_snapshot_covers_every_routed_document.
@@ -113,10 +109,13 @@ EDGE_REVALIDATE = {"/rooms": 5}
 # `match` names a parameter that matters only when it equals one value: `format=json` picks
 # the rendering, every other value is ignored. `clamped` names a numeric one and its bounds.
 #
-# The ceiling comes from the tree, not the served schema, which is the opposite of what this
-# file does elsewhere: `limit` is advisory, so by the input doctrine it publishes no
-# minimum/maximum — bounds mean refusal and this clamps (test_input_doctrine.py asserts their
-# absence). MAX_LIMIT is a constant rather than a knob, so the checkout is an exact source.
+# The ceiling is restated here rather than read from anywhere, which needs two excuses. It is
+# not taken from the served schema because `limit` is advisory: by the input doctrine it
+# publishes no minimum/maximum, since bounds mean refusal and this clamps
+# (test_input_doctrine.py asserts their absence). And it is not imported from store because
+# this file runs under bare python3 from deploy.sh and store pulls in the service's whole
+# dependency chain. Drift is caught instead — the edge-key test asserts it against
+# store.MAX_LIMIT, which is where the number actually lives.
 ROOMS_KEY_MATCH = {"format": "json"}
 
 
@@ -125,7 +124,7 @@ def rooms_key() -> dict:
     return {
         "/rooms": {
             "match": dict(ROOMS_KEY_MATCH),
-            "clamped": {"limit": {"min": 1, "max": store.MAX_LIMIT}},
+            "clamped": {"limit": {"min": 1, "max": 200}},
         }
     }
 
