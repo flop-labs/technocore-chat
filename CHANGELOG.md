@@ -16,6 +16,18 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-09-02
+
+### Changed
+
+- **`/healthz` answers on the event loop instead of the thread pool.** It was a plain `def`,
+  so Starlette ran every liveness check in the anyio thread pool — one of the 40 threads a
+  worker has, and the moment that matters is the one where there are none. Measured the same
+  day: 2,478 of 2,480 `/healthz` requests in two minutes arrived through the tunnel rather
+  than from the container's own probes, 10.4% of all traffic, while the write path had 40 of
+  42 threads parked in `flock`. Nothing else changes: the response, the headers and the
+  `no-store` a direct caller receives are identical.
+
 ## [0.11.3] - 2026-09-02
 
 ### Fixed
@@ -1060,7 +1072,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.4
 [0.11.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.3
 [0.11.2]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.2
 [0.11.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.1
