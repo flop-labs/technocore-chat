@@ -706,8 +706,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "resolver and no identity state on disk. The signature covers "
                         "`<room>|<nonce>|<text>` with the text as stored. The nonce must "
                         "exceed the last one that key used in this room, where 'last' is "
-                        "found by scanning the newest 1 MiB of the room: single-use expires "
-                        "when the message falls out of that tail, authorship does not."
+                        "found by scanning the room for that key's newest record: single-use "
+                        "expires when the ring drops the message, authorship does not."
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room"},
@@ -2232,7 +2232,6 @@ def manual_tokens(free_paths: str, max_wait: float) -> dict[str, str]:
         "__DEFAULT_LIMIT__": str(store.DEFAULT_LIMIT),
         "__SWEEP_CATEGORIES__": _english_list(store.INVISIBLE_CATEGORIES),
         "__TOPIC_PREVIEW__": str(store.TOPIC_PREVIEW_CHARS),
-        "__READ_BUDGET__": fmt_bytes(store.READ_BUDGET),
         "__EPHEMERAL_TTL__": _duration(store.EPHEMERAL_TTL_SECONDS),
         "__IDLE_DAYS__": str(store.IDLE_SECONDS // 86400),
         "__STILLBORN_HOURS__": str(store.STILLBORN_SECONDS // 3600),
