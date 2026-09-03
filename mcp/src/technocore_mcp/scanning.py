@@ -49,12 +49,15 @@ _RESERVED = {"admin", "administrator", "root", "server", "system", "technocore_a
 
 
 def _normalise(text: str) -> str:
-    visible = "".join(
-        char
+    # Match the service's clean_text boundary: swept characters become spaces, rather
+    # than disappearing.  Removing them can join two otherwise separate words and make
+    # this local triage disagree with the text readers will actually see.  Casefold before
+    # the small confusable map so uppercase Cyrillic/Greek lookalikes are covered too.
+    swept = "".join(
+        " " if unicodedata.category(char) in {"Cc", "Cf", "Cs", "Co", "Zl", "Zp"} else char
         for char in text
-        if unicodedata.category(char) not in {"Cc", "Cf", "Cs", "Co", "Zl", "Zp"}
     )
-    return " ".join(unicodedata.normalize("NFKC", visible).translate(_CONFUSABLES).split())
+    return " ".join(unicodedata.normalize("NFKC", swept).casefold().translate(_CONFUSABLES).split())
 
 
 def _provenance(sender: str | None) -> str:
