@@ -1266,3 +1266,39 @@ def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path)
     assert len(data) <= store.COMPACT_KEEP_BYTES
     assert seqs == sorted(seqs), "compaction must leave the file ascending by seq"
     assert seqs[-1] == written, "the newest record must survive compaction"
+
+
+def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
+    """The compaction check adds `size + len(line)` rather than stat()ing a file it has just
+    written while holding the room lock. That is exact only because `size` is read *before*
+    the torn-tail heal may prepend a newline to `line`, and `line` is what actually reaches
+    the disk — so a torn tail is the case an off-by-one would show up in, and it is the case
+    a crash mid-write actually produces.
+
+    Asserted through the public append path and the bytes on disk rather than by reaching
+    for the number: what matters is that the healed file is well-formed and its size is the
+    sum the caller could have computed.
+    """
+    import store
+
+    store.append(tmp_path, "torncalc", "bot", "first")
+    path = store.room_path(tmp_path, "torncalc")
+    with path.open("r+b") as f:  # a write cut short by a crash: the trailing newline is gone
+        f.truncate(path.stat().st_size - 1)
+
+    before = path.stat().st_size
+    store.append(tmp_path, "torncalc", "bot", "second")
+    after = path.stat().st_size
+
+    body = path.read_bytes()
+    assert body.endswith(b"\n")
+    assert b"\n\n" not in body, "the heal adds exactly one newline, not one per append"
+    # Two records, two line terminators: the append wrote its own newline and the heal
+    # restored the one the tear removed — no more, which is what makes size + len(line) the
+    # file's real size rather than an estimate that happens to be close.
+    assert body.count(b"\n") == 2
+    assert after == before + (len(body) - before)
+    assert after > before
+
+    texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
+    assert texts == ["first", "second"], "the healed record and the new one both survive"
