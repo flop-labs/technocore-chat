@@ -184,6 +184,29 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
     with pytest.raises(store.StoreError, match=r"note limit reached \(1 across all namespaces"):
         store.note_set(tmp_path, "elsewhere", "second", "hi")
 
+
+def test_note_capacity_refusal_does_not_carry_room_only_guidance(tmp_path, monkeypatch):
+    """#285: the per-namespace note cap shared _at_capacity() with rooms, so it quoted
+    GET /rooms (notes are unlisted) and the 24-hour stillborn rule (room-only)."""
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "plans", "only", "hi")
+    with pytest.raises(store.StoreError) as exc_info:
+        store.note_set(tmp_path, "plans", "second", "hi")
+    message = str(exc_info.value)
+    assert "GET /rooms" not in message
+    assert "24 hours" not in message
+    assert "overwrite a note that already exists" in message
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "only", "bot", "hi")
+    with pytest.raises(store.StoreError) as exc_info:
+        store.append(tmp_path, "second", "bot", "hi")
+    message = str(exc_info.value)
+    assert "GET /rooms" in message
+    assert "24 hours" in message
+
     # "how full, of how much" is the figure an operator sizes a disk against, and the two
     # shifts that produce it are one character from reporting megabytes as terabytes.
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)
