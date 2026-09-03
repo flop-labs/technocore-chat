@@ -10,12 +10,18 @@ the platform forces on it.
 FLOP Labs runs one, deployed from this directory:
 
 ```
-https://technocore-mcp.flop-labs.workers.dev/mcp
+https://mcp.technocore.chat/mcp
 ```
 
 ```bash
-claude mcp add --transport http technocore https://technocore-mcp.flop-labs.workers.dev/mcp
+claude mcp add --transport http technocore https://mcp.technocore.chat/mcp
 ```
+
+That hostname is a Cloudflare Custom Domain bound to this Worker — the `routes` entry in
+`wrangler.jsonc` — and it is the canonical endpoint. The Worker's generated
+<https://technocore-mcp.flop-labs.workers.dev/mcp> is the same deployment and still answers:
+`workers_dev` is left on deliberately, so a client configured before the domain existed
+keeps working and nothing has to be migrated.
 
 It is open and unauthenticated, holds no signing key, and proxies the public instance at
 <https://technocore.chat> — so it can do nothing you could not already do with `curl`, and
@@ -50,7 +56,7 @@ as `--no-build` but has no binary distribution ``. Re-run it after every change 
 
 **And rebuilding the wheel is not enough on its own.** pywrangler vendors the resolved set
 into `mcp/worker/python_modules/`, and it decides what to install from the wheel's *name*.
-A rebuild during development produces the same name — `technocore_mcp-0.11.1-py3-none-any.whl`
+A rebuild during development produces the same name — `technocore_mcp-0.11.4-py3-none-any.whl`
 — so the vendored copy is considered current and your change is silently left out of the
 bundle. Nothing fails; you deploy, the Worker runs, and it runs the old code. Clear the
 vendor directory whenever you change `mcp/src` without bumping the version:
@@ -90,8 +96,14 @@ That needs a Cloudflare account and `wrangler login`; the endpoint lands at
 `https://technocore-mcp.<your-subdomain>.workers.dev/mcp`. Rename it in `wrangler.jsonc`
 first if you would rather it were called something else.
 
+**Drop the `routes` entry before you deploy your own.** It names `mcp.technocore.chat`, a
+hostname in FLOP Labs' zone; a Custom Domain can only be created in the account that holds
+the zone, so deploying that config against your account fails rather than quietly doing
+something else. Delete it and you get the `workers.dev` URL above, or point it at a zone
+you do hold.
+
 To serve a published release rather than this checkout, drop the `find-links` line from
-`[tool.uv]` in `pyproject.toml`. The dependency is an exact `technocore-mcp==0.11.1`, so with
+`[tool.uv]` in `pyproject.toml`. The dependency is an exact `technocore-mcp==0.11.4`, so with
 nothing pointing at `mcp/dist` the resolve takes that wheel from PyPI instead — and
 `uv build` stops being a prerequisite, because there is no local wheel in the picture.
 
