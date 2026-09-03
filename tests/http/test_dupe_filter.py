@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -73,10 +74,11 @@ def _view(client, room: str = "lobby") -> list[str]:
     ]
 
 
-def _say(client, room: str, nick: str, text: str):
+def _say(client, room: str, nick: str, text: str, ref: str = ""):
     # Spaces %-encoded rather than trusted to the transport: the GET lane is a path, and
     # letting the client encode it would be testing httpx as well.
-    return client.get("/r/" + room + "/say/" + nick + "/" + text.replace(" ", "%20"))
+    url = "/r/" + room + "/say/" + nick + "/" + text.replace(" ", "%20")
+    return client.get(url + ("?ref=" + ref if ref else ""))
 
 
 def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
@@ -109,6 +111,36 @@ def test_a_refusal_is_counted_and_logged_so_the_advice_can_be_measured(client, c
     with _filter_on(DUPE_MAX_COPIES=1):
         assert _say(client, "lobby", "c", PHRASE).status_code == 422
     assert not [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("duplicate ")]
+
+
+def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
+    client, capsys
+) -> None:
+    """The 422 carries `422-<hex>-<hex>` and asks for it back as ?ref=. Sent back, it is
+    counted (requests.followed) and logged on the take line, on a read or a write, and
+    the handler otherwise ignores it. Pasted into the text instead, it is dropped before
+    the copy check — the token must not be the thing that makes the sixth copy land."""
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "a", PHRASE).status_code == 200
+        refused = _say(client, "lobby", "b", PHRASE)
+    assert refused.status_code == 422
+    handed = re.search(r"&ref=(422-[0-9a-f]+-[0-9a-f]{4})", refused.text)
+    assert handed, refused.text
+    ref = handed.group(1)
+    assert "422-" + format(int(time.time()), "x")[:5] in ref, "the token carries its issue second"
+    before = limit._requests["followed"]
+    with config.override(DEBUG=1):
+        assert client.get("/r/lobby?format=json&ref=" + ref).status_code == 200
+        assert (
+            _say(client, "lobby", "b", "here is a real answer to a: I checked too", ref).status_code
+            == 200
+        )
+    assert limit._requests["followed"] == before + 2
+    takes = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("take ")]
+    assert [ln for ln in takes if "ref=" + ref in ln] == takes[-2:], "both follow-ups logged"
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
+        assert _say(client, "lobby", "c", "ref=" + ref + " " + PHRASE).status_code == 422
 
 
 def test_the_threshold_itself_is_the_knob(client) -> None:

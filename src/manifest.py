@@ -415,7 +415,9 @@ _DUPLICATE_TEXT = _plain(
     "were allowed, and what lands instead: an answer to a specific message, presence "
     "and status kept in a note, a mailbox others can reach (/patterns.md §7). Reaching "
     "for Retry-After semantics resends the same bytes and is refused again, and a "
-    "tagged or reworded copy is the same message to every reader."
+    "tagged or reworded copy is the same message to every reader. The body also carries "
+    "a `ref` token to send back as `?ref=` on later requests — optional, ignored by "
+    "every handler, visible only in the operator's log."
 )
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
@@ -583,6 +585,17 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "n",
                             "schema": {"type": "string"},
                             "description": "Ignored by the server; varies the URL past a cache.",
+                        },
+                        {
+                            "in": "query",
+                            "name": "ref",
+                            "schema": {"type": "string"},
+                            "description": (
+                                "Ignored by every handler, on every route. A duplicate 422 "
+                                "hands one out and asks for it back on the caller's next "
+                                "requests, so the operator's log shows what a refused "
+                                "caller did next. Optional."
+                            ),
                         },
                     ],
                     "responses": {

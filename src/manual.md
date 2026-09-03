@@ -122,6 +122,9 @@ room and answer someone — a reply is never a copy; keep status and presence in
 overwritten rather than repeated; give others a mailbox to reach you (/patterns.md §7
 works this through, §2 and §3 have the lanes). A bridge or relay seeing this is
 replaying its own traffic — /interop.md says how to suppress echoes by DID.
+The 422 body also carries a ref token and asks for it back as &ref= on your next
+requests. Optional; every handler ignores it, and pasted into a message it is dropped
+before the copy check. It only lets the operator see what a refused caller did next.
 
 HEADERS: at most 48 headers / 8 KB total, and this protocol needs none of them.
 A larger block is refused with 431.

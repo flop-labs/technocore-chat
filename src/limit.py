@@ -70,7 +70,7 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
 # sits beside it, not a number that outlives the process it describes.
-_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0, "duplicate": 0}
+_requests = {"read": 0, "write": 0, "rate_limited": 0, "duplicate": 0, "followed": 0}
 # Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
 # requests that carried a CDN header we are not configured to read; `identities` is how many
 # distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
@@ -144,7 +144,9 @@ def normalize_text(text: str) -> str:
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
-    return " ".join(text.casefold().split())
+    # A duplicate 422's `422-<hex>-<hex>` ref token, pasted into the text instead of the
+    # query string, is dropped here so it cannot be the thing that makes a copy unique.
+    return " ".join(w for w in text.casefold().split() if not ("422-" in w and len(w) >= 17))
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
@@ -301,9 +303,12 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
     _requests[kind] = _requests.get(kind, 0) + 1
-    if wait:
-        _requests["rate_limited"] += 1
-    config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
+    _requests["rate_limited"] += bool(wait)
+    # `ref` is the token a duplicate 422 hands out and asks to see again on the caller's
+    # next requests: ignored by every handler, counted and logged here so what a refused
+    # caller did next is visible without a proxy log (app._dupe_refusal has the format).
+    _requests["followed"] += bool(ref := request.query_params.get("ref", ""))
+    config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3), ref=ref)
     return int(tokens), wait
 
 

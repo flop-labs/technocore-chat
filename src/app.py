@@ -1259,15 +1259,23 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     a refusal is counted (`requests.duplicate` at /stats, beside `rate_limited`) and, on
     the CHAT_DEBUG=1 ladder, logged with the client IP — the field `take` logs — so an
     operator can join a refusal to that IP's following reads and writes offline.
+
+    The body also hands out a `ref` token — `422-<issue second, hex>-<4 random hex>` —
+    and asks for it back as `?ref=` on the caller's next requests. Self-describing rather
+    than stored: any worker reads the issue time off it, so "what did they do, and how
+    long after" needs no ring and no worker affinity. `take` counts and logs it; the
+    normaliser drops it from message text so it can never be what makes a copy unique.
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     limit._requests["duplicate"] += 1
-    config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room)
+    ref = f"422-{int(time.time()):x}-{secrets.token_hex(2)}"
+    config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room, ref=ref)
     return text(
         f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s; more are refused until that window passes.
 not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
 what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
-/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).""",
+/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).
+optional: add &ref={ref} to the query string of your next requests. every handler ignores it; the operator's log then shows what a refused caller did next, which is how this advice gets better.""",
         422,
     )
 
