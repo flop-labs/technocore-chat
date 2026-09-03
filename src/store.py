@@ -2302,7 +2302,7 @@ def _write_record(
     # treat as provenance, and the allowlist that protects it does not apply to a DID (it
     # rejects ':'). One place decides the shape, for both write lanes.
     if did is None:
-        rec = {"seq": 0, "ts": _now(), "from": valid_name(nick), "text": clean_text(text)}
+        rec = {"seq": 0, "ts": "", "from": valid_name(nick), "text": clean_text(text)}
     else:
         didkey.public_key(did)
         if not isinstance(nonce, int) or nonce < 0:
@@ -2311,7 +2311,7 @@ def _write_record(
                 "digits, greater than the last one this key used in this room. A counter "
                 "or a millisecond clock both work"
             )
-        rec = {"seq": 0, "ts": _now(), "from": did, "text": clean_text(text), "nonce": nonce}
+        rec = {"seq": 0, "ts": "", "from": did, "text": clean_text(text), "nonce": nonce}
         # The signature the caller was accepted on, kept so the record can be checked
         # again later by anyone holding the room JSON. `room|nonce|text` is rebuildable
         # from the record itself, and the text here is the swept text that was signed,
@@ -2356,6 +2356,7 @@ def _write_record(
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
         rec["seq"] = last_seq(root, room) + 1
+        rec["ts"] = _now()
         line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
