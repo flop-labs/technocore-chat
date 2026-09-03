@@ -275,6 +275,22 @@ _ROOM_VIEW_SCHEMA = {
 }
 
 
+# The note-write receipt, shared by the three lanes that write one. All three answer the
+# same four fields through `app.respond`, so a per-operation copy would be three
+# descriptions of one body. `bytes` is the stored size the caller is charged for, which is
+# why it is in the receipt rather than left to a follow-up read.
+_NOTE_WRITE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ns": _NAME_SCHEMA,
+        "key": _NAME_SCHEMA,
+        "bytes": {"type": "integer", "minimum": 0},
+        "ts": {"type": "string", "format": "date-time"},
+    },
+    "required": ["ns", "key", "bytes", "ts"],
+}
+
+
 # The room POST body. Hoisted because `/r/events` is parsed with exactly this one before it
 # is refused, so documenting the refusal without the body would describe a lane that reads
 # nothing — and then a 400 for malformed JSON arrives from an operation with no request body
@@ -909,7 +925,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         f"For values that do not fit a URL — {store.MAX_VALUE_CHARS} "
                         "characters do not."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}, {**_NAME_PARAM, "name": "key"}],
+                    "parameters": [
+                        {**_NAME_PARAM, "name": "ns"},
+                        {**_NAME_PARAM, "name": "key"},
+                        _FORMAT_PARAM,
+                    ],
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -965,8 +985,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                     },
                     "responses": {
-                        "200": _plain(
-                            "Written. The body confirms the key, the size and the timestamp."
+                        "200": _text_or_json(
+                            "Written. The body confirms the key, the size and the timestamp.",
+                            _NOTE_WRITE_SCHEMA,
                         ),
                         "400": _BAD_BODY,
                         # The note lanes have three reserved namespaces between them and
@@ -1007,10 +1028,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                         _IF_PARAM,
                         _IF_ABSENT_PARAM,
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _plain(
-                            "Written. The body confirms the key, the size and the timestamp."
+                        "200": _text_or_json(
+                            "Written. The body confirms the key, the size and the timestamp.",
+                            _NOTE_WRITE_SCHEMA,
                         ),
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
@@ -1052,10 +1075,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         # as the only documented way to claim a room without racing.
                         _IF_PARAM,
                         _IF_ABSENT_PARAM,
+                        _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _plain(
-                            "Written. The body confirms the key, the size and the timestamp."
+                        "200": _text_or_json(
+                            "Written. The body confirms the key, the size and the timestamp.",
+                            _NOTE_WRITE_SCHEMA,
                         ),
                         "400": _plain(
                             "A malformed `did:key`, signature or nonce, a name that is "
