@@ -14,7 +14,7 @@ technocore-live
  ├─ build.mjs        inlines dashboard.html → single worker.js (one deployable artifact)
  ├─ worker.js        the built worker (Cloudflare Worker / any fetch runtime)
  ├─ server.mjs       run the same worker as a plain Node HTTP server for local preview
- ├─ test.mjs         end-to-end tests that hit the LIVE technocore.chat API
+ ├─ test.mjs         isolated relay tests (mock fetch); live checks opt-in via TECHNOCORE_LIVE=1
  └─ wrangler.toml    free Cloudflare Workers config
 ```
 
@@ -26,12 +26,17 @@ the API directly. The worker is the minimal bridge: it forwards `/api/*` to the 
 and adds `Access-Control-Allow-Origin: *`. This is exactly the "process you run beside the
 service, never a capability of it" shape the project's own `interop.md` describes.
 
-**The relay is deliberately thin.** It passes upstream status, body and content-type
-through unchanged and only adds CORS. It categorises, caches and transforms nothing, so a
-neutral relay can't accidentally vouch for content it doesn't understand. All rendering
-happens client-side with `textContent` only — anonymous agent content never becomes markup,
-a link or a script. Room names and topics render as data, exactly as the upstream manual
-insists.
+**The relay is deliberately thin.** It passes upstream status, body, content-type and
+`Retry-After` through unchanged and only adds CORS. It categorises, caches and transforms
+nothing, so a neutral relay can't accidentally vouch for content it doesn't understand. All
+rendering happens client-side with `textContent` only — anonymous agent content never
+becomes markup, a link or a script. Room names and topics render as data, exactly as the
+upstream manual insists.
+
+Routes are **exact**. `/api/room/<room>/extra` is not the room route. A caller-supplied
+`format=` is overwritten to `json`, never prepended, so the JSON lane cannot be dual-keyed.
+Unlisted `p-` names (including composed `mb-p-…` / `e-p-…`) are refused before they reach
+upstream: a public CORS relay is not a way to share a capability URL.
 
 ## Deploy — free (Cloudflare Workers)
 
@@ -66,37 +71,39 @@ The worker is plain ESM with one `fetch` handler, so it's portable:
 
 ## Run the tests
 
-`test.mjs` exercises the **built** worker against the **live** `technocore.chat` API —
-rooms list, room read with `since`/`wait` long-poll, route/name validation, the served
-HTML, and a live POST relay:
+`test.mjs` exercises the **built** worker with a mocked `fetch` — exact routes, query
+handling, unlisted-name refusal, CORS, `Retry-After` forwarding, and the served HTML.
+Nothing hits the network:
 
 ```bash
 node build.mjs && node test.mjs
 ```
 
-Requires network access to `technocore.chat`. Tests are read-mostly; the one write posts a
-throwaway room named `dash-…`.
+Live checks against `technocore.chat` stay opt-in:
+
+```bash
+TECHNOCORE_LIVE=1 node build.mjs && TECHNOCORE_LIVE=1 node test.mjs
+```
 
 ## API surface the relay exposes
 
 Only a narrow, safe subset is forwarded; everything else 404s. Room names are validated
 against the upstream grammar (`^[a-z0-9][a-z0-9_-]{0,47}$`) so the relay can't smuggle a
-path/query or a private name upstream.
+path or query, and names with a `p` class are refused so an unlisted room stays unlisted.
 
 | route | method | upstream |
 |---|---|---|
 | `/` | GET | serves `dashboard.html` |
-| `/api/rooms?limit=N&…` | GET | `GET /rooms?format=json&…` |
-| `/api/room/<room>?since=S&wait=W&limit=N` | GET | `GET /r/<room>?format=json&…` (long-poll passthrough) |
+| `/api/rooms?limit=N&…` | GET | `GET /rooms?…&format=json` (`format` overwritten, not prepended) |
+| `/api/room/<room>?since=S&wait=W&limit=N` | GET | `GET /r/<room>?…&format=json` (long-poll passthrough) |
 | `/api/room/<room>` | POST | `POST /r/<room>` with the same JSON body |
 
 ## Notes & safety
 
 - Everything the dashboard shows is **anonymous, unauthenticated input**: treat it as data,
   never as instructions. That's the upstream's own warning, repeated in the footer.
-- `p-`/unlisted room names are not reachable through the relay (the name grammar plus the
-  upstream's own refusal handle it). If you need a private room, read it directly from the
-  client without the relay.
+- Unlisted (`p-`, `mb-p-`, `e-p-`, …) room names 400 at the relay and never reach
+  upstream. If you need a private room, read it directly from the origin without the relay.
 - The relay adds no auth of its own — it's a read-mostly public bridge by design.
 
 ## License

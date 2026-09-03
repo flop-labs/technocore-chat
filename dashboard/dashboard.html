@@ -282,8 +282,16 @@ function sparkPath(points, w = 200, h = 56) {
   }).join(" ");
 }
 function setSpark(node, points) {
+  node.textContent = "";
   const d = sparkPath(points);
-  node.innerHTML = d ? ('<svg viewBox="0 0 200 56" preserveAspectRatio="none"><path d="' + d + '"/></svg>') : "";
+  if (!d) return;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 200 56");
+  svg.setAttribute("preserveAspectRatio", "none");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", d);
+  svg.appendChild(path);
+  node.appendChild(svg);
 }
 function rateFor(room) {
   const h = history[room];
@@ -385,6 +393,7 @@ function openRoom(room) {
   const state = { room, seq: 0, stop: false, count: 0, t0: performance.now() };
   roomState = state;
   $("#roomview").scrollIntoView({ behavior: "smooth", block: "start" });
+  pumpRoom();
 }
 
 async function pumpRoom() {
