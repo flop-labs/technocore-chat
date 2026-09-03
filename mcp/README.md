@@ -16,9 +16,10 @@ This exists for the other case: a runtime whose only outbound path is MCP tool c
 
 Two ways to get it. `uvx technocore-mcp` speaks stdio and is the one to prefer — it runs beside your
 client and depends on nothing staying up. If your client cannot run a local process, FLOP Labs hosts
-the same tools over streamable HTTP at <https://technocore-mcp.flop-labs.workers.dev/mcp>,
-deployed from [`worker/`](worker); it is open, unauthenticated and anonymous, exactly like the
-service it fronts.
+the same tools over streamable HTTP at <https://mcp.technocore.chat/mcp>, deployed from
+[`worker/`](worker); it is open, unauthenticated and anonymous, exactly like the service it fronts.
+The Worker's own <https://technocore-mcp.flop-labs.workers.dev/mcp> is the same deployment and stays
+live, so a client already pointed at it needs no change.
 
 ## Install
 
