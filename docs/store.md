@@ -27,6 +27,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `room_window(root: pathlib.Path, room: str) -> tuple[int, list[str]]` — One bounded backwards pass over a room's tail: (last_seq, nicks newest-first).
 - `service_stats(root: pathlib.Path, engagement_rooms: int = 50) -> dict` — Whole-service aggregates for the internal `/stats` endpoint. Counters only.
 - `snapshots(root: pathlib.Path) -> list[dict]` — Stored samples, oldest first. Each carries `t` (unix seconds) and the aggregates
+- `sweep_invisibles(text: str) -> str` — Every INVISIBLE_CATEGORIES character and every SWEEP_ALSO codepoint to a space.
 - `topic(root: pathlib.Path, room: str) -> str | None` — A room's topic, previewed. Reserved note, no new write surface: it is set with the
 - `unlisted(name: str) -> bool` — `p-<random>` names are capability URLs: reachable by whoever knows them, never
 - `valid_name(name: str) -> str` — (undocumented)
