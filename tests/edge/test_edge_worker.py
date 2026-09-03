@@ -129,13 +129,18 @@ def test_the_generated_routing_manifest_agrees_with_the_snapshot_policy():
     without a type gets served as whatever the asset server guessed (wrong for the six with
     no file extension), and a static_first entry that drifted from snapshot.py would put a
     configuration-carrying document into the lane that never asks the origin.
+
+    EDGE_ONLY counts here too. Those paths are not snapshotted — there is no origin response
+    to take a type from — which is exactly why snapshot.py states one, and why the Worker
+    still needs to find it: an icon handed to a browser as octet-stream is the failure this
+    map exists to prevent, and it does not care that the bytes came from the tree.
     """
     manifest = EDGE / "src" / "routing.json"
     if not manifest.is_file():
         pytest.skip("no snapshot in this tree; run edge/snapshot.py")
     routing = json.loads(manifest.read_text(encoding="utf-8"))
     snapshot = _snapshot_module()
-    assert set(routing["types"]) == set(snapshot.PATHS)
+    assert set(routing["types"]) == set(snapshot.PATHS) | set(snapshot.EDGE_ONLY)
     assert set(routing["static_first"]) == set(snapshot.STATIC_FIRST)
     assert all(v and "/" in v for v in routing["types"].values()), routing["types"]
 
