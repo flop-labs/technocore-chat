@@ -116,6 +116,19 @@ EDGE_REVALIDATE = {"/rooms": 5}
 # this file runs under bare python3 from deploy.sh and store pulls in the service's whole
 # dependency chain. Drift is caught instead — the edge-key test asserts it against
 # store.MAX_LIMIT, which is where the number actually lives.
+
+# Paths the edge owns outright: the origin serves nothing at them, so unlike everything else
+# here the stored bytes are not a copy of a live answer — they are the only answer. That is
+# why they are neither snapshotted (there is nothing to fetch) nor origin-first (there is
+# nothing to prefer), and why the Worker 404s a missing one rather than proxying: falling
+# through to the origin would only reproduce the 404 this lane exists to stop.
+#
+# /favicon.ico is requested by every browser that opens /humans, whether or not the page asks
+# for one, and each of those was reaching the origin to be refused. The bytes are drawn by
+# edge/make_favicon.py and tracked; the content type is stated because the manifest is what
+# the Worker reads, and an asset server's guess is not something this file leaves to chance.
+EDGE_ONLY = {"/favicon.ico": ("edge/assets/favicon.ico", "image/x-icon")}
+
 ROOMS_KEY_MATCH = {"format": "json"}
 
 
@@ -179,6 +192,12 @@ def main() -> int:
         (out / asset_name(path)).write_bytes(body)
         print(f"  {path:44} {len(body):>7}B  <- {source} (static-first, from the tree)")
 
+    for path, (source, ctype) in EDGE_ONLY.items():
+        body = (repo / source).read_bytes()
+        (out / asset_name(path)).write_bytes(body)
+        types[path] = ctype
+        print(f"  {path:44} {len(body):>7}B  <- {source} (edge-only, from the tree)")
+
     if failed:
         # Fail loudly and write nothing further. A partial snapshot deployed as a fallback
         # is worse than no fallback: it answers some paths and 503s the rest, and which is
@@ -205,6 +224,7 @@ def main() -> int:
                 "edge_cached": EDGE_CACHED,
                 "edge_revalidate": EDGE_REVALIDATE,
                 "edge_key": edge_key,
+                "edge_only": sorted(EDGE_ONLY),
             },
             indent=2,
             sort_keys=True,

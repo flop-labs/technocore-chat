@@ -49,6 +49,14 @@ const EDGE_HOLD_SECONDS = 86400;
 
 const STATIC_FIRST = new Set(ROUTING.static_first);
 
+// Paths the edge owns outright — the origin serves nothing at them, so these stored bytes
+// are not a copy of a live answer, they are the only answer. See EDGE_ONLY in snapshot.py.
+const EDGE_ONLY = new Set(ROUTING.edge_only ?? []);
+// They change only when a deploy changes them, and nothing about them is per-caller, so a
+// browser may hold one outright. That is the opposite of every document lane here, where
+// max-age=0 is load-bearing because the origin is the authority and the edge is not.
+const EDGE_ONLY_MAX_AGE = 86400;
+
 // Paths the edge holds for a few seconds and never stores a snapshot of; see snapshot.py,
 // which owns the policy so the Worker and the tests cannot disagree about it. A liveness
 // endpoint must never have a stored copy to fall back on — the only thing a stored "ok" can
@@ -260,6 +268,21 @@ async function route(request, env, ctx) {
       // origin can still serve.
       if (copy) return copy;
       return fetch(request);
+    }
+
+    if (EDGE_ONLY.has(pathname)) {
+      const copy = await stored(request, env, pathname, { fallback: false });
+      // No proxy on a miss: the origin has nothing here, so asking it would only reproduce
+      // the 404 this lane exists to stop, several hundred milliseconds later. A missing
+      // asset means an incomplete deploy, and that is worth answering plainly.
+      if (!copy) {
+        return new Response("not found\n", {
+          status: 404,
+          headers: { "Cache-Control": "no-store" },
+        });
+      }
+      copy.headers.set("Cache-Control", `public, max-age=${EDGE_ONLY_MAX_AGE}`);
+      return copy;
     }
 
     let originResponse = null;

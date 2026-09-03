@@ -65,7 +65,12 @@ def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     whole point of them.
     """
     snapshot = _snapshot_module()
-    accounted = set(snapshot.PATHS) | set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE)
+    accounted = (
+        set(snapshot.PATHS)
+        | set(snapshot.EDGE_CACHED)
+        | set(snapshot.EDGE_REVALIDATE)
+        | set(snapshot.EDGE_ONLY)
+    )
     assert _wrangler_routes() - accounted == set()
 
 
@@ -415,3 +420,59 @@ def test_a_path_whose_reply_varies_by_query_is_routed_with_a_wildcard():
             f"{path}'s reply varies by query string, so its route must end in * or the "
             "Worker never sees the requests that carry one"
         )
+
+
+def test_an_edge_owned_path_is_not_snapshotted_and_not_origin_first():
+    """EDGE_ONLY is the one lane whose stored bytes are not a copy of anything. The origin
+    serves nothing at these paths, so snapshotting one would fetch a 404 and fail the deploy,
+    and proxying one would reproduce the 404 the lane exists to stop.
+    """
+    snapshot = _snapshot_module()
+    owned = set(snapshot.EDGE_ONLY)
+    assert owned & set(snapshot.PATHS) == set(), "the origin serves nothing at these paths"
+    assert owned & set(snapshot.STATIC_FIRST) == set()
+    assert owned & set(snapshot.EDGE_CACHED) == set()
+    assert owned & set(snapshot.EDGE_REVALIDATE) == set()
+
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = _between(worker, "if (EDGE_ONLY.has(pathname))", "let originResponse")
+    assert "fetch(request" not in lane, "a miss here must not fall through to the origin"
+    assert "404" in lane
+
+
+def test_every_edge_owned_path_has_bytes_in_the_tree_and_a_declared_type():
+    """These are copied from the checkout, not fetched, so a missing file is a deploy that
+    dies at the snapshot step. And the type is declared rather than guessed: the Worker reads
+    it from the manifest, and an asset server handing a browser octet-stream for an icon is
+    the failure this whole types map exists to prevent.
+    """
+    repo = EDGE.parent
+    for path, (source, ctype) in _snapshot_module().EDGE_ONLY.items():
+        body = (repo / source).read_bytes()
+        assert body, f"{path} has no bytes at {source}"
+        assert ctype and "/" in ctype, f"{path} needs a content type, got {ctype!r}"
+
+
+def test_the_favicon_carries_the_size_a_browser_tab_actually_renders():
+    """16 is what a tab renders. An icon that lost that frame still looks right everywhere
+    the mistake does not matter, which is why it is worth asserting rather than eyeballing.
+    Parsed out of the ICO directory so it checks the file, not the script that wrote it.
+    """
+    ico = (EDGE / "assets" / "favicon.ico").read_bytes()
+    assert ico[:4] == b"\x00\x00\x01\x00", "not an ICO"
+    count = int.from_bytes(ico[4:6], "little")
+    # Each directory entry is 16 bytes and starts with width, height (0 meaning 256).
+    sizes = {ico[6 + i * 16] or 256 for i in range(count)}
+    assert 16 in sizes, f"no 16px frame, only {sorted(sizes)}"
+
+
+def test_the_icon_is_built_from_the_tracked_brand_mark():
+    """The mark itself lives outside this repo, in the brand deliverables, so a copy is
+    tracked here or nothing can rebuild the icon. make_favicon.py reads that copy and only
+    that copy — a generator reaching outside the checkout is one that works on one laptop.
+    """
+    source = EDGE / "assets" / "icon-source.png"
+    assert source.exists(), "the brand mark must be tracked, not read from outside the repo"
+    script = (EDGE / "make_favicon.py").read_text(encoding="utf-8")
+    assert 'SOURCE = HERE / "assets" / "icon-source.png"' in script
+    assert ".." not in script.split("SOURCE =")[1].split("\n")[0]

@@ -46,6 +46,8 @@
     // and agents for ?format=json — so without it the lane is attached to the one form of
     // the request nobody makes. This is the only route whose reply depends on its query.
     { "pattern": "technocore.chat/rooms*", "zone_name": "technocore.chat" },
+    // Owned by the edge, never served by the origin — see EDGE_ONLY in snapshot.py.
+    { "pattern": "technocore.chat/favicon.ico", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/robots.txt", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/sitemap.xml", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/openapi.json", "zone_name": "technocore.chat" },
