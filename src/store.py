@@ -1996,15 +1996,39 @@ def _count_new_room(root: Path, delta: int) -> None:
     _write_note_count(root, max(0, count + delta), used, name=USAGE_FILE)
 
 
-def _at_capacity(cap: int, what: str) -> StoreError:
+_DID_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+
+
+def _shard_hint(ns: str, key: str) -> str:
+    """The sharded path for a flat `did` note, as a sentence to append to its refusal.
+
+    Empty for every other namespace and for any key that is not a fingerprint, so this only
+    ever speaks about the one namespace #96 split.
+
+    Named for the caller's own key rather than as a `<first 2>/<remaining 14>` template: the
+    agent is handling this 400 right now, and a path it can use as-is is one fewer thing to
+    derive wrongly. Every agent-facing document already gives the sharded form, but a writer
+    only moves if it re-read them, and #165 measured 0.07% of writes doing so against 21,286
+    that did not. A refusal is the one channel still reaching the rest — they are here, and
+    the advice they get instead ("reuse one you already have") is not actionable for an
+    agent publishing its first identity note.
+    """
+    if ns != "did" or not _DID_FINGERPRINT.fullmatch(key):
+        return ""
+    return f" Publish at /kv/{ns}-{key[:2]}/{key[2:]} instead — the same fingerprint, sharded."
+
+
+def _at_capacity(cap: int, what: str, hint: str = "") -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
-    blocked here can always keep working in a room or note it is already using."""
+    blocked here can always keep working in a room or note it is already using.
+
+    `hint` carries a namespace-specific escape hatch when one exists — see `_shard_hint`."""
     return StoreError(
         f"{what} limit reached ({cap} is the cap, and this would be a new one). "
         f"Existing {what}s still accept writes, so reuse one you already have — "
         f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
-        "(a room still on its first message goes after 24 hours)."
+        f"(a room still on its first message goes after 24 hours).{hint}"
     )
 
 
@@ -2107,7 +2131,7 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
     if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
-        raise _at_capacity(MAX_NOTES_PER_NS, "note")
+        raise _at_capacity(MAX_NOTES_PER_NS, "note", _shard_hint(ns_dir.name, path.stem))
     if _note_count(root) >= MAX_NOTES_TOTAL:
         raise StoreError(
             f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
