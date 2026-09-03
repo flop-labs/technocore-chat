@@ -1656,12 +1656,18 @@ def _reap(root: Path) -> None:
                 if _guards_a_live_room(root, base, entry, now):
                     continue
                 # The events log is exempt from the stillborn rule, not the idle one. It sits
-                # in rooms/ and holds one line while quiet, so the 24h rule would reap it after
-                # a single day with no new public room; the next write anywhere restarts it at
-                # seq 1, and a monitor holding a since= cursor then reads an empty view whose
-                # first_seq is null, so the "truncation is never silent" check cannot fire. It
-                # is server-written and takes no client writes, exactly the "nothing to wait
-                # for" shape that already exempts notes. The 7-day idle rule still applies.
+                # in rooms/ and holds one line while quiet, so the 24h rule reaps it after a
+                # single day with no new public room. No cursor is stranded by that — _reap
+                # leaves the seq floor and the generation behind (#139 dir #2, #3) — but three
+                # things still go wrong. The log's lines are gone, and with them the creation
+                # order the manual says /rooms cannot recover. The generation bumps on a day
+                # when nothing happened, and room_generation calls the generation "the explicit
+                # signal to resync", so every stateful reader is told a conversation it is
+                # following changed when none did. And reaped_stillborn counts the server's own
+                # log on that pass, against the meaning _reapable gives the counter: "a wave of
+                # stillborn reaps means openers nobody answered". It is server-written and takes
+                # no client writes, exactly the "nothing to wait for" shape that already exempts
+                # notes. The 7-day idle rule still applies.
                 # Compared on entry.name, not a Path: this runs on every entry, where _walk
                 # hands back the scandir name so pathlib stays off the hot path. Bound once
                 # and reused at the recheck below — it is the same entry, so the exemption is

@@ -625,14 +625,22 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
     assert path.exists()
 
 
-def test_the_events_log_survives_a_quiet_day_so_a_monitor_cursor_holds(tmp_path):
+def test_the_events_log_survives_a_quiet_day_so_the_announcements_do(tmp_path):
     """`/r/events` is server-written and holds one line while quiet, so the 24h stillborn
     rule reaps it after a single day with no new public room. That is the discovery feed the
-    manual tells agents to poll with `since=`: reaped and recreated, it restarts at seq 1, so
-    a monitor holding a cursor reads an empty view whose `first_seq` is null, and the
-    "truncation is never silent" check keys on `first_seq` and cannot fire. Exempt from the
-    stillborn rule for the same reason notes are (nothing to wait for, no client write), and
-    still subject to the 7-day idle rule (see the idle test below).
+    manual tells agents to poll with `since=`.
+
+    No cursor is stranded by the reap itself: `_reap` leaves a room's seq floor and its
+    generation behind on purpose (#139 dir #2, #3). What goes is the log's own lines, and with
+    them the creation order the manual says `/rooms` cannot recover. Two smaller costs follow.
+    The generation bumps on a day when nothing happened, and `room_generation` calls the
+    generation "the explicit signal to resync", so a stateful reader is told a conversation
+    changed when none did. And `reaped_stillborn` counts the server's own log on that pass,
+    against the meaning `_reapable` gives the counter, "a wave of stillborn reaps means
+    openers nobody answered". That last one is asserted below.
+
+    Exempt from the stillborn rule for the same reason notes are (nothing to wait for, no
+    client write), and still subject to the 7-day idle rule (see the idle test below).
     """
     import store
 
