@@ -5,7 +5,9 @@ module is the portability path for a fixed Python runtime where packages cannot
 be installed. It implements the signing half of RFC 8032; verification remains
 on the server's PyNaCl-backed path, and native cryptography stays preferred for
 performance when it is available. The fallback is portability-oriented pure
-Python rather than a constant-time implementation.
+Python rather than a constant-time implementation; it runs locally in CLI
+tools with key material already held by the operator, where no remote party
+is positioned to measure execution timing.
 """
 
 from __future__ import annotations
