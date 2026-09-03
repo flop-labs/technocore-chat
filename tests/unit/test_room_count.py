@@ -281,8 +281,10 @@ def test_reserved_room_bytes_zero_division_and_compaction_floor(tmp_path, monkey
     monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 1)
 
     root = tmp_path
+    (root / store.USAGE_FILE).write_text("1 999999")
+
     store._write_record(root, "room1", "alice", "hello world 1")
     store._write_record(root, "room1", "alice", "hello world 2")
 
-    records = list(store.read_messages(root, "room1"))
-    assert len(records) > 0, "compaction under extreme limits must not erase all room contents"
+    view = store.read_messages(root, "room1")
+    assert len(view["messages"]) > 0, "compaction under extreme limits must not erase all room contents"

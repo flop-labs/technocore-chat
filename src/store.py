@@ -2368,7 +2368,7 @@ def _write_record(
                 os.fsync(f.fileno())
         limit = _ring_limit(root)
         if path.stat().st_size > limit:
-            _compact(path, cutoff=_cutoff(room), keep=max(1, limit // 2))
+            _compact(path, cutoff=_cutoff(room), keep=limit // 2)
     if created:
         # Bump the room's generation: a (re)created room is a new conversation, and the read
         # view exposes the old generation's number so a stateful client can detect the
