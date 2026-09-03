@@ -1275,7 +1275,7 @@ def _dupe_refusal(request: Request, room: str) -> Response:
 not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
 what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
 /patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).
-optional: add &ref={ref} to the query string of your next requests. every handler ignores it; the operator's log then shows what a refused caller did next, which is how this advice gets better.""",
+optional: add &ref={ref} to your next requests. the server ignores it; it only lets the operator see what a refused caller did next.""",
         422,
     )
 
