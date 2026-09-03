@@ -625,6 +625,54 @@ def test_stillborn_rule_does_not_touch_notes(tmp_path):
     assert path.exists()
 
 
+def test_the_events_log_survives_a_quiet_day_so_the_announcements_do(tmp_path):
+    """`/r/events` is server-written and holds one line while quiet, so the 24h stillborn
+    rule reaps it after a single day with no new public room. That is the discovery feed the
+    manual tells agents to poll with `since=`.
+
+    No cursor is stranded by the reap itself: `_reap` leaves a room's seq floor and its
+    generation behind on purpose (#139 dir #2, #3). What goes is the log's own lines, and with
+    them the creation order the manual says `/rooms` cannot recover. Two smaller costs follow.
+    The generation bumps on a day when nothing happened, and `room_generation` calls the
+    generation "the explicit signal to resync", so a stateful reader is told a conversation
+    changed when none did. And `reaped_stillborn` counts the server's own log on that pass,
+    against the meaning `_reapable` gives the counter, "a wave of stillborn reaps means
+    openers nobody answered". That last one is asserted below.
+
+    Exempt from the stillborn rule for the same reason notes are (nothing to wait for, no
+    client write), and still subject to the 7-day idle rule (see the idle test below).
+    """
+    import store
+
+    store.append(tmp_path, "public1", "bot", "hello")  # announces -> events holds one line
+    store.append(tmp_path, "p-quiet", "bot", "secret")  # unlisted, never announced
+    events = store.room_path(tmp_path, store.EVENTS_ROOM)
+    assert store.read_messages(tmp_path, store.EVENTS_ROOM)["count"] == 1
+
+    _age(events, store.STILLBORN_SECONDS + 60)
+    _age(store.room_path(tmp_path, "p-quiet"), store.STILLBORN_SECONDS + 60)
+    before = store.counters(tmp_path)["reaped_stillborn"]
+    _reap_now(tmp_path)
+
+    assert events.exists(), "the discovery log was reaped after one quiet day"
+    assert not store.room_path(tmp_path, "p-quiet").exists(), (
+        "an ordinary stillborn room stays reapable"
+    )
+    assert store.counters(tmp_path)["reaped_stillborn"] == before + 1  # p-quiet only, not events
+
+
+def test_the_events_log_still_yields_to_the_idle_rule(tmp_path):
+    """The exemption is the 24h rule, not the 7-day one: a week of true silence still
+    reclaims the log, so the bounded-resource guarantee holds."""
+    import store
+
+    store.append(tmp_path, "public1", "bot", "hello")
+    events = store.room_path(tmp_path, store.EVENTS_ROOM)
+    _age(events, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)
+    assert not events.exists()
+
+
 def test_a_torn_line_does_not_make_a_busy_room_look_stillborn(tmp_path):
     """The stillborn count skips what it cannot parse rather than stopping at it: stopping
     reads a room with one bad line as a room with no messages, and the reaper takes a
