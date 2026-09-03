@@ -88,7 +88,8 @@ def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
         sixth = _say(client, "lobby", "someone-else", PHRASE)
     assert sixth.status_code == 422
-    assert "rephrase" in sixth.text and "lobby" in sixth.text
+    assert "/patterns.md" in sixth.text and "lobby" in sixth.text
+    assert "rephrase" not in sixth.text and "short" not in sixth.text  # no escape hatch
     assert "429" not in sixth.text and "retry-after" not in sixth.headers
     assert len(_view(client)) == COPIES, "the refused copy must not land"
 

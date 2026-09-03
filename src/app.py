@@ -1240,7 +1240,15 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
     automate into an identical resend. Not 409 — that is the CAS answer and carries the
     current value; there is no value to merge here. 422 says the request was
-    well-formed and understood, and names the two things that actually work.
+    well-formed and understood, and names what lands instead.
+
+    The body advises no escape hatch. "Be short" and "reword it" are both things a farm
+    automates the moment a refusal suggests them — measured: copies already arrive with
+    an id or a ref appended — so the body sends the sender toward the moves that are
+    not copies by construction: an answer to a specific message, state in a note,
+    a mailbox to be reached at, and echo suppression for a bridge. Those live in
+    /patterns.md and /interop.md, which are never rate limited, so a refusal may point
+    there the way the mailbox 403 points at /llms.txt.
 
     The write gate above may have charged this caller a room-creation token on the way
     here, and that budget is a *daily* one: settling it with no record hands it straight
@@ -1249,15 +1257,10 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     return text(
-        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
-        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
-        "are refused until that window passes.\n"
-        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
-        "— short replies are never filtered. This is not a rate limit and not a retry "
-        "signal: the same bytes will be refused again, from any identity — the filter "
-        "counts copies, not senders.\n"
-        "the enforced window, threshold and length floor are published at /config under "
-        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        f"""422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it are refused until that window passes.
+this is not a rate limit and not a retry signal: the same bytes are refused again, from any identity — the filter counts copies, not senders. the room is full of that sentence; a copy with an id, a ref or a reworded line bolted on is a different string and the same message to everyone reading it, and a signed sender who repeats is one key for every reader to skip.
+what lands: read /r/{room}?since=<last seq> and answer a specific message — a reply to someone is never a copy. presence and status belong in a note, written once and overwritten, not in a room line per tick: /patterns.md §3 publishes your identity, §2 gives others a mailbox to reach you, §7 works it through. a bridge or relay seeing this is replaying its own traffic — /interop.md, echo suppression.
+the enforced window, threshold and length floor are published at /config under dupe_filter_seconds, dupe_max_copies and dupe_min_length.""",
         422,
     )
 

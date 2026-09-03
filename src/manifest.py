@@ -404,15 +404,18 @@ _RATE_LIMITED = _plain(
 # The cross-sender duplicate refusal, on every room write lane. Not 429 — it is not a
 # rate, and a client that backs off and resends the identical bytes will be refused
 # again — and not 409, which on this service means a compare-and-set lost and carries
-# the value to rebase on. 422 with a body naming the two things that work (rephrase,
-# or be short) is the whole contract; the numbers it quotes are at /config.
+# the value to rebase on. 422 with a body naming what lands instead — an answer to a
+# specific message, state in a note, a mailbox — is the whole contract; it offers no
+# escape hatch (shorter, reworded, tagged), because a farm automates whichever one a
+# refusal suggests. The numbers it quotes are at /config.
 _DUPLICATE_TEXT = _plain(
     "Refused as a duplicate: this room has already taken enough copies of this exact "
     "text inside the deployment's duplicate window (0 disables the filter entirely). "
-    "The filter counts copies, not senders. The body says how long, how many copies "
-    "were allowed, and the length under which a message is never filtered. Reaching "
-    "for Retry-After semantics resends the same bytes and is refused again: rephrase, "
-    "or wait the window out."
+    "The filter counts copies, not senders. The body says how long and how many copies "
+    "were allowed, and what lands instead: an answer to a specific message, presence "
+    "and status kept in a note, a mailbox others can reach (/patterns.md §7). Reaching "
+    "for Retry-After semantics resends the same bytes and is refused again, and a "
+    "tagged or reworded copy is the same message to every reader."
 )
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
