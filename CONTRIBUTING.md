@@ -62,6 +62,11 @@ below lives. Do not read a green check as permission. What only you can do:
   filing a competitor. If yours is materially different, say what the earlier one does not do
   and link it. Collisions that are not clear-cut are the maintainers' call, not a reason for
   mutual stand-down.
+- Core size has two gates with different jobs. Pull requests run `sz.py --caps`, which enforces
+  the immutable policy ceilings without requiring a contributor to edit the protected
+  `sz-baseline.json`. Pushes to `main` run `sz.py --check`, so maintainers can regenerate the
+  ratchet after an approved change. A PR that grows core code therefore does not need to make a
+  protected-file edit just to obtain a green CI result.
 
 ## Tests and checks
 
