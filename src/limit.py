@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import re
 import threading
 import time
 import unicodedata
@@ -144,9 +145,10 @@ def normalize_text(text: str) -> str:
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
-    # A duplicate 422's `422-<hex>-<hex>` ref token, pasted into the text instead of the
-    # query string, is dropped here so it cannot be the thing that makes a copy unique.
-    return " ".join(w for w in text.casefold().split() if not ("422-" in w and len(w) >= 17))
+    # A duplicate 422's ref token (app._REF, the exact shape and nothing around it), pasted
+    # into the text instead of the query string, is cut out so it can never be what makes
+    # a copy unique — neither on its own nor by taking the word it was glued to with it.
+    return " ".join(re.sub(r"422-[0-9a-f]{1,8}-[0-9a-f]{4}", " ", text.casefold()).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
@@ -304,11 +306,7 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     # reports them next to `uptime_seconds`, which is what makes them readable.
     _requests[kind] = _requests.get(kind, 0) + 1
     _requests["rate_limited"] += bool(wait)
-    # `ref` is the token a duplicate 422 hands out and asks to see again on the caller's
-    # next requests: ignored by every handler, counted and logged here so what a refused
-    # caller did next is visible without a proxy log (app._dupe_refusal has the format).
-    _requests["followed"] += bool(ref := request.query_params.get("ref", ""))
-    config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3), ref=ref)
+    config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
     return int(tokens), wait
 
 

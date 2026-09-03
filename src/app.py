@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 import tomllib
@@ -684,6 +685,12 @@ def sitemap(request: Request) -> Response:
     )
 
 
+# The ref token a duplicate 422 hands out, as it may come back in a query string: exact
+# shape, whole value. Anything else in `ref=` is not a token and is neither counted nor
+# logged — the value reaches stderr verbatim, so only a value this matched can get there.
+_REF = re.compile(rb"(?:^|&)ref=(422-[0-9a-f]{1,8}-[0-9a-f]{4})(?:&|$)")
+
+
 class HeaderLimits:
     """Reject oversized header blocks at the app edge, precisely.
 
@@ -692,6 +699,12 @@ class HeaderLimits:
     measured, httptools returned 200 for a 256 KiB header. This is the deterministic
     bound, and it also documents the contract. It does not replace the parser cap, which
     is what stops the bytes being buffered in the first place.
+
+    Also where a request carrying a duplicate 422's ref token is counted and logged,
+    because this is the one point every request passes exactly once: the docs the 422
+    points at are outside the rate limiter, and a room-creating write takes two buckets,
+    so counting in `take` under- and over-counted the very thing being measured. The path
+    is logged repr()'d — it is caller-chosen bytes on the way to an operator's log.
     """
 
     def __init__(self, app):
@@ -714,6 +727,10 @@ class HeaderLimits:
                     headers={"Cache-Control": "no-store"},
                 )(scope, receive, send)
                 return
+            ref = _REF.search(scope.get("query_string", b""))
+            if ref:
+                limit._requests["followed"] += 1
+                config._dbg(1, "followed", ref=ref[1].decode(), path=repr(scope["path"]))
         await self.app(scope, receive, send)
 
 
@@ -1263,8 +1280,9 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     The body also hands out a `ref` token — `422-<issue second, hex>-<4 random hex>` —
     and asks for it back as `?ref=` on the caller's next requests. Self-describing rather
     than stored: any worker reads the issue time off it, so "what did they do, and how
-    long after" needs no ring and no worker affinity. `take` counts and logs it; the
-    normaliser drops it from message text so it can never be what makes a copy unique.
+    long after" needs no ring and no worker affinity. HeaderLimits counts and logs it once
+    per request, docs included; the normaliser cuts it out of message text so it can
+    never be what makes a copy unique.
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     limit._requests["duplicate"] += 1

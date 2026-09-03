@@ -117,9 +117,12 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     client, capsys
 ) -> None:
     """The 422 carries `422-<hex>-<hex>` and asks for it back as ?ref=. Sent back, it is
-    counted (requests.followed) and logged on the take line, on a read or a write, and
-    the handler otherwise ignores it. Pasted into the text instead, it is dropped before
-    the copy check — the token must not be the thing that makes the sixth copy land."""
+    counted (requests.followed) and logged once per request — on a read, on the docs the
+    body points at, and once (not twice) on a write that also creates a room — and the
+    handler otherwise ignores it. Only the exact token shape is counted or logged: a
+    forged value with a newline in it must not reach the operator's log at all. Pasted
+    into the text instead, glued to a word or not, the token is cut out before the copy
+    check — it must not be the thing that makes the sixth copy land."""
     with _filter_on(DUPE_MAX_COPIES=1):
         assert _say(client, "lobby", "a", PHRASE).status_code == 200
         refused = _say(client, "lobby", "b", PHRASE)
@@ -131,15 +134,18 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     before = limit._requests["followed"]
     with config.override(DEBUG=1):
         assert client.get("/r/lobby?format=json&ref=" + ref).status_code == 200
+        assert client.get("/patterns.md?ref=" + ref).status_code == 200
         assert (
-            _say(client, "lobby", "b", "here is a real answer to a: I checked too", ref).status_code
-            == 200
+            _say(client, "p-fresh-room-for-ref", "b", "a real answer to a", ref).status_code == 200
         )
-    assert limit._requests["followed"] == before + 2
-    takes = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("take ")]
-    assert [ln for ln in takes if "ref=" + ref in ln] == takes[-2:], "both follow-ups logged"
+        assert client.get("/r/lobby?ref=x%0Aduplicate%20ip=forged").status_code == 200
+    assert limit._requests["followed"] == before + 3
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("followed ")]
+    assert [ln for ln in lines if "ref=" + ref in ln] == lines and len(lines) == 3
+    assert "path='/patterns.md'" in lines[1] and "forged" not in "".join(lines)
     with _filter_on(DUPE_MAX_COPIES=1):
-        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
+        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
+        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
         assert _say(client, "lobby", "c", "ref=" + ref + " " + PHRASE).status_code == 422
 
 
