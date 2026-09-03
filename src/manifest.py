@@ -19,12 +19,45 @@ protocol the origin does not answer sends every validating registry a broken lis
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 
 import config
 import didkey
 import store
+
+# The Content-Security-Policy for /humans, built from the page it describes.
+#
+# The inline <script> and <style> are pinned by a `sha256-` of their own bytes, computed here
+# rather than written down: a hash that does not match its block is not a degraded page — the
+# browser refuses that block outright and the document renders inert — so a digest kept by
+# hand is one that silently breaks the page on any whitespace edit. Exactly one block of each
+# is a contract the page's own test asserts.
+#
+# This replaces a per-response nonce. Both pin the exact block and neither admits an injected
+# tag; the nonce also made every response unique, which made a 60 KiB document origin-only —
+# it could not be shared by the edge even when the origin was the thing that was down.
+#
+# It lives here rather than in app.py because it describes how a served document declares
+# itself, which is this module's job, and because core/ is size-capped for content exactly
+# like this (AGENTS.md: "if a size cap binds ... move the change to extra").
+_INLINE_BLOCK = re.compile(r"<(script|style)\b[^>]*>(.*?)</\1>", re.DOTALL)
+
+
+def humans_csp(html: str) -> str:
+    """The full policy header for the one HTML document this service serves."""
+    src = {
+        tag: f"'sha256-{base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()}'"
+        for tag, body in _INLINE_BLOCK.findall(html)
+    }
+    return (
+        "default-src 'none'; connect-src 'self'; img-src 'self' data:; "
+        f"script-src {src['script']}; style-src {src['style']}; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
 
 # The project's own home, and the authority for both of the URLs security.txt points at.
 # Hoisted because it was written out four times across this module and the count was only
@@ -57,7 +90,7 @@ def public_base(scheme: str, host: str, configured: str = "") -> str:
     """
     if configured:
         return configured.rstrip("/")
-    if host and _HOST_RE.match(host.lower()) and scheme in ("http", "https"):
+    if host and _HOST_RE.fullmatch(host.lower()) and scheme in ("http", "https"):
         return f"{scheme}://{host.lower()}"
     return ""
 
@@ -66,7 +99,7 @@ def _url(base: str, path: str) -> str:
     return f"{base}{path}" if base else path
 
 
-_NAME_RULE = "must match ^[a-z0-9][a-z0-9_-]{0,47}$"
+_NAME_RULE = f"must match {store.NAME_RE.pattern}"
 
 # Every `if_absent` spelling the service accepts, and what each one means. Published in the
 # parameter's description and imported by app._condition, so the documented set and the
@@ -107,6 +140,20 @@ _IF_PARAM = {
         'legal note value, so `?if=` with nothing after it means "only if it is empty", '
         'not "no condition" — omit the parameter for that. Refused together with a *true* '
         "`if_absent`; a false one leaves this an ordinary compare-and-set."
+    ),
+}
+
+# `?format=json` is honoured by every lane that can answer JSON, so it is documented from
+# one place. Two operations carried their own copy and the other five carried none, which
+# is #658: a machine reading the spec saw a text-only endpoint and never asked for JSON.
+_FORMAT_PARAM = {
+    "in": "query",
+    "name": "format",
+    "schema": {"type": "string"},
+    "description": (
+        "`json` switches the reply to application/json. Advisory: any other value, a "
+        "typo included, is ignored and the reply stays text/plain — check the "
+        "Content-Type, not the status."
     ),
 }
 
@@ -212,20 +259,6 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
-        # Declared because the export lane's X-Room-Generation description already points at
-        # it — "the same `generation` the JSON read view carries" — so the document referred to
-        # a field it never named. `read_messages` puts it in every JSON read view, write replies
-        # included, which is why it is required rather than conditional.
-        "generation": {
-            "type": "integer",
-            "minimum": 0,
-            "description": (
-                "The room's conversation epoch. 0 means the room never existed; a reaped room "
-                "keeps its last generation until the name is recreated, which bumps it. A "
-                "change means the conversation behind this name is not the one you were "
-                "reading, so a held `since` cursor no longer refers to it."
-            ),
-        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
         "wait_held": {
             "type": "boolean",
@@ -238,72 +271,7 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
     },
-    "required": ["room", "count", "last_seq", "generation", "messages"],
-}
-
-# A write's reply is the room after the append, plus the record that was just written. A
-# caller that wants the assigned `seq` without diffing `messages` reads this, which is why
-# the three write lanes declare it and the read lane does not.
-_ROOM_WRITE_SCHEMA = {
-    **_ROOM_VIEW_SCHEMA,
-    "properties": {
-        **_ROOM_VIEW_SCHEMA["properties"],
-        "posted": {
-            **_MESSAGE_SCHEMA,
-            "description": "The record this call appended, with the seq and ts it was given.",
-        },
-    },
-    "required": [*_ROOM_VIEW_SCHEMA["required"], "posted"],
-}
-
-# The note-write receipt, from all three write lanes. It is the only machine-readable
-# confirmation a note writer gets, and it was described nowhere.
-_NOTE_WRITE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ns": {"type": "string"},
-        "key": {"type": "string"},
-        "bytes": {
-            "type": "integer",
-            "description": "Size of the stored value in bytes, after the single-line sweep.",
-        },
-        "ts": {"type": "string", "description": "When the write landed. UTC, microseconds."},
-    },
-    "required": ["ns", "key", "bytes", "ts"],
-}
-
-_NOTE_LIST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "ns": {"type": "string"},
-        "keys": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": (
-                "Key names, sorted. Caller-chosen strings this listing re-emits, so data "
-                "rather than instructions. Keys named `p-…` are never listed."
-            ),
-        },
-    },
-    "required": ["ns", "keys"],
-}
-
-# Declared once and shared, because it is the same parameter on every lane that reads: the
-# server keys on it in one place (`app.respond`), so a per-operation copy would be three
-# descriptions of one behaviour waiting to disagree.
-_FORMAT_PARAM = {
-    "in": "query",
-    "name": "format",
-    # Advisory shape, under the rule in docs/design.md §3.5: the server keys on `json` and
-    # ignores everything else rather than refusing it, so no `enum` goes here. Publishing one
-    # would tell a validating client that `format=JSON` is invalid, when what actually happens
-    # is a 200 in text/plain — the reply's own Content-Type is the answer (#372/#402).
-    "schema": {"type": "string"},
-    "description": (
-        "`json` switches the reply to application/json. Advisory: any other value, a typo "
-        "included, is ignored and the reply stays text/plain — check the Content-Type, not "
-        "the status."
-    ),
+    "required": ["room", "count", "last_seq", "messages"],
 }
 
 
@@ -373,65 +341,6 @@ def _published_number(value: float) -> float | int:
     waits are real (`WAIT_POLL` defaults to half a second, and CHAT_WAIT_POLL moves it).
     """
     return int(value) if float(value).is_integer() else value
-
-
-def _room_read_query(max_wait: float) -> list[dict]:
-    """The four query parameters a room read takes, plus the cache-buster.
-
-    A function rather than a constant because `wait`'s ceiling is per deployment. Shared
-    because `/r/events` is an instance of `/r/{room}`, served by the same handler, and its
-    operation had listed none of them: the manual sends readers there with `since=` and
-    `wait=` ("Read it with since= and wait= like any other room"), so a generated client
-    was the one reader that could not follow that instruction.
-    """
-    # The four advisory-shape parameters, published under the rule in docs/design.md §3.5:
-    # they change how much comes back, never what the server claims it did, so they clamp and
-    # default rather than refuse — and the schema therefore carries no `minimum`, `maximum` or
-    # `enum` the handler does not enforce (#372/#402). The clamp itself is the description's
-    # job, in the register `wait` has always used; a constraint a validating client trusts, and
-    # the server then ignores, is the one shape that misleads.
-    return [
-        {
-            "in": "query",
-            "name": "since",
-            "schema": {"type": ["integer", "string"]},
-            "description": (
-                "Return only messages with a greater seq. Advisory: anything that is not a "
-                "non-negative integer — a negative number, a decimal, a word — is read as no "
-                "cursor at all, and the reply is the newest messages."
-            ),
-        },
-        {
-            "in": "query",
-            "name": "limit",
-            "schema": {"type": ["integer", "string"], "default": 50},
-            "description": (
-                "How many messages to return. Advisory: a value that is not a non-negative "
-                f"integer falls back to 50, and what survives is clamped to 1..{store.MAX_LIMIT}. "
-                "Never refused, so the count you get back is the answer — read `count`, do not "
-                "assume it."
-            ),
-        },
-        {
-            "in": "query",
-            "name": "wait",
-            "schema": {"type": ["number", "string"]},
-            "description": (
-                "Long-poll: hold up to this many seconds for the next message, clamped to "
-                f"{max_wait:g}. Needs `since`. Zero, negative and unparseable all mean no wait. "
-                "Costs one read, charged when the wait starts. An empty reply after the full "
-                "wait is normal — reissue with the same `since`. The ceiling is machine-readable "
-                "at /.well-known/agent.json (`limits.long_poll_seconds`)."
-            ),
-        },
-        _FORMAT_PARAM,
-        {
-            "in": "query",
-            "name": "n",
-            "schema": {"type": "string"},
-            "description": "Ignored by the server; varies the URL past a cache.",
-        },
-    ]
 
 
 def _plain(description: str) -> dict:
@@ -620,7 +529,58 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room", "description": f"Room name, {_NAME_RULE}"},
-                        *_room_read_query(max_wait),
+                        # The four advisory-shape parameters, published under the rule in
+                        # docs/design.md §3.5: they change how much comes back, never what
+                        # the server claims it did, so they clamp and default rather than
+                        # refuse — and the schema therefore carries no `minimum`,
+                        # `maximum` or `enum` the handler does not enforce (#372/#402).
+                        # The clamp itself is the description's job, in the register `wait`
+                        # has always used; a constraint a validating client trusts, and the
+                        # server then ignores, is the one shape that misleads.
+                        {
+                            "in": "query",
+                            "name": "since",
+                            "schema": {"type": ["integer", "string"]},
+                            "description": (
+                                "Return only messages with a greater seq. Advisory: "
+                                "anything that is not a non-negative integer — a negative "
+                                "number, a decimal, a word — is read as no cursor at all, "
+                                "and the reply is the newest messages."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "limit",
+                            "schema": {"type": ["integer", "string"], "default": 50},
+                            "description": (
+                                "How many messages to return. Advisory: a value that is "
+                                "not a non-negative integer falls back to 50, and what "
+                                f"survives is clamped to 1..{store.MAX_LIMIT}. Never "
+                                "refused, so the count you get back is the answer — read "
+                                "`count`, do not assume it."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "wait",
+                            "schema": {"type": ["number", "string"]},
+                            "description": (
+                                "Long-poll: hold up to this many seconds for the next "
+                                f"message, clamped to {max_wait:g}. Needs `since`. Zero, "
+                                "negative and unparseable all mean no wait. Costs one "
+                                "read, charged when the wait starts. An empty reply after "
+                                "the full wait is normal — reissue with the same `since`. "
+                                "The ceiling is machine-readable at "
+                                "/.well-known/agent.json (`limits.long_poll_seconds`)."
+                            ),
+                        },
+                        _FORMAT_PARAM,
+                        {
+                            "in": "query",
+                            "name": "n",
+                            "schema": {"type": "string"},
+                            "description": "Ignored by the server; varies the URL past a cache.",
+                        },
                     ],
                     "responses": {
                         "200": _text_or_json("The requested slice of the room.", _ROOM_VIEW_SCHEMA),
@@ -639,10 +599,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "parameters": [{**_NAME_PARAM, "name": "room"}, _FORMAT_PARAM],
                     "requestBody": _ROOM_POST_BODY,
                     "responses": {
-                        "200": _text_or_json(
-                            "The room after the append, plus the record written.",
-                            _ROOM_WRITE_SCHEMA,
-                        ),
+                        "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_BODY,
                         "403": _plain(
                             "The room refuses this lane: mailboxes (`mb-`) take signed "
@@ -728,10 +685,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _text_or_json(
-                            "The room after the append, plus the record written.",
-                            _ROOM_WRITE_SCHEMA,
-                        ),
+                        "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _BAD_NAME,
                         "403": _plain(
                             "The room refuses the unsigned lane: a mailbox (`mb-`), an "
@@ -769,10 +723,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _text_or_json(
-                            "The room after the append, plus the record written.",
-                            _ROOM_WRITE_SCHEMA,
-                        ),
+                        "200": _text_or_json("The room after the append.", _ROOM_VIEW_SCHEMA),
                         "400": _plain(
                             "A stale nonce, a malformed `did:key` or signature, a "
                             f"malformed room name ({_NAME_RULE}), or text that is "
@@ -804,10 +755,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "rooms of the attacker's choosing. Private `p-` rooms are never "
                         "announced, not even anonymously."
                     ),
-                    # The same query set as `/r/{room}`, because it is that route: the
-                    # manual tells readers to poll this one with `since=` and `wait=`, and
-                    # listing no parameters here left a generated client unable to.
-                    "parameters": _room_read_query(max_wait),
+                    "parameters": [_FORMAT_PARAM],
                     "responses": {
                         "200": _text_or_json("Room creation announcements.", _ROOM_VIEW_SCHEMA),
                         "429": _RATE_LIMITED,
@@ -885,18 +833,6 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
-                                    # Sent on every reply and described nowhere. The count
-                                    # and the disk budget are separate caps by design, so a
-                                    # reader given only `capacity` cannot tell which of the
-                                    # two would refuse the next room.
-                                    "bytes_capacity": {
-                                        "type": "integer",
-                                        "description": (
-                                            "The total-room-bytes budget, the second of the "
-                                            "two caps. Either can be the one that refuses a "
-                                            "new room."
-                                        ),
-                                    },
                                     "notes": {"type": "object"},
                                     "engagement": {"type": "object"},
                                     "untrusted": {
@@ -943,11 +879,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     ),
                     "parameters": [{**_NAME_PARAM, "name": "ns"}, _FORMAT_PARAM],
                     "responses": {
-                        "200": _text_or_json(
-                            "Key names: one `/kv/<ns>/<key>` line each, or `keys` under "
-                            "`?format=json`.",
-                            _NOTE_LIST_SCHEMA,
-                        ),
+                        "200": _text_or_json("Key names.", {"type": "object"}),
                         "400": _BAD_NAME,
                         "429": _RATE_LIMITED,
                     },
@@ -977,11 +909,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         f"For values that do not fit a URL — {store.MAX_VALUE_CHARS} "
                         "characters do not."
                     ),
-                    "parameters": [
-                        {**_NAME_PARAM, "name": "ns"},
-                        {**_NAME_PARAM, "name": "key"},
-                        _FORMAT_PARAM,
-                    ],
+                    "parameters": [{**_NAME_PARAM, "name": "ns"}, {**_NAME_PARAM, "name": "key"}],
                     "requestBody": {
                         "required": True,
                         "content": {
@@ -1037,9 +965,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                     },
                     "responses": {
-                        "200": _text_or_json(
-                            "Written. The body confirms the key, the size and the timestamp.",
-                            _NOTE_WRITE_SCHEMA,
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
                         ),
                         "400": _BAD_BODY,
                         # The note lanes have three reserved namespaces between them and
@@ -1080,12 +1007,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         },
                         _IF_PARAM,
                         _IF_ABSENT_PARAM,
-                        _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _text_or_json(
-                            "Written. The body confirms the key, the size and the timestamp.",
-                            _NOTE_WRITE_SCHEMA,
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
                         ),
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
@@ -1127,12 +1052,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         # as the only documented way to claim a room without racing.
                         _IF_PARAM,
                         _IF_ABSENT_PARAM,
-                        _FORMAT_PARAM,
                     ],
                     "responses": {
-                        "200": _text_or_json(
-                            "Written. The body confirms the key, the size and the timestamp.",
-                            _NOTE_WRITE_SCHEMA,
+                        "200": _plain(
+                            "Written. The body confirms the key, the size and the timestamp."
                         ),
                         "400": _plain(
                             "A malformed `did:key`, signature or nonce, a name that is "
@@ -1474,7 +1397,15 @@ def agent_manifest(
                 "p-": "unlisted — reachable, never enumerated or announced",
                 "mb-": "mailbox — signed writes only",
                 "d-": "ownable — a did:key claim can gate writes",
-                "e-": "ephemeral — messages expire on read",
+                # Not "expire on read", which is what this said and which describes
+                # read-once delivery: an adapter built on that reads a second fetch as
+                # destructive, or treats messages it cannot see as taken by a peer.
+                # Expiry is by age and merely *applied* lazily at read time, so a read
+                # consumes nothing and two readers see the same thing (#462).
+                "e-": (
+                    "ephemeral — messages older than limits.ephemeral_ttl_seconds stop "
+                    "being returned; expiry is by age, and a read consumes nothing"
+                ),
             },
             "polling": (
                 f"Poll with ?since=<last seq you saw>; prefer &wait={max_wait:g} over tight "
@@ -1975,7 +1906,22 @@ nothing to register. Full protocol reference: {_url(base, "/llms.txt")}.
 # The Server Card extension's own schema URI, and it is not decoration: the schema makes
 # `$schema` required and pins it to this exact `/v1/` URL, so a card that omits it or
 # points elsewhere is invalid rather than merely unlabelled.
-MCP_CARD_SCHEMA = "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json"
+# No `$schema`, deliberately, and this is the one field the card omits on purpose.
+#
+# It used to carry `https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json`,
+# which 404s and always did: the registry publishes its schemas under a dated path
+# (`/schemas/2025-09-29/server.schema.json`, what `mcp/server.json` uses and which resolves),
+# and SEP-2127 — Extensions Track, unratified — publishes no schema for the *card* at any
+# path. The `v1` URL named a document that has never existed.
+#
+# A dangling `$schema` is worse than an absent one. Absent, a validator has nothing to
+# check against and says so. Present and unresolvable, a validator fetches it, fails, and
+# a strict one reports the card invalid — so the field cost conformance rather than buying
+# it. The SEP lists it among its required fields; a required field naming a 404 is a defect
+# in the draft, not a contract this service can satisfy by guessing a URL.
+#
+# When the SEP ratifies and a schema is published at a real path, this is where it goes,
+# and tests/http/test_docs.py is what will notice it is still missing.
 
 # The card's `name` is a registry identity, not a display name: the schema requires
 # reverse-DNS with exactly one slash (`^[a-zA-Z0-9.-]+/[a-zA-Z0-9._-]+$`). This is the
@@ -1990,11 +1936,27 @@ MCP_SERVER_INFO_NAME = "technocore-chat"
 # Where the MCP server actually is. Cross-origin on purpose: this origin speaks no MCP —
 # see `ai_catalog_document` and README.md — and the card is how it says where the server
 # that does speak it lives. Same URL as `mcp/server.json`'s `remotes` entry.
-MCP_REMOTE_URL = "https://technocore-mcp.flop-labs.workers.dev/mcp"
+MCP_REMOTE_URL = "https://mcp.technocore.chat/mcp"
 
-# Advertised so a client can pick a version before opening a connection, which is the
-# whole point of an out-of-band card. This is what the wrapper negotiates.
-MCP_PROTOCOL_VERSIONS = ("2025-06-18",)
+# Advertised so a client can pick a version before opening a connection, which is the whole
+# point of an out-of-band card — and therefore the one field here where being stale costs a
+# caller something real: a client that trusts a card naming only an old revision opens at
+# that revision, and never learns the server would have spoken a newer one.
+#
+# It was stale. This said `("2025-06-18",)` from before the wrapper moved onto the official
+# SDK (#539), while the SDK's `HANDSHAKE_PROTOCOL_VERSIONS` had four members and negotiated
+# up to `2025-11-25` — so the card undersold the server by two revisions for the whole of
+# 0.11.x, and nothing failed, because the only assertion on this field was that it was
+# non-empty.
+#
+# The handshake versions, not `KNOWN_PROTOCOL_VERSIONS`: `2026-07-28` removed `initialize`
+# and is what the SDK calls a *modern* version, which this server does not serve — a client
+# asking for it is answered `2025-11-25`. Advertising it would be advertising a downgrade.
+#
+# A literal rather than an import because the service cannot import the wrapper (see
+# `mcp_server_card_document`), so `tests/unit/test_mcp_constant_parity.py` holds the two
+# together instead — the same trade the name grammar and the limit ceiling already make.
+MCP_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
 
 def mcp_server_card_document(version: str) -> dict:
@@ -2008,10 +1970,11 @@ def mcp_server_card_document(version: str) -> dict:
     without this service ever having to speak the protocol.
 
     **Draft, and knowingly so.** SEP-2127 is Extensions Track and unratified; the wire
-    format lives in `experimental-ext-server-card` and may move before it lands. The
-    fields below are the ones its `schema.ts` defines — `$schema`, `name`, `version` and
-    `description` are its required four — so this validates against the contract as it
-    stands today, and the path is the one crawlers actually probe.
+    format lives in `experimental-ext-server-card` and may move before it lands. The fields
+    below are the ones its `schema.ts` defines, with one deliberate omission: `$schema` is
+    among its required four and there is no published schema for it to name, so the card
+    carries the other three and no dangling URL (see the comment on that above). The path
+    is the one crawlers actually probe.
 
     `serverInfo` and `capabilities` are additive rather than schema fields: the Server
     Card format has neither, and the SEP says explicitly that `_meta` is not the place to
@@ -2028,7 +1991,6 @@ def mcp_server_card_document(version: str) -> dict:
     `initialize` is authoritative for that, as the SEP itself says when the two disagree.
     """
     return {
-        "$schema": MCP_CARD_SCHEMA,
         "name": MCP_CARD_NAME,
         "version": version,
         # Capped at 100 characters by the schema, so this is the short form, not the
@@ -2209,3 +2171,70 @@ def robots_txt(base: str) -> str:
         "# Skills: /.well-known/agent-skills/index.json\n"
         "# MCP server card: /.well-known/mcp/server-card.json (SEP-2127, draft)\n"
     )
+
+
+def _english_list(items: tuple[str, ...]) -> str:
+    """`("a", "b", "c")` -> `a, b and c`. For prose that names a set the code owns.
+
+    The sweep categories were written out by hand in three documents and a docstring, and a
+    category added to `INVISIBLE_CATEGORIES` would have moved none of them. Rendering the
+    tuple means the prose cannot say five when the sweep does six.
+    """
+    if len(items) < 2:
+        return "".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _duration(seconds: int) -> str:
+    """A whole-unit duration for prose: 900 -> `15 minutes`, 604800 -> `7 days`.
+
+    Falls back to seconds rather than inventing a fraction, because a deployment that sets
+    an odd TTL should read an exact number it can check against `/config`, not a rounded
+    one it cannot.
+    """
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size and seconds % size == 0:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{seconds} seconds"
+
+
+def manual_tokens(free_paths: str, max_wait: float) -> dict[str, str]:
+    """Every `__TOKEN__` in manual.md, and the constant each one renders from.
+
+    The manual is the one served document written as prose rather than assembled as a
+    structure, so it is the one that can state a number without anything checking it — and
+    it did, for a whole release, after the caps moved underneath it. This is the table that
+    stops it: a value here is read from the same constant the handler enforces and the
+    other documents publish, so `/llms.txt`, `/openapi.json` and `/config` cannot disagree
+    about a figure without the disagreement being a code change someone made on purpose.
+
+    Lives here rather than beside the template because that is the rule this module already
+    is: `_NAME_RULE`, `_NAME_SCHEMA` and `limits` in `/.well-known/agent.json` are the same
+    constants rendered for machines. The manual is the human-readable rendering of them.
+
+    `free_paths` and `max_wait` are passed rather than imported: they are app's, and
+    manifest importing app would be a cycle. Everything else is store's or config's.
+    """
+    return {
+        "__FREE_PATHS__": free_paths,
+        "__MAX_WAIT__": f"{max_wait:g}",
+        "__MAX_ROOMS__": str(store.MAX_ROOMS),
+        "__MAX_NOTES__": str(store.MAX_NOTES_TOTAL),
+        "__MAX_NOTES_NS__": str(store.MAX_NOTES_PER_NS),
+        "__ROOM_BYTES_TOTAL__": fmt_bytes(store.MAX_TOTAL_ROOM_BYTES),
+        "__ROOM_RING__": fmt_bytes(store.MAX_ROOM_BYTES),
+        "__ROOM_FLOOR__": fmt_bytes(store.RESERVED_ROOM_BYTES),
+        "__NAME_RULE__": store.NAME_RE.pattern,
+        "__MAX_TEXT__": str(store.MAX_TEXT_CHARS),
+        "__MAX_VALUE__": str(store.MAX_VALUE_CHARS),
+        "__MAX_LIMIT__": str(store.MAX_LIMIT),
+        "__DEFAULT_LIMIT__": str(store.DEFAULT_LIMIT),
+        "__SWEEP_CATEGORIES__": _english_list(store.INVISIBLE_CATEGORIES),
+        "__TOPIC_PREVIEW__": str(store.TOPIC_PREVIEW_CHARS),
+        "__READ_BUDGET__": fmt_bytes(store.READ_BUDGET),
+        "__EPHEMERAL_TTL__": _duration(store.EPHEMERAL_TTL_SECONDS),
+        "__IDLE_DAYS__": str(store.IDLE_SECONDS // 86400),
+        "__STILLBORN_HOURS__": str(store.STILLBORN_SECONDS // 3600),
+        "__MCP_REMOTE__": MCP_REMOTE_URL,
+    }
