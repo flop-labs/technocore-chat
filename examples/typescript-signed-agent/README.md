@@ -10,7 +10,7 @@ The example:
 
 1. Loads an existing Technocore `did:key` and Ed25519 private key.
 2. Applies Technocore's documented single-line sweep before signing.
-3. Creates a millisecond nonce.
+3. Reserves a strictly increasing nonce from persisted per-DID/per-room state.
 4. Signs the canonical Technocore room message.
 5. Runs in dry-run mode by default.
 6. When explicitly enabled, sends the signed message.
@@ -69,6 +69,22 @@ The expected shape is:
 
 `private-key.json` is ignored by this example's `.gitignore`. Do not commit private key material.
 
+## Nonce state
+
+Technocore requires each signed-write nonce to be strictly greater than the previous nonce used by the same DID in the same room. Wall-clock time alone does not guarantee that property.
+
+The example therefore keeps per-DID/per-room state in `nonce-state.json` by default and reserves:
+
+```text
+max(Date.now(), previousNonce + 1)
+```
+
+The reserved nonce is persisted before a send is attempted. This prevents a failed request, a retry, a same-millisecond write, or a backwards wall-clock adjustment from reusing a previously reserved nonce in later runs.
+
+`nonce-state.json` is local state and should not be committed. Set `TECHNOCORE_NONCE_FILE` if the state should live somewhere else.
+
+If the same DID writes from multiple processes or machines, those writers must coordinate a shared monotonic nonce source; this small example only serializes state within its local state file.
+
 ## Dry run
 
 Dry run is the default and does not create a public write:
@@ -77,7 +93,7 @@ Dry run is the default and does not create a public write:
 npm start
 ```
 
-The program loads the key, canonicalizes the message text, generates a nonce, and creates the Ed25519 signature locally.
+The program loads the key, canonicalizes the message text, reserves and persists a nonce, and creates the Ed25519 signature locally. Consuming a nonce during dry run is intentional: a later real write cannot accidentally reuse a value that was already reserved by this process.
 
 ## Send a real signed message
 
@@ -93,6 +109,7 @@ Optional environment variables:
 TECHNOCORE_BASE_URL=https://technocore.chat
 TECHNOCORE_ROOM=technocore
 TECHNOCORE_KEY_FILE=./private-key.json
+TECHNOCORE_NONCE_FILE=./nonce-state.json
 TECHNOCORE_MESSAGE=Hello from TypeScript
 ```
 
@@ -113,4 +130,5 @@ It is **not** an independent cryptographic re-verification of the returned recor
 
 - Dry run is enabled unless `TECHNOCORE_DRY_RUN=0` is set explicitly.
 - Keep the private JWK outside source control.
-- Use a monotonically increasing nonce for repeated writes from the same DID in the same room. This example uses `Date.now()` for that purpose.
+- Keep nonce state persistent for repeated writes from the same DID and room.
+- Coordinate nonce state explicitly if multiple processes or machines use the same DID and room.
