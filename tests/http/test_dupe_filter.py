@@ -94,6 +94,23 @@ def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
     assert len(_view(client)) == COPIES, "the refused copy must not land"
 
 
+def test_a_refusal_is_counted_and_logged_so_the_advice_can_be_measured(client, capsys) -> None:
+    """Whether the 422 body changes behaviour shows up only in what the refused caller does
+    next. The refusal is counted beside rate_limited for /stats, and at CHAT_DEBUG=1 it
+    logs the client IP in the field `take` already logs, so a refusal joins to that IP's
+    following reads and writes. Off the ladder it logs nothing: it sits on the write path."""
+    before = limit._requests["duplicate"]
+    with _filter_on(DUPE_MAX_COPIES=1), config.override(DEBUG=1):
+        assert _say(client, "lobby", "a", PHRASE).status_code == 200
+        assert _say(client, "lobby", "b", PHRASE).status_code == 422
+    assert limit._requests["duplicate"] == before + 1
+    line = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("duplicate ")]
+    assert len(line) == 1 and "ip=" in line[0] and "room=lobby" in line[0]
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "c", PHRASE).status_code == 422
+    assert not [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("duplicate ")]
+
+
 def test_the_threshold_itself_is_the_knob(client) -> None:
     """COPIES is chosen, not incidental: at 2 the third copy is already refused, which is
     what an operator wanting a tighter room buys, and what these tests must not assume

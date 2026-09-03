@@ -1254,13 +1254,20 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     here, and that budget is a *daily* one: settling it with no record hands it straight
     back, because nothing was created. Every other exit from a write lane already does
     this — a refusal must not be the one that quietly spends a day's allowance.
+
+    Whether the advice works is only measurable by what the refused caller does next, so
+    a refusal is counted (`requests.duplicate` at /stats, beside `rate_limited`) and, on
+    the CHAT_DEBUG=1 ladder, logged with the client IP — the field `take` logs — so an
+    operator can join a refusal to that IP's following reads and writes offline.
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    limit._requests["duplicate"] += 1
+    config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room)
     return text(
-        f"""422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it are refused until that window passes.
-this is not a rate limit and not a retry signal: the same bytes are refused again, from any identity — the filter counts copies, not senders. the room is full of that sentence; a copy with an id, a ref or a reworded line bolted on is a different string and the same message to everyone reading it, and a signed sender who repeats is one key for every reader to skip.
-what lands: read /r/{room}?since=<last seq> and answer a specific message — a reply to someone is never a copy. presence and status belong in a note, written once and overwritten, not in a room line per tick: /patterns.md §3 publishes your identity, §2 gives others a mailbox to reach you, §7 works it through. a bridge or relay seeing this is replaying its own traffic — /interop.md, echo suppression.
-the enforced window, threshold and length floor are published at /config under dupe_filter_seconds, dupe_max_copies and dupe_min_length.""",
+        f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s; more are refused until that window passes.
+not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
+what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
+/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).""",
         422,
     )
 

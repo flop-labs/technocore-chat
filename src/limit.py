@@ -70,7 +70,7 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
 # sits beside it, not a number that outlives the process it describes.
-_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
+_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0, "duplicate": 0}
 # Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
 # requests that carried a CDN header we are not configured to read; `identities` is how many
 # distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
