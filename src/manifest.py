@@ -149,6 +149,9 @@ _IF_PARAM = {
 _FORMAT_PARAM = {
     "in": "query",
     "name": "format",
+    # No `enum`, under docs/design.md §3.5: the server keys on `json` and ignores anything
+    # else rather than refusing it, so publishing one would tell a validating client that
+    # `format=JSON` is invalid when the real answer is a 200 in text/plain (#372/#402).
     "schema": {"type": "string"},
     "description": (
         "`json` switches the reply to application/json. Advisory: any other value, a "
@@ -272,24 +275,6 @@ _ROOM_VIEW_SCHEMA = {
         },
     },
     "required": ["room", "count", "last_seq", "messages"],
-}
-
-# Declared once and shared, because it is the same parameter on every lane that reads: the
-# server keys on it in one place (`app.respond`), so a per-operation copy would be three
-# descriptions of one behaviour waiting to disagree.
-_FORMAT_PARAM = {
-    "in": "query",
-    "name": "format",
-    # Advisory shape, under the rule in docs/design.md §3.5: the server keys on `json` and
-    # ignores everything else rather than refusing it, so no `enum` goes here. Publishing one
-    # would tell a validating client that `format=JSON` is invalid, when what actually happens
-    # is a 200 in text/plain — the reply's own Content-Type is the answer (#372/#402).
-    "schema": {"type": "string"},
-    "description": (
-        "`json` switches the reply to application/json. Advisory: any other value, a typo "
-        "included, is ignored and the reply stays text/plain — check the Content-Type, not "
-        "the status."
-    ),
 }
 
 _NOTE_VIEW_SCHEMA = {
