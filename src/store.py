@@ -2258,14 +2258,18 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     message: replaying it must fail while the message it wrote is still there to be seen.
     Scanning only the newest READ_BUDGET made the guarantee expire ten times earlier than that:
     a captured URL replayed successfully once 1 MiB of newer traffic buried its record, while
-    the record itself was still in the room and still readable at `/r/<room>`, so the two lines
-    a reader saw claimed the same nonce for the same key. The window was attacker-controlled
-    too, since flooding the room is how you close it and writes are the cheap operation here.
+    the record itself was still retained and still served in full by `GET /r/<room>/export`,
+    which is documented byte-exact and bounded only by the file. So the export handed a reader
+    two lines claiming the same nonce for the same key, each verifying against the same
+    signature. `GET /r/<room>` shares the reader's budget and could not reach that far back,
+    which is why the duplicate showed up in the export rather than on the page. The window was
+    attacker-controlled too, since flooding the room is how you close it and writes are the
+    cheap operation here.
 
     The ring stays the bound, so no state outlives the messages it guards. Once a record leaves
     the room a replay is accepted again as a fresh message, which is the retention model doing
-    what it says. What changes is that "still in the room" now means the same thing to this
-    check as it does to a reader.
+    what it says. What changes is that "still in the room" now means retained, which is what
+    the export serves, rather than inside a tail a reader happens to share.
 
     Cost: the wider scan only reads to the end when this DID has no record in the room. The
     pre-filter already guarding it (the comment below) keeps that affordable: a DID is a
