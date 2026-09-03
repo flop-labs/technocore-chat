@@ -366,3 +366,76 @@ def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(clie
                 "agent " + str(i + 1) + " following SKILL.md was refused: " + r.text[:120]
             )
     assert len(_view(client)) == COPIES + 1
+
+
+def test_one_text_takes_one_slot_however_many_lanes_it_arrives_on(client) -> None:
+    """Four lanes, one room, one phrase: the copies must be counted together.
+
+    Every test above holds one lane fixed, and test_the_post_lanes_match_the_get_lanes
+    deliberately moves the signed half to another room so its own sixth copy is the one
+    that gets refused. That is the right call for asserting each lane refuses - and it
+    leaves the property those refusals depend on unasserted, because a ring keyed per
+    lane would satisfy all of them: each lane would reach its own threshold, and a caller
+    rotating four lanes would land four times the copies while every existing assertion
+    stayed green.
+
+    The phrase carries a zero-width space, which is what gives this teeth. Every lane puts
+    the same raw bytes on the wire, but room_say reserves with those bytes while
+    room_say_signed reserves with what clean_text returned - a space where the ZWSP was.
+    One text reaches the ring in two forms, and only the sweep rung inside
+    limit.normalize_text makes them one key. With an all-ASCII phrase the two forms are
+    identical, the rung is never exercised, and this test would pass with it deleted.
+
+    tests/unit/test_dupe_ring.py checks that rung over every code point either transform
+    touches. This is the end-to-end consequence, and the one an operator reading
+    DUPE_MAX_COPIES is relying on.
+    """
+    # Written as an escape, not a literal: an invisible character in a source file is the
+    # exact hazard this service sweeps, and a reader has to be able to see why the test
+    # works. Swept to "one more copy ...", so the two forms differ by one character.
+    zwsp_phrase = "one\u200bmore copy of this sentence than allowed is refused, swept"
+    keys = [_keypair(seed) for seed in range(21, 31)]
+    # The did and the signer are indexed rather than star-unpacked: a *keys[i] could fill
+    # `nonce` positionally as far as the type checker can tell, and the file's other signed
+    # tests index for the same reason.
+    lanes = [
+        ("GET unsigned", lambda i: _say(client, "lobby", "n" + str(i), zwsp_phrase)),
+        (
+            "GET signed",
+            lambda i: _say_signed(client, "lobby", keys[i][0], keys[i][1], zwsp_phrase, nonce=1),
+        ),
+        (
+            "POST unsigned",
+            lambda i: client.post("/r/lobby", json={"from": "p" + str(i), "text": zwsp_phrase}),
+        ),
+        (
+            "POST signed",
+            lambda i: _post_signed(client, "lobby", keys[i][0], keys[i][1], zwsp_phrase, nonce=1),
+        ),
+    ]
+
+    accepted, refusals = [], []
+    with _filter_on():
+        # Two full rotations: the first COPIES writes land, and everything after is
+        # refused whichever lane it comes on - so the rotation has to outrun COPIES.
+        for i in range(2 * len(lanes)):
+            name, call = lanes[i % len(lanes)]
+            response = call(i)
+            (accepted if response.status_code == 200 else refusals).append(
+                (name, response.status_code)
+            )
+
+    assert [code for _, code in refusals] == [422] * len(refusals), (
+        f"a refusal on a rotating lane must be the duplicate 422 and nothing else: {refusals}"
+    )
+    assert len(accepted) == COPIES, (
+        f"{len(accepted)} copies landed across four lanes where the threshold is {COPIES}: "
+        f"{accepted} - the swept and unswept forms of one text are taking a ring slot each, "
+        f"so a sender alternating lanes multiplies its copy budget"
+    )
+    assert len(_view(client)) == COPIES, "a refused copy must not land on any lane"
+    # Every stored copy is the swept form, whichever lane carried it: the ZWSP is gone and
+    # nothing arrived as two lines.
+    assert set(_view(client)) == {"one more copy of this sentence than allowed is refused, swept"}
+    # The lanes that got in are not all one lane, or the rotation proved nothing.
+    assert len({name for name, _ in accepted}) > 1, "the rotation did not actually rotate"

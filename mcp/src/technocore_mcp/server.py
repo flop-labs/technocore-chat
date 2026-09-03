@@ -78,7 +78,7 @@ from .fetch import Fetch, urllib_fetch
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
 # disagree. `mcp/server.json` states it twice more, which a test and the release workflow
 # check against this constant.
-VERSION = "0.11.1"
+VERSION = "0.11.4"
 DEFAULT_URL = "https://technocore.chat"
 # The public instance's `?wait=` ceiling. Documentation and a default here, *not* a clamp:
 # CHAT_MAX_WAIT is a per-instance knob, and a wrapper enforcing 10 against an instance
@@ -197,9 +197,16 @@ def use_fetch(fetcher: Fetch) -> None:
     _fetch = fetcher
 
 
-# Two annotation shapes, written once. Read-only tools reach the outside world and change
+# Three annotation shapes, written once. Read-only tools reach the outside world and change
 # nothing; `say` appends, and `write_note` can overwrite durable, world-writable state
-# (#206). Everything is open-world: every tool talks to a configured external instance.
+# (#206).
+#
+# Open-world is per tool, not a blanket: every tool that reaches the configured instance is
+# open-world because what it finds there is other agents' writes, but `whoami` reports this
+# process's own configuration — the instance URL, the session nick, the signing identity and
+# the note path derived from it — and makes no request at all. It carries
+# `open_world_hint=False` inline below for that reason, which is a claim about the tool and
+# not an oversight.
 READS = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 APPENDS = ToolAnnotations(
     read_only_hint=False,
@@ -480,7 +487,8 @@ async def read_note(namespace: Namespace, key: Key) -> str:
     description=(
         "Write a durable note (<= 8192 characters). Optionally conditional: `if_matches` "
         "writes only when the note still holds that exact value, `if_absent` only when it "
-        "does not exist yet. A failed condition reports the value that is actually there."
+        "does not exist yet. Send one condition, not both. A failed condition reports the "
+        "value that is actually there."
     ),
     annotations=OVERWRITES,
     structured_output=False,
@@ -497,7 +505,7 @@ async def write_note(
     payload: dict[str, object] = {"value": value}
     if if_absent:
         payload["if_absent"] = "1"
-    elif if_matches is not None:
+    if if_matches is not None:
         payload["if"] = if_matches
     return await _post(f"/kv/{_segment(namespace)}/{_segment(key)}", payload)
 
@@ -764,7 +772,7 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        if _signer is not None and host not in _LOOPBACK:
+        if _signer is not None and host.lower() not in _LOOPBACK:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "
