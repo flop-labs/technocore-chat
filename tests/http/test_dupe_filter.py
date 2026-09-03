@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -73,10 +74,11 @@ def _view(client, room: str = "lobby") -> list[str]:
     ]
 
 
-def _say(client, room: str, nick: str, text: str):
+def _say(client, room: str, nick: str, text: str, ref: str = ""):
     # Spaces %-encoded rather than trusted to the transport: the GET lane is a path, and
     # letting the client encode it would be testing httpx as well.
-    return client.get("/r/" + room + "/say/" + nick + "/" + text.replace(" ", "%20"))
+    url = "/r/" + room + "/say/" + nick + "/" + text.replace(" ", "%20")
+    return client.get(url + ("?ref=" + ref if ref else ""))
 
 
 def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
@@ -88,9 +90,63 @@ def test_the_sixth_copy_from_a_different_sender_is_refused(client) -> None:
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
         sixth = _say(client, "lobby", "someone-else", PHRASE)
     assert sixth.status_code == 422
-    assert "rephrase" in sixth.text and "lobby" in sixth.text
+    assert "/patterns.md" in sixth.text and "lobby" in sixth.text
+    assert "rephrase" not in sixth.text and "short" not in sixth.text  # no escape hatch
     assert "429" not in sixth.text and "retry-after" not in sixth.headers
     assert len(_view(client)) == COPIES, "the refused copy must not land"
+
+
+def test_a_refusal_is_counted_and_logged_so_the_advice_can_be_measured(client, capsys) -> None:
+    """Whether the 422 body changes behaviour shows up only in what the refused caller does
+    next. The refusal is counted beside rate_limited for /stats, and at CHAT_DEBUG=1 it
+    logs the client IP in the field `take` already logs, so a refusal joins to that IP's
+    following reads and writes. Off the ladder it logs nothing: it sits on the write path."""
+    before = limit._requests["duplicate"]
+    with _filter_on(DUPE_MAX_COPIES=1), config.override(DEBUG=1):
+        assert _say(client, "lobby", "a", PHRASE).status_code == 200
+        assert _say(client, "lobby", "b", PHRASE).status_code == 422
+    assert limit._requests["duplicate"] == before + 1
+    line = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("duplicate ")]
+    assert len(line) == 1 and "ip=" in line[0] and "room=lobby" in line[0]
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "c", PHRASE).status_code == 422
+    assert not [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("duplicate ")]
+
+
+def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
+    client, capsys
+) -> None:
+    """The 422 carries `422-<hex>-<hex>` and asks for it back as ?ref=. Sent back, it is
+    counted (requests.followed) and logged once per request — on a read, on the docs the
+    body points at, and once (not twice) on a write that also creates a room — and the
+    handler otherwise ignores it. Only the exact token shape is counted or logged: a
+    forged value with a newline in it must not reach the operator's log at all. Pasted
+    into the text instead, glued to a word or not, the token is cut out before the copy
+    check — it must not be the thing that makes the sixth copy land."""
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "a", PHRASE).status_code == 200
+        refused = _say(client, "lobby", "b", PHRASE)
+    assert refused.status_code == 422
+    handed = re.search(r"&ref=(422-[0-9a-f]+-[0-9a-f]{4})", refused.text)
+    assert handed, refused.text
+    ref = handed.group(1)
+    assert "422-" + format(int(time.time()), "x")[:5] in ref, "the token carries its issue second"
+    before = limit._requests["followed"]
+    with config.override(DEBUG=1):
+        assert client.get("/r/lobby?format=json&ref=" + ref).status_code == 200
+        assert client.get("/patterns.md?ref=" + ref).status_code == 200
+        assert (
+            _say(client, "p-fresh-room-for-ref", "b", "a real answer to a", ref).status_code == 200
+        )
+        assert client.get("/r/lobby?ref=x%0Aduplicate%20ip=forged").status_code == 200
+    assert limit._requests["followed"] == before + 3
+    lines = [ln for ln in capsys.readouterr().err.splitlines() if ln.startswith("followed ")]
+    assert [ln for ln in lines if "ref=" + ref in ln] == lines and len(lines) == 3
+    assert "path='/patterns.md'" in lines[1] and "forged" not in "".join(lines)
+    with _filter_on(DUPE_MAX_COPIES=1):
+        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
+        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
+        assert _say(client, "lobby", "c", "&ref=" + ref + " " + PHRASE).status_code == 422
 
 
 def test_the_threshold_itself_is_the_knob(client) -> None:
@@ -366,3 +422,76 @@ def test_the_first_action_skill_md_prescribes_survives_a_wave_of_new_agents(clie
                 "agent " + str(i + 1) + " following SKILL.md was refused: " + r.text[:120]
             )
     assert len(_view(client)) == COPIES + 1
+
+
+def test_one_text_takes_one_slot_however_many_lanes_it_arrives_on(client) -> None:
+    """Four lanes, one room, one phrase: the copies must be counted together.
+
+    Every test above holds one lane fixed, and test_the_post_lanes_match_the_get_lanes
+    deliberately moves the signed half to another room so its own sixth copy is the one
+    that gets refused. That is the right call for asserting each lane refuses - and it
+    leaves the property those refusals depend on unasserted, because a ring keyed per
+    lane would satisfy all of them: each lane would reach its own threshold, and a caller
+    rotating four lanes would land four times the copies while every existing assertion
+    stayed green.
+
+    The phrase carries a zero-width space, which is what gives this teeth. Every lane puts
+    the same raw bytes on the wire, but room_say reserves with those bytes while
+    room_say_signed reserves with what clean_text returned - a space where the ZWSP was.
+    One text reaches the ring in two forms, and only the sweep rung inside
+    limit.normalize_text makes them one key. With an all-ASCII phrase the two forms are
+    identical, the rung is never exercised, and this test would pass with it deleted.
+
+    tests/unit/test_dupe_ring.py checks that rung over every code point either transform
+    touches. This is the end-to-end consequence, and the one an operator reading
+    DUPE_MAX_COPIES is relying on.
+    """
+    # Written as an escape, not a literal: an invisible character in a source file is the
+    # exact hazard this service sweeps, and a reader has to be able to see why the test
+    # works. Swept to "one more copy ...", so the two forms differ by one character.
+    zwsp_phrase = "one\u200bmore copy of this sentence than allowed is refused, swept"
+    keys = [_keypair(seed) for seed in range(21, 31)]
+    # The did and the signer are indexed rather than star-unpacked: a *keys[i] could fill
+    # `nonce` positionally as far as the type checker can tell, and the file's other signed
+    # tests index for the same reason.
+    lanes = [
+        ("GET unsigned", lambda i: _say(client, "lobby", "n" + str(i), zwsp_phrase)),
+        (
+            "GET signed",
+            lambda i: _say_signed(client, "lobby", keys[i][0], keys[i][1], zwsp_phrase, nonce=1),
+        ),
+        (
+            "POST unsigned",
+            lambda i: client.post("/r/lobby", json={"from": "p" + str(i), "text": zwsp_phrase}),
+        ),
+        (
+            "POST signed",
+            lambda i: _post_signed(client, "lobby", keys[i][0], keys[i][1], zwsp_phrase, nonce=1),
+        ),
+    ]
+
+    accepted, refusals = [], []
+    with _filter_on():
+        # Two full rotations: the first COPIES writes land, and everything after is
+        # refused whichever lane it comes on - so the rotation has to outrun COPIES.
+        for i in range(2 * len(lanes)):
+            name, call = lanes[i % len(lanes)]
+            response = call(i)
+            (accepted if response.status_code == 200 else refusals).append(
+                (name, response.status_code)
+            )
+
+    assert [code for _, code in refusals] == [422] * len(refusals), (
+        f"a refusal on a rotating lane must be the duplicate 422 and nothing else: {refusals}"
+    )
+    assert len(accepted) == COPIES, (
+        f"{len(accepted)} copies landed across four lanes where the threshold is {COPIES}: "
+        f"{accepted} - the swept and unswept forms of one text are taking a ring slot each, "
+        f"so a sender alternating lanes multiplies its copy budget"
+    )
+    assert len(_view(client)) == COPIES, "a refused copy must not land on any lane"
+    # Every stored copy is the swept form, whichever lane carried it: the ZWSP is gone and
+    # nothing arrived as two lines.
+    assert set(_view(client)) == {"one more copy of this sentence than allowed is refused, swept"}
+    # The lanes that got in are not all one lane, or the rotation proved nothing.
+    assert len({name for name, _ in accepted}) > 1, "the rotation did not actually rotate"
