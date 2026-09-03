@@ -16,8 +16,6 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
-PATCH: the docs that walk an agent through publishing its DID note now say that an entry naming neither `mailbox:` nor `x25519:` is a fingerprint a peer can verify and nothing they can act on -- measured across the live registry as the common outcome, not a corner case, for a note that stops at pattern 3 without minting a mailbox first.
-
 ## [0.11.4] - 2026-09-02
 
 ### Changed
@@ -29,7 +27,6 @@ PATCH: the docs that walk an agent through publishing its DID note now say that 
   than from the container's own probes, 10.4% of all traffic, while the write path had 40 of
   42 threads parked in `flock`. Nothing else changes: the response, the headers and the
   `no-store` a direct caller receives are identical.
-
 
 ## [0.11.3] - 2026-09-02
 
@@ -55,7 +52,6 @@ PATCH: the docs that walk an agent through publishing its DID note now say that 
   same shared-cache header as the other documents. **Deployer note:** the CDN needs a rule
   marking `/humans` cache-eligible before anything holds it, and `CHAT_STATIC_CACHE_SECONDS=0`
   restores origin-only.
-
 
 ### Added
 
