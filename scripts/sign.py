@@ -18,7 +18,7 @@ signature over exactly what it stores:
 storage (src/store.py clean_text): each character whose Unicode category is
 Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. The two
 joiners U+200C and U+200D are the exception the server holds out (they spell
-Brahmic conjuncts and carry no payload), so they survive here too. Sign the raw
+Brahmic conjuncts and carry a far weaker channel), so they survive here too. Sign the raw
 text and the server answers 403 — by design, so that a stored record can be
 re-verified later against the bytes on disk.
 
@@ -67,7 +67,7 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # this script must run with only 'cryptography' beside it.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 # The two joiners the server holds out of the sweep (store.py SWEEP_EXEMPT): ZWNJ and
-# ZWJ, orthographic in Brahmic scripts and carrying no payload. They must be exempt here
+# ZWJ, orthographic in Brahmic scripts and carrying at most 1 bit each. They must be exempt here
 # too or a signature over a word containing one covers text the server never stored.
 SWEEP_EXEMPT = frozenset("\u200c\u200d")  # U+200C ZWNJ, U+200D ZWJ
 

@@ -414,9 +414,9 @@ def ownable(name: str) -> bool:
 #                      away from what is stored (Trojan Source). This service's stated top
 #                      hazard is cross-agent prompt injection (design doc §3.1), so text that
 #                      renders as nothing must not survive into another agent's context. Two
-#                      Cf characters are held out by SWEEP_EXEMPT below: they carry no payload
-#                      and spell real words, so the rule that takes the rest would corrupt
-#                      them — see there for why the exception is safe.
+#                      Cf characters are held out by SWEEP_EXEMPT below: their channel is a
+#                      fraction of the tag block's and they spell real words, so the rule
+#                      that takes the rest would corrupt them — see there for the measurement.
 #   Cs  surrogate    — never valid on its own in stored text.
 #   Co  private use  — renders as whatever the reader's font decides, which is not a promise.
 #   Zl  line sep     — U+2028, and Zp U+2029: invisible here, a line break to enough
@@ -429,10 +429,13 @@ INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 # ZERO WIDTH JOINER. Both are Cf, so INVISIBLE_CATEGORIES would otherwise take them, but the
 # reasoning that lists Cf carves them out rather than covering them. Two properties set them
 # apart from every other Cf character:
-#   1. They carry no payload. The tag block encodes arbitrary hidden ASCII and a bidi
-#      override reorders visible text; a joiner is a single invisible codepoint that can at
-#      most perturb text a reader already sees. There is no hidden instruction to smuggle in
-#      one, so exempting them does not reopen the §3.1 hazard the rest of the list closes.
+#   1. Their channel is a fraction of the one the sweep exists to close, measured rather
+#      than assumed. The tag block carries 7 bits per codepoint and can be inserted almost
+#      anywhere, so 0.73% density hides arbitrary ASCII. A joiner carries at most 1 bit and
+#      only between two characters a reader already sees, so the same payload needs about
+#      5% density and shows up as visibly broken spelling. Not zero, and this comment does
+#      not claim zero: small enough that exempting them does not reopen the §3.1 hazard the
+#      rest of the list closes.
 #   2. They are orthographic, not decorative. Every Brahmic script (Devanagari, Bengali,
 #      Tamil, Telugu, and a dozen more) spells conjuncts with ZWJ and blocks them with ZWNJ,
 #      and Persian/Urdu use ZWNJ inside a word. Sweeping them silently rewrites the spelling

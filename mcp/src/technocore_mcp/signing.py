@@ -42,7 +42,7 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # depend on the service — and pinned by a parity test that runs both over hostile input.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 # The two joiners the service holds out of the sweep (store.py SWEEP_EXEMPT): ZWNJ and ZWJ,
-# orthographic in Brahmic scripts and in ZWJ emoji sequences, and carrying no payload. They
+# orthographic in Brahmic scripts and in ZWJ emoji sequences, and carrying at most 1 bit. They
 # must be exempt here too: this module signs the swept text, so a copy that still replaces
 # them signs a respelling the service never stores, and the write is refused — or worse, is
 # accepted having silently respelled the caller's word.
