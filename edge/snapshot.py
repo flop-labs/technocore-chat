@@ -26,10 +26,6 @@ import pathlib
 import sys
 import urllib.request
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
-
-import store  # noqa: E402  — for MAX_LIMIT only; see ROOMS_KEY_MATCH below
-
 # Every route in app.py that renders a document. Deliberately explicit: this list and the
 # `routes` in wrangler.jsonc describe the same surface and are checked against each other
 # by test_edge_snapshot_covers_every_routed_document.
@@ -113,10 +109,26 @@ EDGE_REVALIDATE = {"/rooms": 5}
 # `match` names a parameter that matters only when it equals one value: `format=json` picks
 # the rendering, every other value is ignored. `clamped` names a numeric one and its bounds.
 #
-# The ceiling comes from the tree, not the served schema, which is the opposite of what this
-# file does elsewhere: `limit` is advisory, so by the input doctrine it publishes no
-# minimum/maximum — bounds mean refusal and this clamps (test_input_doctrine.py asserts their
-# absence). MAX_LIMIT is a constant rather than a knob, so the checkout is an exact source.
+# The ceiling is restated here rather than read from anywhere, which needs two excuses. It is
+# not taken from the served schema because `limit` is advisory: by the input doctrine it
+# publishes no minimum/maximum, since bounds mean refusal and this clamps
+# (test_input_doctrine.py asserts their absence). And it is not imported from store because
+# this file runs under bare python3 from deploy.sh and store pulls in the service's whole
+# dependency chain. Drift is caught instead — the edge-key test asserts it against
+# store.MAX_LIMIT, which is where the number actually lives.
+
+# Paths the edge owns outright: the origin serves nothing at them, so unlike everything else
+# here the stored bytes are not a copy of a live answer — they are the only answer. That is
+# why they are neither snapshotted (there is nothing to fetch) nor origin-first (there is
+# nothing to prefer), and why the Worker 404s a missing one rather than proxying: falling
+# through to the origin would only reproduce the 404 this lane exists to stop.
+#
+# /favicon.ico is requested by every browser that opens /humans, whether or not the page asks
+# for one, and each of those was reaching the origin to be refused. The bytes are drawn by
+# edge/make_favicon.py and tracked; the content type is stated because the manifest is what
+# the Worker reads, and an asset server's guess is not something this file leaves to chance.
+EDGE_ONLY = {"/favicon.ico": ("edge/assets/favicon.ico", "image/x-icon")}
+
 ROOMS_KEY_MATCH = {"format": "json"}
 
 
@@ -125,7 +137,7 @@ def rooms_key() -> dict:
     return {
         "/rooms": {
             "match": dict(ROOMS_KEY_MATCH),
-            "clamped": {"limit": {"min": 1, "max": store.MAX_LIMIT}},
+            "clamped": {"limit": {"min": 1, "max": 200}},
         }
     }
 
@@ -180,6 +192,12 @@ def main() -> int:
         (out / asset_name(path)).write_bytes(body)
         print(f"  {path:44} {len(body):>7}B  <- {source} (static-first, from the tree)")
 
+    for path, (source, ctype) in EDGE_ONLY.items():
+        body = (repo / source).read_bytes()
+        (out / asset_name(path)).write_bytes(body)
+        types[path] = ctype
+        print(f"  {path:44} {len(body):>7}B  <- {source} (edge-only, from the tree)")
+
     if failed:
         # Fail loudly and write nothing further. A partial snapshot deployed as a fallback
         # is worse than no fallback: it answers some paths and 503s the rest, and which is
@@ -206,6 +224,7 @@ def main() -> int:
                 "edge_cached": EDGE_CACHED,
                 "edge_revalidate": EDGE_REVALIDATE,
                 "edge_key": edge_key,
+                "edge_only": sorted(EDGE_ONLY),
             },
             indent=2,
             sort_keys=True,
