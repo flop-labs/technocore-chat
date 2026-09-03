@@ -457,6 +457,22 @@ SWEEP_ALSO = frozenset(
 )
 
 
+def sweep_invisibles(text: str) -> str:
+    """Every INVISIBLE_CATEGORIES character and every SWEEP_ALSO codepoint to a space.
+
+    One function because two lanes have to agree on it. `clean_text` sweeps on the way
+    into storage, and `limit.normalize_text` sweeps on the way into the duplicate ring,
+    which the unsigned lanes reach before `append` runs `clean_text` at all. If the two
+    lists ever drift apart, one text becomes two ring keys and a flood of one message
+    takes a slot per codepoint it varies. That is `normalize_text`'s own reasoning, so the
+    list it reasons about lives here rather than in two comprehensions.
+    """
+    return "".join(
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES or c in SWEEP_ALSO) else c
+        for c in text
+    )
+
+
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     """Replace every INVISIBLE_CATEGORIES character and every SWEEP_ALSO codepoint with a
     space, then trim.
@@ -472,10 +488,7 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     (👨‍👩‍👧 → 👨👩👧) and a variation selector (an emoji or CJK presentation form loses its
     selector). Mangled but visible is harmless; a smuggled instruction is neither.
     """
-    text = "".join(
-        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES or c in SWEEP_ALSO) else c
-        for c in text
-    ).strip()
+    text = sweep_invisibles(text).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
