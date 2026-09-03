@@ -277,7 +277,17 @@ class StoreLifecycle(RuleBasedStateMachine):
             else:
                 assert view["last_seq"] == since
         else:
-            assert view["last_seq"] == (since or 0)
+            # When since is None and the room has messages on disk (expired
+            # ephemeral), last_seq reflects the actual head seq (#287).
+            if since is not None:
+                assert view["last_seq"] == since
+            else:
+                head = (
+                    store.last_seq(self.root, room)
+                    if store.room_path(self.root, room).exists()
+                    else 0
+                )
+                assert view["last_seq"] == head
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 

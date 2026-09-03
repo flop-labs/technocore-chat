@@ -886,7 +886,9 @@ def read_messages(
     elif since is not None and since > 0 and head_seq is not None and since > head_seq:
         last_seq = head_seq
     else:
-        last_seq = since or 0
+        # When since is None and head_seq exists (room has messages but all expired),
+        # report the actual head seq so the cursor doesn't reset to 0 (#287).
+        last_seq = since if since is not None else (head_seq or 0)
     return {
         "room": room,
         "count": len(out),
