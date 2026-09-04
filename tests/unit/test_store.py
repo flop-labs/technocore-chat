@@ -193,6 +193,75 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
         store.append(tmp_path, "overflow", "bot", "hi")
 
 
+def test_a_capacity_refusal_points_at_the_surface_that_shows_the_full_cap(tmp_path, monkeypatch):
+    """Each refusal has to name a path that can actually show the count that is full, and it
+    has to state a reclamation rule the reaper actually applies to the thing being refused.
+
+    /rooms is right for a room. It is wrong for a per-namespace note cap: those note figures
+    are the global aggregate and are blind to namespaces by design (note_stats), so a
+    caller sent there sees plenty of headroom while the namespace it asked for is at its
+    cap. /kv/<ns> is the surface that lists the namespace being counted.
+
+    The stillborn clause is the same fault one field along. `reap` passes stillborn_rule=True
+    only for ("rooms", ".jsonl"), so no note has ever been reclaimed at 24 hours, yet the
+    note refusal carried the room's 24-hour sentence. The global note refusal below it states
+    the 7-day rule alone, which is what a note actually gets.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "only", "bot", "hi")
+    with pytest.raises(store.StoreError, match=r"GET /rooms lists what exists") as room:
+        store.append(tmp_path, "second", "bot", "hi")
+    assert "first message goes after 24 hours" in str(room.value)
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "did", "only", "hi")
+    with pytest.raises(store.StoreError, match=r"GET /kv/did lists what exists") as note:
+        store.note_set(tmp_path, "did", "second", "hi")
+    assert str(note.value).endswith("Idle notes are reclaimed after 7 days.")
+    assert "24 hours" not in str(note.value)
+
+    # A second namespace, to pin that the path is the namespace asked for rather than a
+    # constant that happens to read correctly for the first one.
+    store.note_set(tmp_path, "plans", "only", "hi")
+    with pytest.raises(store.StoreError, match=r"GET /kv/plans lists what exists"):
+        store.note_set(tmp_path, "plans", "second", "hi")
+
+
+def test_a_capacity_refusal_says_the_listing_omits_what_the_cap_counts(tmp_path, monkeypatch):
+    """The listing a refusal names does not show everything the cap counted, in the same
+    direction on both sides, so the message says so rather than leaving it to be inferred.
+
+    `list_notes` filters names through `_listable.__wrapped__` while the per-namespace cap
+    counts every `.txt`; `room_stats` filters through `_listable` while `_count_rooms` counts
+    every `.jsonl`. An unlisted `p-` name is therefore counted and never enumerated, so a
+    caller sent to the listing to find what to reuse can be shown an empty namespace by a cap
+    that is full — which reads as headroom and is the opposite of the truth.
+
+    Asserted with the cap filled entirely by unlisted names, because that is the case where the
+    listing and the count disagree maximally: the listing is empty and the cap is at its limit.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "did", "p-" + "a" * 30, "hi")
+    assert store.list_notes(tmp_path, "did") == []  # counted, never enumerated
+
+    with pytest.raises(store.StoreError) as refusal:
+        store.note_set(tmp_path, "did", "second", "hi")
+    assert "unlisted notes count against this cap and are not listed" in str(refusal.value)
+
+    # The room side of the same asymmetry, which the message now states for both.
+    monkeypatch.setattr(store, "MAX_ROOMS", 1)
+    store.append(tmp_path, "p-" + "b" * 30, "bot", "hi")
+    assert store.room_stats(tmp_path)["total"] == 0  # counted, never listed
+
+    with pytest.raises(store.StoreError) as room:
+        store.append(tmp_path, "second", "bot", "hi")
+    assert "unlisted rooms count against this cap and are not listed" in str(room.value)
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the

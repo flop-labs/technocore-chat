@@ -1996,15 +1996,39 @@ def _count_new_room(root: Path, delta: int) -> None:
     _write_note_count(root, max(0, count + delta), used, name=USAGE_FILE)
 
 
-def _at_capacity(cap: int, what: str) -> StoreError:
+def _at_capacity(cap: int, what: str, where: str) -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
-    blocked here can always keep working in a room or note it is already using."""
+    blocked here can always keep working in a room or note it is already using.
+
+    `where` is the path that answers "what exists" for the cap that was hit, and it is a
+    parameter because the two caps do not share one. A room refusal points at `/rooms`. The
+    per-namespace note refusal cannot: the note figures there are the global aggregate,
+    blind to namespaces by design (see `note_stats`), so they report the whole store's
+    headroom while the namespace the caller asked for is full. `/rooms` does publish
+    `capacity_per_namespace`, the cap this message already carries, but no per-namespace
+    count to read it against. `/kv/<ns>` lists the namespace being counted, bar its
+    unlisted `p-` keys, which the cap counts and nothing enumerates (see `unlisted`).
+
+    That last clause is in the message and not only here, because a caller sent to a listing
+    that structurally omits part of what the cap counts can read it as headroom. The omission
+    is the same shape on both sides and the lister differs: `list_notes` filters names through
+    `_listable.__wrapped__` while the per-namespace cap counts every `.txt`, and `room_stats`
+    filters through `_listable` while `_count_rooms` counts every `.jsonl`. So the sentence is
+    generic rather than conditional on `what` — it is true of every cap this raises, unlike the
+    stillborn rule below, which really is a room rule.
+
+    The stillborn clause is a room rule and says so. `reap` passes `stillborn_rule=True`
+    only for `("rooms", ".jsonl")`, so a note has never gone at 24 hours however new it is,
+    and the global note refusal twelve lines below already states the 7-day rule without it.
+    """
+    stillborn = " (a room still on its first message goes after 24 hours)" if what == "room" else ""
     return StoreError(
         f"{what} limit reached ({cap} is the cap, and this would be a new one). "
         f"Existing {what}s still accept writes, so reuse one you already have — "
-        f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
-        "(a room still on its first message goes after 24 hours)."
+        f"GET {where} lists what exists, though unlisted {what}s count against this cap "
+        f"and are not listed. Idle {what}s are reclaimed after 7 days"
+        f"{stillborn}."
     )
 
 
@@ -2072,7 +2096,7 @@ def _check_room_capacity(root: Path, path: Path) -> None:
     # enforced on a world-writable service. `_count_rooms` recurses for the rebuild either way.
     count, used = _note_totals(root, _count_rooms, name=USAGE_FILE)
     if count >= MAX_ROOMS:
-        raise _at_capacity(MAX_ROOMS, "room")
+        raise _at_capacity(MAX_ROOMS, "room", "/rooms")
     if used >= MAX_TOTAL_ROOM_BYTES:
         raise StoreError(
             f"room storage is full ({used >> 20} MiB of a {MAX_TOTAL_ROOM_BYTES >> 20} MiB "
@@ -2107,7 +2131,13 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
     if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
-        raise _at_capacity(MAX_NOTES_PER_NS, "note")
+        # `ns_dir.name` and not `path.parent.name` for the same sharding reason as above: the
+        # parent is the key's bucket, so it would name `/kv/<2 hex>`. Why this refusal cannot
+        # cite /rooms is in `_at_capacity`.
+        raise _at_capacity(MAX_NOTES_PER_NS, "note", f"/kv/{ns_dir.name}")
+    # The global cap keeps citing /rooms, and that is correct rather than an oversight: this
+    # figure *is* the store-wide aggregate, which is exactly what /rooms publishes. Only the
+    # per-namespace refusal above was pointing at a number blind to the namespace it named.
     if _note_count(root) >= MAX_NOTES_TOTAL:
         raise StoreError(
             f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
