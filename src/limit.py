@@ -394,13 +394,20 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
 
 
 def budget_note(kind: str, left: int, per_min: int) -> str:
-    """Warn before the wall, not at it — only once the budget is nearly gone."""
+    """Warn before the wall, not at it — only once the budget is nearly gone.
+
+    This rides on a 200, so it deliberately does not contain the string "429".
+    Every refusal body *begins* with it, which makes "429" the obvious thing for a
+    caller to search a body for — and a pacing hint that matched would read as the
+    wall itself, turning "slow down" into "stop". The two lanes stay tellable
+    apart by their first characters: "429 " refused, "# budget:" advisory.
+    """
     if left * 4 > per_min:
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "
-        f"(refills {refill_rate(per_min)}; a 429 states the wait, and the full limits are "
-        f"in /.well-known/agent.json)"
+        f"(refills {refill_rate(per_min)}; the refusal states the wait, and the full limits "
+        f"are in /.well-known/agent.json)"
     )
 
 

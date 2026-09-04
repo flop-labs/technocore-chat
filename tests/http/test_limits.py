@@ -248,6 +248,37 @@ def test_budget_warning_appears_before_the_wall(client, monkeypatch):
         assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
 
 
+def test_the_advisory_footer_cannot_be_mistaken_for_the_wall(client):
+    """Pacing advice on a 200 and a refusal must not answer the same substring search.
+
+    Every refusal body *begins* "429 " — deliberately, because harnesses show the body and
+    drop the headers — which makes "429" the string a caller reaches for. The footer used
+    to carry one ("a 429 states the wait"), so anything grepping a body for it
+    false-positived on every pacing hint, turning "slow down" into "stop" at the moment
+    the difference matters most. A rule rather than a wording check: however either string
+    is phrased, the two stay tellable apart by what the body starts with. Found by the
+    author of examples/beautiful_chat.sh while making the demo deterministic (#55).
+    """
+    import app as app_module
+    import config
+
+    with config.override(RATE_READ=8):
+        for _ in range(6):
+            client.get("/r/lobby")
+        advisory = client.get("/r/lobby")
+        assert advisory.status_code == 200
+        assert "# budget:" in advisory.text
+        assert "429" not in advisory.text
+
+    app_module._buckets.clear()
+    with config.override(RATE_READ=1):
+        client.get("/r/lobby")
+        refused = client.get("/r/lobby")
+        assert refused.status_code == 429
+        assert refused.text.startswith("429 ")
+        assert "# budget:" not in refused.text
+
+
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
     """The room cap bounds the service; this bounds how much of it one caller can take.
 
