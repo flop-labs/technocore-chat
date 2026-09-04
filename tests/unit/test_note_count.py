@@ -478,7 +478,7 @@ def test_a_widened_namespace_is_honoured_and_still_sits_inside_the_global_cap(
     # cap a raised namespace redistributes rather than grows.
     store.note_set(tmp_path, "other", "k0", "v")
     store.note_set(tmp_path, "other", "k1", "v")
-    with pytest.raises(store.StoreError, match=r"note limit reached \(8 across all"):
+    with pytest.raises(store.StoreError, match=r"note limit reached \(8 of 8 across all namespaces"):
         store.note_set(tmp_path, "other", "k2", "v")
 
 
@@ -496,7 +496,7 @@ def test_the_refusal_still_fires_at_the_global_cap(tmp_path, monkeypatch) -> Non
         store.note_set(tmp_path, f"ns{i}", "k", "v")
     assert store._note_count(tmp_path) == cap, "the cache must track the creates it gated"
 
-    with pytest.raises(store.StoreError, match=rf"note limit reached \({cap} across all"):
+    with pytest.raises(store.StoreError, match=rf"note limit reached \({cap} of {cap} across all namespaces"):
         store.note_set(tmp_path, "ns-over", "k", "v")
     # Refused on a new name only: the cap never silences a note somebody already owns.
     store.note_set(tmp_path, "ns0", "k", "v2")

@@ -1996,16 +1996,22 @@ def _count_new_room(root: Path, delta: int) -> None:
     _write_note_count(root, max(0, count + delta), used, name=USAGE_FILE)
 
 
-def _at_capacity(cap: int, what: str) -> StoreError:
+def _at_capacity(cap: int, what: str, used: int) -> StoreError:
     """The refusal, in one place because two callers raise it (rooms count both a cap and a
     byte budget). Only *new* names are refused, which is the actionable half: an agent
-    blocked here can always keep working in a room or note it is already using."""
+    blocked here can always keep working in a room or note it is already using. `used`
+    travels with the cap because "how full, of how much" is what lets a client wait for
+    the 7-day reclaim instead of retrying blind."""
     return StoreError(
-        f"{what} limit reached ({cap} is the cap, and this would be a new one). "
-        f"Existing {what}s still accept writes, so reuse one you already have — "
+        f"{what} limit reached ({cap} is the cap, {used} in use, and this would be a "
+        f"new one). Existing {what}s still accept writes, so reuse one you already have — "
         f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
         "(a room still on its first message goes after 24 hours)."
     )
+
+
+
+
 
 
 def room_bytes_used(root: Path) -> int:
@@ -2072,7 +2078,7 @@ def _check_room_capacity(root: Path, path: Path) -> None:
     # enforced on a world-writable service. `_count_rooms` recurses for the rebuild either way.
     count, used = _note_totals(root, _count_rooms, name=USAGE_FILE)
     if count >= MAX_ROOMS:
-        raise _at_capacity(MAX_ROOMS, "room")
+        raise _at_capacity(MAX_ROOMS, "room", count)
     if used >= MAX_TOTAL_ROOM_BYTES:
         raise StoreError(
             f"room storage is full ({used >> 20} MiB of a {MAX_TOTAL_ROOM_BYTES >> 20} MiB "
@@ -2081,6 +2087,25 @@ def _check_room_capacity(root: Path, path: Path) -> None:
             "writes, so reuse one you already have — GET /rooms shows what exists. Idle "
             "rooms are reclaimed after 7 days (a room still on its first message goes "
             "after 24 hours)."
+        )
+
+
+def _check_note_total(root: Path) -> None:
+    """The global half of the note cap: one file read, no directory walk at all.
+
+    Split out so it can run *before* the create gate as well as inside it. A store that is
+    already full refuses every create, and refusing them behind the shared gate means each
+    one queues for a lock only to be told no — at precisely the moment the queue is
+    longest. This sheds them for the price of a read. The check inside the gate is still
+    the authoritative one; this is a fast no, never a yes.
+    """
+    total = _note_count(root)
+    if total >= MAX_NOTES_TOTAL:
+        raise StoreError(
+            f"note limit reached ({total} of {MAX_NOTES_TOTAL} across all namespaces, and "
+            "this would be a new one). A fresh namespace buys nothing — the cap is global. Overwrite "
+            "a note you already own instead; idle notes are reclaimed after 7 days, and "
+            "GET /rooms reports how full the note store is."
         )
 
 
@@ -2106,15 +2131,10 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # The namespace directory, passed in rather than taken from the note: `path.parent` is the
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
-    if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
-        raise _at_capacity(MAX_NOTES_PER_NS, "note")
-    if _note_count(root) >= MAX_NOTES_TOTAL:
-        raise StoreError(
-            f"note limit reached ({MAX_NOTES_TOTAL} across all namespaces, and this would "
-            "be a new one). A fresh namespace buys nothing — the cap is global. Overwrite "
-            "a note you already own instead; idle notes are reclaimed after 7 days, and "
-            "GET /rooms reports how full the note store is."
-        )
+    used = _note_totals(ns_dir, _ns_totals, persist=True)[0]
+    if used >= MAX_NOTES_PER_NS:
+        raise _at_capacity(MAX_NOTES_PER_NS, "note", used)
+    _check_note_total(root)
 
 
 @contextmanager
