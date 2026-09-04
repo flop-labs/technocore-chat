@@ -1145,9 +1145,20 @@ def _allowed_keys(room: str) -> set[str]:
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
     """Every write to a room passes here, signed or not. Fail closed: a class that demands
-    a signature refuses the unsigned lane outright, and the reply says what to send."""
-    denied = _reject_if_events_room(room)
-    if denied:
+    a signature refuses the unsigned lane outright, and the reply says what to send.
+
+    The grammar decides before any class does. A class is the leading `<class>-` markers of a
+    name, so `mb-FOO` carries one while being a name this service will never store. The checks
+    below then answered *"this is a mailbox, send a signature"* about a room that cannot exist,
+    naming as the correction the `say-signed` lane that answers 400 for the same name because
+    it reaches `store.append` (#109). 403 says "this room refuses you"; 400 says "that name can
+    never exist here". Only the second was ever true, and the difference is the one a caller
+    acts on: the 403 invited a retry that cannot succeed. Validating here also keeps a `{room}`
+    segment, which matches the raw newline `{text:path}` deliberately does not, out of a
+    `text/plain` body the server authored.
+    """
+    room = store.valid_name(room)
+    if denied := _reject_if_events_room(room):
         return denied
     if store.is_mailbox(room) and signer is None:
         return text(
@@ -1539,7 +1550,14 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     exception exists because a room owner has to be able to publish an allow-list that a
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
+
+    Grammar first, exactly as in `_room_write_gate` and for the same reason: `ownable(key)`
+    reads a `<class>-` prefix whether or not the whole name is one this service accepts, so
+    `room-owners/D-FOO` answered "cannot be owned" while `room-allow/D-FOO` answered 400 for
+    the identical key, because the sibling namespace reads the owner note first and `note_get`
+    validates.
     """
+    ns, key = store.valid_name(ns), store.valid_name(key)
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
@@ -1601,8 +1619,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 403,
             )
         return None
-    owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
-    if owner is None:
+    if (owner := store.note_get(config.ROOT, store.OWNERS_NS, key)) is None:
         return text(
             f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing "
             f"with the key you are storing: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>"
