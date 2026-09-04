@@ -85,7 +85,7 @@ def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, m
     fresh = store.note_path(tmp_path, "did", "brand-new")
 
     (ns / store.NOTES_FILE).unlink()  # what a reap leaves behind
-    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
+    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh, locked=True))
     # 2, not 1: the rebuild scan recurses, and one seeded note occupies one bucket — so the
     # namespace directory and that bucket. The cost grows with OCCUPIED buckets rather than
     # with notes, and one level of 256 bounds it at 257 reads however full the namespace
@@ -93,7 +93,7 @@ def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, m
     assert rebuild == 2, "a dropped count must be rebuilt by scanning that namespace once"
     assert (ns / store.NOTES_FILE).exists(), "…and the rebuild must be persisted"
 
-    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
+    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh, locked=True))
     assert cached == 0, "every create after the rebuild is a file read"
 
 
@@ -299,6 +299,24 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     assert store._note_count(root) == cap
 
 
+def test_unlocked_capacity_check_does_not_persist_rebuilt_count(tmp_path) -> None:
+    """The optimistic, unlocked capacity check must not persist a rebuilt snapshot."""
+    import store
+
+    store.note_set(tmp_path, "did", "seed", "v")
+    ns = tmp_path / "notes" / "did"
+    fresh = store.note_path(tmp_path, "did", "brand-new")
+    counter = ns / store.NOTES_FILE
+
+    counter.unlink()
+
+    store._check_note_capacity(tmp_path, ns, fresh, locked=False)
+    assert not counter.exists(), "an unlocked check must not persist a rebuilt count"
+
+    store._check_note_capacity(tmp_path, ns, fresh, locked=True)
+    assert counter.exists(), "a locked check must persist the rebuilt count"
+
+
 def test_a_refused_write_counts_nothing(tmp_path) -> None:
     """The count is a reservation, and a reservation nothing was written against is given
     back. `?if=<value>` against a key that does not exist reaches its CAS check *inside* the
@@ -399,8 +417,8 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, ns_dir, path):
-        real_check(root, ns_dir, path)
+    def slow_check(root, ns_dir, path, *, locked=False):
+        real_check(root, ns_dir, path, locked=locked)
         time.sleep(0.02)  # widen the count->write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
