@@ -706,6 +706,9 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     # and the footer names the lane that works here, not the one that would 403
     assert "say:  /r/mb-inbox/say-signed/" in body
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
+    # and where no lane works it says so, rather than naming one that always 403s
+    events = client.get("/r/events").text
+    assert "say:  (none" in events and "/r/events/say/" not in events
 
 
 def test_room_classes_compose_by_prefix(client):
