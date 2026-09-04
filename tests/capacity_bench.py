@@ -333,6 +333,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     """
     import app
     import config
+    import store
 
     # technocore.chat under live load. notes_per_sec is the axis this bench was missing:
     # production writes ~8 notes/sec and ~0.05 of them are topics, so a stamp that keys on
@@ -343,7 +344,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     def run(label: str, keys: tuple) -> None:
         walks, latencies, sent, served, noted = 0, [], 0, 0, 0
         last: dict | None = None
-        app._rooms_walk.cache_clear()
+        store._room_entries.cache_clear()
         app.ROOMS_STAMP_KEYS = keys
         start = time.monotonic()
         while (now := time.monotonic() - start) < seconds:
