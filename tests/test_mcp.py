@@ -461,6 +461,22 @@ def test_technocore_scan_rejects_regex_shaped_invalid_did(mcp):
     assert result["provenance"] == "unverified_nick"
 
 
+def test_technocore_scan_does_not_call_valid_did_authenticated(mcp):
+    result = json.loads(
+        text_of(
+            mcp.call(
+                "technocore_scan",
+                {
+                    "text": "arbitrary caller-supplied text",
+                    "sender": "did:key:z6MkjchhfUsD6mmvni8mCdXHw216Xrm9bQe2mBEyuTPUp7cD",
+                },
+            )
+        )
+    )
+    assert result["provenance"] == "valid_did"
+    assert result["provenance"] != "verified_did"
+
+
 def test_text_with_url_metacharacters_survives_intact(mcp):
     """A message containing / ? # & must not become extra path or a query string."""
     mcp.call("say", {"room": "lobby", "text": "a/b?c#d&e f", "nick": "bot"})

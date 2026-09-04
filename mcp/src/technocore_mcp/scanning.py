@@ -63,7 +63,9 @@ def _normalise(text: str) -> str:
 
 def _provenance(sender: str | None) -> str:
     if is_valid_did(sender):
-        return "verified_did"
+        # The scanner receives sender as caller-supplied data and has no signed
+        # room/nonce/message tuple. Valid key material is not authentication.
+        return "valid_did"
     if sender and sender.lstrip("~").lower() in _RESERVED:
         return "impersonator_warning"
     return "unverified_nick"
