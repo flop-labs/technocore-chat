@@ -96,7 +96,7 @@ def instance(tmp_path_factory):
     no check in this module asserts on cache hits.
     """
     app_module._buckets.clear()
-    app_module._rooms_walk.cache_clear()
+    store._room_entries.cache_clear()
     store._cached_window.cache_clear()
     store._topics_memo.cache_clear()
     app_module._identities.clear()

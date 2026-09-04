@@ -31,7 +31,7 @@ def client(tmp_path, monkeypatch):
     origin = time.monotonic()
     monkeypatch.setattr(store, "_time_bucket", lambda now, ttl: int((now - origin) // ttl))
     app_module._buckets.clear()
-    app_module._rooms_walk.cache_clear()
+    store._room_entries.cache_clear()
     store._cached_window.cache_clear()
     store._topics_memo.cache_clear()
     app_module._identities.clear()
