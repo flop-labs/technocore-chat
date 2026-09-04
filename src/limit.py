@@ -149,7 +149,7 @@ def normalize_text(text: str) -> str:
     # behind, and nothing else), pasted into the text instead of the query string, is cut
     # out so it can never be what makes a copy unique — neither on its own nor by taking
     # the word it was glued to with it.
-    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
+    return " ".join(re.sub(r"&ref=422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
