@@ -1182,34 +1182,40 @@ def list_rooms(root: Path) -> list[str]:
     return sorted(n for n in names if _listable(n))
 
 
-_ROOMS_TOTAL_MAX = 64
+# One /rooms walk, cached on the structural stamp and the TTL bucket only — NOT limit and
+# NOT offset. The walk (readdir, a stat per listable room, a full sort) is the expensive
+# half of /rooms; the page (which rooms, how many, what window/topic reads) is a cheap
+# slice done per request in room_stats against this one list. Keying the whole walk on
+# limit/offset, as the page LRU in app.py used to, meant one entry per distinct page a
+# caller asked for — paging a large listing at limit=50 opened ~1,080 slots in a 64-entry
+# cache and walked the store on every miss (#576). Dropping limit and offset from the key
+# makes every page the same `(stamp, bucket)` = one walk, and the LRU bound then holds 64
+# walks instead of 64 pages. Returned as tuples so one entry is safe to hand to every
+# thread — a caller mutating the sort would corrupt every other thread's page. Root is a
+# str for the reason the store's other memo keys use str.
+_MAX_ROOMS_WALK = 64
 
 
-@lru_cache(maxsize=_ROOMS_TOTAL_MAX)
-def _rooms_total(root: str, stamp: tuple) -> int:
-    """The /rooms listing size, keyed on the rooms stamp the page cache rides.
+def _walk_entries(root: Path) -> list:
+    """The uncached walk room_stats runs when no cached listing is supplied."""
+    entries = []
+    for e in _walk(root / "rooms", ".jsonl"):
+        name = e.name[: -len(".jsonl")]
+        if not _listable(name):
+            continue
+        try:
+            st = e.stat()
+        except OSError:
+            continue  # reaped between the readdir and the stat
+        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
+    entries.sort(reverse=True)
+    return entries
 
-    The count moves with structural writes — a room created or reaped — every one of which
-    bumps the stamp, so a count served under a current stamp is exact and a stale stamp is
-    a key nobody asks for any more, exactly like the page cache. The /rooms route
-    canonicalizes an offset against this *before* keying the page LRU, so every offset past
-    the current end lands on the same (empty) end-page entry rather than opening a fresh
-    cache slot per value.
 
-    readdir-only, and deliberately lighter than room_stats: it lists names, it does not
-    stat every room or touch any tail, so the count costs far less than the walk it keys.
-    """
-    return len(list_rooms(Path(root)))
-
-
-def _rooms_offset(root: Path, stamp: tuple, offset: int) -> int:
-    """The offset to key a /rooms page on: clamped to the current listing size.
-
-    Every value past the end renders the same empty page, so they must share one cache
-    entry — min(offset, total). `_rooms_total` is keyed on the stamp, so this is exact for
-    the current structural state and costs a readdir, never a stat of every room or a tail.
-    """
-    return min(offset, _rooms_total(str(root), stamp))
+@lru_cache(maxsize=_MAX_ROOMS_WALK)
+def _room_entries(root: str, stamp: tuple, bucket: int) -> tuple:
+    """The cached sorted listing described above the constant. Immutable by shape."""
+    return tuple(_walk_entries(Path(root)))
 
 
 def _time_bucket(now: float, ttl: float) -> int:
@@ -1294,7 +1300,9 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
+def room_stats(
+    root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0, *, entries: list | tuple | None = None
+) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
@@ -1306,19 +1314,15 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0) -> dict:
     past the tail is an empty list with `truncated` False — a caller pages forward by
     advancing `offset` while `truncated` is True, and `total` stays the full count so a
     completed census is `offset + len(rooms)` catching up to it.
+
+    `entries` is an optional pre-walked sorted listing (the cached `_room_entries`): the
+    caller's way of paying for the expensive walk once per `(stamp, bucket)` and reusing it
+    across every page, so distinct `limit`/`offset` never re-walk the store. When None the
+    walk runs here, once, which is the uncached/cold path.
     """
     now = time.time()
-    entries = []
-    for e in _walk(root / "rooms", ".jsonl"):
-        name = e.name[: -len(".jsonl")]
-        if not _listable(name):
-            continue
-        try:
-            st = e.stat()
-        except OSError:
-            continue  # reaped between the readdir and the stat
-        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    entries.sort(reverse=True)
+    if entries is None:
+        entries = _walk_entries(root)
     offset = min(max(0, offset), len(entries))
     page = entries[offset : offset + max(1, min(int(limit), MAX_LIMIT))]
     shown = []

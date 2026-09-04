@@ -54,12 +54,13 @@ def stats_client(tmp_path, monkeypatch):
     """A client whose service has the stats token configured (the deployed shape)."""
     import app as app_module
     import config
+    import store
 
     # Test bodies read CHAT_ROOT back for direct store access; the knob itself comes from
     # config.override now, not the environment.
     monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
     app_module._buckets.clear()
-    app_module._rooms_walk.cache_clear()
+    store._room_entries.cache_clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     with config.override(  # every stats call recomputes, so a test can observe its writes
