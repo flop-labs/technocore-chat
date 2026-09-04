@@ -158,6 +158,14 @@ LISTING_BANNER = (
     "and never a claim about what a room is or who runs it. The numbers are the server's."
 )
 
+# And the same pair for a note read, whose JSON lane carries the value as a field rather than
+# as the body. `note` is BANNER because BANNER is what the text lane already prints above that
+# value, which is the shape /rooms set: there the JSON `note` is the same sentence the listing
+# prints, not a second one written for JSON. `fields` is the machine-readable half and the one
+# a reader should key on, since a marker only found by matching prose is not one. It is built
+# at the use site, the way the listing marker is, because core/app.py has one code line of
+# headroom against its cap and a name for a literal used once is what that line would buy.
+
 # --------------------------------------------------------------------------- helpers
 
 # The abuse budget lives in limit.py; app keeps the module-level surface the tests and
@@ -1500,7 +1508,10 @@ def note_read(request: Request) -> Response:
             "and a note idle for 7 days is reclaimed, so this may be one that expired.",
             404,
         )
-    return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
+    # dict(p, ...) rather than restating the two names: the route is /kv/{ns}/{key}, so `p`
+    # is exactly those two, and they already passed valid_name inside note_get.
+    view = dict(p, value=value, untrusted={"fields": ["value"], "note": BANNER})
+    return respond(request, view, f"{BANNER}\n\n{value}", budget_note("read", left, RATE_READ))
 
 
 def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:

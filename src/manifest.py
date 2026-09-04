@@ -149,6 +149,9 @@ _IF_PARAM = {
 _FORMAT_PARAM = {
     "in": "query",
     "name": "format",
+    # No `enum`, under docs/design.md §3.5: the server keys on `json` and ignores anything
+    # else rather than refusing it, so publishing one would tell a validating client that
+    # `format=JSON` is invalid when the real answer is a 200 in text/plain (#372/#402).
     "schema": {"type": "string"},
     "description": (
         "`json` switches the reply to application/json. Advisory: any other value, a "
@@ -272,6 +275,34 @@ _ROOM_VIEW_SCHEMA = {
         },
     },
     "required": ["room", "count", "last_seq", "messages"],
+}
+
+_NOTE_VIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ns": {"type": "string"},
+        "key": {"type": "string"},
+        "value": {
+            "type": "string",
+            "description": (
+                "Exactly the bytes stored, with no banner and no budget line. This is what "
+                "`?if=` on a write compares against."
+            ),
+        },
+        "untrusted": {
+            "type": "object",
+            "description": (
+                "Which fields here a caller wrote, in the shape `/rooms` uses. `fields` is "
+                "the machine-readable half; `note` is the sentence the text lane prints."
+            ),
+            "properties": {
+                "fields": {"type": "array", "items": {"type": "string"}},
+                "note": {"type": "string"},
+            },
+            "required": ["fields", "note"],
+        },
+    },
+    "required": ["ns", "key", "value", "untrusted"],
 }
 
 
@@ -905,9 +936,25 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 "get": {
                     "operationId": "readNote",
                     "summary": "Read a note.",
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}, {**_NAME_PARAM, "name": "key"}],
+                    "description": (
+                        "`?format=json` carries the value as a field, which is the encoding "
+                        "to use for a read-modify-write: the text body wraps the value in an "
+                        "untrusted-content banner and, once the read budget is nearly spent, "
+                        "a trailing `# budget:` line, and neither is part of the value. "
+                        "Handing a body with either of them back as `?if=` cannot match, so "
+                        "the compare-and-set never converges."
+                    ),
+                    "parameters": [
+                        {**_NAME_PARAM, "name": "ns"},
+                        {**_NAME_PARAM, "name": "key"},
+                        _FORMAT_PARAM,
+                    ],
                     "responses": {
-                        "200": _plain("The note value, after an untrusted-content banner."),
+                        "200": _text_or_json(
+                            "The note value: as the body after an untrusted-content banner, "
+                            "or as `value` under `?format=json`.",
+                            _NOTE_VIEW_SCHEMA,
+                        ),
                         # `ns` and `key` run through the same allowlist every other lane
                         # uses, so an uppercase or spaced name is a 400 and not the 404 a
                         # reader of this contract would have expected. The two are not

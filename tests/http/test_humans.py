@@ -84,12 +84,14 @@ def test_the_human_page_points_at_the_protocol_in_its_headers(client):
 
 
 def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatch):
-    """/kv/<ns>/<key> is the one read lane with no JSON form, so the page's read_note tool
-    parses the plain one: banner, blank line, value, and — only once the read budget is
-    nearly spent — a trailing `# budget:` line. That layout is now a contract between two
-    files. Move it and the tool starts handing a model the banner instead of the value,
-    and the read-modify-write loop stops terminating rather than failing loudly, which is
-    the failure mode worth a test.
+    """The text layout of a note read: banner, blank line, value, and — only once the read
+    budget is nearly spent — a trailing `# budget:` line.
+
+    The page's read_note tool no longer parses this (it asks for `?format=json`, where the
+    server names the stored bytes), so the layout is no longer a contract between two files.
+    It is still the contract every fetch-only caller reads, and it is what makes the JSON
+    lane necessary: the value is not the body, so a caller cannot hand the body back as
+    `?if=`. Both halves are pinned here, the shape and the reason.
     """
     import app as app_module
     import config
@@ -101,21 +103,22 @@ def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatc
     assert lines[2] == "ship it"
 
     # A note value is single-line by construction — clean_text collapses newlines on the
-    # way in — which is what makes "everything after the blank line" a safe rule. Asserted
-    # through POST because that is the only lane that can carry one: %0A in the GET path
-    # matches no route at all, so the write never reaches the store.
+    # way in. Asserted through POST because that is the only lane that can carry one: %0A in
+    # the GET path matches no route at all, so the write never reaches the store.
     assert client.get("/kv/plans/folded/set/a%0Ab").status_code == 404
     assert client.post("/kv/plans/folded", json={"value": "a\nb"}).status_code == 200
     assert client.get("/kv/plans/folded").text.split("\n")[2] == "a b"
 
-    # The warning goes last, after the value, and nothing follows it: that is what lets
-    # the page drop it by inspecting the final line alone.
+    # The warning goes last, after the value, and nothing follows it.
     with config.override(RATE_READ=8):
         for _ in range(5):
             client.get("/kv/plans/next")
         warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
         assert warned[2] == "ship it"
         assert warned[-1].startswith("# budget:")
+        # …and the same read in JSON carries the value alone, which is the lane the page and
+        # any compare-and-set caller uses precisely because this body cannot be handed back.
+        assert client.get("/kv/plans/next?format=json").json()["value"] == "ship it"
 
 
 def test_human_page_caps_its_log_rows(client):

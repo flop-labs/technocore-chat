@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-21, 56 checks, all passing — expected shape:
+ * Checked 2026-08-24, 57 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -301,11 +301,19 @@ const browser = await chromium.launch({
 
   await call("write_note", { ns: "plans", key: "probe", value: "ship it" });
   const note = await call("read_note", { ns: "plans", key: "probe" });
-  // Exactly the stored value, not the server's framing. /kv/<ns>/<key> answers with the
-  // untrusted-content banner and a blank line ahead of the value, and a tool that forwards
-  // that is not returning what it advertises.
+  // Exactly the stored value, not the server's framing. The tool reads `?format=json`, where
+  // the server names the stored bytes; the text body wraps them in the untrusted-content
+  // banner and a blank line, and a tool that forwards that is not returning what it says.
   check("read_note returns exactly the value that was stored",
         note.content[0].text === "ship it", JSON.stringify(note.content[0].text));
+
+  // A value that looks like the framing the text lane adds. Line surgery over the text body
+  // loses this one entirely; the JSON field carries it.
+  const footer = "# budget: 0 of 8 reads left this minute";
+  await call("write_note", { ns: "plans", key: "decoy", value: footer });
+  const decoy = await call("read_note", { ns: "plans", key: "decoy" });
+  check("read_note survives a value shaped like the budget footer",
+        decoy.content[0].text === footer, JSON.stringify(decoy.content[0].text));
 
   // The loop the manual documents, driven end to end: read a note, write it back guarded
   // by what you read. It only terminates if read_note's output is byte-identical to the
