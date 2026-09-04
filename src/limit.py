@@ -145,11 +145,13 @@ def normalize_text(text: str) -> str:
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
-    # A duplicate 422's ref token (app._REF's shape, with the `&ref=` the body shows it
-    # behind, and nothing else), pasted into the text instead of the query string, is cut
+    # A duplicate 422's ref token (`&ref=422-<tick>-<random>`, the exact form the body
+    # shows and nothing else), pasted into the text instead of the query string, is cut
     # out so it can never be what makes a copy unique — neither on its own nor by taking
-    # the word it was glued to with it.
-    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
+    # the word it was glued to with it. Bare token-shaped substrings (e.g. a ticket ID
+    # that happens to match `422-xxxx-xxxx`) are *not* stripped — they are legitimate
+    # message content, and stripping them collapses distinct texts onto one duplicate key.
+    return " ".join(re.sub(r"&?ref=422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:

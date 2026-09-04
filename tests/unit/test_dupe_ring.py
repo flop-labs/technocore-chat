@@ -62,6 +62,19 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     )
 
 
+def test_bare_ref_shaped_token_not_stripped_from_dupe_key() -> None:
+    """A message containing a bare `422-xxxx-xxxx` substring (no `ref=` prefix) must
+    not share its duplicate key with one that lacks it — the normaliser must only strip
+    the full `&ref=422-...` parameter form. Regression for #694."""
+    token = "422-a1b2c3-def0"
+    assert limit.normalize_text("incident " + token + " alpha") != limit.normalize_text(
+        "incident alpha"
+    ), "bare token-shaped substring must preserve distinct keys"
+    assert limit.normalize_text("&ref=" + token + " incident alpha") == limit.normalize_text(
+        "incident alpha"
+    ), "prefixed ref= form must still be stripped"
+
+
 def test_the_length_floor_is_on_the_normalised_text() -> None:
     """The floor is the boundary: at or above it the filter applies, below it never
     does - the entire conversational-repeat class lives below it."""

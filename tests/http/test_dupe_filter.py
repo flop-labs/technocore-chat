@@ -144,8 +144,11 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     assert [ln for ln in lines if "ref=" + ref in ln] == lines and len(lines) == 3
     assert "path='/patterns.md'" in lines[1] and "forged" not in "".join(lines)
     with _filter_on(DUPE_MAX_COPIES=1):
-        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
-        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
+        # A bare token-shaped substring (no `ref=` prefix) is legitimate content — it
+        # must NOT be stripped, so these messages land as distinct texts.
+        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 200
+        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 200  # glued to a word
+        # The full `&ref=...` parameter form IS stripped, so this message is still a copy.
         assert _say(client, "lobby", "c", "&ref=" + ref + " " + PHRASE).status_code == 422
 
 
