@@ -185,7 +185,24 @@ async function fromOrigin(request, key) {
   // ride along for the origin's rate accounting; nothing caller-specific is stored, because
   // the guard below refuses any reply that carries some.
   const canonical = new Request(key.url, { method: "GET", headers: request.headers });
-  const fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  let fresh;
+  try {
+    fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  } catch (err) {
+    // Timeout, DNS, refused connection: the origin failing to answer inside the budget
+    // this lane already waited out. Report it here, the same way edgeCached does, rather
+    // than letting the exception escape to the top-level fail-open handler — that handler
+    // retries with no deadline of its own, which on a stalled origin would double the work
+    // during exactly the outage this lane exists to survive, and would delay the caller
+    // (on the cold path, which awaits this) until whatever unbounded retry finally settles
+    // instead of ending it at ORIGIN_REVALIDATE_MS. The background refresh path already
+    // swallows this with its own `.catch(() => {})`; this is the cold path's equivalent.
+    return {
+      status: 503,
+      body: new TextEncoder().encode("origin unavailable\n"),
+      headers: new Headers({ "Cache-Control": "no-store" }),
+    };
+  }
   const body = await fresh.arrayBuffer();
   const headers = new Headers(fresh.headers);
   if (fresh.status !== 200) return { status: fresh.status, body, headers };
