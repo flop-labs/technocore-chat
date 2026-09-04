@@ -1285,7 +1285,9 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     """
     now = time.time()
     entries = []
+    total_rooms = 0
     for e in _walk(root / "rooms", ".jsonl"):
+        total_rooms += 1
         name = e.name[: -len(".jsonl")]
         if not _listable(name):
             continue
@@ -1316,6 +1318,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     return {
         "rooms": shown,
         "total": len(entries),
+        "occupied": total_rooms,
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
         # Both bounds, because either can be the one that bites: a service can be far from

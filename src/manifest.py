@@ -848,6 +848,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "rooms": {"type": "array", "items": {"type": "object"}},
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
+                                    "occupied": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Total rooms that exist — listed and unlisted "
+                                            "combined. Differs from `total` (listed rooms "
+                                            "only) whenever unlisted (`p-`) rooms exist; "
+                                            "this is the population the room cap actually "
+                                            "refuses on."
+                                        ),
+                                    },
                                     "bytes": {"type": "integer"},
                                     "notes": {"type": "object"},
                                     "engagement": {"type": "object"},
