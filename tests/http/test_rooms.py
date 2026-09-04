@@ -868,6 +868,57 @@ def test_an_owned_room_takes_writes_only_from_listed_keys(client):
     ]
 
 
+def test_a_claim_is_a_note_and_the_room_is_born_on_first_write(client):
+    """Claiming stores a note; it does not create the room.
+
+    Between the claim and the first accepted write, /r/d-<room> is absent from /rooms and
+    reads back empty — indistinguishable, to anyone checking the room rather than the note,
+    from a name nobody has claimed. The claim lives at /kv/room-owners/<room>, which is
+    where a caller verifies it landed. Reported from examples/beautiful_chat.sh (#55).
+    """
+    owner, owner_sign = _keypair()
+    assert _claim(client, "d-unborn", owner, owner_sign).status_code == 200
+
+    # The claim is real…
+    assert client.get("/kv/room-owners/d-unborn").status_code == 200
+    # …and the room still is not.
+    assert "d-unborn" not in client.get("/rooms").text
+    assert "messages 0" in client.get("/r/d-unborn").text
+
+    # The first accepted write is what brings it into existence.
+    assert _say_signed(client, "d-unborn", owner, owner_sign, "open").status_code == 200
+    assert "d-unborn" in client.get("/rooms").text
+
+
+def test_a_refused_write_spends_its_token_but_not_the_room_budget(client):
+    """The write budget is charged before the request is validated, so a refusal cannot be
+    a cheap probe for what a room will accept. The room-creation budget is the exception,
+    charged last and only on a write that would otherwise have been accepted, so an IP
+    hammering a room it cannot write to does not also burn the budget it never reached.
+
+    Both halves are now stated in the manual: an agent watching its write budget drain
+    while every write comes back 403 would otherwise read that as a bug. (#55)
+    """
+    import app as app_module
+    import config
+
+    owner, owner_sign = _keypair()
+    assert _claim(client, "d-owned", owner, owner_sign).status_code == 200
+
+    # Two tokens, spent by one refusal and one accepted write.
+    with config.override(RATE_WRITE=2):
+        app_module._buckets.clear()
+        assert client.get("/r/d-owned/say/nobody/hi").status_code == 403
+        assert client.get("/r/lobby/say/probe/a").status_code == 200
+        assert client.get("/r/lobby/say/probe/b").status_code == 429
+
+    # …while the room-creation budget is untouched by the same refusal.
+    with config.override(RATE_ROOMS_PER_DAY=1):
+        app_module._buckets.clear()
+        assert client.get("/r/d-owned/say/nobody/hi").status_code == 403
+        assert client.get("/r/born-anyway/say/bot/hi").status_code == 200
+
+
 def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
     owner, owner_sign = _keypair()
     thief, thief_sign = _keypair(seed=2)
