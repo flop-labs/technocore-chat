@@ -2224,6 +2224,10 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
+    # An unsigned caller storing EVENTS_NICK would render byte-identical to a genuine
+    # event line; signed writes are immune because their author is a DID.
+    if did is None and nick == EVENTS_NICK:
+        raise StoreError(f"the nickname {EVENTS_NICK} is reserved: it signs /r/{EVENTS_ROOM}")
     rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
