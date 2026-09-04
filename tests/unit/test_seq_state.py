@@ -152,13 +152,11 @@ def test_a_map_written_after_the_split_wins_over_the_shard(tmp_path) -> None:
     assert kept == {"gone": {"floor": 5, "gen": 1}}, "the backup lost the original state"
 
 
-def test_mixed_upgrade_merges_floor_and_generation_independently(tmp_path) -> None:
-    """Legacy and new workers can advance different fields before the next split.
+def test_mixed_upgrade_keeps_newer_generation_floor_coupled(tmp_path) -> None:
+    """A newer recreate owns the floor, even when an older worker recorded a larger floor.
 
-    Whole-entry last-writer selection cannot preserve both transitions: a legacy reap may
-    advance the floor while a new recreate advances the generation. The durable state must
-    retain the high-water mark of each field, or either cursors regress or an old conversation
-    is reported as current.
+    Generation and floor describe one room lifecycle. Merging either independently can make
+    cursors treat a new conversation as if it still had the old conversation's floor.
     """
     import store
 
@@ -166,10 +164,10 @@ def test_mixed_upgrade_merges_floor_and_generation_independently(tmp_path) -> No
     _reap_now(tmp_path)
     # A still-running old worker recreates the legacy map while the shard has a newer
     # generation but an older floor. Neither whole entry is safe to choose.
-    _legacy(tmp_path, {"gone": {"floor": 400, "gen": 9}})
+    _legacy(tmp_path, {"gone": {"floor": 0, "gen": 9}})
     _reap_now(tmp_path)
 
-    assert store.last_seq(tmp_path, "gone") == 500
+    assert store.last_seq(tmp_path, "gone") == 0
     assert store.room_generation(tmp_path, "gone") == 9
 
 

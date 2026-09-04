@@ -1020,6 +1020,11 @@ def _read_seq_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
+def _seq_value(entry: dict, key: str) -> int:
+    value = entry.get(key)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
 def _seq_field(root: Path, room: str, key: str) -> int:
     """`room`'s `floor` or `gen`, always as a non-negative int.
 
@@ -1546,18 +1551,27 @@ def _split_seq_state(root: Path) -> None:
                         if not isinstance(current, dict) or not isinstance(entry, dict):
                             merged[room] = entry
                             continue
-                        merged[room] = {
-                            **current,
-                            **entry,
-                            "floor": max(
-                                v if isinstance(v, int) and v >= 0 else 0
-                                for v in (current.get("floor"), entry.get("floor"))
-                            ),
-                            "gen": max(
-                                v if isinstance(v, int) and v >= 0 else 0
-                                for v in (current.get("gen"), entry.get("gen"))
-                            ),
-                        }
+                        current_gen = _seq_value(current, "gen")
+                        incoming_gen = _seq_value(entry, "gen")
+                        if incoming_gen > current_gen:
+                            # A recreate advances the generation and clears the floor. The
+                            # generation and floor are one lifecycle state, so the newer entry
+                            # must win as a whole rather than inheriting an older floor.
+                            merged[room] = dict(entry)
+                        elif current_gen > incoming_gen:
+                            merged[room] = dict(current)
+                        else:
+                            # Same lifecycle: both workers may have reaped different high-water
+                            # marks, so the floor is the only field that is independently monotonic.
+                            merged[room] = {
+                                **current,
+                                **entry,
+                                "floor": max(
+                                    v if isinstance(v, int) and v >= 0 else 0
+                                    for v in (current.get("floor"), entry.get("floor"))
+                                ),
+                                "gen": current_gen,
+                            }
                     _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
             legacy.replace(backup) if first else legacy.unlink()
     except OSError:
