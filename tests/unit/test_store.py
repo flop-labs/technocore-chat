@@ -877,6 +877,73 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
+def test_a_guard_note_survives_at_exactly_the_idle_threshold(tmp_path):
+    """The boundary itself, which the test above steps over with a 60-second margin.
+
+    `_guards_a_live_room` asks `now - room_mtime <= IDLE_SECONDS`, and the two spellings of
+    that comparison disagree on exactly one instant: at the threshold `<=` calls the room live
+    and keeps its guards, `<` calls it reapable and deletes them. Nothing noticed, which is the
+    shape tests/mutation_scope.py's `ttl` theme names — an off-by-one in an idle threshold keeps
+    data a week too long or drops it a day early and never raises.
+
+    Dropping them early is the direction that costs something: the owner note is write access,
+    the allow-list is who may post, and the nonce note is replay protection, so a room one
+    second inside its own threshold would open to a fresh claim while still busy.
+
+    `now` is computed from the room's own mtime rather than read off the clock, because
+    `_age(path, IDLE_SECONDS)` plus a later `time.time()` lands microseconds past the boundary
+    and tests the wrong side of it.
+    """
+    import store
+
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    store.append(tmp_path, "d-edge", "bot", "hi")
+    store.note_set(tmp_path, store.OWNERS_NS, "d-edge", did)
+
+    base = f"{tmp_path / 'notes'}{os.sep}"  # exactly what _reap passes
+    owner = store.note_path(tmp_path, store.OWNERS_NS, "d-edge")
+    entry = next(e for e in os.scandir(owner.parent) if e.name == owner.name)
+    mtime = store.room_path(tmp_path, "d-edge").stat().st_mtime
+
+    at_threshold = mtime + store.IDLE_SECONDS
+    assert store._guards_a_live_room(tmp_path, base, entry, at_threshold) is True
+    assert store._guards_a_live_room(tmp_path, base, entry, at_threshold + 1) is False
+
+
+def test_a_guard_note_takes_its_room_from_the_last_dot(tmp_path):
+    """`rpartition` and not `partition`, which are the same thing only while NAME_RE holds.
+
+    The helper's own docstring rests the choice on NAME_RE admitting no dot, so a guard file
+    carries exactly one and either spelling finds the same room. That makes them interchangeable
+    today and leaves the reasoning unpinned. Relax NAME_RE and `partition` starts naming a
+    *different, live* room, the guard reads True for a room it does not guard, and the note it
+    was protecting is judged against the wrong mtime.
+
+    A file like `d-dots.d.txt` cannot be created through the API — `note_set` runs the same
+    NAME_RE — so this writes one directly, which is what makes the assumption testable at all.
+    With `rpartition` the room name is `d-dots.d`, which NAME_RE refuses, and `room_path` raises
+    `StoreError`. That is worth pinning in its own right: `StoreError` is not an `OSError`, so
+    the `except OSError` a few lines below does not soften it, and a malformed guard filename
+    would abort a reap pass rather than mis-resolve quietly. With `partition` the name is
+    `d-dots`, a room that exists and is live, and the helper returns True instead.
+    """
+    import store
+
+    assert store.NAME_RE.match("a.b") is None  # why the two are equivalent today
+    assert not issubclass(store.StoreError, OSError)  # why the raise is not swallowed
+
+    store.append(tmp_path, "d-dots", "bot", "hi")  # the room `partition` would find
+    store.note_set(tmp_path, store.OWNERS_NS, "d-dots", "x")
+    guard = store.note_path(tmp_path, store.OWNERS_NS, "d-dots")
+    doubled = guard.with_name("d-dots.d" + guard.suffix)
+    guard.rename(doubled)
+
+    base = f"{tmp_path / 'notes'}{os.sep}"
+    entry = next(e for e in os.scandir(doubled.parent) if e.name == doubled.name)
+    with pytest.raises(store.StoreError):
+        store._guards_a_live_room(tmp_path, base, entry, time.time())
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 
