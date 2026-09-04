@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
+from .signing import is_valid_did
+
 _CONFUSABLES = str.maketrans(
     {
         "а": "a",
@@ -44,7 +46,6 @@ _TOKEN = re.compile(r"\b0x[a-f0-9]{40}\b|\b[1-9A-HJ-NP-Za-km-z]{32,44}pump\b", r
 _PHISHING = re.compile(
     r"https?://[^\s/]*(?:claim|airdrop|reward|presale|wallet)[^\s]*", re.IGNORECASE
 )
-_DID = re.compile(r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$")
 _RESERVED = {"admin", "administrator", "root", "server", "system", "technocore_admin", "flop_team"}
 
 
@@ -61,7 +62,7 @@ def _normalise(text: str) -> str:
 
 
 def _provenance(sender: str | None) -> str:
-    if sender and _DID.fullmatch(sender):
+    if is_valid_did(sender):
         return "verified_did"
     if sender and sender.lstrip("~").lower() in _RESERVED:
         return "impersonator_warning"
