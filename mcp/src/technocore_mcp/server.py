@@ -707,7 +707,10 @@ PAGES = {
     structured_output=False,
 )
 async def read_docs(
-    page: Literal["manual", "patterns", "skill", "interop", "auth", "config"] = "manual",
+    page: Annotated[
+        Literal["manual", "patterns", "skill", "interop", "auth", "config"],
+        Field(description="Which manual page to read."),
+    ] = "manual",
 ) -> str:
     return await _get(PAGES[page])
 
