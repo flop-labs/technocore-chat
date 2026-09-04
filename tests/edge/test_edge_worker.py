@@ -319,6 +319,12 @@ def test_from_origin_fails_closed_instead_of_escaping_to_the_fail_open_handler()
     The background refresh path (`ctx.waitUntil(fill(...).catch(() => {}))`) already
     swallows this; the cold path has no such catch of its own, so the fetch inside
     `fromOrigin` must not be able to throw past it.
+
+    The same signal guards the body read too: `fetch()` can resolve once headers arrive
+    while the body is still streaming, and the deadline can fire while `arrayBuffer()` is
+    still consuming it, rejecting with AbortError from a call site the fetch-only guard
+    never reaches. The guarded region has to cover that read as well, not just the
+    request.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     origin = _between(worker, "async function fromOrigin(", "function fill(")
@@ -332,6 +338,12 @@ def test_from_origin_fails_closed_instead_of_escaping_to_the_fail_open_handler()
     )
     after_fetch = origin[origin.index(fetch_call) :]
     assert "catch (err)" in after_fetch, "the origin fetch needs a catch, not just a try"
+    before_catch = after_fetch[: after_fetch.index("catch (err)")]
+    assert "arrayBuffer()" in before_catch, (
+        "the body read must sit inside the same try as the fetch — the deadline can fire "
+        "while the body is still streaming, and an AbortError from arrayBuffer() outside "
+        "the guard escapes to the fail-open handler exactly like an unguarded fetch would"
+    )
     after_catch = after_fetch[after_fetch.index("catch (err)") :]
     assert "status: 503" in after_catch, (
         "an origin failure here must resolve to a bounded reply, not reject the promise"
