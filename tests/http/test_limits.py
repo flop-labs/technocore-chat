@@ -327,6 +327,43 @@ def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
         assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
 
 
+def test_recreating_a_reaped_room_costs_a_token_like_any_other_creation(client, tmp_path):
+    """A room that was reaped and is written to again is created afresh — a new file and a
+    new slot against MAX_ROOMS — so it must cost a room-creation token like any creation.
+
+    The refund keyed on `seq == 1`, but a reaped room leaves its high-water mark behind as
+    a floor so a recreated room's sequence continues past it rather than restarting and
+    stranding cursors (#139). The first message after a reap is therefore seq = floor + 1,
+    not 1, which made a genuine creation look like the losing side of a creation race and
+    handed its token back. A caller that lets rooms idle out could then re-acquire their
+    slots for free, past the per-IP daily budget the gate exists to hold.
+    """
+    import config
+    import store
+
+    # 500 writes/min isolates this from the write limit, as the sibling budget tests do.
+    with config.override(RATE_ROOMS_PER_DAY=2, RATE_WRITE=500):
+        # First of two rooms, given a little history so its floor is above 1 after a reap.
+        assert client.get("/r/churn/say/bot/hello there one").status_code == 200
+        for i in range(3):
+            assert client.get(f"/r/churn/say/bot/filler line {i}").status_code == 200
+
+        # Reap it: age it past the idle rule and run the throttled pass by hand, the way
+        # tests/unit/test_seq_state.py does. The room file is gone but its floor remains.
+        _client._age(store.room_path(tmp_path, "churn"), store.IDLE_SECONDS + 60)
+        (tmp_path / ".reaped").unlink(missing_ok=True)
+        store._reap(tmp_path)
+        assert not store.room_path(tmp_path, "churn").exists()
+
+        # Recreate it. This is a real creation — the sequence continues at floor + 1, not 1
+        # — and must spend the second and last token.
+        assert client.get("/r/churn/say/bot/back again").status_code == 200
+
+        # The budget is now spent, so a brand-new room is refused. Before the fix the
+        # recreation was refunded on the seq != 1 heuristic and this returned 200.
+        assert client.get("/r/fresh/say/bot/hello there two").status_code == 429
+
+
 def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
     """A POST must not stall every *other* request while it touches disk.
 
