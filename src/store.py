@@ -1024,6 +1024,11 @@ def _read_seq_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
+def _seq_value(entry: dict, key: str) -> int:
+    value = entry.get(key)
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
 def _seq_field(root: Path, room: str, key: str) -> int:
     """`room`'s `floor` or `gen`, always as a non-negative int.
 
@@ -1512,18 +1517,13 @@ def _split_seq_state(root: Path) -> None:
     Grouped before any shard is opened, so this costs one pass over the map and one lock per
     *shard* rather than one per room.
 
-    Which side of the merge wins is decided by whether the backup already exists, and the two
-    cases are opposite for the same reason — the later write is the true one:
+    The fields are merged independently by high-water mark. A rolling upgrade can have an old
+    worker update the legacy map while a new worker updates the shard, and those updates need not
+    be the same kind of transition: one may advance `floor` while the other bumps `gen`. Choosing
+    one whole entry based on which file exists can therefore preserve one field while regressing
+    the other. Both fields are monotonic, so taking their maxima preserves every accepted
+    lifecycle transition without pretending file age is observable.
 
-      - **The first split.** No backup yet, so every entry in the map predates this pass, and
-        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
-        wins.
-      - **A map that came back.** The backup exists, so this map was written *after* a split
-        had already consumed and renamed the original — which only an old worker still running
-        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
-        the shard's is stale, so the map wins. Getting this backwards silently drops that
-        worker's reap or create: the room's floor regresses and cursors past it miss messages,
-        or a generation bump is lost and a stateful reader is told nothing changed.
 
     The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
     pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
@@ -1549,7 +1549,33 @@ def _split_seq_state(root: Path) -> None:
             for path, entries in shards.items():
                 with _locked(path):
                     shard = _read_seq_state(path)
-                    merged = {**entries, **shard} if first else {**shard, **entries}
+                    merged = dict(shard)
+                    for room, entry in entries.items():
+                        current = merged.get(room)
+                        if not isinstance(current, dict) or not isinstance(entry, dict):
+                            merged[room] = entry
+                            continue
+                        current_gen = _seq_value(current, "gen")
+                        incoming_gen = _seq_value(entry, "gen")
+                        if incoming_gen > current_gen:
+                            # A recreate advances the generation and clears the floor. The
+                            # generation and floor are one lifecycle state, so the newer entry
+                            # must win as a whole rather than inheriting an older floor.
+                            merged[room] = dict(entry)
+                        elif current_gen > incoming_gen:
+                            merged[room] = dict(current)
+                        else:
+                            # Same lifecycle: both workers may have reaped different high-water
+                            # marks, so the floor is the only field that is independently monotonic.
+                            merged[room] = {
+                                **current,
+                                **entry,
+                                "floor": max(
+                                    v if isinstance(v, int) and v >= 0 else 0
+                                    for v in (current.get("floor"), entry.get("floor"))
+                                ),
+                                "gen": current_gen,
+                            }
                     _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
             legacy.replace(backup) if first else legacy.unlink()
     except OSError:

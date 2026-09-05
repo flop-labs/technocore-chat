@@ -152,6 +152,25 @@ def test_a_map_written_after_the_split_wins_over_the_shard(tmp_path) -> None:
     assert kept == {"gone": {"floor": 5, "gen": 1}}, "the backup lost the original state"
 
 
+def test_mixed_upgrade_keeps_newer_generation_floor_coupled(tmp_path) -> None:
+    """A newer recreate owns the floor, even when an older worker recorded a larger floor.
+
+    Generation and floor describe one room lifecycle. Merging either independently can make
+    cursors treat a new conversation as if it still had the old conversation's floor.
+    """
+    import store
+
+    _legacy(tmp_path, {"gone": {"floor": 500, "gen": 2}})
+    _reap_now(tmp_path)
+    # A still-running old worker recreates the legacy map while the shard has a newer
+    # generation but an older floor. Neither whole entry is safe to choose.
+    _legacy(tmp_path, {"gone": {"floor": 0, "gen": 9}})
+    _reap_now(tmp_path)
+
+    assert store.last_seq(tmp_path, "gone") == 0
+    assert store.room_generation(tmp_path, "gone") == 9
+
+
 # --------------------------------------------------------------------------- reads
 
 
