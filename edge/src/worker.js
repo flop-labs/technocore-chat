@@ -185,7 +185,10 @@ async function fromOrigin(request, key) {
   // ride along for the origin's rate accounting; nothing caller-specific is stored, because
   // the guard below refuses any reply that carries some.
   const canonical = new Request(key.url, { method: "GET", headers: request.headers });
-  const fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  const fresh = await fetch(canonical, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS),
+  });
   const body = await fresh.arrayBuffer();
   const headers = new Headers(fresh.headers);
   if (fresh.status !== 200) return { status: fresh.status, body, headers };
