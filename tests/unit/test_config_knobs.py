@@ -31,6 +31,9 @@ PROBE = (
     "'store.MAX_NOTES_PER_NS': store.MAX_NOTES_PER_NS, "
     "'config.MAX_NOTES_TOTAL': config.MAX_NOTES_TOTAL, "
     "'store.MAX_NOTES_TOTAL': store.MAX_NOTES_TOTAL, "
+    "'config.STILLBORN_SECONDS': config.STILLBORN_SECONDS, "
+    "'store.STILLBORN_SECONDS': store.STILLBORN_SECONDS, "
+    "'store.IDLE_SECONDS': store.IDLE_SECONDS, "
     "'config.MAX_WAITERS_TOTAL': config.MAX_WAITERS_TOTAL, "
     "'limit.MAX_WAITERS_TOTAL': limit.MAX_WAITERS_TOTAL, "
     "'app.MAX_WAITERS_TOTAL': app.MAX_WAITERS_TOTAL, "
@@ -68,6 +71,7 @@ def test_the_new_knobs_default_to_the_values_they_replaced() -> None:
     # = 32 * MAX_ROOMS, the derivation it replaced — and store must be bound to the same
     # number, since that is the module the global capacity check enforces from.
     assert values["config.MAX_NOTES_TOTAL"] == values["store.MAX_NOTES_TOTAL"] == 163840
+    assert values["config.STILLBORN_SECONDS"] == values["store.STILLBORN_SECONDS"] == 86400
     assert values["config.MAX_WAITERS_TOTAL"] == 64
     assert values["config.MAX_WAITERS_PER_IP"] == 4
     assert values["config.WORKERS"] == 1  # no WEB_CONCURRENCY set
@@ -81,6 +85,7 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
         CHAT_MAX_ROOMS="99",
         CHAT_MAX_NOTES_PER_NS="400",
         CHAT_MAX_NOTES_TOTAL="4000",
+        CHAT_STILLBORN_SECONDS="43200",
         CHAT_MAX_WAITERS_TOTAL="7",
         CHAT_MAX_WAITERS_PER_IP="2",
         WEB_CONCURRENCY="3",
@@ -93,6 +98,9 @@ def test_the_environment_moves_them_at_every_binding_site() -> None:
     # cap, so an implementation that still multiplied would fail here rather than agree by
     # coincidence. `_check_note_capacity` reads store's copy.
     assert values["config.MAX_NOTES_TOTAL"] == values["store.MAX_NOTES_TOTAL"] == 4000
+    # `_reapable` reads store's copy, so a stillborn window that stopped at config would
+    # publish 12 hours at /config while the reaper went on taking rooms at 24.
+    assert values["config.STILLBORN_SECONDS"] == values["store.STILLBORN_SECONDS"] == 43200
     for module in ("config", "limit", "app"):
         assert values[f"{module}.MAX_WAITERS_TOTAL"] == 7
         assert values[f"{module}.MAX_WAITERS_PER_IP"] == 2
@@ -115,6 +123,11 @@ def test_the_floors_hold() -> None:
     # room-allow, room-nonce) hold one note per room each, so anything under MAX_ROOMS means
     # some room cannot carry a topic or an owner. A value below it clamps up, silently and on
     # purpose — the alternative is refusing to boot over a setting whose intent was "smaller".
+    # STILLBORN_SECONDS floors at an hour, and that floor is a publishing constraint rather
+    # than an arithmetic one: the manual states the window in whole hours, so anything under
+    # 3600 would print "0 hours" — the document contradicting the reaper is the failure.
+    assert boot(CHAT_STILLBORN_SECONDS="60")["config.STILLBORN_SECONDS"] == 3600
+    assert boot(CHAT_STILLBORN_SECONDS="0")["config.STILLBORN_SECONDS"] == 3600
     assert boot(CHAT_MAX_NOTES_PER_NS="1")["config.MAX_NOTES_PER_NS"] == 5120
     assert boot(CHAT_MAX_NOTES_PER_NS="-5")["config.MAX_NOTES_PER_NS"] == 5120
     clamped = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_PER_NS="10")
@@ -127,6 +140,28 @@ def test_the_floors_hold() -> None:
     assert boot(CHAT_MAX_NOTES_TOTAL="-5")["config.MAX_NOTES_TOTAL"] == 20480
     floored_total = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_TOTAL="10")
     assert floored_total["config.MAX_NOTES_TOTAL"] == 396  # follows MAX_ROOMS, not 20480
+
+
+def test_the_stillborn_window_is_clamped_to_what_the_reaper_can_actually_honour() -> None:
+    """The published window has to be the enforced one, at both ends.
+
+    `_reapable` tests the idle rule first, so a window past IDLE_SECONDS is unreachable — the
+    room goes on day seven however many days the setting claims. And the manual renders the
+    window with `// 3600`, so a value that is not a whole hour reads low: 5400 would promise
+    one hour while the reaper waited ninety minutes. Both are the same defect, a document
+    disagreeing with the code, and store is where the clamp has to be because /config
+    publishes store's copy.
+    """
+    ceiling = boot(CHAT_STILLBORN_SECONDS="864000")  # ten days, past the seven-day idle rule
+    assert ceiling["store.STILLBORN_SECONDS"] == ceiling["store.IDLE_SECONDS"] == 604800
+    assert boot(CHAT_STILLBORN_SECONDS="5400")["store.STILLBORN_SECONDS"] == 3600
+    # 43201 is a second past a whole hour: the floor takes the hour, never the next one up.
+    assert boot(CHAT_STILLBORN_SECONDS="43201")["store.STILLBORN_SECONDS"] == 43200
+    # The invariant, not an instance of it: no setting can put the window past the idle rule.
+    for value in ("3600", "43200", "86400", "604800", "999999999"):
+        booted = boot(CHAT_STILLBORN_SECONDS=value)
+        assert booted["store.STILLBORN_SECONDS"] <= booted["store.IDLE_SECONDS"]
+        assert booted["store.STILLBORN_SECONDS"] % 3600 == 0
 
 
 def test_the_per_namespace_note_cap_moves_without_dragging_the_others() -> None:

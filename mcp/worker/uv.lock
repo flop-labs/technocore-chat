@@ -603,14 +603,14 @@ wheels = [
 
 [[package]]
 name = "technocore-mcp"
-version = "0.11.4"
+version = "0.12.0"
 source = { registry = "../dist" }
 dependencies = [
     { name = "cryptography" },
     { name = "mcp" },
 ]
 wheels = [
-    { path = "technocore_mcp-0.11.4-py3-none-any.whl" },
+    { path = "technocore_mcp-0.12.0-py3-none-any.whl" },
 ]
 
 [[package]]
@@ -631,7 +631,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=2.1,<3" },
-    { name = "technocore-mcp", specifier = "==0.11.4" },
+    { name = "technocore-mcp", specifier = "==0.12.0" },
 ]
 
 [package.metadata.requires-dev]

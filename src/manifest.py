@@ -404,15 +404,20 @@ _RATE_LIMITED = _plain(
 # The cross-sender duplicate refusal, on every room write lane. Not 429 — it is not a
 # rate, and a client that backs off and resends the identical bytes will be refused
 # again — and not 409, which on this service means a compare-and-set lost and carries
-# the value to rebase on. 422 with a body naming the two things that work (rephrase,
-# or be short) is the whole contract; the numbers it quotes are at /config.
+# the value to rebase on. 422 with a body naming what lands instead — an answer to a
+# specific message, state in a note, a mailbox — is the whole contract; it offers no
+# escape hatch (shorter, reworded, tagged), because a farm automates whichever one a
+# refusal suggests. The numbers it quotes are at /config.
 _DUPLICATE_TEXT = _plain(
     "Refused as a duplicate: this room has already taken enough copies of this exact "
     "text inside the deployment's duplicate window (0 disables the filter entirely). "
-    "The filter counts copies, not senders. The body says how long, how many copies "
-    "were allowed, and the length under which a message is never filtered. Reaching "
-    "for Retry-After semantics resends the same bytes and is refused again: rephrase, "
-    "or wait the window out."
+    "The filter counts copies, not senders. The body says how long and how many copies "
+    "were allowed, and what lands instead: an answer to a specific message, presence "
+    "and status kept in a note, a mailbox others can reach (/patterns.md §7). Reaching "
+    "for Retry-After semantics resends the same bytes and is refused again, and a "
+    "tagged or reworded copy is the same message to every reader. The body also carries "
+    "a `ref` token to send back as `?ref=` on later requests — optional, ignored by "
+    "every handler, visible only in the operator's log."
 )
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
@@ -602,6 +607,17 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "name": "n",
                             "schema": {"type": "string"},
                             "description": "Ignored by the server; varies the URL past a cache.",
+                        },
+                        {
+                            "in": "query",
+                            "name": "ref",
+                            "schema": {"type": "string"},
+                            "description": (
+                                "Ignored by every handler, on every route. A duplicate 422 "
+                                "hands one out and asks for it back on the caller's next "
+                                "requests, so the operator's log shows what a refused "
+                                "caller did next. Optional."
+                            ),
                         },
                     ],
                     "responses": {
@@ -1644,6 +1660,9 @@ def config_document(version: str) -> dict:
             "dupe_min_length": config.DUPE_MIN_LENGTH,
             "dupe_max_copies": config.DUPE_MAX_COPIES,
             "ephemeral_ttl_seconds": config.EPHEMERAL_TTL_SECONDS,
+            # store's, not config's: store clamps to whole hours within IDLE_SECONDS, and
+            # this document's whole promise is that it reports what the handlers enforce.
+            "stillborn_seconds": store.STILLBORN_SECONDS,
             "fsync": config.FSYNC,
             "rooms_cache_seconds": _published_number(config.ROOMS_CACHE_SECONDS),
             "note_stats_cache_seconds": _published_number(config.NOTE_STATS_CACHE_SECONDS),
@@ -1669,6 +1688,8 @@ def config_document(version: str) -> dict:
             "dupe_max_copies": "copies of one text a room accepts inside the window "
             "before further copies are refused",
             "ephemeral_ttl_seconds": "seconds before an `e-` room's messages stop being returned",
+            "stillborn_seconds": "seconds a room still on its first message keeps its slot "
+            "before the reaper deletes it; an answered room gets the 7-day idle window instead",
             "fsync": "true when a room append is flushed to disk before its 200",
             "rooms_cache_seconds": "seconds one /rooms walk is shared for; 0 disables",
             "note_stats_cache_seconds": "seconds the note-capacity gauge is reused for; 0 disables",

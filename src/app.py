@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 import tomllib
@@ -691,6 +692,12 @@ def sitemap(request: Request) -> Response:
     )
 
 
+# The ref token a duplicate 422 hands out, as it may come back in a query string: exact
+# shape, whole value. Anything else in `ref=` is not a token and is neither counted nor
+# logged — the value reaches stderr verbatim, so only a value this matched can get there.
+_REF = re.compile(rb"(?:^|&)ref=(422-[0-9a-f]{1,8}-[0-9a-f]{4})(?:&|$)")
+
+
 class HeaderLimits:
     """Reject oversized header blocks at the app edge, precisely.
 
@@ -699,6 +706,12 @@ class HeaderLimits:
     measured, httptools returned 200 for a 256 KiB header. This is the deterministic
     bound, and it also documents the contract. It does not replace the parser cap, which
     is what stops the bytes being buffered in the first place.
+
+    Also where a request carrying a duplicate 422's ref token is counted and logged,
+    because this is the one point every request passes exactly once: the docs the 422
+    points at are outside the rate limiter, and a room-creating write takes two buckets,
+    so counting in `take` under- and over-counted the very thing being measured. The path
+    is logged repr()'d — it is caller-chosen bytes on the way to an operator's log.
     """
 
     def __init__(self, app):
@@ -721,6 +734,10 @@ class HeaderLimits:
                     headers={"Cache-Control": "no-store"},
                 )(scope, receive, send)
                 return
+            ref = _REF.search(scope.get("query_string", b""))
+            if ref:
+                limit._requests["followed"] += 1
+                config._dbg(1, "followed", ref=ref[1].decode(), path=repr(scope["path"]))
         await self.app(scope, receive, send)
 
 
@@ -1289,24 +1306,43 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
     automate into an identical resend. Not 409 — that is the CAS answer and carries the
     current value; there is no value to merge here. 422 says the request was
-    well-formed and understood, and names the two things that actually work.
+    well-formed and understood, and names what lands instead.
+
+    The body advises no escape hatch. "Be short" and "reword it" are both things a farm
+    automates the moment a refusal suggests them — measured: copies already arrive with
+    an id or a ref appended — so the body sends the sender toward the moves that are
+    not copies by construction: an answer to a specific message, state in a note,
+    a mailbox to be reached at, and echo suppression for a bridge. Those live in
+    /patterns.md and /interop.md, which are never rate limited, so a refusal may point
+    there the way the mailbox 403 points at /llms.txt.
 
     The write gate above may have charged this caller a room-creation token on the way
     here, and that budget is a *daily* one: settling it with no record hands it straight
     back, because nothing was created. Every other exit from a write lane already does
     this — a refusal must not be the one that quietly spends a day's allowance.
+
+    Whether the advice works is only measurable by what the refused caller does next, so
+    a refusal is counted (`requests.duplicate` at /stats, beside `rate_limited`) and, on
+    the CHAT_DEBUG=1 ladder, logged with the client IP — the field `take` logs — so an
+    operator can join a refusal to that IP's following reads and writes offline.
+
+    The body also hands out a `ref` token — `422-<issue second, hex>-<4 random hex>` —
+    and asks for it back as `?ref=` on the caller's next requests. Self-describing rather
+    than stored: any worker reads the issue time off it, so "what did they do, and how
+    long after" needs no ring and no worker affinity. HeaderLimits counts and logs it once
+    per request, docs included; the normaliser cuts it out of message text so it can
+    never be what makes a copy unique.
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    limit._requests["duplicate"] += 1
+    ref = f"422-{int(time.time()):x}-{secrets.token_hex(2)}"
+    config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room, ref=ref)
     return text(
-        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
-        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
-        "are refused until that window passes.\n"
-        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
-        "— short replies are never filtered. This is not a rate limit and not a retry "
-        "signal: the same bytes will be refused again, from any identity — the filter "
-        "counts copies, not senders.\n"
-        "the enforced window, threshold and length floor are published at /config under "
-        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s; more are refused until that window passes.
+not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
+what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
+/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).
+optional: add &ref={ref} to your next requests. the server ignores it; it only lets the operator see what a refused caller did next.""",
         422,
     )
 
