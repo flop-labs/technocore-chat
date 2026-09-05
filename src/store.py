@@ -20,7 +20,7 @@ import time
 import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -153,8 +153,9 @@ USAGE_FILE = ".usage"
 # and nothing else; a create counted but not yet written is invisible to it. Rather than hold
 # the creates still for the length of a walk that now costs half a minute, the pass reads this
 # file with the creates waited out at both ends and adds back what it grew by in between —
-# fail-closed by construction, at the price of running high by one pass's creates
-# (`_counted_at` and `_settle_count` carry the arithmetic).
+# fail-closed by construction, at the price of running high by however many of that pass's
+# creates the walk happened to see (`_counted_at` and `_settle_count` carry the arithmetic,
+# and `_reap` runs one pass at a time so the window is a window).
 #
 # That walk is `sized` now, for the byte half — one stat per note on a REAP_EVERY timer, on
 # a pass that already stats every note to decide what is idle, bought so that `note_stats`
@@ -635,8 +636,13 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     file inode without writers holding a lock on the orphan.
 
     `nb` adds LOCK_NB, which raises BlockingIOError (EAGAIN) instead of waiting when the
-    lock is held. Only `_bump` takes it: everything else here is holding the lock to make a
+    lock is held. `_bump` takes it because it is holding the lock to record a delta that a
+    later writer can carry instead; everything else here is holding the lock to make a
     decision that has to be made, and would have to wait again anyway.
+
+    `nb` is also how `_reap` keeps one pass running at a time: it takes its own marker file
+    that way and gives up rather than queueing, because a caller that cannot get it is one
+    whose work is already being done.
 
     `shared` takes LOCK_SH instead, which is what lets a lock mean "a create is in flight"
     without meaning "one create at a time" (see `_create_gate`): any number of holders
@@ -1537,29 +1543,33 @@ def _settle_count(root: Path, name: str, before: tuple[int, int] | None, kept: l
     A walk cannot see a create that has reserved but not yet written, and a figure below the
     disk admits a write the cap should refuse — so this fails closed rather than aiming to be
     exact. Whatever the counter grew by between `_counted_at`'s read and this one is added
-    back: every create the walk could have missed reserved against the file inside that
-    window, so `after - before` bounds them from above and 0 from below. The result is exact
-    on a quiet store, high by at most the creates that landed during the pass on a busy one,
-    and re-established from a fresh walk on the next pass, so the error never accumulates. A
-    `before` that did not parse — a lost or pre-format counter file, the case `_note_totals`
-    answers by walking — has no window to offer, so the walk stands as its own baseline and
-    the only thing the counter can still do is hold the figure up.
+    back. Both readings wait every create out, so the window between them holds whole creates
+    and nothing part-done: a reservation given back (a `?if=` refusal on a fresh key counts
+    -1) is bracketed by the same two readings as its own `+1`, and `after - before` is exactly
+    the number that landed. Each of those is either in `kept` or missed by the walk, so the
+    figure written is the truth plus however many of them the walk happened to see — never
+    below the disk, exact on a quiet store, and re-established from a fresh walk on the next
+    pass, so the error never accumulates. `_reap` runs one pass at a time service-wide, which
+    is what keeps this a window and not an interleaving of two.
 
-    What it gives up is the exactness a 29 s exclusive hold bought. The one direction it can
-    be low is a reservation given back — a `?if=` refusal on a fresh key counts -1 — landing
-    in the same pass as a create the walk missed, which cancel in `after - before` and leave
-    the figure one short until the next pass rewrites it. One note of slack for one interval,
-    against every create in the store blocking on the walk once per REAP_EVERY.
+    A `before` that did not parse — a lost or pre-format counter file, the case `_note_totals`
+    answers by walking — offers no window at all. The walk is then the whole answer, except
+    that the count may still be raised to what the counter claims, since creates that reserved
+    against it are on the disk whether this walk saw them or not. Not the byte half: those
+    bytes may be ones a racing rebuild measured before this pass deleted them, and the gauge
+    they feed fails open by doctrine (see `room_bytes_used`) where the count fails closed.
     """
     try:
         with _locked((root / name).with_suffix(".create")):
-            after = _read_counts(root, name)
-            # A `before` that did not parse leaves no window to measure, so the walk is its
-            # own baseline: the figure can then be raised to what the counter already claims
-            # but never dropped below it, which is the fail-closed half without the window.
-            base = before or kept
-            made = [0, 0] if after is None else [max(0, after[i] - base[i]) for i in (0, 1)]
-            _write_note_count(root, kept[0] + made[0], kept[1] + made[1], name=name)
+            # An unreadable reading at either end leaves no window at all, and both branches
+            # below then write the walk: `before` for one, the walk against itself for the other.
+            after = _read_counts(root, name) or before or kept
+            if before is None:
+                total, size = max(kept[0], after[0]), kept[1]
+            else:
+                total = kept[0] + max(0, after[0] - before[0])
+                size = kept[1] + max(0, after[1] - before[1])
+            _write_note_count(root, total, size, name=name)
     except OSError:
         pass
 
@@ -1656,27 +1666,38 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
 
 
 def _drop_emptied_namespaces(root: Path, dirs: set[str]) -> None:
-    """Drop each per-namespace count, and then the namespace itself if that leaves it empty.
-    `dirs` is the namespaces this pass deleted a note in or swept a lock in, and nothing else.
+    """Drop every per-namespace count, and then the namespaces this pass emptied. Two jobs
+    with two costs, which is why they are two loops.
 
-    Runs after `_sweep_orphan_locks`, which is what puts a namespace back to notes and locks
-    only and so lets the rmdir here reach an emptied one — and which reports what it emptied
-    into the same set, so a namespace drained by an earlier pass is still reached.
+    The counts go unconditionally, for every namespace, because a deletion is not the only
+    thing one can be wrong about. A create reserves before it writes (see `_create_gate`), so
+    a crash in between leaves that namespace one high with no give-back coming, and under
+    CHAT_FSYNC=0 an unclean shutdown can lose an increment and leave it low. Neither is
+    reachable from the pass's own walk, and both are permanent against MAX_NOTES_PER_NS if
+    nothing drops the file: this is the only thing that heals them. The next create in that
+    namespace pays one scan to rebuild it and none after. Re-establishing each figure from a
+    walk would work too and is strictly more code to be wrong in; an unlink cannot be off by
+    one.
 
-    The counts go unconditionally, and only for those namespaces. This pass is the only thing
-    that deletes notes, so a deletion is the only thing a count can be wrong about, and the
-    namespaces a deletion happened in are exactly this set: dropping the count means it never
-    outlives a deletion, and the next create in that namespace pays one scan to rebuild it and
-    none after. Re-establishing each figure from the walk would work too and is strictly more
-    code to be wrong in; an unlink cannot be off by one.
+    Deliberately NOT under the span, which the rmdir below needs and this does not — one
+    scandir of `notes/` and an unlink apiece is the whole cost, and taking the span 10,114
+    times to make it is what put this pass at the top of the production lock profile. A create
+    racing the unlink is benign either way round. Landing between that create's read of the
+    file and its `+1`, the create re-persists the old figure plus one, and the next pass
+    unlinks it again: a drift survives one more interval and is never left lower than the
+    truth. Landing after `_check_note_capacity` rebuilt the file, `_count_new_note` finds
+    nothing to read and rebuilds by walking that one namespace, which is the right figure by
+    definition.
 
-    It used to iterate every namespace instead, which is what made this the single largest
-    holder of blocked time in production: 10,114 exclusive acquisitions of one lock per pass,
-    each one queued against a stream of creates holding it shared, on a store where all but a
-    handful of namespaces had nothing to clean. What is left is one acquisition per directory
-    the pass actually emptied — usually none. A namespace left empty by neither a deletion nor
-    a lock (a crash in the mkdir-to-open gap makes one) is not visited any more; it costs one
-    directory entry and the next create in that namespace moves back into it.
+    The rmdir is the half that needs the span, and it visits `dirs` only — the namespaces this
+    pass deleted a note in or swept a lock in. Runs after `_sweep_orphan_locks`, which is what
+    puts a namespace back to notes and locks only and so lets the rmdir reach an emptied one —
+    and which reports what it emptied into the same set, so a namespace drained by an earlier
+    pass is still reached. It used to try every namespace, which meant 10,114 exclusive
+    acquisitions of one lock per pass, each queued against a stream of creates holding it
+    shared, on a store where all but a handful had nothing to remove. A namespace left empty by
+    neither a deletion nor a lock (a crash in the mkdir-to-open gap makes one) is not visited
+    any more; it costs one directory entry and the next create there moves back into it.
 
     Under the create span, taken exclusively, for a nearer reason than the count's. A create
     makes its namespace directory inside `_locked`, one `mkdir` before the `open` that creates
@@ -1695,9 +1716,18 @@ def _drop_emptied_namespaces(root: Path, dirs: set[str]) -> None:
     reason this whole tail is best effort — `_reap` runs on the request path, and a pass that
     cannot take the span must skip a cleanup, never fail the create that triggered it.
     """
+    try:
+        with os.scandir(root / "notes") as namespaces:
+            for ns in namespaces:
+                with suppress(OSError):  # a stray file, or a tree we may not write
+                    Path(ns.path, NOTES_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass  # no notes yet, or nothing readable: either way there is no count to drop
     for d in map(Path, dirs):
         try:
             with _locked((root / NOTES_FILE).with_suffix(".create")):
+                # Again, so the rmdir below still meets an empty directory on a pass whose
+                # scandir above could not read `notes/` at all.
                 (d / NOTES_FILE).unlink(missing_ok=True)
                 # Buckets first: since sharding a namespace's notes sit a level further down,
                 # so a drained namespace holds empty directories, and rmdir refuses those
@@ -1716,6 +1746,22 @@ def _reap(root: Path) -> None:
     it doubles as the answer to namespace squatting: a hard cap alone would let an attacker
     park MAX_ROOMS junk rooms forever. Eviction-by-idleness expires the junk without ever
     letting one caller evict another's *active* room.
+
+    One pass at a time across the whole service, which the timestamp alone did not buy:
+    reading the marker and touching it are two unserialised operations, so two of the ~230
+    workers arriving together on an interval boundary both passed the check — and a walk that
+    takes longer than REAP_EVERY is overlapped by the next writer however the check is
+    written. Two passes interleaved write a count *below* the disk: the second deletes and
+    settles while the first is still walking, and the first then installs a figure measured
+    against a window the second has already spent (see `_settle_count`). So the marker
+    carries a lock as well as a timestamp, taken non-blocking around the whole pass — a caller
+    that cannot have it is one whose work is already being done, and the throttle would have
+    refused it a moment later anyway. Nothing else ever takes this lock, so it orders against
+    nothing and cannot deadlock.
+
+    The throttle itself stays outside that lock, and the touch with it, exactly where they
+    were: the lock is a mutex on the pass, not on the marker, and arming the throttle before
+    the walk starts is what keeps a 30 s pass from being re-run by the very next writer.
     """
     marker = root / ".reaped"
     now = time.time()
@@ -1726,6 +1772,17 @@ def _reap(root: Path) -> None:
         pass
     root.mkdir(parents=True, exist_ok=True)
     marker.touch()
+    try:
+        with _locked(marker, nb=True):
+            _reap_pass(root, now)
+    except BlockingIOError:
+        return  # a pass is already running in another worker; nothing here waits for it
+
+
+def _reap_pass(root: Path, now: float) -> None:
+    """One pass, under the marker lock and past the throttle — see `_reap`, which owns both.
+    `now` is that caller's instant, so every reapability decision in the pass is made against
+    one clock rather than one that moves through it."""
     # Rooms only: the stillborn rule is a room rule, so folding reaped notes into the same
     # two counters would make "idle" mean two different things in one number.
     reaped = {"reaped_idle": 0, "reaped_stillborn": 0}

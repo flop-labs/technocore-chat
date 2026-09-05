@@ -73,10 +73,12 @@ def test_a_new_note_reads_the_same_number_of_directories_at_any_store_size(
 
 
 def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, monkeypatch):
-    """The count file is not durable state: `_reap` drops every one of them, because a
-    deletion pass is the only thing that can make one wrong. So the shape a flood actually
-    sees is one rebuild scan per namespace per reap interval, then nothing — not one scan
-    per create, and never a count that outlived the notes it counted.
+    """The count file is not durable state: `_reap` drops every one of them, because more
+    than one thing can leave one wrong and none of them announces itself — a reap deleting
+    the notes it counted, a create that crashed between its reservation and its write, an
+    increment lost to an unclean shutdown. So the shape a flood actually sees is one rebuild
+    scan per namespace per reap interval, then nothing — not one scan per create, and never a
+    count that outlived the notes it counted.
     """
     import store
 
@@ -970,3 +972,43 @@ def test_a_reap_dropping_a_namespace_still_waits_for_a_create_entering_it(
     creator[0].join(10)
     assert not died, f"the reap killed a create it raced: {died!r}"
     assert store.note_get(tmp_path, "doomed", "fresh") == "v", "the create it raced must survive"
+
+
+def test_a_second_reap_pass_gives_up_rather_than_overlapping_the_first(tmp_path, monkeypatch):
+    """Two passes running at once write a count *below* the disk, which is the one direction
+    that breaches a cap.
+
+    Reading the marker and touching it are two unserialised operations, and a pass can outlast
+    REAP_EVERY on its own, so at an interval boundary two of the ~230 workers really do both
+    start one. Interleaved, they lose creates: the first reads `before` as C, the second
+    deletes D notes and settles C-D, the first's walk then runs against the smaller store and
+    keeps C-D, N creates land past its cursor, and the first writes
+    (C-D) + max(0, (C-D+N) - C) = C-D against a disk holding C-D+N.
+
+    The marker carries a non-blocking lock around the whole pass, so the second caller returns
+    instead. Asserted on the walks themselves rather than on a timing, and joined with a bound
+    so a pass that queues for the lock fails here rather than hanging the suite.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "k", "v")
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # the throttle refuses nobody: only the lock can
+    real_walk = store._walk
+    walked, second = [], []
+
+    def walk_but_run_a_second_pass_from_inside_the_first(d, suffix):
+        walked.append(threading.current_thread().name)
+        if not second:
+            second.append(threading.Thread(target=store._reap, args=(tmp_path,), name="second"))
+            second[0].start()
+            second[0].join(10)  # it has to give up on its own: this thread holds the marker
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_run_a_second_pass_from_inside_the_first)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert second and not second[0].is_alive(), "the second pass queued instead of giving up"
+    assert walked, "premise: the first pass walked"
+    assert "second" not in walked, f"two passes walked the store at once: {walked}"
+    assert store._note_totals(tmp_path) == store._count_notes(tmp_path), "and the count holds"
