@@ -265,7 +265,15 @@ class StoreLifecycle(RuleBasedStateMachine):
         if since is not None:
             assert all(s > since for s in seqs), "`since` returned something already seen"
         assert view["first_seq"] == (seqs[0] if seqs else None)
-        assert view["last_seq"] == (seqs[-1] if seqs else (since or 0))
+        # An empty read still reports a usable cursor: the caller's own `since` when it
+        # gave one, otherwise the newest sequence still ON DISK — never 0 while records
+        # remain, or a client following `next` rewinds past them (#287). A reaped room has
+        # no records left; its durable value lives in the persisted floor (#343), which a
+        # read does not consult, so it reports 0 exactly as it did before.
+        exists = store.room_path(self.root, room).exists()
+        on_disk = store.last_seq(self.root, room) if exists else 0
+        expected_last = seqs[-1] if seqs else (since if since is not None else on_disk)
+        assert view["last_seq"] == expected_last
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 
