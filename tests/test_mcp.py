@@ -265,12 +265,17 @@ ADVERTISED = {
             "text": "string",
             "did": "string?",
             "sig": "string?",
-            "nonce": "integer?",
+            "nonce": "integer|string?",
         },
         ["room", "text"],
     ),
     "claim_room": (
-        {"room": "string", "did": "string?", "sig": "string?", "nonce": "integer?"},
+        {
+            "room": "string",
+            "did": "string?",
+            "sig": "string?",
+            "nonce": "integer|string?",
+        },
         ["room"],
     ),
     "set_room_allow": (
@@ -279,7 +284,7 @@ ADVERTISED = {
             "dids": "string",
             "did": "string?",
             "sig": "string?",
-            "nonce": "integer?",
+            "nonce": "integer|string?",
         },
         ["room", "dids"],
     ),
@@ -335,12 +340,13 @@ ANNOTATED = {
 
 
 def named(schema: dict) -> str:
-    """The one word a property's schema says about its type, optional arms folded in."""
+    """The effective types in a property's schema, optional arms folded in."""
     if "type" in schema:
         return schema["type"]
     arms = [arm for arm in schema["anyOf"] if arm.get("type") != "null"]
-    assert len(arms) == 1, schema
-    return arms[0]["type"] + "?"
+    nullable = len(arms) != len(schema["anyOf"])
+    types = "|".join(sorted(arm["type"] for arm in arms))
+    return types + ("?" if nullable else "")
 
 
 def test_every_tool_is_listed_with_a_usable_schema(mcp):
@@ -376,6 +382,20 @@ def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
     write_note = next(tool for tool in tools if tool.name == "write_note")
     assert "Send one condition, not both." in write_note.description
+
+
+def test_signed_nonce_schema_preserves_values_past_javascript_integer_precision(mcp):
+    """A signature covers the nonce's exact digits, so a JavaScript client must not be
+    invited to round a service-valid 19-digit value through its JSON number type."""
+    schemas = {tool.name: tool.input_schema for tool in mcp.tools()}
+    for name in ("say_signed", "claim_room", "set_room_allow"):
+        nonce = schemas[name]["properties"]["nonce"]
+        arms = {arm.get("type"): arm for arm in nonce["anyOf"]}
+        assert set(arms) == {"string", "integer", "null"}
+        assert arms["string"]["pattern"] == mcp.module.NONCE_PATTERN
+        assert arms["integer"]["minimum"] == 0
+        assert arms["integer"]["maximum"] == mcp.module.JSON_SAFE_INTEGER
+        assert "decimal digits" in nonce["description"]
 
 
 def test_every_tool_publishes_its_effect_annotations(mcp):
@@ -933,6 +953,48 @@ def test_an_external_signature_passes_through_without_a_server_key(mcp):
     )
     assert reply.is_error is False, text_of(reply)
     assert swept in text_of(mcp.call("read_room", {"room": "mb-inbox"}))
+
+
+def test_an_external_signature_keeps_a_19_digit_nonce_exact(mcp):
+    """The decimal-string arm carries every service-valid nonce without JSON rounding."""
+    from _client import _keypair
+
+    assert mcp.module._signer is None
+    did, sign = _keypair(seed=5)
+    nonce = "1750000000000000001"
+    canonical = f"mb-inbox|{nonce}|large nonce"
+    reply = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "large nonce",
+            "did": did,
+            "sig": sign(canonical),
+            "nonce": nonce,
+        },
+    )
+    assert reply.is_error is False, text_of(reply)
+
+
+def test_an_unsafe_json_integer_nonce_is_refused_before_the_network(mcp):
+    """A rounded number must fail locally with the schema pointing callers to strings."""
+    from _client import _keypair
+
+    did, sign = _keypair(seed=6)
+    nonce = mcp.module.JSON_SAFE_INTEGER + 1
+    before = len(mcp.sent)
+    reply = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "unsafe numeric nonce",
+            "did": did,
+            "sig": sign(f"mb-inbox|{nonce}|unsafe numeric nonce"),
+            "nonce": nonce,
+        },
+    )
+    assert reply.is_error is True
+    assert len(mcp.sent) == before
 
 
 def test_a_partial_external_signature_is_refused_before_the_network(mcp, monkeypatch):

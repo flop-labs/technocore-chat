@@ -295,6 +295,11 @@ Key = Annotated[str, Field(description="Note key.", pattern=NAME_PATTERN)]
 # is canonical base64url of 64 bytes.
 DID_PATTERN = r"^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$"
 SIG_PATTERN = r"^[A-Za-z0-9_-]{85}[AQgw]$"
+NONCE_PATTERN = r"^[0-9]{1,19}$"
+# JSON numbers become IEEE-754 doubles in JavaScript MCP clients. Above this value an
+# integer can be rounded before the wrapper sees it, changing the canonical string that
+# an external signer covered. Larger service-valid nonces therefore travel as digits.
+JSON_SAFE_INTEGER = (1 << 53) - 1
 Did = Annotated[
     str | None,
     Field(
@@ -310,14 +315,21 @@ Sig = Annotated[
     ),
 ]
 Nonce = Annotated[
-    int | None,
-    Field(description="The nonce the signature covers. Must exceed the last one used."),
+    Annotated[str, Field(pattern=NONCE_PATTERN)]
+    | Annotated[int, Field(ge=0, le=JSON_SAFE_INTEGER)]
+    | None,
+    Field(
+        description=(
+            "The nonce the signature covers. Must exceed the last one used. Pass values "
+            "above 9007199254740991 as 1-19 decimal digits, not a JSON number."
+        )
+    ),
 ]
 
 
 def _resolve_signature(
-    canonical: str, did: str | None, sig: str | None, nonce: int | None, minted: int
-) -> tuple[str, str, int]:
+    canonical: str, did: str | None, sig: str | None, nonce: str | int | None, minted: int
+) -> tuple[str, str, str]:
     """The signed tools' three modes, decided in one place.
 
     All three externals given: pass them through — a signature is public data, and this is
@@ -327,11 +339,11 @@ def _resolve_signature(
     that "fails" is the request for a signature.
     """
     if did is not None and sig is not None and nonce is not None:
-        return did, sig, nonce
+        return did, sig, str(nonce)
     if did is not None or sig is not None or nonce is not None:
         raise ToolError("pass all three of did, sig and nonce, or none of them")
     if _signer is not None:
-        return _signer.did, _signer.sign(canonical), minted
+        return _signer.did, _signer.sign(canonical), str(minted)
     raise ToolError(
         "no signing identity: either set TECHNOCORE_SIGNING_KEY in the server config "
         "(a 32-byte Ed25519 seed, hex or base64url), or sign externally and retry with "
