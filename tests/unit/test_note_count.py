@@ -841,3 +841,132 @@ def test_a_create_the_walk_could_not_see_leaves_the_count_at_or_above_the_disk(
     assert on_disk[0] == 2, "premise: the walk had already passed the namespace"
     assert store._note_count(tmp_path) >= on_disk[0], "a count below the disk breaches the cap"
     assert store._note_totals(tmp_path) == on_disk, "and the create is counted exactly once"
+
+
+def _exclusive_takes(monkeypatch, name: str, work) -> int:
+    """How many times `work` takes `<name>.create` exclusively. The unit that matters for this
+    lock: shared holders coexist, so it is the exclusive acquisitions that every create in the
+    store queues behind, and the old shape took one per namespace on every pass."""
+    import store
+
+    taken = 0
+    real = store._locked
+
+    def counting(target, shared=False, nb=False):
+        nonlocal taken
+        if not shared and target.name == f"{name}.create":
+            taken += 1
+        return real(target, shared, nb)
+
+    monkeypatch.setattr(store, "_locked", counting)
+    work()
+    monkeypatch.setattr(store, "_locked", real)
+    return taken
+
+
+@pytest.mark.parametrize("namespaces", [4, 30])
+def test_a_pass_takes_the_note_span_a_constant_number_of_times(tmp_path, monkeypatch, namespaces):
+    """`_drop_emptied_namespaces` took `.notes-count.create` exclusively once per namespace,
+    every pass, and dropped a count file that nothing had deleted from. At 10,114 namespaces
+    that is 10,114 exclusive acquisitions of the one lock every note create holds shared —
+    the single largest holder of blocked time in the production profile.
+
+    Two per pass now, whatever the store holds: one to read the counter with the creates
+    waited out, one to install what the walk measured. Parametrised rather than looped so a
+    failure names the size it failed at; both sizes must give the same number, which is the
+    whole claim.
+    """
+    import store
+
+    root = tmp_path / f"store{namespaces}"
+    _seed(root, namespaces)
+    _due(root)
+    taken = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(root))
+
+    assert taken == 2, f"{namespaces} namespaces cost {taken} exclusive acquisitions, not 2"
+
+
+def test_only_a_namespace_the_pass_emptied_costs_an_acquisition(tmp_path, monkeypatch) -> None:
+    """The other half: cheap must not mean nothing gets cleaned up. A count file may only be
+    wrong about a deletion, and this pass is the only thing that deletes, so the namespaces it
+    deleted in — plus the ones whose orphan lock it swept — are exactly the ones worth
+    visiting. One acquisition each, and none for the rest of the store.
+    """
+    import store
+
+    _seed(tmp_path, 8)
+    drained = tmp_path / "notes" / "ns3"
+    aged = time.time() - store.IDLE_SECONDS - 60
+    for path in drained.rglob("*"):  # its note and the sidecar lock the sweep then reclaims
+        os.utime(path, (aged, aged))
+
+    _due(tmp_path)
+    emptying = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(tmp_path))
+    assert emptying == 3, "the two counter acquisitions, plus the one namespace it emptied"
+    assert not drained.exists(), "…and the emptied namespace really was dropped"
+    assert store.note_get(tmp_path, "ns4", "seed") == "v", "while the rest is untouched"
+
+    _due(tmp_path)
+    settled = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(tmp_path))
+    assert settled == 2, "and a pass with nothing to drop is back to the constant"
+
+
+def test_a_reap_dropping_a_namespace_still_waits_for_a_create_entering_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The mkdir-to-open race, moved to where the pass now goes. Visiting only the namespaces
+    it emptied does not make the rmdir safe: those are precisely the directories a create can
+    be halfway into, and `_locked` makes a namespace and its bucket one `mkdir` before the
+    `open` that creates the sidecar lock inside them. Removing them in that gap fails the
+    create outright — ENOENT, or EINVAL on APFS — on a path it had just made.
+
+    The window is built rather than waited for: the create is started where the pass is about
+    to take the span, and parked between the mkdir and the open until the pass is done. Unfixed
+    the rmdir sweeps the bucket the create just made and the create dies on the open; fixed the
+    pass blocks on the span the create holds shared, the park times out, and the create
+    completes. The bounded wait is what keeps that from being a deadlock.
+    """
+    import store
+
+    store.note_set(tmp_path, "doomed", "old", "v")
+    aged = time.time() - store.IDLE_SECONDS - 60
+    for path in (tmp_path / "notes" / "doomed").rglob("*"):
+        os.utime(path, (aged, aged))
+
+    at_the_window, reap_done = threading.Event(), threading.Event()
+    creator, died, visited = [], [], []
+    real_open, real_drop = open, store._drop_emptied_namespaces
+    sidecar = f"{store.note_path(tmp_path, 'doomed', 'fresh')}.lock"
+
+    def open_the_sidecar_lock_but_park_in_the_window(path, *a, **kw):
+        if str(path) == sidecar:
+            at_the_window.set()
+            reap_done.wait(1.0)  # unfixed the pass gets past here; fixed it is stuck on the span
+        return real_open(path, *a, **kw)
+
+    def create():
+        try:
+            store.note_set(tmp_path, "doomed", "fresh", "v")
+        except BaseException as exc:  # noqa: BLE001 — recorded for the assertion, not hidden
+            died.append(exc)
+
+    def drop_but_let_a_create_into_the_window_first(root, dirs):
+        visited.extend(dirs)
+        creator.append(threading.Thread(target=create))
+        creator[0].start()
+        at_the_window.wait(5)
+        return real_drop(root, dirs)
+
+    monkeypatch.setattr(store, "open", open_the_sidecar_lock_but_park_in_the_window, raising=False)
+    monkeypatch.setattr(
+        store, "_drop_emptied_namespaces", drop_but_let_a_create_into_the_window_first
+    )
+    _due(tmp_path)
+    store._reap(tmp_path)
+    reap_done.set()
+
+    assert visited == [str(tmp_path / "notes" / "doomed")], "premise: the pass visits it"
+    assert at_the_window.is_set(), "premise: the create reached the mkdir/open window"
+    creator[0].join(10)
+    assert not died, f"the reap killed a create it raced: {died!r}"
+    assert store.note_get(tmp_path, "doomed", "fresh") == "v", "the create it raced must survive"

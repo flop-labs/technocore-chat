@@ -600,14 +600,18 @@ def note_path(root: Path, ns: str, key: str) -> Path:
 def _prune(d: Path | str) -> bool:
     """Drop empty directories under `d`, deepest first; True when `d` itself is now empty.
 
-    Sharding turns an emptied bucket into litter that never goes away on its own: a reaped
-    room leaves `rooms/<shard>/` behind, and every later walk pays to open it and find
-    nothing. Left alone that is a new unbounded resource — bounded only by the 256 buckets —
-    and it is also what would stop `_drop_emptied_namespaces` working at all, since a
-    namespace holding nothing but empty buckets is not an empty directory to rmdir.
+    Sharding turns an emptied bucket into litter that never goes away on its own: a drained
+    namespace keeps `<ns>/<shard>/` and every later walk pays to open it and find nothing.
+    Left alone that is a new unbounded resource, and it is also what would stop
+    `_drop_emptied_namespaces` working at all, since a namespace holding nothing but empty
+    buckets is not an empty directory to rmdir.
+
+    A namespace is the only thing walked this way now. A room bucket holds no directories, so
+    `_reap` rmdirs the buckets it emptied and nothing else — scanning all 256 of them under
+    the span every room create holds was most of what this pass used to block creates on.
 
     Never removes `d` itself: the caller owns that decision, because for a namespace it is
-    the last step and for `rooms/` it must not happen at all.
+    the last step.
     """
     empty = True
     try:
@@ -1490,6 +1494,16 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
         return False  # no room left to guard
 
 
+def _emptied(base: str, path: str, ns: bool) -> str:
+    """The directory a deletion of `path` may have left empty — for a room its bucket, for a
+    note its NAMESPACE and never the bucket the key landed in, because the namespace is the
+    level the count file, the cap and the rmdir all live at (`_note_ns_dir`) and `_prune`
+    reaches the buckets under it. Slices a known prefix for the same reason
+    `_guards_a_live_room` does: it runs once per deleted file and per swept lock.
+    """
+    return f"{base}{path[len(base) :].partition(os.sep)[0]}" if ns else os.path.dirname(path)
+
+
 def _counted_at(root: Path, name: str) -> tuple[int, int] | None:
     """`name`'s totals as of an instant with no create in flight, or None if the file did not
     parse. The reading taken *before* the reap walk, to be handed to `_settle_count` after it.
@@ -1600,10 +1614,15 @@ def _split_seq_state(root: Path) -> None:
         pass
 
 
-def _sweep_orphan_locks(root: Path, now: float) -> None:
+def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) -> None:
     """Unlink sidecar locks whose data file is gone and that have been idle as long as any
     reaped room. `now` is the caller's, so every reapability decision in one pass is made
     against one instant rather than a clock that moves through it.
+
+    Records what it emptied into `touched`, beside what the reap loop deleted, because a
+    swept lock is usually the last thing standing between a namespace or a bucket and being
+    empty — the deletion that drained it happened a pass or more ago, so without this the
+    directory would be empty and never looked at again.
 
     Sidecar locks are deliberately *not* removed with their data file: unlinking one a writer
     holds splits the lock domain, and the next writer locks a fresh inode. Sweeping the
@@ -1614,6 +1633,7 @@ def _sweep_orphan_locks(root: Path, now: float) -> None:
     bounded by the room cap: at most a week of churn in empty files.
     """
     for sub, suffix in (("rooms", ".jsonl.lock"), ("notes", ".txt.lock")):
+        base = f"{root / sub}{os.sep}"
         for entry in _walk(root / sub, suffix):
             try:
                 # Slicing `.lock` off the name is `Path.with_suffix("")` without the Path,
@@ -1630,21 +1650,33 @@ def _sweep_orphan_locks(root: Path, now: float) -> None:
                 if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
                 os.unlink(entry.path)
+                touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue
 
 
-def _drop_emptied_namespaces(root: Path) -> None:
+def _drop_emptied_namespaces(root: Path, dirs: set[str]) -> None:
     """Drop each per-namespace count, and then the namespace itself if that leaves it empty.
+    `dirs` is the namespaces this pass deleted a note in or swept a lock in, and nothing else.
 
     Runs after `_sweep_orphan_locks`, which is what puts a namespace back to notes and locks
-    only and so lets the rmdir here reach an emptied one.
+    only and so lets the rmdir here reach an emptied one — and which reports what it emptied
+    into the same set, so a namespace drained by an earlier pass is still reached.
 
-    The counts go unconditionally. This pass is the only thing that deletes notes, so it is
-    also the only thing those counts can be wrong about — dropping them means a count file
-    never outlives a deletion, and the next create in that namespace pays one scan to rebuild
-    it and none after. Re-establishing each figure from the walk would work too and is
-    strictly more code to be wrong in; an unlink cannot be off by one.
+    The counts go unconditionally, and only for those namespaces. This pass is the only thing
+    that deletes notes, so a deletion is the only thing a count can be wrong about, and the
+    namespaces a deletion happened in are exactly this set: dropping the count means it never
+    outlives a deletion, and the next create in that namespace pays one scan to rebuild it and
+    none after. Re-establishing each figure from the walk would work too and is strictly more
+    code to be wrong in; an unlink cannot be off by one.
+
+    It used to iterate every namespace instead, which is what made this the single largest
+    holder of blocked time in production: 10,114 exclusive acquisitions of one lock per pass,
+    each one queued against a stream of creates holding it shared, on a store where all but a
+    handful of namespaces had nothing to clean. What is left is one acquisition per directory
+    the pass actually emptied — usually none. A namespace left empty by neither a deletion nor
+    a lock (a crash in the mkdir-to-open gap makes one) is not visited any more; it costs one
+    directory entry and the next create in that namespace moves back into it.
 
     Under the create span, taken exclusively, for a nearer reason than the count's. A create
     makes its namespace directory inside `_locked`, one `mkdir` before the `open` that creates
@@ -1663,7 +1695,7 @@ def _drop_emptied_namespaces(root: Path) -> None:
     reason this whole tail is best effort — `_reap` runs on the request path, and a pass that
     cannot take the span must skip a cleanup, never fail the create that triggered it.
     """
-    for d in (root / "notes").glob("*"):
+    for d in map(Path, dirs):
         try:
             with _locked((root / NOTES_FILE).with_suffix(".create")):
                 (d / NOTES_FILE).unlink(missing_ok=True)
@@ -1703,9 +1735,12 @@ def _reap(root: Path) -> None:
     # create waited out, so `_settle_count` can tell what was created while the walk ran.
     kept = {"rooms": [0, 0], "notes": [0, 0]}
     before = {name: _counted_at(root, name) for name in (USAGE_FILE, NOTES_FILE)}
+    # And the directories it emptied, which is the only place a bucket or a namespace can
+    # need removing: nothing else in the store deletes.
+    touched: dict[str, set[str]] = {"rooms": set(), "notes": set()}
     for sub, suffix, stillborn_rule in (("rooms", ".jsonl", True), ("notes", ".txt", False)):
         base = f"{root / sub}{os.sep}"
-        held = kept[sub]
+        held, emptied = kept[sub], touched[sub]
         for entry in _walk(root / sub, suffix):
             try:
                 # One stat per entry, before any branch can skip it: a guard note is kept, so
@@ -1744,6 +1779,7 @@ def _reap(root: Path) -> None:
                         p.unlink(missing_ok=True)
                         held[0] -= 1
                         held[1] -= st.st_size
+                        emptied.add(_emptied(base, entry.path, sub == "notes"))
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
                             reaped[f"reaped_{reason}"] += 1
@@ -1751,24 +1787,27 @@ def _reap(root: Path) -> None:
                 continue  # racing writer or vanished file: next pass picks it up
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room
         _bump(root, **reaped)
-    _sweep_orphan_locks(root, now)
+    _sweep_orphan_locks(root, now, touched)
     # Both counts after the deletions and after the orphan-lock sweep, so each figure
     # describes the disk as it now is. Each is one exclusive acquisition of its own span held
     # for a read and a replace; nothing that scales with the store happens inside either, which
     # is the whole point — every create in the service queues on these two files.
     _settle_count(root, NOTES_FILE, before[NOTES_FILE], kept["notes"])
     _settle_count(root, USAGE_FILE, before[USAGE_FILE], kept["rooms"])
-    _drop_emptied_namespaces(root)
+    _drop_emptied_namespaces(root, touched["notes"])
     _split_seq_state(root)  # once in the life of a store; a no-op every pass after
-    # The buckets, under the room span for the mkdir-to-open reason `_drop_emptied_namespaces`
-    # gives: `_locked` makes a bucket one `mkdir` before opening the sidecar lock inside it,
-    # and removing it in that gap fails the create outright. After the sweep, so `_prune` can
-    # reach a bucket whose last orphan lock has just gone.
-    try:
-        with _locked((root / USAGE_FILE).with_suffix(".create")):
-            _prune(root / "rooms")
-    except OSError:
-        pass  # best effort: a pass that cannot take the span leaves the litter to the next
+    # The buckets the pass emptied, one span acquisition each, for the mkdir-to-open reason
+    # `_drop_emptied_namespaces` gives: `_locked` makes a bucket one `mkdir` before opening
+    # the sidecar lock inside it, and removing it in that gap fails the create outright. This
+    # was `_prune(rooms)`, a scandir of all 256 buckets and everything in them under the span
+    # every create in the store queues on; a bucket only ever needs removing if this pass
+    # emptied it. After the sweep, so a bucket whose last orphan lock has just gone is reached.
+    for d in touched["rooms"] - {str(root / "rooms")}:  # a flat legacy room's dirname IS that
+        try:
+            with _locked((root / USAGE_FILE).with_suffix(".create")):
+                os.rmdir(d)  # empty buckets only: rmdir refuses a directory with entries
+        except OSError:
+            continue  # best effort, like the rest of the tail: the next pass tries again
 
 
 def snapshots(root: Path) -> list[dict]:
