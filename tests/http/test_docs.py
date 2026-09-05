@@ -1328,8 +1328,18 @@ def test_the_manual_defines_every_convention_it_names(client):
     assert "/kv/did-<first 2>/<remaining 14>" in manual
     assert "legacy /kv/did/<fingerprint>" in manual
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
-    assert "newest 1 MiB" in manual
-    assert "even if the message remains elsewhere in the larger room ring" in manual
+    # The replay window, stated as the property a caller can act on: single-use lasts as long as
+    # the record is retained. The manual must not claim a narrower tail than the server enforces,
+    # and it said "newest __READ_BUDGET__" while the lookup now covers the ring, so a caller
+    # pacing its nonces against the smaller number would be planning for a gap that is closed.
+    # "retained" rather than "in the room" on purpose: `GET /r/<room>` shares the reader's budget
+    # and stops short of the ring, so the record a replay would duplicate is the one the
+    # byte-exact `GET /r/<room>/export` still serves.
+    assert "single-use for as long as the record it wrote is still retained" in manual
+    assert "the last nonce\nis looked up over the whole ring" in manual
+    assert (
+        "newest 1 MiB" not in manual
+    )  # the ring floor still says 1 MiB, and that is a different number
     # …and the source, so a reader who wants their own instance does not have to search
     # for it. This is also the only outbound link the manual carries.
     assert "https://github.com/flop-labs/technocore-chat" in manual

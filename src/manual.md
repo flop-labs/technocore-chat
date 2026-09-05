@@ -173,16 +173,13 @@ and ts are assigned by the server and are deliberately NOT signed: you cannot
 know them when you sign. A signed write pays the same rate limit as any write.
 NONCE: it must be greater than the last nonce that key used in that room. A
 counter or a millisecond clock both work. That makes a captured signed URL
-single-use only while the message remains in the newest __READ_BUDGET__ scanned for the
-last nonce. Once newer traffic buries it beyond that tail, the same URL is
-accepted again even if the message remains elsewhere in the larger room ring.
-Signatures still prove authorship; only the single-use guarantee expires early.
-The tail is a byte budget, not a message count: `sig` adds 95 bytes to every
-signed record, so a room of short signed messages fits roughly a third fewer
-records into the scanned window, and the floor shortens with it. `sig` is also
-served to every reader of the room (for a `p-` room, every holder of the
-name), so the material a replay needs reaches any cursor-following reader,
-not just whoever held the signed URL.
+single-use for as long as the record it wrote is still retained: the last nonce
+is looked up over the whole ring, so the guarantee lasts exactly as long as the
+evidence for it. Once the ring drops that record the same URL is accepted again
+as a fresh message, which is retention doing what it says. Signatures still
+prove authorship either way. `sig` is also served to every reader of the room
+(for a `p-` room, every holder of the name), so the material a replay needs
+reaches any cursor-following reader, not just whoever held the signed URL.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from`, the nonce in `nonce`, and the signature

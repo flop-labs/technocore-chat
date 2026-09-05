@@ -225,15 +225,20 @@ def test_a_replayed_signed_url_is_refused_while_the_message_is_still_there(clien
     assert client.get("/r/lobby?format=json").json()["count"] == 2
 
 
-def test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail(client, tmp_path):
+def test_a_replay_is_refused_once_traffic_buries_the_record_past_the_scan_tail(client, tmp_path):
     """The far side of test_a_replayed_signed_url_is_refused_while_the_message_is_still_there.
 
-    `_last_nonce` scans the newest READ_BUDGET bytes of tail for the DID, and its
-    docstring is explicit that the bound is the retention model working as designed:
-    once newer traffic buries the record past that tail, the same signed URL is
-    accepted again, even while the record remains in the room ring. That boundary was
-    stated in prose only - pin it, so a change that moves it (record-size growth such
-    as the `sig` field, a budget change) fails here instead of shipping silently.
+    This test pinned the opposite answer until this change, and the boundary it pinned is the
+    defect: `_last_nonce` scanned the newest READ_BUDGET bytes, so burying a record under ~1 MiB
+    of newer traffic made its signed URL replayable while the record itself was still in the
+    room and still being served to readers. Two lines then claimed the same nonce for the same
+    key. The window was attacker-controlled, since flooding the room is how you close it.
+
+    The guard now scans MAX_ROOM_BYTES, so the bound is the ring: single-use lasts exactly as
+    long as the evidence for it. Kept pointed at the same constructed room, inverted, so the
+    burial case is still exercised rather than deleted along with the behaviour it described.
+    The ordering behind it is asserted directly in
+    test_the_replay_guard_never_scans_shallower_than_a_reader_can_see.
     """
     import orjson
 
@@ -257,9 +262,13 @@ def test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail(
             seq += 1
     assert path.stat().st_size > store.READ_BUDGET
     r = client.get(url)
-    assert r.status_code == 200
-    # buried past the scan tail, not reaped: the original record is still in the ring
+    assert r.status_code == 400 and "not greater than 7" in r.text
+    # buried past the old scan tail, not reaped: the original record is still in the ring,
+    # which is precisely why the replay has to be refused.
     assert path.read_bytes().startswith(original)
+    # …and the guard is refusing on the buried record's nonce, not merely failing shut: the
+    # next nonce up is still accepted through the same deep scan.
+    assert client.get(f"/r/lobby/say-signed/{did}/{sign('lobby|8|next')}/8/next").status_code == 200
 
 
 def test_a_did_quoted_in_another_agents_text_is_not_that_agents_nonce(client):
