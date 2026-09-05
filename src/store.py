@@ -1505,7 +1505,8 @@ def _emptied(base: str, path: str, ns: bool) -> str:
     note its NAMESPACE and never the bucket the key landed in, because the namespace is the
     level the count file, the cap and the rmdir all live at (`_note_ns_dir`) and `_prune`
     reaches the buckets under it. Slices a known prefix for the same reason
-    `_guards_a_live_room` does: it runs once per deleted file and per swept lock.
+    `_guards_a_live_room` does: it runs once per note the walk sees — that is how the pass
+    totals a namespace — and again per deleted file and per swept lock.
     """
     return f"{base}{path[len(base) :].partition(os.sep)[0]}" if ns else os.path.dirname(path)
 
@@ -1665,43 +1666,68 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                 continue
 
 
-def _drop_emptied_namespaces(root: Path, dirs: set[str]) -> None:
-    """Drop every per-namespace count, and then the namespaces this pass emptied. Two jobs
-    with two costs, which is why they are two loops.
+def _drop_emptied_namespaces(
+    root: Path, before_ns: dict[str, tuple[int, int] | None], per_ns: Counter[str], dirs: set[str]
+) -> None:
+    """Drop the per-namespace count of every namespace whose file did not hold still at what
+    this pass walked, and remove the namespaces this pass emptied. One scandir of `notes/`,
+    and an acquisition only where there is something to heal.
 
-    The counts go unconditionally, for every namespace, because a deletion is not the only
-    thing one can be wrong about. A create reserves before it writes (see `_create_gate`), so
-    a crash in between leaves that namespace one high with no give-back coming, and under
-    CHAT_FSYNC=0 an unclean shutdown can lose an increment and leave it low. Neither is
-    reachable from the pass's own walk, and both are permanent against MAX_NOTES_PER_NS if
-    nothing drops the file: this is the only thing that heals them. The next create in that
-    namespace pays one scan to rebuild it and none after. Re-establishing each figure from a
-    walk would work too and is strictly more code to be wrong in; an unlink cannot be off by
-    one.
+    The predicate is `before == walk == after`: the file as `_reap_pass` read it before the
+    walk, the notes the walk itself totalled for that namespace, and the file as it stands
+    now. Anything else is dropped — a file that will not parse included — while one absent at
+    both ends has nothing to heal, since its next reader rebuilds by walking that namespace.
+    What it is looking for is everything a deletion-only rule missed: a create that reserved
+    and then crashed before writing leaves the figure one high with no give-back coming, and
+    under CHAT_FSYNC=0 an unclean shutdown can lose an increment and leave it low. Neither is
+    reachable from the deletions this pass made, and both are permanent against
+    MAX_NOTES_PER_NS if nothing drops the file. Both reads are unlocked, like every other read
+    of a counter — a replace is atomic, so each sees the old bytes or the new — and the extra
+    one is the price of the third point: one more read per namespace per pass, no lock and no
+    stat, against a comparison that a single create can otherwise walk straight through.
 
-    Deliberately NOT under the span, which the rmdir below needs and this does not — one
-    scandir of `notes/` and an unlink apiece is the whole cost, and taking the span 10,114
-    times to make it is what put this pass at the top of the production lock profile. A create
-    racing the unlink is benign either way round. Landing between that create's read of the
-    file and its `+1`, the create re-persists the old figure plus one, and the next pass
-    unlinks it again: a drift survives one more interval and is never left lower than the
-    truth. Landing after `_check_note_capacity` rebuilt the file, `_count_new_note` finds
-    nothing to read and rebuilds by walking that one namespace, which is the right figure by
-    definition.
+    Two points were not enough. A file already low by one, and a single create landing after
+    the walk passed that namespace, agree perfectly at the second: the walk totals K, the
+    create moves the file from K-1 to K and the disk to K+1, and the drift outlives a pass
+    that looked right. Read before the walk as well and that is a mismatch, K-1 against K.
 
-    The rmdir is the half that needs the span, and it visits `dirs` only — the namespaces this
-    pass deleted a note in or swept a lock in. Runs after `_sweep_orphan_locks`, which is what
-    puts a namespace back to notes and locks only and so lets the rmdir reach an emptied one —
-    and which reports what it emptied into the same set, so a namespace drained by an earlier
-    pass is still reached. It used to try every namespace, which meant 10,114 exclusive
-    acquisitions of one lock per pass, each queued against a stream of creates holding it
-    shared, on a store where all but a handful had nothing to remove. A namespace left empty by
-    neither a deletion nor a lock (a crash in the mkdir-to-open gap makes one) is not visited
-    any more; it costs one directory entry and the next create there moves back into it.
+    What the third point buys, stated as what it does not buy. Agreement everywhere means the
+    file ended the pass where it started, so nothing landed during it but creates already
+    reserved at the before-read, and the walk cannot have counted more notes than the file
+    claimed at that moment. An over-high file therefore never agrees, and a namespace this
+    pass deleted in is in `dirs` and visited whatever its count says. A low file agrees only
+    by borrowing a reservation in flight at that first read — one that has moved the file and
+    not yet written its note — and then only if the walk misses exactly that note: an
+    undercount of one, surviving one pass. Reading with the creates waited out would close
+    that, and would mean holding the span across a read of every namespace, which is the hold
+    this branch exists to remove. It clears on any later pass whose reading does not land
+    inside a create, and MAX_NOTES_PER_NS is all it can over-admit against in between.
 
-    Under the create span, taken exclusively, for a nearer reason than the count's. A create
-    makes its namespace directory inside `_locked`, one `mkdir` before the `open` that creates
-    the sidecar lock in it, and the directory is still empty in between — precisely what this
+    The unlink is under the span, exclusively, and needs it every bit as much as the rmdir
+    below does. Unlocked it puts a count *below* its notes: create 1 has reserved
+    (`_count_new_note` wrote K+1) and is still writing its note when the file goes; create 2
+    finds nothing to read, rebuilds by walking a namespace whose K+1'th note is not on disk
+    yet, persists K, and reserves K+1 against it. Two notes were made, the file moved by one,
+    and the namespace over-admits against MAX_NOTES_PER_NS until something rewrites the
+    figure. Both creates hold the span shared, so only an exclusive holder is waited out for.
+
+    A create landing mid-pass shows up as a mismatch that heals nothing. It costs one unlink
+    and one rebuild scan by that namespace's next create — which is what every namespace paid
+    on every pass when the drop was unconditional, and that version took this span once per
+    namespace: 10,114 exclusive acquisitions of the lock every note create holds shared, the
+    single largest holder of blocked time in the production profile. In steady state this set
+    is empty or a handful.
+
+    The rmdir visits `dirs` alone — the namespaces this pass deleted a note in or swept a lock
+    in. It runs after `_sweep_orphan_locks`, which is what puts a namespace back to notes and
+    locks only and so lets the rmdir reach an emptied one, and which reports what it emptied
+    into the same set, so a namespace drained by an earlier pass is still reached. One left
+    empty by neither a deletion nor a lock (a crash in the mkdir-to-open gap makes one) is not
+    removed; it costs one directory entry and the next create there moves back into it.
+
+    That half wants the span for a nearer reason than the count's. A create makes its
+    namespace directory inside `_locked`, one `mkdir` before the `open` that creates the
+    sidecar lock in it, and the directory is still empty in between — precisely what this
     rmdir looks for. Removing it in that gap does not merely lose a race, it fails the create:
     creating a file in a directory being removed is EINVAL on APFS, measured here and needing
     O_CREAT to reproduce at all, where a directory merely *gone* gives the ENOENT POSIX
@@ -1711,31 +1737,37 @@ def _drop_emptied_namespaces(root: Path, dirs: set[str]) -> None:
     exactly the gap to close.
 
     Per namespace rather than once around the loop: a create only ever needs the directory it
-    is entering to stand still, so holding the span across all 32 of them at the cap would
-    queue creates behind namespaces they have nothing to do with. Inside the `try` for the
-    reason this whole tail is best effort — `_reap` runs on the request path, and a pass that
-    cannot take the span must skip a cleanup, never fail the create that triggered it.
+    is entering to stand still, so holding the span across all of them would queue creates
+    behind namespaces they have nothing to do with. Inside the `try` for the reason this whole
+    tail is best effort — `_reap` runs on the request path, and a pass that cannot take the
+    span must skip a cleanup, never fail the create that triggered it.
     """
     try:
         with os.scandir(root / "notes") as namespaces:
             for ns in namespaces:
-                with suppress(OSError):  # a stray file, or a tree we may not write
-                    Path(ns.path, NOTES_FILE).unlink(missing_ok=True)
+                before, after = before_ns.get(ns.path), _read_counts(Path(ns.path))
+                file = f"{ns.path}{os.sep}{NOTES_FILE}"
+                # Steady at both ends and equal to the walk between them, or never there at
+                # all: nothing to heal. A file that will not parse reads as neither, and the
+                # `or` chain is why the access check costs a syscall only when it decides.
+                fresh = before and after and before[0] == per_ns[ns.path] == after[0]
+                settled = fresh or not (before or after or os.access(file, os.F_OK))
+                if settled and ns.path not in dirs:
+                    continue
+                try:
+                    with _locked((root / NOTES_FILE).with_suffix(".create")):
+                        Path(file).unlink(missing_ok=True)
+                        if ns.path in dirs:
+                            # Buckets first: since sharding a namespace's notes sit a level
+                            # further down, so a drained namespace holds empty directories,
+                            # and rmdir refuses those exactly as it refuses notes. Without
+                            # this the namespace below never goes.
+                            _prune(ns.path)
+                            os.rmdir(ns.path)  # rmdir refuses a directory with entries
+                except OSError:
+                    continue  # a tree we may not write, or a create that got there first
     except OSError:
-        pass  # no notes yet, or nothing readable: either way there is no count to drop
-    for d in map(Path, dirs):
-        try:
-            with _locked((root / NOTES_FILE).with_suffix(".create")):
-                # Again, so the rmdir below still meets an empty directory on a pass whose
-                # scandir above could not read `notes/` at all.
-                (d / NOTES_FILE).unlink(missing_ok=True)
-                # Buckets first: since sharding a namespace's notes sit a level further down,
-                # so a drained namespace holds empty directories, and rmdir refuses those
-                # exactly as it refuses notes. Without this the namespace below never goes.
-                _prune(d)
-                d.rmdir()  # empty namespaces only: rmdir refuses a directory with entries
-        except OSError:
-            continue
+        pass  # no notes yet, or nothing readable: no count to heal and no namespace to drop
 
 
 def _reap(root: Path) -> None:
@@ -1792,12 +1824,22 @@ def _reap_pass(root: Path, now: float) -> None:
     # create waited out, so `_settle_count` can tell what was created while the walk ran.
     kept = {"rooms": [0, 0], "notes": [0, 0]}
     before = {name: _counted_at(root, name) for name in (USAGE_FILE, NOTES_FILE)}
+    # The same total for notes, split by namespace: what `_drop_emptied_namespaces` compares
+    # each per-namespace count file against, so it drops the files that disagree and no others.
+    per_ns: Counter[str] = Counter()
+    # And every per-namespace count as it stands before the walk, unlocked and without a stat:
+    # the drop compares all three, because a file and a walk that agree can still be a drift a
+    # create moved into place while the walk ran.
+    before_ns: dict[str, tuple[int, int] | None] = {}
+    with suppress(OSError), os.scandir(root / "notes") as entries:
+        before_ns = {e.path: _read_counts(Path(e.path)) for e in entries if e.is_dir()}
     # And the directories it emptied, which is the only place a bucket or a namespace can
     # need removing: nothing else in the store deletes.
     touched: dict[str, set[str]] = {"rooms": set(), "notes": set()}
     for sub, suffix, stillborn_rule in (("rooms", ".jsonl", True), ("notes", ".txt", False)):
         base = f"{root / sub}{os.sep}"
         held, emptied = kept[sub], touched[sub]
+        by_ns = sub == "notes"  # notes are counted per namespace as well as in total
         for entry in _walk(root / sub, suffix):
             try:
                 # One stat per entry, before any branch can skip it: a guard note is kept, so
@@ -1805,6 +1847,8 @@ def _reap_pass(root: Path, now: float) -> None:
                 st = entry.stat()
                 held[0] += 1
                 held[1] += st.st_size
+                if by_ns:
+                    per_ns[_emptied(base, entry.path, True)] += 1
                 if _guards_a_live_room(root, base, entry, now):
                     continue
                 if not _reapable(entry.path, now, stillborn_rule, st):
@@ -1836,7 +1880,9 @@ def _reap_pass(root: Path, now: float) -> None:
                         p.unlink(missing_ok=True)
                         held[0] -= 1
                         held[1] -= st.st_size
-                        emptied.add(_emptied(base, entry.path, sub == "notes"))
+                        emptied.add(d := _emptied(base, entry.path, by_ns))
+                        if by_ns:
+                            per_ns[d] -= 1
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
                             reaped[f"reaped_{reason}"] += 1
@@ -1851,7 +1897,7 @@ def _reap_pass(root: Path, now: float) -> None:
     # is the whole point — every create in the service queues on these two files.
     _settle_count(root, NOTES_FILE, before[NOTES_FILE], kept["notes"])
     _settle_count(root, USAGE_FILE, before[USAGE_FILE], kept["rooms"])
-    _drop_emptied_namespaces(root, touched["notes"])
+    _drop_emptied_namespaces(root, before_ns, per_ns, touched["notes"])
     _split_seq_state(root)  # once in the life of a store; a no-op every pass after
     # The buckets the pass emptied, one span acquisition each, for the mkdir-to-open reason
     # `_drop_emptied_namespaces` gives: `_locked` makes a bucket one `mkdir` before opening
@@ -2310,10 +2356,12 @@ def _create_gate(gate: Path, path: Path, check, counted):
       - `<gate>.create`, SHARED, spanning the whole create. It is never contended by another
         create; it exists so the reaper can take it exclusively and know that no create is
         between its reservation and its write. `_counted_at` and `_settle_count` need that to
-        bound the creates their walk could not see, and `_prune` and
-        `_drop_emptied_namespaces` need it because `_locked` below makes a directory one
-        `mkdir` before opening the sidecar lock inside it, and removing it in that gap fails
-        the write outright (ENOENT, or EINVAL on APFS) rather than merely losing a race.
+        bound the creates their walk could not see; `_prune` and `_drop_emptied_namespaces`
+        need it because `_locked` below makes a directory one `mkdir` before opening the
+        sidecar lock inside it, and removing it in that gap fails the write outright (ENOENT,
+        or EINVAL on APFS) rather than merely losing a race; and the same drop needs it to
+        unlink a per-namespace count, which between a create's reservation and its write would
+        be dropping a figure that create has already moved.
         The reaper takes it for two file operations at each end of its pass and never
         across the walk between them: a hold that long parks every create in the store.
       - `path`'s own sidecar lock, which the body would take anyway, taken *before* the
