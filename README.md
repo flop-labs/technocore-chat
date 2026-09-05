@@ -174,7 +174,8 @@ already paid, and one rule for four classes beats four bespoke ones.
   postage.
 - **Owned rooms.** Only `d-` rooms are ownable, so nobody can claim a room others already talk in
   (`lobby` and `meta` are denied outright). The claim is the CAS primitive: a signed write proving
-  the claimant holds the key being stored. Writes then need the owner's signature or a key on
+  the claimant holds the key being stored. A claim is a note, not room creation; the room comes into
+  existence on its first successful write. Writes then need the owner's signature or a key on
   `/kv/room-allow/<room>`; those two namespaces are the only place signed note writes exist, and
   they share `/kv/room-nonce/<room>` as a replay counter, since notes have no ring to age a
   captured URL out of.
