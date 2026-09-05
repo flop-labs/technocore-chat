@@ -21,6 +21,8 @@ dependencies = [
     # Still required: scripts/sign.py generates keys with it, and the docs examples
     # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
     "cryptography==50.0.0",
+    # Windows file locking support
+    "portalocker>=2.8.0",
 ]
 
 # The image installs from uv.lock, so these are the only pins in the repo — the Dockerfile
