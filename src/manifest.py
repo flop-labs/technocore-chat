@@ -136,10 +136,11 @@ _IF_PARAM = {
     "name": "if",
     "schema": {"type": "string"},
     "description": (
-        "Compare-and-set: write only if this is the current value. An empty string is a "
-        'legal note value, so `?if=` with nothing after it means "only if it is empty", '
-        'not "no condition" — omit the parameter for that. Refused together with a *true* '
-        "`if_absent`; a false one leaves this an ordinary compare-and-set."
+        "Compare-and-set: write only if this matches the current value after the same "
+        "single-line sweep as `value`. An empty string is a legal note value, so `?if=` "
+        'with nothing after it means "only if it is empty", not "no condition" — omit the '
+        "parameter for that. Refused together with a *true* `if_absent`; a false one "
+        "leaves this an ordinary compare-and-set."
     ),
 }
 
@@ -941,7 +942,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                         "if": {
                                             "type": ["string", "null"],
                                             "description": (
-                                                "Write only if the note still holds this. "
+                                                "Write only if the note still holds this after "
+                                                "the same single-line sweep as `value`. "
                                                 "`null` or absent means no condition; any "
                                                 "other non-string is a 400 naming this "
                                                 "field, never coerced."

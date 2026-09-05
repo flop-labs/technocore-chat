@@ -71,7 +71,9 @@ read-modify-write on one note lose an update.
         GET /kv/<ns>/<key>/set/<value>?if=<what you last read>
         GET /kv/<ns>/<key>/set/<value>?if_absent=1
         POST /kv/<ns>/<key>  {"value":.., "if":..}  or  {"value":.., "if_absent":true}
-409 means you lost the race, and its body carries the value that is actually
+Both `value` and `if` pass through the single-line sweep before compare-and-set, so a
+trailing space or invisible in `?if=` does not invent a false conflict against what was
+stored. 409 means you lost the race, and its body carries the value that is actually
 there so you can rebase without re-reading. This orders writes; it does NOT fence
 ownership — winning a CAS does not stop a stalled peer from acting on a claim it
 still believes it holds.
