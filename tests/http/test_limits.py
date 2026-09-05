@@ -961,6 +961,138 @@ def test_the_refill_rate_stays_a_number_an_agent_can_pace_against(client):
     assert app_module.refill_rate(1) == "one token every 60s"
 
 
+def test_take_never_leaves_a_key_a_concurrent_eviction_can_delete(monkeypatch):
+    """The `_buckets[k] = v` / `move_to_end(k)` pair in take() must be one atomic step.
+
+    `__setitem__` on an EXISTING key does not reposition it, so between those two calls the
+    key can still be sitting at the LRU front — exactly where another thread's eviction loop
+    (`popitem(last=False)`) takes from. Land an eviction in that gap and `move_to_end` raises
+    KeyError on a key the same function just wrote: a 500 on every rate-limited route.
+
+    Thread timing cannot find that window — it is two bytecodes against a 5ms switch
+    interval, and a plain N-threads-x-M-calls stress passes just as happily with the lock
+    deleted (measured: 300/300 green unguarded). So this does not hope for the interleaving,
+    it schedules it: a dict subclass turns the gap into a real suspension point and runs a
+    second, genuine take() there. `fired` and `guarded_at_window` are tripwires — if a
+    refactor moves the write off the front of the LRU, or stops going through setitem +
+    move_to_end at all, this fails instead of passing while proving nothing.
+    """
+    import threading
+    from collections import OrderedDict
+    from types import SimpleNamespace
+
+    import limit
+
+    max_buckets = 4
+    target = ("10.0.0.0", "read")
+    armed: list[bool] = []
+    fired: list[str] = []
+    guarded_at_window: list[bool] = []
+    racers: list[threading.Thread] = []
+    evicted = threading.Event()
+
+    def request_from(ip: str):
+        return SimpleNamespace(headers={}, client=SimpleNamespace(host=ip))
+
+    def concurrent_take() -> None:
+        # A second request through the REAL take(); its eviction loop is what pops the front.
+        limit.take(request_from("10.0.0.99"), "read", per_min=60, max_buckets=max_buckets)
+        evicted.set()
+
+    class RacingBuckets(OrderedDict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if not armed or key != target or fired:
+                return
+            # Record WHERE the just-written key sits: only a front key is evictable, so if
+            # this ever reads "not-front" the scenario has gone vacuous and must be re-aimed.
+            fired.append("front" if next(iter(self)) == target else "not-front")
+            lock = getattr(limit, "_bucket_lock", None)
+            guarded = lock is not None and lock.locked()
+            guarded_at_window.append(guarded)
+            racer = threading.Thread(target=concurrent_take, daemon=True)
+            racers.append(racer)
+            racer.start()
+            if not guarded:
+                # Unguarded, the racer really can enter take() here — wait for it, then let
+                # move_to_end meet the key it deleted. Guarded, it provably cannot make
+                # progress until we release, so there is nothing to wait for and no sleep.
+                evicted.wait(timeout=5)
+
+    monkeypatch.setattr(limit, "_buckets", RacingBuckets())
+    monkeypatch.setattr(limit, "_identities", set())
+    monkeypatch.setattr(limit, "_requests", dict(limit._requests))
+
+    # Seed so `target` is an existing key AND the least-recently-used one.
+    limit.take(request_from("10.0.0.0"), "read", per_min=60, max_buckets=max_buckets)
+    for i in (1, 2, 3):
+        limit.take(request_from(f"10.0.0.{i}"), "read", per_min=60, max_buckets=max_buckets)
+    assert next(iter(limit._buckets)) == target
+    armed.append(True)
+
+    limit.take(request_from("10.0.0.0"), "read", per_min=60, max_buckets=max_buckets)
+
+    for racer in racers:
+        racer.join(timeout=10)
+    assert fired == ["front"], f"the race was never staged: {fired}"
+    assert guarded_at_window == [True], "the setitem/move_to_end window ran unguarded"
+    assert evicted.is_set(), "the concurrent take() never ran, so nothing was contended"
+    assert not [t for t in racers if t.is_alive()]
+
+
+def test_take_and_refund_survive_real_thread_concurrency(monkeypatch):
+    """Belt to the deterministic test's braces: real OS threads, released together on a
+    barrier so they genuinely overlap rather than finishing in turn. This cannot catch the
+    setitem/move_to_end window on its own (nothing timing-based can), but it does cover the
+    shapes a scheduled test hard-codes away — mixed take/refund, contended eviction, and a
+    lock that a refactor makes deadlock rather than merely ineffective.
+    """
+    import threading
+    from types import SimpleNamespace
+
+    import limit
+
+    monkeypatch.setattr(limit, "_buckets", limit._buckets.__class__())
+    monkeypatch.setattr(limit, "_identities", set())
+    monkeypatch.setattr(limit, "_requests", dict(limit._requests))
+
+    def request_from(ip: str):
+        return SimpleNamespace(headers={}, client=SimpleNamespace(host=ip))
+
+    identities = [f"10.0.0.{i}" for i in range(6)]
+    max_buckets, rounds, threads_n = 4, 300, 12
+    start = threading.Barrier(threads_n, timeout=10)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker(n: int) -> None:
+        try:
+            start.wait()  # every thread hammers the buckets at once, not one after another
+            for i in range(rounds):
+                ip = identities[(n + i) % len(identities)]
+                kind = "read" if i % 2 == 0 else "write"
+                request = request_from(ip)
+                limit.take(request, kind, per_min=60, max_buckets=max_buckets)
+                if i % 5 == 0:
+                    limit.refund(request, kind, per_min=60)
+        except BaseException as exc:  # noqa: BLE001 - surfaced through `errors`, not hidden
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,), daemon=True) for n in range(threads_n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, errors
+    assert not [t for t in threads if t.is_alive()], "a worker never finished"
+    # refund() has no eviction loop of its own, so it can insert an evicted key and leave the
+    # dict one over the cap until the next take() trims it. The bound is the cap plus one
+    # in-flight refund per thread, NOT the cap itself.
+    assert len(limit._buckets) <= max_buckets + threads_n
+
+
 def test_waiter_slots_are_bounded_per_ip(client):
     import app
 
