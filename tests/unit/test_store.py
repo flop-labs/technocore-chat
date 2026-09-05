@@ -613,6 +613,41 @@ def test_stillborn_room_survives_its_first_day(tmp_path):
     assert store.room_path(tmp_path, "waiting").exists()
 
 
+def test_the_stillborn_window_is_a_knob_the_reaper_actually_reads(tmp_path):
+    """CHAT_STILLBORN_SECONDS moves the reaper, not just the published number.
+
+    Both rooms are 12 hours idle and on one message, which is inside the 24h default and
+    outside a shortened window — so the same room survives or goes on the knob alone. This
+    is the assertion the knob exists for: a deployment at its room cap shortens this to free
+    slots, and a setting that only changed what /config prints would be worse than none.
+    """
+    import config
+    import store
+
+    store.append(tmp_path, "monologue", "bot", "anyone here?")
+    _age(store.room_path(tmp_path, "monologue"), 12 * 3600 + 60)
+    _reap_now(tmp_path)
+    assert store.room_path(tmp_path, "monologue").exists()  # inside the 86400 default
+
+    with config.override(STILLBORN_SECONDS=12 * 3600):
+        _reap_now(tmp_path)
+        assert not store.room_path(tmp_path, "monologue").exists()
+
+
+def test_the_capacity_refusal_quotes_the_window_this_deployment_reaps_at(tmp_path):
+    """The refusal tells a blocked agent when a slot frees. It stated 24 hours as prose for
+    as long as that was the only value; now that an operator can move it, prose that cannot
+    move with it is a wrong answer to the one question the message exists to answer."""
+    import config
+    import store
+
+    with config.override(STILLBORN_SECONDS=12 * 3600, MAX_ROOMS=1):
+        store.append(tmp_path, "first", "bot", "hi")
+        with pytest.raises(store.StoreError) as refused:
+            store.append(tmp_path, "second", "bot", "hi")
+    assert "goes after 12 hours" in str(refused.value)
+
+
 def test_stillborn_rule_does_not_touch_notes(tmp_path):
     """A note has no reply to wait for, so a single write says nothing about it. Notes keep
     the 7-day rule, and a topic must outlive the first day of the room it describes."""
