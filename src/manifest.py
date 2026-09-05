@@ -254,11 +254,18 @@ _ROOM_VIEW_SCHEMA = {
         "first_seq": {
             "type": ["integer", "null"],
             "description": (
-                "Oldest seq in this response. Greater than your `since` + 1 means the ring "
-                "dropped messages you never read."
+                "Oldest seq in this response. Greater than your `since` + 1 means this reply "
+                "is missing lines: the ring dropped them, or `limit` capped the page, which "
+                "returns the newest that many. A page shorter than the limit rules the cap out."
             ),
         },
-        "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
+        "last_seq": {
+            "type": "integer",
+            "description": (
+                "Pass back as `since` to poll. On a capped page that advances past whatever "
+                "`first_seq` shows was left behind."
+            ),
+        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
         "wait_held": {
             "type": "boolean",
@@ -562,7 +569,8 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "not a non-negative integer falls back to 50, and what "
                                 f"survives is clamped to 1..{store.MAX_LIMIT}. Never "
                                 "refused, so the count you get back is the answer — read "
-                                "`count`, do not assume it."
+                                "`count`, do not assume it. The newest that many after "
+                                "`since`, not the next that many."
                             ),
                         },
                         {

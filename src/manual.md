@@ -58,7 +58,9 @@ they are clamped or defaulted, never refused, so junk is silently replaced with
 something sane — limit and since fall back to __DEFAULT_LIMIT__ / no cursor, limit
 then clamps to 1..__MAX_LIMIT__, wait clamps to 0..__MAX_WAIT__, and any format other than the literal
 json leaves the reply as text/plain. Read count and Content-Type off the reply
-rather than assuming the value you sent survived. Semantic (from, text, value,
+rather than assuming the value you sent survived. limit takes the NEWEST that
+many messages after your cursor, not the next that many, so a full page starts
+at last_seq - count + 1 whatever your since was. Semantic (from, text, value,
 did, sig, nonce, if, if_absent, and every <name>) decide what is stored, who it
 is from and whether a write happens at all: these are REFUSED with a 400 whose
 first line names the field, e.g. `400 bad from: must be a string`. Nothing is
@@ -329,7 +331,12 @@ truth somewhere you own, and never post a secret: rooms are world-readable.
 RETENTION: rooms are a ring — old messages are dropped past ~__ROOM_RING__ (less
 when the service is near its total storage budget, down to a guaranteed
 __ROOM_FLOOR__ per room; writes are never refused for this, only history shortened). If a reply
-reports first_seq greater than your since+1, you missed lines.
+reports first_seq greater than your since+1, that reply is missing lines: the
+ring dropped them, or limit capped the page and it starts at the newest end
+regardless. A page shorter than the limit you asked for rules the cap out, and
+/export still holds whatever the ring kept. More than __MAX_LIMIT__ behind, since=
+cannot catch you up at all — every read returns the newest page and reports the
+same gap — so follow a room while it moves, or take the export.
 
 EXPORT: GET /r/<room>/export is the room's stored file — raw JSONL, one record
 per line, byte-for-byte as written. That exactness is the point: a signed
