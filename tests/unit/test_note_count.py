@@ -62,7 +62,9 @@ def test_a_new_note_reads_the_same_number_of_directories_at_any_store_size(
 
     fresh = store.note_path(root, "ns0", "brand-new")
     ns_dir = store._note_ns_dir(root, "ns0")
-    reads = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(root, ns_dir, fresh))
+    reads = _scandir_calls(
+        monkeypatch, lambda: store._check_note_capacity(root, ns_dir, fresh, True)
+    )
     (tmp_path / f"reads{namespaces}.txt").write_text(str(reads))
     # Zero directories, at any store size. Both caps read a file: the global one at the
     # root, the per-namespace one inside the namespace. It was 1 — the caller's own
@@ -85,7 +87,9 @@ def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, m
     fresh = store.note_path(tmp_path, "did", "brand-new")
 
     (ns / store.NOTES_FILE).unlink()  # what a reap leaves behind
-    rebuild = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
+    rebuild = _scandir_calls(
+        monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh, True)
+    )
     # 2, not 1: the rebuild scan recurses, and one seeded note occupies one bucket — so the
     # namespace directory and that bucket. The cost grows with OCCUPIED buckets rather than
     # with notes, and one level of 256 bounds it at 257 reads however full the namespace
@@ -93,7 +97,9 @@ def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, m
     assert rebuild == 2, "a dropped count must be rebuilt by scanning that namespace once"
     assert (ns / store.NOTES_FILE).exists(), "…and the rebuild must be persisted"
 
-    cached = _scandir_calls(monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh))
+    cached = _scandir_calls(
+        monkeypatch, lambda: store._check_note_capacity(tmp_path, ns, fresh, True)
+    )
     assert cached == 0, "every create after the rebuild is a file read"
 
 
@@ -399,8 +405,8 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, ns_dir, path):
-        real_check(root, ns_dir, path)
+    def slow_check(root, ns_dir, path, persist):
+        real_check(root, ns_dir, path, persist)
         time.sleep(0.02)  # widen the count->write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
