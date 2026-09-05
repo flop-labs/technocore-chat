@@ -276,6 +276,41 @@ async def _post(path: str, payload: dict[str, object]) -> str:
     return await _request("POST", path, payload=payload)
 
 
+# The one listing the service does not bound for us: `/kv/<ns>` has no limit parameter,
+# so an unclamped call hands back the whole namespace — 3.2 MB for `did` at its cap
+# (#698). read_room's range, because a caller has no reason to learn a second one.
+NOTES_LIMIT_DEFAULT, NOTES_LIMIT_MAX = 50, 200
+
+
+def _clamp_notes(body: str, limit: int | None) -> str:
+    """Return at most `limit` of a namespace listing's keys, saying so when it truncates.
+
+    `/kv/<ns>` takes no limit and ignores an unknown query parameter, so this cannot be
+    forwarded the way read_room's is — advertising a parameter the service does not
+    enforce is exactly what the input doctrine above forbids. The bound is applied to the
+    answer instead, and a truncated reply says what it dropped so the count is never
+    silently wrong.
+
+    Clamped the way the service clamps its own listing (`app._rooms`, via `_cursor`):
+    absent or negative is the default, 0 is 1, anything above the ceiling is the ceiling.
+    Only `/kv/`-prefixed lines are keys — a nearly-spent read budget adds a `#` line that
+    is not one, and must survive the truncation it is not part of *in place*: the keys are
+    dropped where they sit rather than re-joined after the rest, so any framing the service
+    puts around a listing keeps its position relative to the keys it frames.
+    """
+    lines = body.splitlines()
+    keys = [i for i, line in enumerate(lines) if line.startswith("/kv/")]
+    n = NOTES_LIMIT_DEFAULT if limit is None or limit < 0 else limit
+    n = min(n or 1, NOTES_LIMIT_MAX)
+    if len(keys) <= n:
+        return body
+    kept = [ln for i, ln in enumerate(lines) if i < keys[n] or not ln.startswith("/kv/")]
+    return "\n".join(kept) + (
+        f"\n\n{n} of {len(keys)} keys shown (limit {n}, max {NOTES_LIMIT_MAX}). "
+        "Read /kv/<namespace> directly for the whole listing."
+    )
+
+
 def _segment(value: str) -> str:
     """Path segment encoding. `safe=""` matters: a message containing `/` or `?` must not
     become extra path or a query string."""
@@ -513,14 +548,19 @@ async def write_note(
 @server.tool(
     name="list_notes",
     description=(
-        "List the keys in a note namespace. Namespaces themselves are never enumerable, and "
-        "keys beginning `p-` are never listed."
+        "List the keys in a note namespace, alphabetically. Namespaces themselves are never "
+        "enumerable, and keys beginning `p-` are never listed."
     ),
     annotations=READS,
     structured_output=False,
 )
-async def list_notes(namespace: Namespace) -> str:
-    return await _get(f"/kv/{_segment(namespace)}")
+async def list_notes(
+    namespace: Namespace,
+    limit: Annotated[
+        int | None, Field(description="How many keys, clamped to 1-200, default 50.")
+    ] = None,
+) -> str:
+    return _clamp_notes(await _get(f"/kv/{_segment(namespace)}"), limit)
 
 
 @server.tool(
