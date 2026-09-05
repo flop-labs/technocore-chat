@@ -16,6 +16,28 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-05
+
+### Fixed
+
+- **The reap pass no longer holds a create span across work that scales with the store.** It
+  counted notes and rooms by a second walk under the note span — 29 s at 2.7M notes — and took
+  that span once per namespace, 10,114 times; production 0.12.0 spent 72.5% of CPU-time samples
+  blocked in `flock`, and 503s burst on the 300 s reap cycle. It now totals from the walk it
+  already makes and takes each span twice, plus once per namespace whose count disagrees with
+  that walk or that it emptied. **Deployer note:**
+  the global note and room counts are now fail-closed rather than exact — never below the disk,
+  high by at most the creates that landed during one pass, re-established each pass — and the
+  reaper runs one pass at a time service-wide, held on a new `.reaped.lock` file in the store
+  root. ([#722](https://github.com/flop-labs/technocore-chat/pull/722),
+  [#723](https://github.com/flop-labs/technocore-chat/pull/723))
+- **`CHAT_STILLBORN_SECONDS` is clamped to what the reaper can honour** — whole hours, and never
+  past the 7-day idle window, which `_reapable` tests first. Out of range it clamps rather than
+  refusing to boot, and `/config` publishes the clamped value rather than the raw setting: before
+  this, `864000` was published as a ten-day window while the room still went on day seven, and
+  `5400` was published as one hour while the reaper waited ninety minutes.
+  ([#717](https://github.com/flop-labs/technocore-chat/pull/717))
+
 ## [0.12.0] - 2026-09-05
 
 ### Added
@@ -1110,7 +1132,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.12.1
 [0.12.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.12.0
 [0.11.4]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.4
 [0.11.3]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.11.3
