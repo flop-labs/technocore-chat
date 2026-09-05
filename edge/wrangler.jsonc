@@ -21,7 +21,7 @@
 
   // Plain routes, NOT a custom domain: technocore.chat already has an origin — the chat
   // service, reached through a Cloudflare tunnel — and these attach in front of it for
-  // sixteen exact paths. mcp/worker uses `custom_domain` because the Worker *is* the origin
+  // twenty exact paths. mcp/worker uses `custom_domain` because the Worker *is* the origin
   // for its hostname; the opposite job, and the opposite setting.
   //
   // Enumerated per path rather than a prefix or a suffix. /r/ and /kv/ are ~80% of traffic

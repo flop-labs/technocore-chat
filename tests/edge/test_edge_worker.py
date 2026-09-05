@@ -481,3 +481,47 @@ def test_the_icon_is_built_from_the_tracked_brand_mark():
     script = (EDGE / "make_favicon.py").read_text(encoding="utf-8")
     assert 'SOURCE = HERE / "assets" / "icon-source.png"' in script
     assert ".." not in script.split("SOURCE =")[1].split("\n")[0]
+
+
+_NUMBER_WORDS = {
+    word: n
+    for n, word in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+        "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split()
+    )
+}
+
+
+def _spelled(text: str, pattern: str) -> int:
+    """The number word `pattern` captures in `text` — exactly once, so a sentence that was
+    reworded out of the pattern's reach fails here rather than going unchecked."""
+    flat = re.sub(r"\s*\n\s*(?:\*|//)?\s*", " ", text)  # unwrap prose and comment lines
+    found = re.findall(pattern, flat)
+    assert len(found) == 1, f"{pattern!r} matched {len(found)} times, expected exactly one"
+    return _NUMBER_WORDS[found[0].lower()]
+
+
+def test_the_spelled_out_counts_are_the_counts_in_the_sources():
+    """README.md, worker.js and wrangler.jsonc each spell out how many paths or documents a
+    lane holds, and every one of those numbers has drifted: three static-first documents
+    when the set had two, sixteen routes when there were seventeen, seventeen when #664,
+    #674 and #684 each added one without the sentence beside them moving. Prose is not a
+    source, so each spelled-out count is read back against the list it describes."""
+    snapshot = _snapshot_module()
+    static = len(snapshot.STATIC_FIRST)
+    documents = len(snapshot.PATHS)
+    routes = len(_wrangler_routes())
+    no_extension = sum("." not in path.rsplit("/", 1)[-1] for path in snapshot.PATHS)
+
+    readme = (EDGE / "README.md").read_text(encoding="utf-8")
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    wrangler = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
+
+    assert _spelled(readme, r"attached to (\w+) exact paths") == routes
+    assert _spelled(wrangler, r"in front of it for (\w+) exact paths") == routes
+    assert _spelled(readme, r"the (\w+) documents `snapshot.py`") == documents
+    assert _spelled(readme, r"the other (\w+) documents") == documents - static
+    assert _spelled(readme, r"The static (\w+) are files") == static
+    assert _spelled(worker, r"the static (\w+) change on a release") == static
+    assert _spelled(readme, r"(\w+) of these documents have no file extension") == no_extension
+    assert _spelled(worker, r"(\w+) of these documents carry no file extension") == no_extension
