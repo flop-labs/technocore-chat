@@ -713,8 +713,11 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (q) parts.push(shown + ' of ' + roomsView.rooms.length + ' loaded rooms match');
     else if (shown < roomsView.total) parts.push('showing ' + shown + ' of ' + roomsView.total + ' rooms');
     else parts.push(roomsView.total + ' rooms');
-    parts.push(roomsView.total + ' of ' + roomsView.capacity + ' room cap');
-    parts.push(size(roomsView.bytes) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
+    // occupied, not total: the cap counts every room on disk and the listing above names
+    // only the listable ones, so `total` against `capacity` understated the store by the
+    // unlisted rooms and the gauge read full-ish while creates were already refused.
+    parts.push(roomsView.occupied + ' of ' + roomsView.capacity + ' room cap');
+    parts.push(size(roomsView.bytes_occupied) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
@@ -722,8 +725,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // Either cap can be the one that refuses the next room, so the warning watches both and
     // reports whichever is closer. Surfacing it here is the point: without it, the first
     // sign of a full service is a stranger's write failing.
-    var full = Math.max(roomsView.total / roomsView.capacity,
-                        roomsView.bytes / roomsView.bytes_capacity);
+    var full = Math.max(roomsView.occupied / roomsView.capacity,
+                        roomsView.bytes_occupied / roomsView.bytes_capacity);
     if (full >= 0.8) {
       var warn = document.createElement('span');
       warn.className = 'badge err';                 // the word carries it too, not the hue

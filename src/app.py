@@ -936,8 +936,14 @@ def rooms(request: Request) -> Response:
         head = (
             # Both caps, because either can be the one that refuses the next room and an
             # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
+            # Both are now stated over the population they are enforced across, which
+            # includes the unlisted rooms this listing deliberately does not name. That
+            # is the same shape as the note line below, which has always published a
+            # global total over namespaces it does not name either: an aggregate is not
+            # an enumeration. Reported the other way round, the pair said 7944 of 10240
+            # on a store that refused the next room.
+            f"# {len(view['rooms'])} of {view['total']} listed rooms ({view['occupied']} of "
+            f"{view['capacity']} slots used, {_size(view['bytes_occupied'])} of "
             f"{_size(view['bytes_capacity'])} stored), newest first"
         )
         # Second line, exactly where render() puts BANNER and for the same reason: a
