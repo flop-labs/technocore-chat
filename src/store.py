@@ -863,6 +863,17 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
+# A nonce arrives as 1-19 decimal digits of text (the POST schema says so) and is stored as
+# an int, which json emits bare. Nineteen digits is past 2^53: a JavaScript reader has
+# rounded it before it can rebuild `room|nonce|text`, and tclk#78 measured 40% of a live
+# board unverifiable that way. Every JSON lane hands it back as the digit text it was
+# signed with — the view below and the `posted` record of a write reply both come through
+# here. /export keeps the stored bytes, by its own contract (#711).
+def as_read(rec: dict) -> dict:
+    """A stored record as a JSON lane returns it: the nonce as the digit text it was signed with."""
+    return {**rec, "nonce": str(rec["nonce"])} if isinstance(rec.get("nonce"), int) else rec
+
+
 def read_messages(
     root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
 ) -> dict:
@@ -885,7 +896,7 @@ def read_messages(
                     break
                 if cutoff is not None and _expired(rec, cutoff):
                     break
-                out.append(rec)
+                out.append(as_read(rec))
                 if len(out) >= limit:
                     break
     out.reverse()

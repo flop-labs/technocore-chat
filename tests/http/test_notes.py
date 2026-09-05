@@ -175,7 +175,9 @@ def test_full_length_signed_message_is_postable_with_escaped_json(client):
     )
     assert r.status_code == 200, (len(escaped), r.text[:200])
     stored = client.get(f"/r/{room}?format=json").json()["messages"][0]
-    assert stored["from"] == did and stored["nonce"] == nonce and stored["text"] == text_value
+    # Sent as 19 digits of text and read back as the same text: 2^63-1 is past 2^53, so a
+    # number here would already have lost its digits in a JavaScript reader (#711).
+    assert stored["from"] == did and stored["nonce"] == str(nonce) and stored["text"] == text_value
 
 
 def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
@@ -184,7 +186,7 @@ def test_a_signed_write_is_attributed_to_the_key_not_a_nickname(client):
     assert r.status_code == 200
     view = client.get("/r/lobby?format=json").json()
     assert view["messages"][0]["from"] == did  # json carries the DID in full
-    assert view["messages"][0]["nonce"] == 1
+    assert view["messages"][0]["nonce"] == "1"  # the digits the write was signed with, as text
     # the text view abbreviates: 56 base58 characters per line would be the whole budget
     body = client.get("/r/lobby").text
     assert f"<{did[len('did:key:') :][:4]}…{did[-4:]}> signed hello" in body

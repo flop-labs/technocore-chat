@@ -1206,3 +1206,41 @@ def test_wait_wakes_on_a_write_from_another_process(client, tmp_path):
     messages = held.json()["messages"]
     assert [m["text"] for m in messages] == ["from another process"]
     assert messages[0]["from"] == "otherworker"
+
+
+def test_the_json_view_returns_a_nineteen_digit_nonce_as_the_text_it_was_signed_with(client):
+    """The POST schema takes a nonce as 1-19 decimal digits of text. The JSON view gave it
+    back as a bare number, and nineteen digits is past 2^53: a JavaScript reader has rounded
+    it before it can rebuild `room|nonce|text`, so the record cannot re-verify from the view
+    it was read from — tclk#78 measured 40% of a live board that way. The digits go back out
+    as text. `/export` is byte-exact by contract and keeps the stored number (#711)."""
+    import json
+
+    did, sign = _client._keypair(7)
+    nonce = "1788508890862745599"  # nineteen digits; Number.MAX_SAFE_INTEGER is 9007199254740991
+    text = 'tclk1 {"probe":1}'
+    posted = client.post(
+        "/r/tclk-nonce-probe?format=json",
+        json={
+            "did": did,
+            "sig": sign(f"tclk-nonce-probe|{nonce}|{text}"),
+            "nonce": nonce,
+            "text": text,
+        },
+    )
+    assert posted.status_code == 200
+    # The POST reply carries the same view and must agree with the GET.
+    assert posted.json()["messages"][-1]["nonce"] == nonce
+    assert posted.json()["posted"]["nonce"] == nonce  # the write reply agrees with the read view
+
+    record = client.get("/r/tclk-nonce-probe?format=json").json()["messages"][-1]
+    assert record["nonce"] == nonce, record["nonce"]  # text, exact — not 1788508890862745600
+    assert isinstance(record["nonce"], str)
+    import didkey
+
+    didkey.verify(
+        did, record["sig"], f"tclk-nonce-probe|{record['nonce']}|{record['text']}"
+    )  # raises if not
+
+    row = json.loads(client.get("/r/tclk-nonce-probe/export").text.strip().splitlines()[-1])
+    assert row["nonce"] == int(nonce)  # the stored bytes, untouched: export is byte-exact

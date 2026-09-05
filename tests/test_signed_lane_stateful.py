@@ -351,10 +351,27 @@ class SignedLane(RuleBasedStateMachine):
         state it keeps out.
         """
         for room in ROOMS:
+            # The view renders a nonce as the digit text it was signed with (#711); the guard
+            # is an int. Admit the text and compare numerically — and refuse to let a type
+            # mismatch quietly select nothing, which is how this invariant went vacuous once.
             newest_visible: dict[str, int] = {}
+            signed_visible = 0
             for rec in _visible(self.root, room):
-                if isinstance(rec.get("nonce"), int) and rec.get("from") in DIDS:
-                    newest_visible[rec["from"]] = rec["nonce"]
+                if rec.get("from") not in DIDS:
+                    continue
+                signed_visible += 1
+                nonce = rec.get("nonce")
+                assert isinstance(nonce, str) and nonce.isdigit(), (
+                    f"{room}: a visible signed record at seq {rec.get('seq')} carries nonce "
+                    f"{nonce!r}; the JSON lane must render it as decimal text"
+                )
+                newest_visible[rec["from"]] = int(nonce)
+            assert len(newest_visible) == len(
+                {r["from"] for r in _visible(self.root, room) if r.get("from") in DIDS}
+            ), (
+                f"{room}: {signed_visible} visible signed records but only {len(newest_visible)} "
+                "keys admitted — the invariant is not exercising what it can see"
+            )
             for did, nonce in newest_visible.items():
                 guard = self._guard(room, did)
                 assert guard is not None and guard >= nonce, (
@@ -623,7 +640,7 @@ def test_narrowing_only_the_guards_budget_makes_a_visible_message_replayable(tmp
         mine = [m for m in _visible(tmp_path, "lobby") if m.get("from") == did]
         assert len(mine) == 2, f"expected the original and the replay, got {len(mine)}"
         first, second = mine
-        assert first["nonce"] == second["nonce"] == 7
+        assert first["nonce"] == second["nonce"] == "7"  # the view renders a nonce as text (#711)
         assert first["text"] == second["text"] == "the guarded message"
         assert first["seq"] < second["seq"] == replayed["seq"]
         # One signature over `lobby|7|the guarded message` now authenticates both records, and
