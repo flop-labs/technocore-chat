@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Accept` q-values are clamped to the 0-1 the grammar allows.** `float()` also reads `inf` and
+  `nan`, and every comparison against a NaN is False, so `Accept: text/markdown, text/plain;q=nan`
+  served `text/plain` despite the markdown preference the caller had stated.
+
 ## [0.12.1] - 2026-09-05
 
 ### Fixed
