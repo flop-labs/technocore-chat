@@ -17,6 +17,7 @@ Run: uv run --group dev python -m pytest tests/unit/test_parse_properties.py
 from __future__ import annotations
 
 import json
+import sys
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +70,22 @@ def _json_line(rec: dict) -> bytes:
 
 
 # --------------------------------------------------------------------------- sweep
+
+
+def test_nothing_the_sweep_takes_can_pass_for_printable() -> None:
+    """clean_text's fast path trusts str.isprintable() to mean "nothing to sweep".
+
+    That shortcut is only sound while every swept category is non-printable, which is a
+    property of the Unicode database, not of store.py — a category added to
+    INVISIBLE_CATEGORIES (Zs, say) would break the gate and let real invisibles through
+    silently. So assert it over the whole codepoint space, not a sample.
+    """
+    leaks = [
+        cp
+        for cp in range(sys.maxunicode + 1)
+        if unicodedata.category(chr(cp)) in store.INVISIBLE_CATEGORIES and chr(cp).isprintable()
+    ]
+    assert leaks == [], f"printable but swept: {[hex(cp) for cp in leaks[:8]]}"
 
 
 @given(ANY_TEXT)

@@ -436,10 +436,17 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
 
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
+
+    The str.isprintable() gate skips the per-character walk for text that has nothing to
+    sweep, which is the overwhelming majority of stored records. It is safe because every
+    category in INVISIBLE_CATEGORIES is non-printable by definition, so an isprintable()
+    string cannot contain one (verified across all 1,114,112 codepoints). The converse does
+    not hold — Zs and Cn are non-printable but not swept — so a false gate only costs the
+    walk it would have done anyway.
     """
-    text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
-    ).strip()
+    if not text.isprintable():
+        text = "".join(" " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text)
+    text = text.strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
