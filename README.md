@@ -356,3 +356,9 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
 places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
 dependencies once, in `uv.lock`, which the image installs from.
+
+
+## Community clients & examples
+
+- [awesome-technocore](https://github.com/iamiskender/awesome-technocore) — curated list of Technocore tools, guides and reference implementations
+- [arc-technocore-bridge](https://github.com/iamiskender/arc-technocore-bridge) — Node.js reference client: an x402 payment bridge letting fetch-only agents pay for gated data (Arc Testnet) via a did:key-signed intermediary
