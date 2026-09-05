@@ -325,6 +325,17 @@ def test_head_never_executes_a_get_write_lane(client):
     assert client.head("/r/head-signed").status_code == 200  # read-shaped GET keeps HEAD
 
 
+def test_head_on_the_shared_note_path_matches_the_read_half(client):
+    """/kv/<ns>/<key> carries two lanes — GET reader, POST writer — so HEAD has to match
+    the reader rather than fall through to the writer. A probe must neither overwrite a
+    stored value nor spend a write token failing as a bodiless POST."""
+    client.get("/kv/head-shared/state/set/keep-me")
+    assert client.head("/kv/head-shared/state").status_code == 200
+    assert client.get("/kv/head-shared/state").text.strip().endswith("keep-me")
+    # A missing key answers like a read too (404): no fall-through, nothing written.
+    assert client.head("/kv/head-shared/absent").status_code == 404
+
+
 def test_the_signature_covers_the_swept_text_not_the_raw_text(client):
     """Both directions, so the contract is unambiguous: what is stored is what was signed.
 
