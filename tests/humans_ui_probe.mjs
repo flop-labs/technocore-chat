@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-09-05, 85 checks, all passing — expected shape:
+ * Checked 2026-09-05, 90 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -37,8 +37,9 @@
  *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
  *                   seed, and hands the SAME did:key back to a browser whose storage has
  *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
- *   delegation      a `delegate:` line is signed, published to the DID note path, and reads
- *                   back verified; four malformed delegations are refused before any fetch
+ *   delegation      two `delegate:` records are signed, published to the DID note path
+ *                   beside an existing `mailbox:`, and both read back verified out of the
+ *                   ONE line a note can hold; four malformed ones are refused before a fetch
  *
  * The webmcp and signing sections both post messages, which reorders /rooms — they run
  * last, after every check that reads the seeded list.
@@ -596,12 +597,35 @@ const browser = await chromium.launch({
   // ---- delegation ----
   check("delegation: the agents panel appears once signed in",
         !(await page.locator("#agents").isHidden()));
+
+  const fp = await page.evaluate(async (d) => {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(d));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
+      .join("").slice(0, 16);
+  }, did);
+  const notePath = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+
+  // Seed the note with the thing a real DID note already holds. A note is ONE line — the
+  // server's sweep turns every newline into a space — so this is what makes the delegations
+  // below land in a note that is not empty, which is the case that a line-oriented parser
+  // silently loses (PR #719 review).
+  await fetch(`${HOST}${notePath}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: "mailbox: mb-probe" }),
+  });
+
   const AGENT = "did:key:z6MkqGC3nWZhYieEVTVDKW5v588CiGfsDSmRVG9ZwwWTvLSK";
-  await page.fill("#agent-did", AGENT);
-  await page.fill("#agent-scope", "r:lobby");
-  await page.fill("#agent-days", "30");
-  await page.click("#delegate");
-  await page.waitForTimeout(2000);
+  const AGENT2 = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const delegate = async (agent, scope, days) => {
+    await page.fill("#agent-did", agent);
+    await page.fill("#agent-scope", scope);
+    await page.fill("#agent-days", days);
+    await page.click("#delegate");
+    await page.waitForTimeout(2000);
+  };
+
+  await delegate(AGENT, "r:lobby", "30");
   check("delegation: it verifies against the issuing key and lists as live",
         (await page.locator(".deleg.ok .state").count()) === 1,
         await page.textContent("#status"));
@@ -609,19 +633,24 @@ const browser = await chromium.launch({
         (await page.textContent(".deleg")).includes("r:lobby"),
         await page.textContent(".deleg"));
 
-  // Published where the manual says, which is what makes it findable by anyone holding the
-  // DID. `uv run scripts/sign.py check <root> <that note>` verifies the same line.
-  const fp = await page.evaluate(async (d) => {
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(d));
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
-      .join("").slice(0, 16);
-  }, did);
-  const notePath = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+  // The regression. Two records plus a mailbox, all in one line, all still findable.
+  await delegate(AGENT2, "kv:plans", "10");
+  check("delegation: a second one is found beside the first in a one-line note",
+        (await page.locator(".deleg.ok .state").count()) === 2,
+        await page.textContent("#status"));
+
   const note = await (await fetch(`${HOST}${notePath}`)).text();
   check("delegation: published to the DID note path",
-        note.includes(`delegate: ${AGENT}`), notePath);
+        note.includes(`delegate: ${AGENT}`) && note.includes(`delegate: ${AGENT2}`), notePath);
+  check("delegation: the note's existing content survived the append",
+        note.includes("mailbox: mb-probe"), note.slice(0, 120));
+  check("delegation: and the note really is a single line",
+        note.trimEnd().split("\n").filter((l) => l.includes("delegate:")).length === 1);
 
-  // Every refusal is client-side; none of these may reach the network.
+  // Every refusal is client-side; none of these may reach the network. Asserted on the
+  // delegation count rather than on the status badge: the room poll writes "seq N" over that
+  // badge about once a second, so reading it after a fixed wait is a race the probe loses
+  // roughly whenever the two line up.
   for (const [label, agent, scope, days] of [
     ["a non-DID agent", "not-a-did", "*", "30"],
     ["a scope outside the grammar", AGENT, "room:lobby", "30"],
@@ -632,11 +661,26 @@ const browser = await chromium.launch({
     await page.fill("#agent-scope", scope);
     await page.fill("#agent-days", days);
     await page.click("#delegate");
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(800);
     check(`delegation: refuses ${label}`,
-          (await page.textContent("#status")).startsWith("error"),
-          await page.textContent("#status"));
+          (await page.locator(".deleg").count()) === 2,
+          `${await page.locator(".deleg").count()} rows`);
   }
+  const after = await (await fetch(`${HOST}${notePath}`)).text();
+  check("delegation: no refusal reached the note",
+        (after.match(/delegate:/g) || []).length === 2);
+
+  // Enrolling a SECOND passkey while one already exists has to sign the reader in as the
+  // credential just created. Deriving from an unconstrained get() here would hand back
+  // whichever credential the authenticator picked — a new key made and silently discarded,
+  // under a DID the reader did not just mint (PR #719 review). Runs last: it leaves two
+  // discoverable credentials behind, which makes any later unconstrained discovery ambiguous.
+  await page.click("#keyout");
+  await page.click("#keypassnew");
+  await signedIn();
+  check("passkey: enrolling a second one derives from the new credential, not an old one",
+        (await page.getAttribute("#me", "title")) !== did,
+        await page.getAttribute("#me", "title"));
 
   check("passkey + delegation: no page errors throughout",
         errors.length === 0, errors.join("; "));

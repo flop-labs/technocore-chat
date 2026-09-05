@@ -70,8 +70,10 @@ defaults to a millisecond clock. Expiry is the ONLY revocation this format has
 — a reader holding a cached copy of the note cannot see a line you deleted —
 so delegate for days, not years, and re-issue.
 
-'check' reads a note (a file, or stdin) and reports every delegation line in it
+'check' reads a note (a file, or stdin) and reports every delegation in it
 against a root did:key: which verify, which have expired, and which are forged.
+Records are found by scanning for the `delegate:` token, not by line — a note is
+always one line, because the server's sweep turns every newline into a space.
 It needs no key and no network, which is the property that matters: a
 delegation is checkable by anyone, from the note text alone.
 """
@@ -115,9 +117,17 @@ MAX_VALUE_CHARS = 8192  # notes
 NAME = r"[a-z0-9][a-z0-9_-]{0,47}"
 SCOPE_RE = re.compile(rf"\*|r:{NAME}|kv:{NAME}")
 DIGITS_RE = re.compile(r"[0-9]{1,19}")
-# `mailbox: <room>` is already a line in this note (see the manual's IDENTITY section), so a
-# delegation is another line type in the same place rather than a second note to find.
-DELEGATE_PREFIX = "delegate: "
+# `mailbox: <room>` already lives in this note (see the manual's IDENTITY section), so a
+# delegation goes in the same place rather than in a second note to find.
+#
+# A *token*, not a line prefix, because a note has no lines. store.clean_text replaces every
+# Cc character with a space -- and U+000A is Cc -- so a note is strictly one line however it
+# was written, and a second record separated by a newline arrives glued to the first by a
+# space. Records are therefore found by scanning for this token and taking the five fields
+# after it, which reads `mailbox: mb-x delegate: <did> ...` correctly and needs no delimiter
+# the sweep could eat.
+DELEGATE_TOKEN = "delegate:"
+DELEGATE_FIELDS = 5  # agent, scope, expires, nonce, sig
 
 
 def swept(text: str, limit: int) -> str:
@@ -233,30 +243,41 @@ def delegation(root: str, agent: str, scope: str, expires: str, nonce: str) -> s
     return f"delegate|{root}|{agent}|{scope}|{expires}|{nonce}"
 
 
+def delegations(body: str) -> list[tuple[str, str, str, str, str]]:
+    """Every delegation record in a note, found by token rather than by line.
+
+    Scans the whole note for DELEGATE_TOKEN and takes the five fields after each. That is
+    what makes several records survive in one note: they are separated by whitespace, which
+    is all a note can hold, and the read lane's banner and budget footer contain no such
+    token so they fall out for free.
+    """
+    fields = body.split()
+    out = []
+    for i, token in enumerate(fields):
+        if token != DELEGATE_TOKEN:
+            continue
+        record = fields[i + 1 : i + 1 + DELEGATE_FIELDS]
+        if len(record) == DELEGATE_FIELDS:
+            out.append((record[0], record[1], record[2], record[3], record[4]))
+    return out
+
+
 def check_note(root: str, body: str) -> int:
-    """Report every delegation line in `body` against `root`. Returns the count that verify.
+    """Report every delegation in `body` against `root`. Returns the count that verify.
 
     Prints one line per delegation and never raises on a bad one: the whole point of a
     self-certifying record in a world-writable note is that garbage is *expected* and is
     supposed to be visibly inert rather than fatal.
     """
     key, live, now = public_key(root), 0, int(time.time())
-    for raw in body.splitlines():
-        line = raw.strip()
-        if not line.startswith(DELEGATE_PREFIX):
-            continue
-        fields = line[len(DELEGATE_PREFIX) :].split()
-        if len(fields) != 4 + 1:
-            print(f"MALFORMED  {line[:72]}  (expected 5 fields, got {len(fields)})")
-            continue
-        agent, scope, expires, nonce, sig = fields
+    for agent, scope, expires, nonce, sig in delegations(body):
         try:
             key.verify(
                 base64.urlsafe_b64decode(sig + "=="),
                 delegation(root, agent, scope, expires, nonce).encode(),
             )
         except (InvalidSignature, ValueError, TypeError):
-            # Not "invalid": *forged, or for somebody else*. A line that fails here was
+            # Not "invalid": *forged, or for somebody else*. A record that fails here was
             # signed by a key that is not this root, which in a note anyone can write to is
             # the ordinary case and not an error.
             print(f"FORGED     {agent} {scope}  (not signed by {root[:20]}...)")
@@ -352,8 +373,9 @@ def main() -> None:
         if root == args.agent:
             raise SystemExit("a key cannot delegate to itself — it already acts for itself")
         sig = signature(key, delegation(root, args.agent, args.scope, expires, nonce))
-        print(f"# add this line to {note_path(root)} — the note of {root}")
-        print(f"{DELEGATE_PREFIX}{args.agent} {args.scope} {expires} {nonce} {sig}")
+        print(f"# append to {note_path(root)} — the note of {root}")
+        print("# a note is one line: separate this from what is already there with a space")
+        print(f"{DELEGATE_TOKEN} {args.agent} {args.scope} {expires} {nonce} {sig}")
         return
 
     # say/set: build the canonical string over the SWEPT text — what is stored.

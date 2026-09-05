@@ -67,7 +67,7 @@ def _line(sign, root_key, agent_did, scope="*", expires=None, nonce="1"):
     root_did = sign.did_of(root_key)
     canonical = sign.delegation(root_did, agent_did, scope, expires, nonce)
     sig = sign.signature(root_key, canonical)
-    return f"{sign.DELEGATE_PREFIX}{agent_did} {scope} {expires} {nonce} {sig}"
+    return f"{sign.DELEGATE_TOKEN} {agent_did} {scope} {expires} {nonce} {sig}"
 
 
 def test_a_delegation_round_trips_through_the_note_it_is_published_in(sign, capsys):
@@ -105,7 +105,7 @@ def test_editing_any_signed_field_invalidates_the_line(sign, capsys, field, tamp
     root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
     other = sign.did_of(Ed25519PrivateKey.from_private_bytes(bytes.fromhex("33" * 32)))
     fields = _line(sign, root, sign.did_of(agent), scope="r:lobby").split()
-    # fields[0] is the "delegate:" prefix; agent, scope, expires follow.
+    # fields[0] is the "delegate:" token; agent, scope, expires follow.
     fields[1 + field] = other if tampered is None else tampered
 
     assert sign.check_note(sign.did_of(root), " ".join(fields)) == 0
@@ -167,7 +167,8 @@ def test_the_note_path_is_the_one_the_manual_documents(sign):
 def test_the_page_and_the_signer_agree_on_the_wire_format(page, sign):
     """Two implementations, no shared code. Everything below is written twice on purpose,
     and a drift in any of it is a delegation one side issues and the other rejects."""
-    assert f"var DELEGATE_PREFIX = '{sign.DELEGATE_PREFIX}';" in page
+    assert f"var DELEGATE_TOKEN = '{sign.DELEGATE_TOKEN}';" in page
+    assert f"var DELEGATE_FIELDS = {sign.DELEGATE_FIELDS};" in page
 
     # The canonical string, rebuilt from the page's own concatenation.
     js = re.search(r"return 'delegate\|' \+ ([^;]+);", page)
@@ -190,3 +191,57 @@ def test_the_prf_salt_is_pinned_because_changing_it_rekeys_everyone(page):
     Pinned here so that change cannot be a silent one-word diff.
     """
     assert "new TextEncoder().encode('technocore.chat/did:key/v1')" in page
+
+
+def test_several_delegations_survive_the_single_line_note_they_live_in(sign):
+    """A note has no lines, and this format has to live with that.
+
+    `store.clean_text` replaces every Cc character with a space and U+000A is Cc, so a note
+    is one line however it was written: two records separated by a newline come back glued
+    together by a space, and a `mailbox:` line already in the note is glued to the front of
+    the first. A line-oriented parser finds one record in that, or none — and reports the
+    write as successful either way, which is the worst version of this bug.
+
+    Found by review on PR #719. The regression is cheap to state and was not covered by
+    anything above, because every earlier case had exactly one record in an empty note.
+    """
+    import store
+
+    root = _key(ROOT_SEED)
+    first = sign.did_of(_key(AGENT_SEED))
+    second = sign.did_of(Ed25519PrivateKey.from_private_bytes(bytes.fromhex("44" * 32)))
+    note = "\n".join(
+        [
+            "mailbox: mb-somewhere",
+            _line(sign, root, first, scope="r:lobby"),
+            _line(sign, root, second, scope="kv:plans", nonce="2"),
+        ]
+    )
+
+    # Through the server's own sweep, which is the thing that flattens it.
+    stored = store.clean_text(note, store.MAX_VALUE_CHARS)
+    assert "\n" not in stored, "the premise of this test: a note cannot hold a newline"
+
+    found = sign.delegations(stored)
+    assert [d[0] for d in found] == [first, second]
+    assert [d[1] for d in found] == ["r:lobby", "kv:plans"]
+    assert sign.check_note(sign.did_of(root), stored) == 2
+
+
+def test_a_truncated_trailing_record_is_dropped_rather_than_half_read(sign):
+    """Scanning by token has to stop at the end of the note, not read off it. A record cut
+    short by the value cap is not a record."""
+    root = _key(ROOT_SEED)
+    full = _line(sign, root, sign.did_of(_key(AGENT_SEED)))
+
+    assert len(sign.delegations(full)) == 1
+    assert sign.delegations(" ".join(full.split()[:-1])) == []
+    assert sign.delegations(sign.DELEGATE_TOKEN) == []
+
+
+def test_the_page_scans_for_the_token_the_same_way(page, sign):
+    """The page and the signer each walk the note's whitespace-separated fields looking for
+    the token. Written twice, so pinned twice: the page must not go back to splitting lines,
+    which is what it did before review caught it."""
+    assert "note.split(/\\s+/)" in page, "the page must scan fields, not lines"
+    assert "note.split('\\n')" not in page

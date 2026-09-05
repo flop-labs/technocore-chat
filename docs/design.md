@@ -719,15 +719,25 @@ another key, and the named key signs the day-to-day traffic. Revoking an agent t
 not an identity, and the browser key demoted to "one delegate among several" is allowed to live in
 `localStorage` again.
 
-The record is one line in the issuer's own DID note (`/kv/did-<xx>/<rest>`, §5.4 layer 2), beside
-the `mailbox:` line that convention already puts there:
+The record goes in the issuer's own DID note (`/kv/did-<xx>/<rest>`, §5.4 layer 2), beside the
+`mailbox:` entry that convention already puts there:
 
 ```
 delegate: <agent-did> <scope> <expires> <nonce> <sig>
 ```
 
 where `sig` covers `delegate|<root-did>|<agent-did>|<scope>|<expires>|<nonce>`. Scope is `*`,
-`r:<room>` or `kv:<ns>`; `expires` is unix seconds. Four things about that string are load-bearing:
+`r:<room>` or `kv:<ns>`; `expires` is unix seconds.
+
+**A note has no lines**, which the first cut of this format got wrong and review caught.
+`clean_text` replaces every Cc character with a space and U+000A is Cc, so a note is strictly one
+line however it was written: records separated by newlines arrive glued together, and a
+line-oriented parser then finds one or none while reporting the write as successful. Records are
+therefore located by scanning the note's whitespace-separated fields for the `delegate:` token and
+taking the five after it — which reads `mailbox: mb-x delegate: <did> …` correctly, needs no
+delimiter the sweep could eat, and drops the read lane's banner and budget footer for free.
+
+Four things about the signed string are load-bearing:
 
 - **The leading literal is domain separation.** A signature is over a string, so two protocols
   sharing a string shape share signatures. Field 1 of a message signature is a room name and field 2

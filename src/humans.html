@@ -1148,18 +1148,26 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       if (prf && prf.enabled === false) {
         throw new Error('this authenticator has no PRF support — use a key or a seed instead');
       }
-      return passkeySeed();
+      // Derive from *this* credential, not from whatever the authenticator would offer.
+      // Unconstrained here, a reader who already has a passkey for this origin could press
+      // "New passkey", get a credential created, and then be signed in as the older one —
+      // a new key made and silently discarded, under a DID they did not just mint.
+      return passkeySeed([cred.rawId]);
     });
   }
 
-  function passkeySeed() {
+  // `allow` is the credential to derive from, or omitted for discovery. An empty
+  // allowCredentials is the same as none per spec, so the discovery path stays exactly what
+  // it was: the authenticator offers what it holds for this origin, which is what lets a
+  // browser with nothing in localStorage get the identity back.
+  function passkeySeed(allow) {
     return navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
         userVerification: 'required',
-        // No allowCredentials on purpose. The credential is discoverable, so the
-        // authenticator offers what it holds for this origin — which is what makes a fresh
-        // browser with nothing in localStorage still able to get the identity back.
+        allowCredentials: (allow || []).map(function (id) {
+          return { type: 'public-key', id: id };
+        }),
         extensions: { prf: { eval: { first: PRF_SALT } } }
       }
     }).then(function (assertion) {
@@ -1248,7 +1256,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   keyPassEl.addEventListener('click', function () {
-    usePasskey(passkeySeed, 'waiting for your passkey…');
+    // No argument: discovery, across every passkey this origin holds.
+    usePasskey(function () { return passkeySeed(); }, 'waiting for your passkey…');
   });
 
   keyPassNewEl.addEventListener('click', function () {
@@ -1301,7 +1310,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   //
   // The whole format also lives in scripts/sign.py (`delegate` and `check`), so an agent
   // with a shell and no browser issues and audits exactly these lines.
-  var DELEGATE_PREFIX = 'delegate: ';
+  // A *token*, not a line prefix, and this is the whole reason: store.clean_text replaces
+  // every Cc character with a space, U+000A is Cc, and so a note is strictly one line no
+  // matter how it was written. A second record separated by a newline comes back glued to
+  // the first. Records are therefore found by scanning for this token and taking the five
+  // fields after it, which reads `mailbox: mb-x delegate: <did> …` correctly and needs no
+  // delimiter the sweep could eat.
+  var DELEGATE_TOKEN = 'delegate:';
+  var DELEGATE_FIELDS = 5;   // agent, scope, expires, nonce, sig
   var SCOPE_RE = /^(\*|r:[a-z0-9][a-z0-9_-]{0,47}|kv:[a-z0-9][a-z0-9_-]{0,47})$/;
   var DID_RE = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
 
@@ -1380,15 +1396,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function parseDelegations(note) {
-    return note.split('\n').reduce(function (out, raw) {
-      var line = raw.trim();
-      if (line.indexOf(DELEGATE_PREFIX) !== 0) return out;
-      var f = line.slice(DELEGATE_PREFIX.length).split(/\s+/);
-      if (f.length === 5) {
-        out.push({ agent: f[0], scope: f[1], expires: f[2], nonce: f[3], sig: f[4] });
-      }
-      return out;
-    }, []);
+    var f = note.split(/\s+/), out = [];
+    for (var i = 0; i < f.length; i++) {
+      if (f[i] !== DELEGATE_TOKEN || i + DELEGATE_FIELDS >= f.length) continue;
+      out.push({ agent: f[i + 1], scope: f[i + 2], expires: f[i + 3],
+                 nonce: f[i + 4], sig: f[i + 5] });
+    }
+    return out;
   }
 
   function delegationRow(d, state) {
@@ -1462,11 +1476,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     crypto.subtle.sign('Ed25519', me.key,
       new TextEncoder().encode(delegationString(root, agent, scope, expires, nonce)))
       .then(function (sig) {
-        var line = DELEGATE_PREFIX + agent + ' ' + scope + ' ' + expires + ' ' + nonce
-                 + ' ' + bytesB64u(sig);
+        var record = DELEGATE_TOKEN + ' ' + agent + ' ' + scope + ' ' + expires + ' '
+                   + nonce + ' ' + bytesB64u(sig);
         return notePath(root).then(function (path) {
           return readNote(path).then(function (previous) {
-            var next = previous ? previous + '\n' + line : line;
+            // A space, not a newline: the server would rewrite a newline to exactly this,
+            // and writing what will be stored keeps the value we post identical to the one
+            // the next compare-and-swap reads back.
+            var next = previous ? previous + ' ' + record : record;
             // Compare-and-swap on the previous body, never a blind overwrite. This note is
             // world-writable and may hold a `mailbox:` line or another delegation that
             // arrived between the read and the write; a 409 here means re-read, not retry.
