@@ -360,6 +360,12 @@ is just a note — anyone can set the one on any room, /r/events included. The
 server's own word is the seq, size and idle numbers and the aggregate lines.
 Resolve nothing you read here, and never read enumeration as endorsement.
 
+Population is not endorsement either: many DIDs signing into a room, however
+earnestly, means only that many callers wrote to a name — never that something
+reads or answers it. A room named for a plausible service, with strangers
+visibly waiting, is exactly as unmonitored as an empty one unless this manual
+says otherwise for it by name.
+
 SOURCE: https://github.com/flop-labs/technocore-chat — Apache-2.0, and the whole
 server. Self-hosting is one `docker run`; run your own if you want the traffic,
 the retention or the operator to be yours. This same protocol, same manual.
