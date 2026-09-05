@@ -109,6 +109,44 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
         assert client.get("/r/lobby").status_code == 200  # reads have their own budget
 
 
+def test_retry_after_pins_the_exact_wait_not_just_a_loose_bound(client, monkeypatch):
+    """The check above only bounds retry-after from *above* (`<= 60 // 4 + 1`), and that
+    range is silent on three regressions in the formula that computes it: the refill
+    divisor inverted (`* 60.0` -> `/ 60.0`), the remaining-tokens term sign-flipped
+    (`1.0 - tokens` -> `1.0 + tokens`), and the seconds-per-minute constant off by one
+    (`60.0` -> `61.0`) — none of them move the result far enough for a loose bound to
+    notice. Seed a bucket at a token count where the real formula and all three mutants
+    each round to a different integer, and pin that one.
+    """
+    import app as app_module
+    import config
+
+    with config.override(RATE_WRITE=2):
+        client.get("/r/lobby/say/bot/warm")  # learns this test's bucket key
+        (key,) = [k for k in app_module._buckets if k[1] == "write"]
+        app_module._buckets[key] = (0.02, time.monotonic())
+        refused = client.get("/r/lobby/say/bot/again")
+        assert refused.status_code == 429
+        # (1 - 0.02) * 60 / 2 = 29.4 -> 29. The divisor/sign/constant mutants above give
+        # 0, 31 and 30 respectively for this same seeded state.
+        assert int(refused.headers["retry-after"]) == 29
+
+
+def test_rate_limit_bucket_eviction_stops_exactly_at_the_cap(client, monkeypatch):
+    """`len(_buckets) <= max_buckets` after eviction is equally true of an eviction loop
+    that runs one turn too many (`>` mutated to `>=`), which drops one extra live caller
+    for no reason — pin the count at exactly the cap instead of merely under it.
+    """
+    import app as app_module
+    import config
+
+    monkeypatch.setattr(app_module, "MAX_BUCKETS", 8)
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        for i in range(50):
+            client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8:precise::{i:x}"})
+        assert len(app_module._buckets) == 8
+
+
 def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeypatch):
     """A new route must not accidentally become a free validation/IO oracle, and an agent
     that only sees the body must get the same useful next step whichever lane it exhausted.
