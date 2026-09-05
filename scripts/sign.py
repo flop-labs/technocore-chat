@@ -14,6 +14,20 @@ signature over exactly what it stores:
     message:  <room>|<nonce>|<text-after-sweep>          (say-signed)
     note:     <ns>|<key>|<nonce>|<value-after-sweep>     (set-signed)
 
+And one the server does not verify at all, because nothing on it has to:
+
+    delegate: delegate|<root-did>|<agent-did>|<scope>|<expires>|<nonce>
+
+That is a *delegation*: a root key saying "this agent key acts for me, this
+much, until then". It is published as a line in the root's own DID note and
+verified by whoever cares, offline, against the root's did:key — so the record
+carries its own proof, and the note holding it needs no protection. Anyone may
+overwrite that note; a forged line simply fails to verify. See 'check'.
+
+Note the leading literal. Field 1 of a message signature is a room name and
+field 2 a nonce, so a 'delegate|...' string can be read as neither of the two
+above, and a signature over one is never a valid signature over the other.
+
 "after-sweep" is the single-line sweep every write passes through before
 storage (src/store.py clean_text): each character whose Unicode category is
 Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. Sign the
@@ -29,9 +43,12 @@ Key material comes from --seed or $SIGN_SEED:
 
 Usage:
   uv run scripts/sign.py keygen
-  uv run scripts/sign.py did   [--seed HEX|PASSPHRASE]
-  uv run scripts/sign.py say   [--seed ...] <room> <nonce> <text>
-  uv run scripts/sign.py set   [--seed ...] <ns> <key> <nonce> <value>
+  uv run scripts/sign.py did      [--seed HEX|PASSPHRASE]
+  uv run scripts/sign.py say      [--seed ...] <room> <nonce> <text>
+  uv run scripts/sign.py set      [--seed ...] <ns> <key> <nonce> <value>
+  uv run scripts/sign.py note     <did:key>
+  uv run scripts/sign.py delegate [--seed ...] <agent-did> <scope> <days> [nonce]
+  uv run scripts/sign.py check    <root-did> [file]
 
 'keygen' prints the seed and the did:key. 'did' prints the did:key. 'say' and
 'set' print two lines — the did:key, then the 86-character base64url
@@ -42,6 +59,21 @@ signature — ready for:
 
 Nonces are yours to choose (1-19 digits) and must count up per key per room;
 a millisecond clock works, and so does a plain counter.
+
+'note' prints the note path a DID's identity note lives at, which is where a
+delegation is published: the first 16 lowercase hex characters of
+SHA-256(did:key string), split as /kv/did-<first 2>/<remaining 14>.
+
+'delegate' prints one `delegate: ...` line to add to that note. Scope is '*',
+'r:<room>' or 'kv:<ns>'; <days> is how long it stays valid, and the nonce
+defaults to a millisecond clock. Expiry is the ONLY revocation this format has
+— a reader holding a cached copy of the note cannot see a line you deleted —
+so delegate for days, not years, and re-issue.
+
+'check' reads a note (a file, or stdin) and reports every delegation line in it
+against a root did:key: which verify, which have expired, and which are forged.
+It needs no key and no network, which is the property that matters: a
+delegation is checkable by anyone, from the note text alone.
 """
 
 from __future__ import annotations
@@ -52,9 +84,13 @@ import hashlib
 import os
 import re
 import secrets
+import sys
+import time
 import unicodedata
+from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 PREFIX = "did:key:z6Mk"  # multibase 'z' + the fixed ed25519-pub prefix base58-encodes to z6Mk
 MULTICODEC_ED25519 = b"\xed\x01"  # varint ed25519-pub, the two bytes every z6Mk key decodes from
@@ -67,6 +103,21 @@ INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
+
+# A delegation's scope. Deliberately three shapes and no grammar to speak of: this file
+# issues and checks delegations, it does not enforce them, and a scope language richer than
+# what a reader can act on is a language nobody implements the same way twice.
+#   *        everything the root could do
+#   r:<room> one room
+#   kv:<ns>  one note namespace
+# The room/namespace halves are store.py's NAME_RE, so a scope names something that can
+# exist.
+NAME = r"[a-z0-9][a-z0-9_-]{0,47}"
+SCOPE_RE = re.compile(rf"\*|r:{NAME}|kv:{NAME}")
+DIGITS_RE = re.compile(r"[0-9]{1,19}")
+# `mailbox: <room>` is already a line in this note (see the manual's IDENTITY section), so a
+# delegation is another line type in the same place rather than a second note to find.
+DELEGATE_PREFIX = "delegate: "
 
 
 def swept(text: str, limit: int) -> str:
@@ -128,6 +179,99 @@ def signature(key: Ed25519PrivateKey, message: str) -> str:
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
+def unbase58(raw: str) -> bytes:
+    """The inverse of multibase(), for reading a did:key back into a public key.
+
+    Only 'check' needs this — issuing a delegation never parses one — which is why it sits
+    apart from the encode path rather than beside it.
+    """
+    n = 0
+    for ch in raw:
+        digit = B58.find(ch)
+        if digit < 0:
+            raise SystemExit(f"bad did:key: {ch!r} is not base58btc")
+        n = n * 58 + digit
+    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+
+
+def public_key(did: str) -> Ed25519PublicKey:
+    """The Ed25519 public key inside a did:key, or exit. Mirrors src/didkey.py public_key:
+    same length check, same multicodec check, same refusal of everything that is not
+    ed25519-pub."""
+    if not did.startswith("did:key:z"):
+        raise SystemExit(f"bad did:key: expected did:key:z6Mk..., got {did!r}")
+    mb = did[len("did:key:") :]
+    if len(mb) != 48:
+        raise SystemExit(f"bad did:key: expected 48 multibase characters, got {len(mb)}")
+    decoded = unbase58(mb[1:])
+    if len(decoded) != 34 or not decoded.startswith(MULTICODEC_ED25519):
+        raise SystemExit("bad did:key: only ed25519-pub (z6Mk...) keys are accepted")
+    return Ed25519PublicKey.from_public_bytes(decoded[2:])
+
+
+def note_path(did: str) -> str:
+    """Where a DID's identity note lives — the manual's IDENTITY section, in code.
+
+    Fingerprint over the did:key *string*, not the key bytes: the string is what every
+    reader already has, and hashing the bytes would make the path unreachable from a DID
+    printed in a message.
+    """
+    public_key(did)  # refuse to name a path for something that is not a key we accept
+    fingerprint = hashlib.sha256(did.encode()).hexdigest()[:16]
+    return f"/kv/did-{fingerprint[:2]}/{fingerprint[2:]}"
+
+
+def delegation(root: str, agent: str, scope: str, expires: str, nonce: str) -> str:
+    """The canonical string a delegation signature covers.
+
+    The root DID is *in* the signed string even though the note it lands in is already
+    addressed by the root's fingerprint. Without it, a line lifted out of one root's note
+    and pasted into another's would carry a signature that still verified against whichever
+    key the reader happened to be checking — the path is not part of the proof, so the proof
+    has to name its own issuer.
+    """
+    return f"delegate|{root}|{agent}|{scope}|{expires}|{nonce}"
+
+
+def check_note(root: str, body: str) -> int:
+    """Report every delegation line in `body` against `root`. Returns the count that verify.
+
+    Prints one line per delegation and never raises on a bad one: the whole point of a
+    self-certifying record in a world-writable note is that garbage is *expected* and is
+    supposed to be visibly inert rather than fatal.
+    """
+    key, live, now = public_key(root), 0, int(time.time())
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line.startswith(DELEGATE_PREFIX):
+            continue
+        fields = line[len(DELEGATE_PREFIX) :].split()
+        if len(fields) != 4 + 1:
+            print(f"MALFORMED  {line[:72]}  (expected 5 fields, got {len(fields)})")
+            continue
+        agent, scope, expires, nonce, sig = fields
+        try:
+            key.verify(
+                base64.urlsafe_b64decode(sig + "=="),
+                delegation(root, agent, scope, expires, nonce).encode(),
+            )
+        except (InvalidSignature, ValueError, TypeError):
+            # Not "invalid": *forged, or for somebody else*. A line that fails here was
+            # signed by a key that is not this root, which in a note anyone can write to is
+            # the ordinary case and not an error.
+            print(f"FORGED     {agent} {scope}  (not signed by {root[:20]}...)")
+            continue
+        if not expires.isdigit() or int(expires) <= now:
+            print(f"EXPIRED    {agent} {scope}  (expired {expires})")
+            continue
+        # Rounded up: a delegation issued for 30 days is "30d left" a second later, where
+        # flooring would report 29 and make every fresh delegation look already shortened.
+        left = -((now - int(expires)) // 86400)
+        print(f"OK         {agent} {scope}  ({left}d left, nonce {nonce})")
+        live += 1
+    return live
+
+
 def main() -> None:
     # --seed lives on a parent parser so it reads naturally on either side of the
     # subcommand: 'sign.py --seed X say ...' and 'sign.py say --seed X ...' both work.
@@ -153,6 +297,16 @@ def main() -> None:
     note.add_argument("key")
     note.add_argument("nonce")
     note.add_argument("value")
+    where = sub.add_parser("note", help="print the note path a DID's identity note lives at")
+    where.add_argument("did")
+    give = sub.add_parser("delegate", parents=[seeded], help="sign a delegation to an agent key")
+    give.add_argument("agent", help="the agent's did:key")
+    give.add_argument("scope", help="'*', 'r:<room>' or 'kv:<ns>'")
+    give.add_argument("days", help="how many days it stays valid")
+    give.add_argument("nonce", nargs="?", help="defaults to a millisecond clock")
+    audit = sub.add_parser("check", help="verify the delegation lines in a note")
+    audit.add_argument("root", help="the root did:key the note belongs to")
+    audit.add_argument("file", nargs="?", help="note text; reads stdin when absent")
     args = parser.parse_args()
 
     if args.cmd == "keygen":
@@ -162,10 +316,44 @@ def main() -> None:
         print(f"did:  {did_of(key)}")
         return
 
+    # Neither of these needs a key: a note path is a hash of a public string, and checking a
+    # delegation is the thing anybody can do with no secret at all. They are answered before
+    # load_key is ever reached so that they work with no --seed and no $SIGN_SEED.
+    if args.cmd == "note":
+        print(note_path(args.did))
+        return
+
+    if args.cmd == "check":
+        body = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+        live = check_note(args.root, body)
+        print(f"\n{live} live delegation(s)")
+        # Nonzero on "nothing usable here", so this is worth putting in a script: a cron job
+        # that re-issues before expiry wants an exit code, not prose to grep.
+        raise SystemExit(0 if live else 1)
+
     seed = getattr(args, "seed", None)  # unset when --seed was passed nowhere (SUPPRESS)
     if args.cmd == "did":
         key, _ = load_key(seed)
         print(did_of(key))
+        return
+
+    if args.cmd == "delegate":
+        if not SCOPE_RE.fullmatch(args.scope):
+            raise SystemExit(f"bad scope {args.scope!r}: expected '*', 'r:<room>' or 'kv:<ns>'")
+        if not args.days.isdigit() or not 1 <= int(args.days) <= 3650:
+            raise SystemExit(f"days must be 1-3650, got {args.days!r}")
+        public_key(args.agent)  # refuse to delegate to something that is not a key
+        nonce = args.nonce or str(int(time.time() * 1000))
+        if not DIGITS_RE.fullmatch(nonce):
+            raise SystemExit(f"nonce must be 1-19 ASCII digits, got {nonce!r}")
+        expires = str(int(time.time()) + int(args.days) * 86400)
+        key, _ = load_key(seed)
+        root = did_of(key)
+        if root == args.agent:
+            raise SystemExit("a key cannot delegate to itself — it already acts for itself")
+        sig = signature(key, delegation(root, args.agent, args.scope, expires, nonce))
+        print(f"# add this line to {note_path(root)} — the note of {root}")
+        print(f"{DELEGATE_PREFIX}{args.agent} {args.scope} {expires} {nonce} {sig}")
         return
 
     # say/set: build the canonical string over the SWEPT text — what is stored.

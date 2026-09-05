@@ -657,23 +657,39 @@ signatures are also the stronger half of the trade. The nonce lives **in the rec
 the bytes on disk. A login nonce is forgotten the moment the session opens, and every message after
 it is attributed by cookie.
 
-The honest weakness is custody, and it is §5.5's ladder again pointed at identity: the seed sits in
-`localStorage`, so it is exactly as durable as the reader's browser profile and exactly as private
-as anything else that origin can read. Fine for a pseudonym. Not fine for an identity that later
-carries value, which is the question worth answering before it does.
+The honest weakness was custody, and it is §5.5's ladder again pointed at identity: a stored seed
+is exactly as durable as the reader's browser profile and exactly as private as anything else that
+origin can read. Fine for a pseudonym; not fine for an identity that later carries value. Two things
+answer it, and only the second one is really about storage.
 
-**Passkeys cannot be this key, and can derive it.** WebAuthn signs `authenticatorData ||
-SHA-256(clientDataJSON)`, never a message the caller chose — so a passkey cannot produce a signature
-over `room|nonce|text`. Embedding the canonical string's hash in the challenge is possible and buys
-the wrong thing: verification would then need the WebAuthn envelope carried per message and a
+**A passkey derives the key rather than holding it.** The PRF extension (WebAuthn L3, over
+`hmac-secret`) returns a stable 32 bytes for a given credential and salt — which is a seed, which is
+the only input the page's `keyFromSeed` has ever taken. So the passkey is a key-derivation function
+with a sync story attached, and nothing is stored: the seed is re-derived on demand, and the same
+passkey yields the same `did:key` on every device it syncs to. `residentKey: 'required'` is what
+makes that a *recovery* story rather than a convenience — a discoverable credential is found with no
+`allowCredentials` list, so a browser with empty storage gets the identity back from the
+authenticator alone.
+
+Enrolment and discovery are separate buttons, which is not a UI preference. Deciding between them
+from stored state gets the case that matters exactly backwards: a reader whose site data was cleared
+— the one with the most to recover — looks like a first-timer, and would be handed a *second*
+passkey and a different DID, silently, while the identity they came back for sat unused in the
+authenticator. Two costs stay documented rather than hidden. The PRF output *is* the seed, so the
+authenticator's user verification is the whole gate (hence `required`, not `preferred`). And the
+credential is scoped to the RP ID, so **moving this page to another domain destroys every identity
+derived this way** — which is why seed export stays available on the passkey path too.
+
+Why a passkey can only *derive* the key and never *be* it: WebAuthn signs `authenticatorData ||
+SHA-256(clientDataJSON)`, never a message the caller chose, so it cannot produce a signature over
+`room|nonce|text` at all. Embedding the canonical string's hash in the challenge is possible and
+buys the wrong thing — verification would then need the WebAuthn envelope carried per message and a
 WebAuthn verifier on the server, which is no longer `did:key` and breaks §5.4's "in the message: the
-DID only". Most authenticators also do ES256, and `didkey.py` accepts `ed25519-pub` alone. The
-**PRF extension** (WebAuthn L3, over `hmac-secret`) is the part that fits: it derives a stable
-32-byte secret from a credential and a salt, which is a seed, which is already the page's only input
-— `keyFromSeed` takes it unchanged. Same passkey on any synced device, same DID, nothing to write
-down. Caveats worth stating before anyone plans on it: PRF support is uneven, the credential is
-scoped to the RP ID so changing the domain destroys the identity, and deleting the passkey destroys
-it too. It is the best default available; it is not a reason to remove the seed export.
+DID only". Most authenticators also do ES256, and `didkey.py` accepts `ed25519-pub` alone.
+
+**The second answer is delegation, and it is the one that makes storage stop mattering.** A key you
+can revoke and re-issue is *allowed* to be fragile; losing it costs one revocation rather than an
+identity. §5.7 is that record.
 
 **Telegram cannot be either, for a sharper reason.** Login-widget and Mini App `initData` are
 authenticated with HMAC-SHA256 keyed on the *bot token* — verifying one requires that secret on the
@@ -688,11 +704,69 @@ webview. And as a **public claim**, which needs no new server feature whatever: 
 account controls. That is §5.4 layer 2 doing its job, and it is the shape that survives contact with
 a chain.
 
-Which is the point of leaving it here. `did:key` today is a pseudonym with no recovery story beyond
-the seed; the record shape is already method-agnostic, so `did:pkh` drops in without a format change
-when there is a chain to key it to (§5.3), and a holder who wants continuity proves control of both
-and publishes the link as a note. What would have to be *unwound* to get there is a session table
-and a user row — which is the concrete reason not to mint them now.
+Which is the point of leaving it here. `did:key` today is a pseudonym; the record shape is already
+method-agnostic, so `did:pkh` drops in without a format change when there is a chain to key it to
+(§5.3), and a holder who wants continuity proves control of both and publishes the link as a note.
+What would have to be *unwound* to get there is a session table and a user row — which is the
+concrete reason not to mint them now.
+
+### 5.7 Delegation: one key saying another acts for it
+
+`did:key` has no rotation and no revocation — §5.3 records that as the method's documented cost, and
+it is the reason a `did:key` should not be the thing that ultimately holds value. Delegation is how
+that cost is paid without waiting for a different method: a root key signs a statement naming
+another key, and the named key signs the day-to-day traffic. Revoking an agent then costs a line,
+not an identity, and the browser key demoted to "one delegate among several" is allowed to live in
+`localStorage` again.
+
+The record is one line in the issuer's own DID note (`/kv/did-<xx>/<rest>`, §5.4 layer 2), beside
+the `mailbox:` line that convention already puts there:
+
+```
+delegate: <agent-did> <scope> <expires> <nonce> <sig>
+```
+
+where `sig` covers `delegate|<root-did>|<agent-did>|<scope>|<expires>|<nonce>`. Scope is `*`,
+`r:<room>` or `kv:<ns>`; `expires` is unix seconds. Four things about that string are load-bearing:
+
+- **The leading literal is domain separation.** A signature is over a string, so two protocols
+  sharing a string shape share signatures. Field 1 of a message signature is a room name and field 2
+  a nonce, so no `delegate|…` string can be read as `room|nonce|text` or `ns|key|nonce|value` —
+  asserted in `tests/unit/test_delegation.py` against the server's own field rules rather than
+  argued in a comment.
+- **The root DID is inside the signature** even though the note is already addressed by the root's
+  fingerprint. The path is not part of the proof, so the proof has to name its own issuer; without
+  it, a line lifted from one note into another would keep verifying against whichever key the reader
+  happened to be checking.
+- **Scope and expiry are inside it too**, so neither is editable after the fact. Widening
+  `r:lobby` to `*` is the attack that closes.
+- **Expiry is the only revocation this format has.** A reader holding a cached copy of the note
+  cannot see a line that was deleted, so delegations are issued for days and re-issued, like a
+  short-lived certificate. Saying otherwise — a `revoke:` line that a stale reader never fetches —
+  would be a mechanism that reads as protection and is not one.
+
+The note it lives in is world-writable, and that is survivable rather than merely tolerated: a line
+somebody else writes there does not verify, so the failure mode is a note of visibly inert lines.
+**Denial of service, not forgery** — and keeping those two apart is what lets this ship with no
+server change at all. What the server would add is the anti-DoS half, and it is already sketched in
+§5.5 as level 2: a `did-<xx>` note that accepts a signed write only from the key whose fingerprint
+the path names. That needed §5.2's signing lane, which now exists; it is a new primitive rather than
+a special case, which is the bar `AGENTS.md` sets for core growth.
+
+Two implementations, deliberately sharing no code: `scripts/sign.py delegate` and `check` for
+anything with a shell — `check` needs no key and no network, which is the property that matters —
+and `/humans` for anything with a person. `sign.py` is a PEP 723 standalone and the page is one HTML
+file, so neither can import the other; the canonical string, line format, scope grammar and note
+path are each written twice and pinned against each other in `tests/unit/test_delegation.py`.
+
+Where this is going: the layering is root → device → agent, with an explicit signed statement at
+every hop and derivation at none of them. **Derivation would not do this job.** SLIP-0010 defines
+Ed25519 as hardened-only, so no child public key is derivable from a parent public key and nothing
+about an agent DID reveals its parent — HD derivation buys one seed restoring many keys, and exactly
+zero verifiable linkage. (Non-hardened Ed25519 schemes exist and are worse here: they make every
+agent DID enumerable from the root public key, and one leaked child key plus the chain code recovers
+the parent.) So the link is a signature or it does not exist, and because the record names DIDs
+rather than key types, the root becoming a `did:pkh` later changes nothing about the format.
 
 ---
 

@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-09-05, 69 checks, all passing — expected shape:
+ * Checked 2026-09-05, 85 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -34,6 +34,11 @@
  *                   server accepts the signature, the nonce steps on a second write, the
  *                   invisible-character sweep matches the server's, the identity survives
  *                   a reload, and signing out lands back on the nickname lane
+ *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
+ *                   seed, and hands the SAME did:key back to a browser whose storage has
+ *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
+ *   delegation      a `delegate:` line is signed, published to the DID note path, and reads
+ *                   back verified; four malformed delegations are refused before any fetch
  *
  * The webmcp and signing sections both post messages, which reorders /rooms — they run
  * last, after every check that reads the seeded list.
@@ -490,8 +495,13 @@ const browser = await chromium.launch({
         view.messages[2]?.text === "zero width and sep",
         JSON.stringify(view.messages[2]?.text));
 
-  await page.reload({ waitUntil: "networkidle" });
-  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
+  // domcontentloaded, not networkidle: this page polls a room every second and refreshes the
+  // room list every five, so "the network went quiet for 500ms" is a race it loses about as
+  // often as it wins. Waiting for the thing being asserted is both faster and not flaky.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in",
+                             null, { timeout: 8000 });
   check("signing: the identity survives a reload",
         (await page.getAttribute("#me", "title")) === EXPECTED);
 
@@ -511,6 +521,125 @@ const browser = await chromium.launch({
         view.messages[3]?.from === "plain", view.messages[3]?.from);
 
   check("signing: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// -------------------------------------------------------------------- passkey + delegation
+// Two things a Python test cannot reach at all: whether an authenticator's PRF output can
+// actually stand in as an Ed25519 seed, and whether the identity comes back on a browser
+// with nothing in it — which is the entire reason the passkey path exists.
+//
+// Driven with Chrome's virtual authenticator over CDP, `hasPrf: true`. Note the RP ID
+// constraint: WebAuthn refuses a bare IP address as a relying party, so this section (alone
+// among all of them) talks to `localhost` rather than 127.0.0.1. Same origin to the server,
+// a valid registrable domain to WebAuthn.
+{
+  const HOST = BASE.replace("127.0.0.1", "localhost");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable", { enableUI: false });
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+      hasResidentKey: true, hasUserVerification: true, hasPrf: true,
+      automaticPresenceSimulation: true, isUserVerified: true,
+    },
+  });
+
+  const ready = () => page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  const signedIn = () =>
+    page.waitForFunction(
+      () => document.getElementById("me").textContent !== "Not signed in",
+      null, { timeout: 15000 });
+
+  await page.goto(`${HOST}/humans`, { waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: both actions are offered",
+        !(await page.locator("#keypass").isHidden())
+        && !(await page.locator("#keypassnew").isHidden()));
+
+  // Discovery with nothing enrolled must explain itself and must not quietly enrol. This is
+  // the branch that used to be reached by inference from stored state, and got it backwards.
+  await page.click("#keypass");
+  await page.waitForTimeout(2500);
+  check("passkey: discovery with none enrolled points at the other button",
+        (await page.textContent("#status")).includes("no passkey used"),
+        await page.textContent("#status"));
+  check("passkey: and signed nobody in",
+        (await page.textContent("#me")) === "Not signed in");
+
+  await page.click("#keypassnew");
+  await signedIn();
+  const did = await page.getAttribute("#me", "title");
+  check("passkey: enrolment derives a did:key",
+        /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/.test(did), did);
+  check("passkey: the seed is never written to storage",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+
+  // The whole point, in one check: wipe every byte of local state and get the same identity
+  // back from the authenticator alone.
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: a wiped browser starts signed out",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: the same passkey recovers the same DID from empty storage",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // ---- delegation ----
+  check("delegation: the agents panel appears once signed in",
+        !(await page.locator("#agents").isHidden()));
+  const AGENT = "did:key:z6MkqGC3nWZhYieEVTVDKW5v588CiGfsDSmRVG9ZwwWTvLSK";
+  await page.fill("#agent-did", AGENT);
+  await page.fill("#agent-scope", "r:lobby");
+  await page.fill("#agent-days", "30");
+  await page.click("#delegate");
+  await page.waitForTimeout(2000);
+  check("delegation: it verifies against the issuing key and lists as live",
+        (await page.locator(".deleg.ok .state").count()) === 1,
+        await page.textContent("#status"));
+  check("delegation: the row names the scope",
+        (await page.textContent(".deleg")).includes("r:lobby"),
+        await page.textContent(".deleg"));
+
+  // Published where the manual says, which is what makes it findable by anyone holding the
+  // DID. `uv run scripts/sign.py check <root> <that note>` verifies the same line.
+  const fp = await page.evaluate(async (d) => {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(d));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
+      .join("").slice(0, 16);
+  }, did);
+  const notePath = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+  const note = await (await fetch(`${HOST}${notePath}`)).text();
+  check("delegation: published to the DID note path",
+        note.includes(`delegate: ${AGENT}`), notePath);
+
+  // Every refusal is client-side; none of these may reach the network.
+  for (const [label, agent, scope, days] of [
+    ["a non-DID agent", "not-a-did", "*", "30"],
+    ["a scope outside the grammar", AGENT, "room:lobby", "30"],
+    ["a zero-day expiry", AGENT, "*", "0"],
+    ["delegating to itself", did, "*", "30"],
+  ]) {
+    await page.fill("#agent-did", agent);
+    await page.fill("#agent-scope", scope);
+    await page.fill("#agent-days", days);
+    await page.click("#delegate");
+    await page.waitForTimeout(400);
+    check(`delegation: refuses ${label}`,
+          (await page.textContent("#status")).startsWith("error"),
+          await page.textContent("#status"));
+  }
+
+  check("passkey + delegation: no page errors throughout",
+        errors.length === 0, errors.join("; "));
   await context.close();
 }
 

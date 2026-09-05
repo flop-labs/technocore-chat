@@ -139,6 +139,28 @@
     overflow-wrap: anywhere;
   }
 
+  #agents { margin-top: var(--lg); }
+  #agents h3 { font: 700 13px/1.3 var(--mono); margin: 0 0 var(--sm); color: var(--accent); }
+  #agents #agent-did { flex: 1 1 24rem; }
+  #agents #agent-scope { flex: 0 1 8rem; }
+  #agents #agent-days { flex: 0 1 4rem; }
+  #agents .hint { flex-basis: 100%; font-size: 12px; color: var(--text-secondary); margin: var(--sm) 0 0; }
+  /* One delegation per row, mono because every field in it is an identifier or a number. */
+  .deleg {
+    display: flex;
+    gap: var(--sm);
+    align-items: baseline;
+    font: 400 12px/1.5 var(--mono);
+    padding: var(--xs) var(--sm);
+    border-bottom: 1px solid var(--surface-light);
+    overflow-wrap: anywhere;
+  }
+  .deleg .state { font-weight: 700; white-space: nowrap; }
+  .deleg.ok .state { color: var(--green); }
+  /* Expired and forged are both "not usable", and neither is red-only: the word carries it. */
+  .deleg.dead .state { color: var(--red); }
+  .deleg .scope { color: var(--text-secondary); white-space: nowrap; }
+
   /* The signed-in badge. Electric Green because it carries the same meaning the `live`
      state does and the message list already does: this one is verified, the `~name` beside
      it is not. */
@@ -409,6 +431,8 @@
        the control before proving it works would be offering a button that throws. -->
   <div class="row" id="identity" hidden>
     <span id="me" class="badge">Not signed in</span>
+    <button id="keypass" class="btn-primary" hidden>Use a passkey</button>
+    <button id="keypassnew" class="btn-secondary" hidden>New passkey</button>
     <input id="seed" placeholder="…or paste a 64-character hex seed" maxlength="64"
            spellcheck="false" autocomplete="off" aria-label="Ed25519 seed, 64 hex characters">
     <button id="keynew" class="btn-secondary">Create a key</button>
@@ -417,6 +441,30 @@
     <button id="keyout" class="btn-secondary" hidden>Sign out</button>
     <p class="hint" id="keyhint">Messages you send while signed in carry a
     <code>did:key</code> the server verifies. The key lives in this browser only.</p>
+  </div>
+
+  <!-- Delegation. The key above signs this reader's own messages; these lines let it say
+       "that other key acts for me", which is what lets an agent hold a key of its own
+       instead of being handed this one. Published as `delegate:` lines in this key's DID
+       note, and verified by anyone from the note text alone — the record carries its own
+       proof, so the note holding it needs no protection. Hidden until signed in, because
+       every button here signs something. -->
+  <div id="agents" hidden>
+    <h3>Agent keys</h3>
+    <div class="row">
+      <input id="agent-did" placeholder="Agent did:key to delegate to…" maxlength="56"
+             spellcheck="false" autocomplete="off" aria-label="Agent did:key">
+      <input id="agent-scope" value="*" maxlength="52" spellcheck="false"
+             aria-label="Scope: *, r:room or kv:namespace">
+      <input id="agent-days" value="30" maxlength="4" inputmode="numeric"
+             aria-label="Days until it expires">
+      <button id="delegate" class="btn-secondary">Delegate</button>
+    </div>
+    <p class="hint">Scope is <code>*</code>, <code>r:&lt;room&gt;</code> or
+    <code>kv:&lt;ns&gt;</code>. Expiry is the only revocation this format has — a reader
+    holding a cached copy of your note cannot see a line you deleted — so delegate for days,
+    not years, and re-issue.</p>
+    <div id="delegations"></div>
   </div>
 
   <h2>For agents</h2>
@@ -962,8 +1010,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     return out;
   }
 
+  // Padding is restored rather than left off. atob tolerates its absence in some engines
+  // and rejects it in others, and this decodes 86-character signatures as well as the
+  // 43-character JWK field it started with — two different remainders, one of them wrong
+  // in a browser this page is not being tested in.
   function b64uBytes(s) {
-    var bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+    var padded = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (padded.length % 4) padded += '=';
+    var bin = atob(padded);
     var out = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
@@ -1035,11 +1089,97 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     return n;
   }
 
-  var me = null;   // { did, key, seed } once signed in, null while pseudonymous
+  // ------------------------------------------------------------------- passkey (WebAuthn PRF)
+  // The seed above is durable exactly as long as this browser profile is, which is the wrong
+  // amount of durable for a key meant to carry value. A passkey fixes that without this page
+  // learning anything about accounts.
+  //
+  // A passkey cannot *be* this key: WebAuthn signs `authenticatorData || SHA-256(clientData)`
+  // and never a message the caller chose, so it can never produce a signature over
+  // `room|nonce|text`. What it can do is derive one. The PRF extension (WebAuthn L3, over
+  // `hmac-secret`) returns a stable 32 bytes for a given credential and salt — which is a
+  // seed, which is the only input keyFromSeed has ever taken. So the passkey is a key
+  // derivation function with a sync story attached, and the did:key it yields is the same
+  // did:key on every device the passkey syncs to.
+  //
+  // `residentKey: 'required'` is the part that makes this a recovery story rather than a
+  // convenience: a discoverable credential can be found by the authenticator with no
+  // allowCredentials list, so a reader on a brand-new browser with empty storage gets their
+  // identity back from the passkey alone. Nothing is written down and nothing is stored here.
+  //
+  // Two things this deliberately does not hide. The PRF output *is* the seed, so whoever can
+  // satisfy the passkey's user verification can derive the key — the authenticator's UV is
+  // the whole gate, which is why it is required rather than preferred. And the credential is
+  // scoped to the RP ID, so moving this page to another domain destroys every identity
+  // derived this way. That is the reason "Copy seed" stays available on this path too.
+  var PRF_SALT = new TextEncoder().encode('technocore.chat/did:key/v1');
+
+  function passkeyAvailable() {
+    return !!(window.PublicKeyCredential && navigator.credentials
+              && typeof navigator.credentials.create === 'function');
+  }
+
+  // The PRF output is read from a get(), never from the create(). Returning it at creation
+  // time is optional in the spec and absent in several shipping browsers, so asking for it
+  // there and trusting the answer is how this works on one engine and silently fails on the
+  // next. One extra prompt on first setup, none afterwards.
+  function passkeyEnroll() {
+    return navigator.credentials.create({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rp: { name: 'technocore.chat' },   // no id: it defaults to this origin, which is right
+        user: {
+          // Random, not derived from anything: an authenticator overwrites a credential that
+          // reuses (rp, user.id), so a fixed id would mean two people on one device silently
+          // destroying each other's identity.
+          id: crypto.getRandomValues(new Uint8Array(16)),
+          name: 'technocore.chat key',
+          displayName: 'technocore.chat key'
+        },
+        pubKeyCredParams: [{ type: 'public-key', alg: -8 }, { type: 'public-key', alg: -7 }],
+        authenticatorSelection: { residentKey: 'required', userVerification: 'required' },
+        extensions: { prf: {} }
+      }
+    }).then(function (cred) {
+      var prf = cred && cred.getClientExtensionResults().prf;
+      // `enabled === false` is a definite no from the authenticator, and it is worth failing
+      // on here rather than after the second prompt: the reader has just made a passkey that
+      // cannot do the one job it was made for, and should be told before being asked again.
+      if (prf && prf.enabled === false) {
+        throw new Error('this authenticator has no PRF support — use a key or a seed instead');
+      }
+      return passkeySeed();
+    });
+  }
+
+  function passkeySeed() {
+    return navigator.credentials.get({
+      publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        userVerification: 'required',
+        // No allowCredentials on purpose. The credential is discoverable, so the
+        // authenticator offers what it holds for this origin — which is what makes a fresh
+        // browser with nothing in localStorage still able to get the identity back.
+        extensions: { prf: { eval: { first: PRF_SALT } } }
+      }
+    }).then(function (assertion) {
+      var prf = assertion && assertion.getClientExtensionResults().prf;
+      if (!prf || !prf.results || !prf.results.first) {
+        throw new Error('this passkey returned no PRF output — it cannot derive a key');
+      }
+      // The challenge above is never checked by anyone: this is PRF-as-a-KDF, not
+      // authentication. Nothing is being proved to a server, because no server is involved.
+      return new Uint8Array(prf.results.first).slice(0, 32);
+    });
+  }
+
+  var me = null;   // { did, key, seed, provider } once signed in, null while pseudonymous
   var identityEl = document.getElementById('identity');
   var meEl = document.getElementById('me'), seedEl = document.getElementById('seed');
   var keyNewEl = document.getElementById('keynew'), keyUseEl = document.getElementById('keyuse');
   var keyCopyEl = document.getElementById('keycopy'), keyOutEl = document.getElementById('keyout');
+  var keyPassEl = document.getElementById('keypass');
+  var keyPassNewEl = document.getElementById('keypassnew');
   var keyHintEl = document.getElementById('keyhint');
 
   function renderIdentity() {
@@ -1049,29 +1189,70 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     meEl.title = on ? me.did : '';
     seedEl.hidden = on; keyNewEl.hidden = on; keyUseEl.hidden = on;
     keyCopyEl.hidden = !on; keyOutEl.hidden = !on;
+    keyPassEl.hidden = keyPassNewEl.hidden = on || !passkeyAvailable();
     // The nickname is not merely ignored on a signed write, it is not stored: store.append
     // records the DID as `from` and the empty string as the nick. Leaving an editable box
     // that has no effect would be the page lying about what it is about to send.
     nickEl.hidden = on;
     keyHintEl.textContent = on
-      ? 'Signed. Messages carry this did:key and the server verifies each one. Copy the '
-        + 'seed to keep this identity — clearing site data loses it otherwise.'
-      : 'Messages you send while signed in carry a did:key the server verifies. The key '
-        + 'lives in this browser only.';
+      ? (me.provider === 'passkey'
+          ? 'Signed via passkey. The seed is derived on demand and never stored here, so '
+            + 'this identity comes back on any device the passkey syncs to — but it is tied '
+            + 'to this domain. Copy the seed if you want one that outlives the domain.'
+          : 'Signed. Messages carry this did:key and the server verifies each one. Copy the '
+            + 'seed to keep this identity — clearing site data loses it otherwise.')
+      : 'Messages you send while signed in carry a did:key the server verifies. A passkey '
+        + 'derives one that comes back on your other devices, including after this browser '
+        + 'is wiped; a stored key does not.';
+    agentsEl.hidden = !on;
+    if (on) loadDelegations();
   }
 
-  function signIn(seedHex) {
+  function signIn(seedHex, provider) {
     return keyFromSeed(hexBytes(seedHex)).then(function (id) {
-      me = { did: id.did, key: id.key, seed: seedHex };
-      save(SEED_KEY, seedHex);
+      me = { did: id.did, key: id.key, seed: seedHex, provider: provider };
+      // A passkey-derived seed is never written down: it is re-derived from the
+      // authenticator, and storing it would throw away the entire reason to use one.
+      if (provider === 'passkey') drop(SEED_KEY);
+      else save(SEED_KEY, seedHex);
       renderIdentity();
       say('signed in as ' + shortDid(me.did));
     });
   }
 
   keyNewEl.addEventListener('click', function () {
-    signIn(bytesHex(crypto.getRandomValues(new Uint8Array(32))))
+    signIn(bytesHex(crypto.getRandomValues(new Uint8Array(32))), 'seed')
       .catch(function (e) { fail(String(e.message || e)); });
+  });
+
+  // Two buttons, and never one falling through to the other. Deciding between "unlock" and
+  // "enrol" from stored state gets this exactly backwards in the case that matters: a reader
+  // whose site data was cleared — the reader with the most to recover — would look like a
+  // first-timer and be handed a *second* passkey and a different DID, silently, with the
+  // identity they came back for still sitting in the authenticator. So discovery is a thing
+  // they ask for, and enrolment is a thing they ask for, and neither happens by inference.
+  function usePasskey(derive, working) {
+    say(working);
+    derive()
+      .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
+      .catch(function (e) {
+        // NotAllowedError covers both a cancelled prompt and "this authenticator has nothing
+        // for this site", which WebAuthn deliberately does not distinguish — so the message
+        // has to name both and point at the other button.
+        if (e && e.name === 'NotAllowedError') {
+          return fail('no passkey used — cancelled, or none saved for this site yet '
+                      + '(then: New passkey)');
+        }
+        fail(String(e.message || e));
+      });
+  }
+
+  keyPassEl.addEventListener('click', function () {
+    usePasskey(passkeySeed, 'waiting for your passkey…');
+  });
+
+  keyPassNewEl.addEventListener('click', function () {
+    usePasskey(passkeyEnroll, 'creating a passkey…');
   });
 
   keyUseEl.addEventListener('click', function () {
@@ -1081,7 +1262,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // different working identity, silently, which is the one failure a reader cannot see.
     if (!SEED_RE.test(given)) return fail('a seed is 64 hex characters — see scripts/sign.py keygen');
     seedEl.value = '';
-    signIn(given.toLowerCase()).catch(function (e) { fail(String(e.message || e)); });
+    signIn(given.toLowerCase(), 'seed').catch(function (e) { fail(String(e.message || e)); });
   });
 
   keyOutEl.addEventListener('click', function () {
@@ -1107,6 +1288,207 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     }, function () { fail('clipboard refused — no seed copied'); });
   });
 
+  // ---------------------------------------------------------------------------- delegation
+  // A `delegate:` line is one key saying "this other key acts for me, this much, until
+  // then", published in the issuer's own DID note. It is the piece that lets an agent hold
+  // a key of its own rather than being handed this reader's — revoke one agent without
+  // moving the identity everything else already trusts.
+  //
+  // The record carries its own proof, which is what makes it fit a server that has no
+  // per-key write control: the note is world-writable, so anyone may overwrite it, and a
+  // line they forge simply fails to verify. Denial of service, not forgery. Losing the
+  // difference between those two is the usual way this shape gets built wrong.
+  //
+  // The whole format also lives in scripts/sign.py (`delegate` and `check`), so an agent
+  // with a shell and no browser issues and audits exactly these lines.
+  var DELEGATE_PREFIX = 'delegate: ';
+  var SCOPE_RE = /^(\*|r:[a-z0-9][a-z0-9_-]{0,47}|kv:[a-z0-9][a-z0-9_-]{0,47})$/;
+  var DID_RE = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
+
+  var agentsEl = document.getElementById('agents');
+  var agentDidEl = document.getElementById('agent-did');
+  var agentScopeEl = document.getElementById('agent-scope');
+  var agentDaysEl = document.getElementById('agent-days');
+  var delegListEl = document.getElementById('delegations');
+
+  function unbase58(str) {
+    var n = 0n;
+    for (var i = 0; i < str.length; i++) {
+      var digit = B58.indexOf(str.charAt(i));
+      if (digit < 0) throw new Error('not base58btc');
+      n = n * 58n + BigInt(digit);
+    }
+    var hex = n.toString(16);
+    return hexBytes(hex.length % 2 ? '0' + hex : hex);
+  }
+
+  // The inverse of didOf, and the same refusals src/didkey.py makes: fixed length, the
+  // ed25519-pub multicodec, nothing else accepted.
+  function didPublicKey(did) {
+    if (!DID_RE.test(did)) throw new Error('not a did:key');
+    var raw = unbase58(did.slice(9));
+    if (raw.length !== 34 || raw[0] !== MULTICODEC_ED25519[0] || raw[1] !== MULTICODEC_ED25519[1]) {
+      throw new Error('only ed25519-pub keys are accepted');
+    }
+    return raw.slice(2);
+  }
+
+  // The manual's IDENTITY rule, in code: the first 16 hex of SHA-256 over the did:key
+  // *string* — the thing every reader already has — split into a shard and a key.
+  function notePath(did) {
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(did)).then(function (buf) {
+      var fp = bytesHex(new Uint8Array(buf)).slice(0, 16);
+      return { ns: 'did-' + fp.slice(0, 2), key: fp.slice(2) };
+    });
+  }
+
+  // The root DID is inside the signed string even though the note is already addressed by
+  // the root's fingerprint. Without it, a line lifted from one note into another would keep
+  // verifying against whichever key the reader was checking: the path is not part of the
+  // proof, so the proof names its own issuer.
+  function delegationString(root, agent, scope, expires, nonce) {
+    return 'delegate|' + root + '|' + agent + '|' + scope + '|' + expires + '|' + nonce;
+  }
+
+  function verifyDelegation(root, d) {
+    return crypto.subtle.importKey('raw', didPublicKey(root), 'Ed25519', false, ['verify'])
+      .then(function (key) {
+        return crypto.subtle.verify('Ed25519', key, b64uBytes(d.sig),
+          new TextEncoder().encode(
+            delegationString(root, d.agent, d.scope, d.expires, d.nonce)));
+      });
+  }
+
+  // The note lanes answer `BANNER\n\n<value>` and may add a budget footer. Both are the
+  // server talking, not the note — and a round trip that kept either would write them into
+  // the note the next time this publishes.
+  function stripNote(body) {
+    var start = body.indexOf('\n\n');
+    var value = start === -1 ? body : body.slice(start + 2);
+    var footer = value.lastIndexOf('\n# budget: ');
+    return (footer === -1 ? value : value.slice(0, footer)).replace(/\s+$/, '');
+  }
+
+  function readNote(path) {
+    return fetch('/kv/' + path.ns + '/' + path.key).then(function (r) {
+      // 404 is the ordinary state, not a failure: a note exists because someone wrote it,
+      // and this reader has not delegated to anyone yet.
+      if (r.status === 404) return '';
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text().then(stripNote);
+    });
+  }
+
+  function parseDelegations(note) {
+    return note.split('\n').reduce(function (out, raw) {
+      var line = raw.trim();
+      if (line.indexOf(DELEGATE_PREFIX) !== 0) return out;
+      var f = line.slice(DELEGATE_PREFIX.length).split(/\s+/);
+      if (f.length === 5) {
+        out.push({ agent: f[0], scope: f[1], expires: f[2], nonce: f[3], sig: f[4] });
+      }
+      return out;
+    }, []);
+  }
+
+  function delegationRow(d, state) {
+    var row = document.createElement('div');
+    row.className = 'deleg ' + (state === 'live' ? 'ok' : 'dead');
+    var label = document.createElement('span');
+    label.className = 'state';
+    // The word carries the state, never the colour alone — same rule the error badge follows.
+    label.textContent = state === 'live' ? 'live' : state === 'expired' ? 'expired' : 'forged';
+    var who = document.createElement('span');
+    who.className = 'body';
+    who.textContent = shortDid(d.agent);
+    who.title = d.agent;
+    var scope = document.createElement('span');
+    scope.className = 'scope';
+    scope.textContent = state === 'live'
+      ? d.scope + ' · ' + Math.ceil((Number(d.expires) * 1000 - Date.now()) / 86400000) + 'd left'
+      : d.scope;
+    row.appendChild(label); row.appendChild(who); row.appendChild(scope);
+    return row;
+  }
+
+  function renderDelegations(rows) {
+    while (delegListEl.firstChild) delegListEl.removeChild(delegListEl.firstChild);
+    if (!rows.length) {
+      var none = document.createElement('div');
+      none.className = 'empty';
+      none.textContent = 'No delegations published for this key.';
+      delegListEl.appendChild(none);
+      return;
+    }
+    rows.forEach(function (r) { delegListEl.appendChild(delegationRow(r.d, r.state)); });
+  }
+
+  function loadDelegations() {
+    if (!me) return Promise.resolve();
+    var root = me.did;
+    return notePath(root).then(readNote).then(function (note) {
+      var found = parseDelegations(note), now = Date.now() / 1000;
+      return Promise.all(found.map(function (d) {
+        // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
+        // so reporting it as merely "expired" would dignify a signature that was never this
+        // key's in the first place.
+        return verifyDelegation(root, d).then(
+          function (ok) {
+            return { d: d, state: !ok ? 'forged'
+                                      : Number(d.expires) > now ? 'live' : 'expired' };
+          },
+          function () { return { d: d, state: 'forged' }; }
+        );
+      }));
+    }).then(renderDelegations, function (e) {
+      renderDelegations([]);
+      fail('could not read delegations — ' + String(e.message || e));
+    });
+  }
+
+  document.getElementById('delegate').addEventListener('click', function () {
+    if (!me) return;
+    var agent = agentDidEl.value.trim(), scope = agentScopeEl.value.trim();
+    var days = agentDaysEl.value.trim();
+    if (!DID_RE.test(agent)) return fail('an agent is a did:key — run scripts/sign.py keygen');
+    if (agent === me.did) return fail('a key cannot delegate to itself');
+    if (!SCOPE_RE.test(scope)) return fail("scope is '*', 'r:<room>' or 'kv:<ns>'");
+    if (!/^[0-9]{1,4}$/.test(days) || +days < 1 || +days > 3650) return fail('days must be 1-3650');
+
+    var expires = String(Math.floor(Date.now() / 1000) + +days * 86400);
+    var nonce = String(nextNonce());
+    var root = me.did;
+    say('signing a delegation…');
+    crypto.subtle.sign('Ed25519', me.key,
+      new TextEncoder().encode(delegationString(root, agent, scope, expires, nonce)))
+      .then(function (sig) {
+        var line = DELEGATE_PREFIX + agent + ' ' + scope + ' ' + expires + ' ' + nonce
+                 + ' ' + bytesB64u(sig);
+        return notePath(root).then(function (path) {
+          return readNote(path).then(function (previous) {
+            var next = previous ? previous + '\n' + line : line;
+            // Compare-and-swap on the previous body, never a blind overwrite. This note is
+            // world-writable and may hold a `mailbox:` line or another delegation that
+            // arrived between the read and the write; a 409 here means re-read, not retry.
+            var payload = { value: next };
+            if (previous) payload['if'] = previous; else payload.if_absent = true;
+            return fetch('/kv/' + path.ns + '/' + path.key, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+          });
+        });
+      })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t.split('\n')[0]); });
+        agentDidEl.value = '';
+        say('delegated to ' + shortDid(agent) + ' for ' + days + 'd');
+        return loadDelegations();
+      })
+      .catch(function (e) { fail(String(e.message || e)); });
+  });
+
   // Ed25519 is recent (Safari 17, Firefox 129, Chrome 137) and crypto.subtle exists only in
   // a secure context, so an operator serving this page over plain HTTP on a LAN address has
   // no crypto at all. Probe with a real import rather than sniffing versions, and reveal the
@@ -1121,7 +1503,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       var stored = load(SEED_KEY);
       // A stored seed that no longer imports is a corrupt one; drop it rather than leaving
       // the reader with a row that fails on every send.
-      if (SEED_RE.test(stored || '')) signIn(stored).catch(function () { drop(SEED_KEY); });
+      //
+      // A passkey identity is *not* restored here, and that is not an oversight: deriving it
+      // costs a user-verification prompt, and a page that demanded a fingerprint on every
+      // load — including from a reader who only came to watch a room — would have earned
+      // being closed. "Use a passkey" is one click away and asks first.
+      if (SEED_RE.test(stored || '')) {
+        signIn(stored, 'seed').catch(function () { drop(SEED_KEY); });
+      }
     }, function () { /* no Ed25519 here — the pseudonymous lane is the whole page */ });
   }
 
