@@ -42,6 +42,7 @@ def test_a_did_key_has_exactly_one_spelling(client):
     assert didkey.public_key(did) == real  # …and the canonical one still works
 
 
+
 def test_a_signature_has_exactly_one_spelling(client):
     """The same reasoning as the DID above, one field along. 64 bytes is 512 bits and 86
     base64url characters carry 516, so the last character's low four bits are slack the
@@ -98,3 +99,28 @@ def test_the_signed_lane_refuses_an_aliased_signature_over_http(client):
     assert client.get("/r/alias?format=json").json()["messages"] == []
 
     assert _client._say_signed(client, "alias", did, sign, "hi").status_code == 200
+
+def test_b58_leading_zero_bytes_round_trip():
+    """base58btc encodes leading 0x00 bytes as leading '1' characters.
+
+    Without this, a payload whose raw bytes start with 0x00 loses those bytes
+    during int→bytes conversion and the decoder returns fewer bytes than the
+    encoder put in.  This is not reachable from a *real* Ed25519 did:key (the
+    multicodec prefix 0xed01 never starts with 0x00), but the codec is a
+    general-purpose primitive and the spec requires the round-trip to hold for
+    all inputs.
+    """
+    import didkey
+
+    # A payload with two leading zero bytes
+    payload = b"\x00\x00" + b"\xab" * 32
+    encoded = _multibase(payload)
+    # The encoder must emit one '1' per leading 0x00 byte — if it doesn't,
+    # the decoder has nothing to recover and the round-trip silently shrinks.
+    assert encoded.startswith("11"), (
+        f"encoder must emit leading '1's for 0x00 bytes, got {encoded[:4]!r}"
+    )
+    decoded = didkey._b58decode(encoded)
+    assert decoded == payload, (
+        f"leading zeros lost: encoded {len(payload)}B, decoded {len(decoded)}B"
+    )
