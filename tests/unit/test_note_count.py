@@ -1011,6 +1011,49 @@ def test_a_drifted_namespace_count_is_healed_by_one_pass(tmp_path, monkeypatch) 
     assert healed and healed[0] == store._ns_totals(ns_dir)[0] == 3, "healed in one pass"
 
 
+def test_a_count_that_was_already_low_before_the_walk_is_dropped(tmp_path, monkeypatch) -> None:
+    """Comparing the file to the walk alone lets a single create cancel a drift.
+
+    A namespace one low — an increment lost to an unclean shutdown under CHAT_FSYNC=0 — and
+    exactly one create landing after the walk has passed it: the walk totals K, the create
+    moves the file from K-1 to K and the disk to K+1, and a file read only afterwards agrees
+    with the walk. The pass looks right, the namespace stays low, and nothing about the
+    coincidence stops it repeating on the next pass — which is the cap being breached by the
+    thing that was supposed to heal it.
+
+    So the file is read before the walk as well, and kept only if it held still at what the
+    walk saw. Here that reading is K-1 against a walk of K, which no create landing later can
+    talk out of. Driven from the orphan-lock sweep, which runs after both walks and holds no
+    span, so the create really is invisible to the walk rather than timed to be.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "a", "v")
+    store.note_set(tmp_path, "ns", "b", "v")
+    ns_dir = tmp_path / "notes" / "ns"
+    (ns_dir / store.NOTES_FILE).write_text("1 0")  # the increment that never reached the disk
+    real_walk = store._walk
+    landed = []
+
+    def walk_but_land_a_create_once_the_notes_are_walked(d, suffix):
+        if suffix == ".txt.lock" and not landed:
+            landed.append(suffix)
+            store.note_set(tmp_path, "ns", "c", "v")  # +1 to the file, +1 to the disk
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_land_a_create_once_the_notes_are_walked)
+    _due(tmp_path)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    assert landed, "premise: the create landed after the walk had passed the namespace"
+    assert store._ns_totals(ns_dir)[0] == 3, "premise: three notes on disk"
+    assert store._read_counts(ns_dir) is None, "a count that was low before the walk is dropped"
+    store.note_set(tmp_path, "ns", "d", "v")
+    healed = store._read_counts(ns_dir)
+    assert healed and healed[0] == store._ns_totals(ns_dir)[0] == 4, "and the next create heals it"
+
+
 def test_a_reap_dropping_a_namespace_still_waits_for_a_create_entering_it(
     tmp_path, monkeypatch
 ) -> None:
@@ -1050,12 +1093,12 @@ def test_a_reap_dropping_a_namespace_still_waits_for_a_create_entering_it(
         except BaseException as exc:  # noqa: BLE001 — recorded for the assertion, not hidden
             died.append(exc)
 
-    def drop_but_let_a_create_into_the_window_first(root, per_ns, dirs):
+    def drop_but_let_a_create_into_the_window_first(root, before_ns, per_ns, dirs):
         visited.extend(dirs)
         creator.append(threading.Thread(target=create))
         creator[0].start()
         at_the_window.wait(5)
-        return real_drop(root, per_ns, dirs)
+        return real_drop(root, before_ns, per_ns, dirs)
 
     monkeypatch.setattr(store, "open", open_the_sidecar_lock_but_park_in_the_window, raising=False)
     monkeypatch.setattr(
