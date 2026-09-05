@@ -171,6 +171,11 @@ USAGE_FILE = ".usage"
 # leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
 # alternative is fsyncing a counter on every create, which is the cost being removed.
 NOTES_FILE = ".notes-count"
+
+# Incremental recency index for /rooms: one JSONL line per room with {room, mtime, size}.
+# Updated on every write, read by room_stats() instead of walking all room files.
+# Format: one JSON object per line, sorted by mtime descending.
+ROOMS_INDEX_FILE = ".rooms-index"
 # >= MAX_ROOMS, and exactly MAX_ROOMS unless an operator says otherwise: the reserved
 # namespaces (topic, room-owners, room-allow, room-nonce) hold at most one note per room, so
 # that floor is the invariant that lets EVERY room carry a topic and an owner. Raising
@@ -1282,29 +1287,72 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
 def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     """Recency-sorted room summaries for the overview.
 
-    `size` and `idle` come free from the directory stat; `last_seq` and the engagement
-    aggregates cost one small tail read, computed only for the rooms actually shown and
-    memoized against that same stat — so a walk re-reads only rooms that changed since
-    the last one. See WINDOW_BYTES for the per-room worst-case bound.
+    Uses the incremental rooms index when available, falling back to
+    walking all room files if the index is missing or empty.
+
+    `size` and `idle` come from the index; `last_seq` and the engagement
+    aggregates cost one small tail read, computed only for the rooms actually shown.
     """
     now = time.time()
-    entries = []
-    for e in _walk(root / "rooms", ".jsonl"):
-        name = e.name[: -len(".jsonl")]
-        if not _listable(name):
-            continue
-        try:
-            st = e.stat()
-        except OSError:
-            continue  # reaped between the readdir and the stat
-        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    entries.sort(reverse=True)
+    limit = max(1, min(int(limit), MAX_LIMIT))
+
+    # Try to use the index first (fast path: reads one file instead of stat()-ing
+    # every room).  The index is append-only and compacted during _reap, so it
+    # may contain stale entries for reaped rooms — the reader dedupes by taking
+    # the last line per room, and _read_rooms_index filters by _listable.
+    index = _read_rooms_index(root)
+    if index:
+        entries = sorted(
+            [(mtime, size, name) for name, (mtime, size) in index.items()],
+            reverse=True,
+        )
+        total = len(index)
+        total_bytes = sum(size for _, size in index.values())
+    else:
+        # Fallback: walk all rooms (slow path: O(total rooms))
+        all_entries: list[tuple[float, int, str]] = []
+        for e in _walk(root / "rooms", ".jsonl"):
+            name = e.name[: -len(".jsonl")]
+            if not _listable(name):
+                continue
+            try:
+                st = e.stat()
+                all_entries.append((st.st_mtime, st.st_size, name))
+            except OSError:
+                continue
+        all_entries.sort(reverse=True)
+        total = len(all_entries)
+        total_bytes = sum(e[1] for e in all_entries)
+        entries = all_entries[:limit]
+
+    # When using the index, re-stat the top `limit` rooms for fresh mtime.
+    # The index mtime can be stale (e.g. after an external utime or _age() in tests),
+    # and idle_seconds / sort order depend on the actual file mtime.  This costs
+    # `limit` stats instead of total-rooms stats — the whole point of the index.
+    if index:
+        fresh: list[tuple[float, int, str, int]] = []
+        for mtime, size, name in entries[:limit]:
+            try:
+                st = room_path(root, name).stat()
+                fresh.append((st.st_mtime, size, name, st.st_mtime_ns))
+            except OSError:
+                continue  # reaped between index write and stat
+        entries = [(m, s, n, ns) for m, s, n, ns in sorted(fresh, reverse=True)]
+
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root)["topics_written"], root_key)
     mono = time.monotonic()
-    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+    for entry in entries[:limit]:
+        mtime, size, name = entry[0], entry[1], entry[2]
+        mtime_ns = entry[3] if len(entry) > 3 else None
+        if mtime_ns is None:
+            try:
+                st = room_path(root, name).stat()
+                mtime_ns = st.st_mtime_ns
+            except OSError:
+                continue
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
@@ -1319,16 +1367,12 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         )
     return {
         "rooms": shown,
-        "total": len(entries),
+        "total": total,
         "capacity": MAX_ROOMS,
-        "bytes": sum(e[1] for e in entries),
-        # Both bounds, because either can be the one that bites: a service can be far from
-        # the room count and out of disk, or the reverse. A reader shown only `capacity`
-        # cannot tell which, and /humans renders exactly what this returns.
+        "bytes": total_bytes,
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
         "engagement": _rollup(windows),
     }
-
 
 def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     """Whole-service aggregates for the internal `/stats` endpoint. Counters only.
@@ -1713,6 +1757,12 @@ def _reap(root: Path) -> None:
         with _locked((root / USAGE_FILE).with_suffix(".create")):
             _write_note_count(root, *_count_rooms(root), name=USAGE_FILE)
             _prune(root / "rooms")
+            # Compact the append-only rooms index: one full walk replaces all
+            # accumulated lines, keeping exactly one entry per listable room.
+            try:
+                _compact_rooms_index(root)
+            except OSError:
+                pass
     except OSError:
         pass  # a missing usage file reads as no pressure, which fails open, not closed
 
@@ -1905,6 +1955,91 @@ def _write_note_count(root: Path, total: int, size: int, name: str = NOTES_FILE)
     """
     _replace(root / name, f"{total} {size}".encode())
 
+
+
+def _read_rooms_index(root: Path) -> dict[str, tuple[float, int]]:
+    """Read the rooms index file: {room: (mtime, size)}.
+
+    The file is append-only — multiple lines per room are expected. This
+    reader takes the *last* entry per room (dict overwrite), so a compacted
+    file and an un-compacted one with pending appends both produce the
+    correct current state.
+
+    Returns an empty dict if the file doesn't exist or is corrupted,
+    causing room_stats() to fall back to walking.
+    """
+    try:
+        data = (root / ROOMS_INDEX_FILE).read_bytes()
+        if not data:
+            return {}
+        index: dict[str, tuple[float, int]] = {}
+        for line in data.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                entry = orjson.loads(line)
+                name = entry["room"]
+                if not _listable(name):
+                    continue
+                index[name] = (entry["mtime"], entry["size"])
+            except (ValueError, KeyError, TypeError):
+                continue  # malformed line — skip, don't abort
+        return index
+    except OSError:
+        return {}
+
+
+def _update_rooms_index(root: Path, room: str, mtime: float, size: int) -> None:
+    """Append one entry to the rooms index (append-only, no rewrite).
+
+    Called from append() after a successful write.  The reader dedupes
+    by taking the last entry per room, so multiple lines for the same
+    room are fine — they cost one 40-byte JSON object on disk and are
+    reconciled on the next compaction pass (which runs during _reap).
+
+    On the very first write (index file does not exist), a full compact
+    is performed so the index starts complete — this prevents the
+    "partially-populated index hides pre-existing rooms" bug (#633
+    review comment by yukkie3276).
+    """
+    try:
+        if not (root / ROOMS_INDEX_FILE).exists():
+            # First write ever — compact from a full walk so the index
+            # starts complete, then append the new entry.
+            _compact_rooms_index(root)
+        line = orjson.dumps({"room": room, "mtime": mtime, "size": size}) + b"\n"
+        with open(root / ROOMS_INDEX_FILE, "ab") as f:
+            f.write(line)
+    except OSError:
+        pass  # best-effort — a missing index is handled by fallback
+
+
+def _compact_rooms_index(root: Path) -> None:
+    """Rebuild the rooms index from a full walk, writing a single-line-per-room file.
+
+    Called from _reap(), which already walks every room under the USAGE_FILE
+    lock — so this is complete, _listable-filtered, race-free and self-healing.
+    The compacted file replaces any accumulated append-only lines.
+    """
+    index: dict[str, tuple[float, int]] = {}
+    for e in _walk(root / "rooms", ".jsonl"):
+        name = e.name[: -len(".jsonl")]
+        if not _listable(name):
+            continue
+        try:
+            st = e.stat()
+            index[name] = (st.st_mtime, st.st_size)
+        except OSError:
+            continue
+    # Write a compacted file: one line per room, sorted by mtime desc
+    lines = sorted(
+        (
+            orjson.dumps({"room": r, "mtime": m, "size": s})
+            for r, (m, s) in index.items()
+        ),
+        reverse=True,
+    )
+    _replace(root / ROOMS_INDEX_FILE, b"\n".join(lines) + b"\n" if lines else b"")
 
 def _ns_totals(d: Path) -> tuple[int, int]:
     """(notes, bytes) in ONE namespace, by walking. The rebuild behind a per-namespace
@@ -2239,8 +2374,26 @@ def append(
     # instant, which is correlatable with whoever was active. So: nothing at all.
     if created and room != EVENTS_ROOM and not unlisted(room):
         _log_event(root, f"created {room}")
+        # The events room was just created by _log_event via _write_record, which
+        # bypasses append() and so never touches the rooms index.  Index it now so
+        # /rooms shows it immediately rather than waiting for the next _reap pass.
+        try:
+            ev_file = room_path(root, EVENTS_ROOM)
+            if ev_file.exists():
+                st_ev = ev_file.stat()
+                _update_rooms_index(root, EVENTS_ROOM, st_ev.st_mtime, st_ev.st_size)
+        except OSError:
+            pass
     # Last, so the sample includes this write and any announcement it produced. Throttled
     # internally — the common call is one stat of a marker file.
+    # Update the rooms index for this room
+    try:
+        room_file = room_path(root, room)
+        if room_file.exists():
+            st = room_file.stat()
+            _update_rooms_index(root, room, st.st_mtime, st.st_size)
+    except OSError:
+        pass  # Index update is best-effort
     _snapshot(root)
     return rec
 
