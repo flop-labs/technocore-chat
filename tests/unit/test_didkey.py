@@ -98,3 +98,20 @@ def test_the_signed_lane_refuses_an_aliased_signature_over_http(client):
     assert client.get("/r/alias?format=json").json()["messages"] == []
 
     assert _client._say_signed(client, "alias", did, sign, "hi").status_code == 200
+
+
+def test_b58decode_preserves_leading_zero_bytes():
+    """Base58btc decodes each leading '1' character to a 0x00 byte (RFC 5869 / multibase).
+    Truncating leading zero bytes violates the base58 specification (#155)."""
+    import didkey
+
+    assert didkey._b58decode("") == b""
+    assert didkey._b58decode("1") == b"\x00"
+    assert didkey._b58decode("11") == b"\x00\x00"
+    assert didkey._b58decode("111") == b"\x00\x00\x00"
+    assert didkey._b58decode("12") == b"\x00\x01"
+    assert didkey._b58decode("2") == b"\x01"
+    with pytest.raises(didkey.DidError):
+        didkey._b58decode("0")  # '0' is not in base58btc
+    with pytest.raises(didkey.DidError):
+        didkey._b58decode("I")  # 'I' is not in base58btc

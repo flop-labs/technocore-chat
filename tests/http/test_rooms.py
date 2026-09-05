@@ -1094,6 +1094,62 @@ def test_two_first_claims_cannot_both_create_one_nonce_counter(client, tmp_path,
     assert store.note_get(tmp_path, store.OWNERS_NS, "d-first") is None
 
 
+def test_two_first_claims_racing_ownership_note_enforces_cas(client, tmp_path, monkeypatch):
+    """TOCTOU race in room ownership claim (#173).
+    A first-time claim on an unowned d- room without ?if_absent=1 must enforce
+    create-if-absent CAS under the lock, so a concurrent racer that created the
+    owner note in the gap is refused with 409 and cannot be overwritten.
+    """
+    import store
+
+    owner, owner_sign = _keypair(seed=1)
+    other, _ = _keypair(seed=2)
+    owner_note = store.note_path(tmp_path, store.OWNERS_NS, "d-race-owner")
+
+    def create_other_owner():
+        owner_note.parent.mkdir(parents=True, exist_ok=True)
+        owner_note.write_text(other, encoding="utf-8")
+
+    raced = _race_before_lock(monkeypatch, store, owner_note, create_other_owner)
+    lost = _claim(client, "d-race-owner", owner, owner_sign)
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-race-owner") == other
+    # A losing claimer's rejected mutation must not commit or advance the room's durable nonce counter
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-race-owner") is None
+
+
+def test_concurrent_signed_update_with_same_nonce_cannot_mutate_note(client, tmp_path):
+    """Replay race and atomic serialization on signed control notes (#173, reported by @yukkie3276).
+    Under the serialization lock (.gate), a signed room-control write must complete its
+    mutation and nonce commit without self-deadlocking. Concurrent signed updates with the
+    same nonce cannot both mutate state: the second caller observing the already-updated
+    nonce is refused with 403 and its note write never executes.
+    """
+    import store
+
+    owner, owner_sign = _keypair(seed=1)
+    claim_res = _claim(client, "d-replay-race", owner, owner_sign)
+    assert claim_res.status_code == 200
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-replay-race") == owner
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-replay-race") == "1"
+
+    guest1, _ = _keypair(seed=2)
+    guest2, _ = _keypair(seed=3)
+
+    res1 = _set_signed(client, store.ALLOW_NS, "d-replay-race", owner, owner_sign, guest1, nonce=2)
+    assert res1.status_code == 200
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-replay-race") == guest1
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-replay-race") == "2"
+
+    res2 = _set_signed(client, store.ALLOW_NS, "d-replay-race", owner, owner_sign, guest2, nonce=2)
+    assert res2.status_code == 403
+    assert "already used" in res2.text
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-replay-race") == guest1
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-replay-race") == "2"
+
+
 def test_note_capacity_walk_is_cached_and_a_note_write_invalidates_it(client, monkeypatch):
     """The note gauge under /rooms changes only when a note is written or reaped, so it
     lives behind its own generation-stamped cache: reused across /rooms requests, dropped

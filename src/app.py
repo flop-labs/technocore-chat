@@ -17,7 +17,7 @@ import re
 import secrets
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -44,10 +44,8 @@ from store import StoreConflictError, StoreError
 # aliased anyway because tests still assert against them as app attributes (override
 # mirrors those copies); every other knob lost its alias when the last monkeypatch site
 # that needed one moved to override.
-RATE_READ = config.RATE_READ  # requests/min/IP
-RATE_WRITE = config.RATE_WRITE
-RATE_ROOMS_PER_DAY = config.RATE_ROOMS_PER_DAY
-CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
+RATE_READ, RATE_WRITE = config.RATE_READ, config.RATE_WRITE  # requests/min/IP
+RATE_ROOMS_PER_DAY, CLIENT_IP_HEADER = config.RATE_ROOMS_PER_DAY, config.CLIENT_IP_HEADER
 
 # Sized from what the wire actually carries, not from what a parser tolerates. A real
 # agent request through Cloudflare — Host, UA, Accept, CF-Connecting-IP, CF-Ray,
@@ -308,10 +306,7 @@ def text(
     reached it not to index the thing robots.txt had just advertised. A service whose whole
     premise is being discoverable was hiding its own manual. Documents pass index=True.
     """
-    headers = {
-        "Cache-Control": "no-store",
-        "X-Content-Type-Options": "nosniff",
-    }
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
     if not index:
         headers["X-Robots-Tag"] = "noindex"
     if extra_headers:
@@ -1531,7 +1526,7 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     return expect, absent
 
 
-def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
+def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | bool | None:
     """Two reserved namespaces carry room ownership, and only those two take signed writes.
 
     Not a general signed-kv system: a note is world-writable by design and stays that way,
@@ -1600,7 +1595,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 "take over a conversation already in progress.",
                 403,
             )
-        return None
+        return current is None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
         return text(
@@ -1626,6 +1621,11 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     return None
 
 
+def _set_note(ns: str, key: str, val: str, exp: str | None, no: bool, first: object = None) -> dict:
+    cas = no or (first is True and exp is None)
+    return store.note_set(config.ROOT, ns, key, val, expect=exp, expect_absent=cas)
+
+
 def note_write(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
@@ -1633,9 +1633,9 @@ def note_write(request: Request) -> Response:
     p = request.path_params
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
     denied = _note_write_gate(p["ns"], p["key"], value, None)
-    if denied:
+    if isinstance(denied, Response):
         return denied
-    meta = store.note_set(config.ROOT, p["ns"], p["key"], value, *_condition(request.query_params))
+    meta = _set_note(p["ns"], p["key"], value, *_condition(request.query_params), denied)
     return respond(
         request,
         meta,
@@ -1644,32 +1644,28 @@ def note_write(request: Request) -> Response:
     )
 
 
-def _burn_nonce(room: str, nonce: str) -> Response | None:
-    """Spend a nonce for a room's signed ownership writes, or refuse the replay.
+@contextmanager
+def _signed_note_gate(room: str, nonce: str) -> Iterator[Response | None]:
+    """Hold a serialization lock on the room's replay counter across the note mutation.
 
-    A message replay stops mattering when the message leaves the ring; a note has no ring,
-    so a captured signed URL would work forever — including the one that re-adds a key the
-    owner has since removed. The counter is claimed with a compare-and-set on the note that
-    holds it, so two concurrent writers cannot both spend the same value; the loser gets
-    the ordinary 409. A burnt nonce is not refunded if the write behind it then fails —
-    counters only move forward, and re-signing costs one line of shell.
+    The counter check, the protected-note CAS, and the nonce commit must share an atomic
+    boundary. A check-then-commit gap allows concurrent updates using the same nonce to
+    both pass and both mutate state; burning the nonce before the mutation commits a
+    side effect for a first-claim rejected by CAS. A distinct `.gate` lock serializes
+    competing signed updates for this room without recursively colliding with the inner
+    `note_set` lock on the nonce note itself.
     """
-    current = store.note_get(config.ROOT, store.NONCE_NS, room)
-    if current is not None and not (current.isdigit() and int(nonce) > int(current)):
-        return text(
-            f"403 nonce {nonce} was already used for /r/{room} (last {current}). A signed "
-            "ownership URL is single-use — count up and sign again.",
-            403,
-        )
-    store.note_set(
-        config.ROOT,
-        store.NONCE_NS,
-        room,
-        nonce,
-        expect=current,
-        expect_absent=current is None,
-    )
-    return None
+    with store._locked(store.note_path(config.ROOT, store.NONCE_NS, room).with_suffix(".gate")):
+        current = store.note_get(config.ROOT, store.NONCE_NS, room)
+        if current is not None and not (current.isdigit() and int(nonce) > int(current)):
+            yield text(
+                f"403 nonce {nonce} was already used for /r/{room} (last {current}). A signed "
+                "ownership URL is single-use — count up and sign again.",
+                403,
+            )
+            return
+        yield None
+        store.note_set(config.ROOT, store.NONCE_NS, room, nonce)
 
 
 def note_write_signed(request: Request) -> Response:
@@ -1683,13 +1679,13 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
-        return denied
-    denied = _burn_nonce(key, nonce)
-    if denied:
-        return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    first = _note_write_gate(ns, key, value, signer)
+    if isinstance(first, Response):
+        return first
+    with _signed_note_gate(key, nonce) as denied:
+        if denied:
+            return denied
+        meta = _set_note(ns, key, value, *_condition(request.query_params), first)
     return respond(
         request,
         meta,
@@ -1725,18 +1721,21 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
-        if denied:
-            return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
-                return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        first = _note_write_gate(ns, key, value, signer)
+        if isinstance(first, Response):
+            return first
+        if signer is None:
+            meta = _set_note(ns, key, value, *condition, first)
+        else:
+            with _signed_note_gate(key, nonce) as denied:
+                if denied:
+                    return denied
+                meta = _set_note(ns, key, value, *condition, first)
         return respond(
             request,
             meta,
-            f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']}",
+            f"ok {meta['ns']}/{meta['key']} {meta['bytes']}B {meta['ts']}"
+            + (f" signed by {didkey.abbreviate(signer)}" if signer else ""),
             budget_note("write", left, RATE_WRITE),
         )
 
