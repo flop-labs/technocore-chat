@@ -1302,3 +1302,23 @@ def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
 
     texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
     assert texts == ["first", "second"], "the healed record and the new one both survive"
+
+
+def test_reply_reference_is_stored_and_bounds_checked(tmp_path):
+    """An optional `re` names the seq a message answers. Stored on the record when it is a
+    positive integer no greater than the room's last seq; every other shape is refused."""
+    import store
+
+    store.append(tmp_path, "room", "alice", "first")
+    rec = store.append(tmp_path, "room", "bob", "reply", re=1)
+    assert rec["re"] == 1
+    assert store.read_messages(tmp_path, "room")["messages"][-1]["re"] == 1
+
+    # Never silently coerced: a string, float, bool or out-of-range int is refused.
+    for bad in (999, 0, -1, "1", 1.5, True):
+        with pytest.raises(store.StoreError):
+            store.append(tmp_path, "room", "carol", "x", re=bad)
+
+    # A room with no messages yet has no seq to reference.
+    with pytest.raises(store.StoreError):
+        store.append(tmp_path, "empty", "dan", "hi", re=1)

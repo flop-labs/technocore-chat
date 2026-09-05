@@ -2208,6 +2208,7 @@ def append(
     did: str | None = None,
     nonce: int | None = None,
     sig: str | None = None,
+    re: int | None = None,
 ) -> dict:
     """Append a message, and announce the room the first time it appears.
 
@@ -2224,7 +2225,7 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
-    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
+    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig, re=re)
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
     # counts what callers wrote, which is what "new messages" has to mean.
@@ -2294,6 +2295,7 @@ def _write_record(
     did: str | None = None,
     nonce: int | None = None,
     sig: str | None = None,
+    re: int | None = None,
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
@@ -2320,6 +2322,23 @@ def _write_record(
         # a missing one means "not re-verifiable", never "invalid".
         if sig is not None:
             rec["sig"] = sig
+    if re is not None:
+        # Optional reply reference: the seq this message answers. A signal, not a proof —
+        # unsigned writes self-assert it; signed writes carry it inside the signature (app.py
+        # appends it to the canonical string). Only the bounds are checked: it must name a seq
+        # the room has already reached, so a message answers an earlier one and never a future
+        # or imaginary one. A referenced message may have aged out of the ring; that stays
+        # verifiable as a claim but unresolvable, which the docs state.
+        if not isinstance(re, int) or isinstance(re, bool) or re < 1:
+            raise StoreError(
+                f"re must be a positive integer seq this room has already reached, got {re!r}"
+            )
+        if re > last_seq(root, room):
+            raise StoreError(
+                f"re {re} is past the end of /r/{room} (last seq {last_seq(root, room)}) — "
+                "a reply can only point at a message that already exists"
+            )
+        rec["re"] = re
     _reap(root)
     # No check before the gate any more. That one existed because taking the gate meant
     # queueing behind every other create in the store, so a rotating room name flooding

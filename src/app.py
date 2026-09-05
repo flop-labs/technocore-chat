@@ -1333,10 +1333,11 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
+    re_ref = _re_query(request)
     with _dupe_slot(room, body) as refused:
         if refused:
             return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, nick, body)
+        rec = store.append(config.ROOT, room, nick, body, re=re_ref)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1358,7 +1359,14 @@ def room_say_signed(request: Request) -> Response:
     p = request.path_params
     room, nonce = p["room"], p["nonce"]
     body = store.clean_text(p["text"])  # sweep first: the signature covers what is stored
-    signer = _signer(p["did"], p["sig"], nonce, f"{room}|{nonce}|{body}")
+    re_ref = _re_query(request)
+    # \x1f is a Cc control char; clean_text replaces every Cc char with a space before
+    # storage, so it can never appear in `body`. Using it as the re marker makes the
+    # re-present canonical unambiguous (text="hello|5", re=None -> room|nonce|hello|5 ;
+    # text="hello", re=5 -> room|nonce|hello\x1fre=5) while leaving the re=None canonical
+    # byte-identical to main, so already-signed messages keep re-verifying.
+    canonical = f"{room}|{nonce}|{body}" + (f"\x1fre={re_ref}" if re_ref is not None else "")
+    signer = _signer(p["did"], p["sig"], nonce, canonical)
     if isinstance(signer, Response):
         return signer
     denied = _room_write_gate(request, room, signer)
@@ -1367,11 +1375,25 @@ def room_say_signed(request: Request) -> Response:
     with _dupe_slot(room, body) as refused:
         if refused:
             return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
+        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"], re=re_ref)
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
     return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
+
+
+def _re_query(request: Request) -> int | str | None:
+    """Optional `re` reply-reference from a query param. Returns an int when it parses, the
+    raw string when it does not (so store.append refuses it with a clear message), or None when
+    absent. GET lanes carry `re` as a query param because the path is taken; POST lanes pass the
+    JSON value straight through (store validates the type)."""
+    raw = request.query_params.get("re")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return raw
 
 
 async def read_json(request: Request) -> dict | Response:
@@ -1435,13 +1457,21 @@ async def room_post(request: Request) -> Response:
     room = request.path_params["room"]
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
-    # were `str()`-coerced here for the same reason `from`/`text` were (#427).
+    # were `str()`-coerced here for the same reason `from`/`text` were (#427). `re` is an
+    # optional reply reference: appended to the signed canonical so a signed reply is
+    # integrity-protected, and passed straight to store.append (which bounds-checks it).
     did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    re_body = payload.get("re")
+    sig = nonce = ""
+    body = ""
     signer = None
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
         body = store.clean_text(sent)
-        signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
+        # \x1f (Cc) can never appear in swept `body`; see the GET signed path above for the
+        # rationale. Keeps the re=None canonical identical to main for back-compat.
+        canonical = f"{room}|{nonce}|{body}" + (f"\x1fre={re_body}" if re_body is not None else "")
+        signer = _signer(did, sig, nonce, canonical)
         if isinstance(signer, Response):
             return signer
 
@@ -1461,13 +1491,13 @@ async def room_post(request: Request) -> Response:
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, nick, sent)
+                posted = store.append(config.ROOT, room, nick, sent, re=re_body)
         else:
             with _dupe_slot(room, body) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
                 posted = store.append(
-                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
+                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig, re=re_body
                 )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
