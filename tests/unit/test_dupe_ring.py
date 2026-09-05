@@ -62,6 +62,60 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     )
 
 
+def test_bare_token_shaped_text_retains_distinct_key_while_pasted_ref_is_cut() -> None:
+    """The documented pasted follow-up syntax (&ref=422-...) is cut out of message text
+    so it cannot buy a fresh duplicate slot. But legitimate bare tokens (such as incident
+    or ticket ids) remain distinct duplicate keys, and ordinary words ending in ref= or
+    malformed token shapes are not over-stripped."""
+    # Bare token stays distinct from text without it
+    phrase = "incident alpha report confirmed"
+    phrase_bare = "incident 422-deadbeef-abcd alpha report confirmed"
+    assert limit.normalize_text(phrase_bare) != limit.normalize_text(phrase)
+    assert limit.normalize_text(phrase_bare) == "incident 422-deadbeef-abcd alpha report confirmed"
+
+    # Documented pasted &ref= syntax is cut out (at middle, start, end, glued)
+    assert limit.normalize_text("hello &ref=422-deadbeef-abcd world") == "hello world"
+    assert limit.normalize_text("&ref=422-deadbeef-abcd") == ""
+    assert limit.normalize_text("&ref=422-deadbeef-abcd hello") == "hello"
+    assert limit.normalize_text("hello &ref=422-deadbeef-abcd") == "hello"
+    assert limit.normalize_text("hello&ref=422-deadbeef-abcd world") == "hello world"
+
+    # Uppercase handling (casefold runs first)
+    assert limit.normalize_text("&REF=422-DEADBEEF-ABCD") == ""
+    assert (
+        limit.normalize_text("INCIDENT 422-DEADBEEF-ABCD ALPHA")
+        == "incident 422-deadbeef-abcd alpha"
+    )
+
+    # Malformed tokens or words ending in ref= are not stripped
+    assert (
+        limit.normalize_text("incident brief=422-deadbeef-abcd alpha")
+        == "incident brief=422-deadbeef-abcd alpha"
+    )
+    assert (
+        limit.normalize_text("incident pref=422-deadbeef-abcd alpha")
+        == "incident pref=422-deadbeef-abcd alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-xyz1 alpha")
+        == "incident &ref=422-deadbeef-xyz1 alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef00000000-abcd alpha")
+        == "incident &ref=422-deadbeef00000000-abcd alpha"
+    )
+
+    # In dupe_refused: filling the threshold with phrase does not reject
+    # the distinct legitimate message phrase_bare
+    limit._dupes.clear()
+    assert refused(phrase, now=0.0, max_copies=1) is False
+    assert refused(phrase, now=1.0, max_copies=1) is True
+    assert refused(phrase_bare, now=2.0, max_copies=1) is False
+    # But pasting documented &ref= into the duplicate message is rejected
+    assert refused(phrase + " &ref=422-deadbeef-abcd", now=3.0, max_copies=1) is True
+    limit._dupes.clear()
+
+
 def test_the_length_floor_is_on_the_normalised_text() -> None:
     """The floor is the boundary: at or above it the filter applies, below it never
     does - the entire conversational-repeat class lives below it."""
