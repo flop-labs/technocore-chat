@@ -18,7 +18,7 @@
  * Exits non-zero on the first failed check, so it is usable as a manual gate before
  * shipping a change to the page.
  *
- * Checked 2026-08-21, 56 checks, all passing — expected shape:
+ * Checked 2026-09-05, 69 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -30,9 +30,18 @@
  *                   in the launch args; a stub stands in where the flag does nothing),
  *                   hints are right, and every tool actually reaches the server
  *   webmcp absent   the page is unchanged with no modelContext, and with one that throws
+ *   signing         a pasted seed yields the did:key scripts/sign.py derives for it, the
+ *                   server accepts the signature, the nonce steps on a second write, the
+ *                   invisible-character sweep matches the server's, the identity survives
+ *                   a reload, and signing out lands back on the nickname lane
  *
- * The webmcp section posts a message, which reorders /rooms — it runs last, after every
- * check that reads the seeded list.
+ * The webmcp and signing sections both post messages, which reorders /rooms — they run
+ * last, after every check that reads the seeded list.
+ *
+ * The signing section needs a *secure context* for crypto.subtle, so it works against
+ * 127.0.0.1 (which browsers treat as trustworthy) and would report a page with no identity
+ * row at all against a LAN address over plain HTTP — correctly, and not because anything
+ * is broken.
  */
 
 import { chromium } from "playwright";
@@ -401,6 +410,108 @@ const browser = await chromium.launch({
     check(`${label}: the log still renders`, (await page.locator("#log .msg").count()) >= 1);
     await context.close();
   }
+}
+
+// ---------------------------------------------------------------------------- signing
+// The did:key lane, which is the one part of this page a Python test can only half-check.
+// tests/unit/test_humans_identity.py pins the constants the page restates; it cannot tell
+// you whether WebCrypto accepts the PKCS#8 wrapper, whether the browser's Unicode tables
+// agree with Python's, or whether a signature this page produces verifies on the server.
+// Those are the three ways the signed lane breaks, and all three are invisible until
+// somebody signed in presses Send.
+//
+// Runs against 127.0.0.1, which is a secure context — crypto.subtle does not exist over
+// plain HTTP to any other host, so a probe against a LAN address would fail here for a
+// reason that is not a bug.
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
+  check("signing: the identity row appears once Ed25519 imports", true);
+  check("signing: it starts pseudonymous", (await page.textContent("#me")) === "Not signed in");
+
+  // The one seed this repo's own signer has an answer for. `uv run scripts/sign.py did
+  // --seed <this>` prints the DID asserted below, so a mismatch here means the browser and
+  // the command line have stopped agreeing on what a seed means — which is exactly the
+  // promise that makes pasting a seed into the composer worth offering.
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  await page.fill("#seed", SEED);
+  await page.click("#keyuse");
+  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
+  const did = await page.getAttribute("#me", "title");
+  check("signing: the seed yields the DID scripts/sign.py derives", did === EXPECTED, did);
+
+  const room = `sigprobe${Date.now().toString(36)}`;
+  const readRoom = async () =>
+    (await fetch(`${BASE}/r/${room}?format=json`)).json();
+
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#text", "hello from a browser-held key");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  let view = await readRoom();
+  check("signing: the server accepted the signature", view.messages.length === 1,
+        await page.textContent("#status"));
+  check("signing: stored under the DID, not a nickname",
+        view.messages[0]?.from === EXPECTED, view.messages[0]?.from);
+  check("signing: the nonce is in the record, so the write re-verifies later",
+        Number.isInteger(view.messages[0]?.nonce));
+
+  // Two writes from one key into one room is where store._last_nonce bites: the second is
+  // refused unless the page stepped the nonce past the first.
+  await page.fill("#text", "second message");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: a second write is accepted", view.messages.length === 2,
+        await page.textContent("#status"));
+  if (view.messages.length === 2)
+    check("signing: the nonce strictly increased",
+          view.messages[1].nonce > view.messages[0].nonce,
+          `${view.messages[0].nonce} -> ${view.messages[1].nonce}`);
+
+  // The sweep. One character from three of the six categories store.clean_text replaces:
+  // U+200B (Cf), U+0007 (Cc), U+2028 (Zl). If the page's regex and Python's
+  // unicodedata.category disagree on any of them, the signature covers different bytes
+  // than the server stores and this comes back 403.
+  const messy = `zero${String.fromCharCode(0x200b)}width${String.fromCharCode(0x07)}`
+              + `and${String.fromCharCode(0x2028)}sep`;
+  await page.evaluate((t) => { document.getElementById("text").value = t; }, messy);
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: invisibles swept the same way the server sweeps them",
+        view.messages[2]?.text === "zero width and sep",
+        JSON.stringify(view.messages[2]?.text));
+
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
+  check("signing: the identity survives a reload",
+        (await page.getAttribute("#me", "title")) === EXPECTED);
+
+  // Signing out has to land back on the lane the whole page is built around, not on a
+  // half-state that can no longer post at all.
+  await page.click("#keyout");
+  check("signing: sign-out clears the badge",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#nick", "plain");
+  await page.fill("#text", "unsigned again");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: the pseudonymous lane still works after sign-out",
+        view.messages[3]?.from === "plain", view.messages[3]?.from);
+
+  check("signing: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
 }
 
 

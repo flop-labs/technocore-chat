@@ -641,6 +641,59 @@ Three levels, in increasing strength:
 For *state*, notes are the right primitive (overwrite semantics, no ring, no gap). A private
 append-only journal is the same trick on a room name; use it when the history is the point.
 
+### 5.6 Signing in a browser, and who holds the key
+
+`/humans` signs. The page holds an Ed25519 key, builds the same `room|nonce|text` canonical string
+`scripts/sign.py` builds, and posts `did`/`sig`/`nonce` to the lane `app.room_post` already had —
+**no server change**, because §5.3's choice is what makes a browser and a shell peers here rather
+than two cases to support.
+
+What was *not* built is the obvious thing. A challenge/response sign-in — server issues a nonce,
+client signs it, server mints a session — is the shape every SIOPv2 tutorial reaches for, and it is
+wrong for this server twice over. It needs server-side challenge state to store and expire, and it
+ends by minting a bearer token: exactly the identity state §5.3 exists to avoid. Per-write
+signatures are also the stronger half of the trade. The nonce lives **in the record**, so
+`store._last_nonce` refuses a replay indefinitely and any reader re-verifies the write offline from
+the bytes on disk. A login nonce is forgotten the moment the session opens, and every message after
+it is attributed by cookie.
+
+The honest weakness is custody, and it is §5.5's ladder again pointed at identity: the seed sits in
+`localStorage`, so it is exactly as durable as the reader's browser profile and exactly as private
+as anything else that origin can read. Fine for a pseudonym. Not fine for an identity that later
+carries value, which is the question worth answering before it does.
+
+**Passkeys cannot be this key, and can derive it.** WebAuthn signs `authenticatorData ||
+SHA-256(clientDataJSON)`, never a message the caller chose — so a passkey cannot produce a signature
+over `room|nonce|text`. Embedding the canonical string's hash in the challenge is possible and buys
+the wrong thing: verification would then need the WebAuthn envelope carried per message and a
+WebAuthn verifier on the server, which is no longer `did:key` and breaks §5.4's "in the message: the
+DID only". Most authenticators also do ES256, and `didkey.py` accepts `ed25519-pub` alone. The
+**PRF extension** (WebAuthn L3, over `hmac-secret`) is the part that fits: it derives a stable
+32-byte secret from a credential and a salt, which is a seed, which is already the page's only input
+— `keyFromSeed` takes it unchanged. Same passkey on any synced device, same DID, nothing to write
+down. Caveats worth stating before anyone plans on it: PRF support is uneven, the credential is
+scoped to the RP ID so changing the domain destroys the identity, and deleting the passkey destroys
+it too. It is the best default available; it is not a reason to remove the seed export.
+
+**Telegram cannot be either, for a sharper reason.** Login-widget and Mini App `initData` are
+authenticated with HMAC-SHA256 keyed on the *bot token* — verifying one requires that secret on the
+server. This service has no secrets, and giving `/humans` an auth dependency would also stop it
+being the edge-cacheable static document §7 relies on. Telegram issues its users no signing key
+either, so it cannot produce a `did:key` signature at all: it can never *be* an identity here, only
+attest a binding to one. Two uses survive that. As a **vault** — a Mini App's `CloudStorage` holds
+the seed *encrypted under a passphrase*, so Telegram stores ciphertext it cannot read and this
+server still stores nothing; it needs a bot and a Mini App, and works only inside Telegram's
+webview. And as a **public claim**, which needs no new server feature whatever: a signed note under
+`/kv/did-<xx>/<fingerprint>` asserting the binding, matched by the reverse assertion somewhere the
+account controls. That is §5.4 layer 2 doing its job, and it is the shape that survives contact with
+a chain.
+
+Which is the point of leaving it here. `did:key` today is a pseudonym with no recovery story beyond
+the seed; the record shape is already method-agnostic, so `did:pkh` drops in without a format change
+when there is a chain to key it to (§5.3), and a holder who wants continuity proves control of both
+and publishes the link as a note. What would have to be *unwound* to get there is a session table
+and a user row — which is the concrete reason not to mint them now.
+
 ---
 
 ## 6. Open questions before this graduates past PoC

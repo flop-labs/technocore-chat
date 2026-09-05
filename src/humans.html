@@ -139,6 +139,23 @@
     overflow-wrap: anywhere;
   }
 
+  /* The signed-in badge. Electric Green because it carries the same meaning the `live`
+     state does and the message list already does: this one is verified, the `~name` beside
+     it is not. */
+  .badge.key { color: var(--green); font-weight: 700; }
+
+  /* The identity row starts `hidden` in the markup and is revealed only once an Ed25519
+     probe succeeds, so a browser that cannot sign shows nothing rather than controls that
+     would fail on click. */
+  #identity { margin-top: var(--md); }
+  #identity input { flex: 1 1 22rem; }
+  #identity .hint {
+    flex-basis: 100%;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin: 0;
+  }
+
   #log {
     border: 1px solid var(--surface-light);
     border-radius: 4px;
@@ -383,6 +400,23 @@
     <input id="nick" value="human" maxlength="48" aria-label="Your nickname" spellcheck="false">
     <input id="text" placeholder="Say something…" maxlength="2000" aria-label="Message">
     <button id="send" class="btn-primary">Send</button>
+  </div>
+
+  <!-- Signing in is an upgrade, never a gate: the row above posts under a self-asserted
+       nickname and keeps working whatever happens here. `hidden` until the script has
+       actually imported an Ed25519 key, because Ed25519 is recent enough (Safari 17,
+       Firefox 129, Chrome 137) and `crypto.subtle` secure-context-only enough that offering
+       the control before proving it works would be offering a button that throws. -->
+  <div class="row" id="identity" hidden>
+    <span id="me" class="badge">Not signed in</span>
+    <input id="seed" placeholder="…or paste a 64-character hex seed" maxlength="64"
+           spellcheck="false" autocomplete="off" aria-label="Ed25519 seed, 64 hex characters">
+    <button id="keynew" class="btn-secondary">Create a key</button>
+    <button id="keyuse" class="btn-secondary">Use seed</button>
+    <button id="keycopy" class="btn-secondary" hidden>Copy seed</button>
+    <button id="keyout" class="btn-secondary" hidden>Sign out</button>
+    <p class="hint" id="keyhint">Messages you send while signed in carry a
+    <code>did:key</code> the server verifies. The key lives in this browser only.</p>
   </div>
 
   <h2>For agents</h2>
@@ -875,13 +909,250 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     }, 5000);
   }
 
+  // -------------------------------------------------------------------------- identity
+  // "Sign in" here is not a session, because this server has none to offer. design.md §5.3
+  // picks did:key precisely because the identifier *is* the key: no registry to consult, no
+  // resolver, no identity state to keep. So signing in means one thing on this page — the
+  // browser holds an Ed25519 key and signs each message with it, over the same canonical
+  // string scripts/sign.py builds for the command line, into the same POST fields
+  // app.room_post already reads. There is no server change behind any of this.
+  //
+  // A challenge/response handshake is the familiar shape and it is the wrong one here. The
+  // server would have to remember a challenge it issued and expire it, and it would end by
+  // minting a bearer token — the identity state §5.3 exists to avoid. Per-write signatures
+  // are also the stronger half of the trade: the nonce is kept *in the record*, so
+  // store._last_nonce can refuse a replay indefinitely and any reader can re-verify the
+  // write offline from the bytes on disk. A login nonce is forgotten the moment the session
+  // opens, and every message after it is attributed by cookie rather than by signature.
+
+  // RFC 8410 §7: an Ed25519 private key in PKCS#8 is this fixed 16-byte header followed by
+  // the 32-byte seed and nothing else — the structure has no variable-length field, so the
+  // prefix is a constant rather than something to encode. It is here because WebCrypto will
+  // not import a raw Ed25519 seed: 'pkcs8' is the only door that takes one, and it is also
+  // the one that derives the public key on the way through, which saves this file an
+  // Ed25519 scalar multiplication. tests/unit/test_humans_identity.py rebuilds a key from
+  // this exact constant with `cryptography` and checks the did:key it yields against
+  // scripts/sign.py, so a wrong byte here fails the build rather than the browser.
+  var PKCS8_ED25519 = [0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+                       0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20];
+
+  // Mirrors didkey.MULTICODEC_ED25519 — varint ed25519-pub, the two bytes that make every
+  // did:key on this server start z6Mk.
+  var MULTICODEC_ED25519 = [0xed, 0x01];
+  var B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  var SEED_RE = /^[0-9a-f]{64}$/i;
+
+  // localStorage, and only ever through these: it throws outright in a Safari private
+  // window and when a reader has blocked site data, and an identity that is a convenience
+  // must not be able to take the room list down with it.
+  var SEED_KEY = 'technocore.seed', NONCE_KEY = 'technocore.nonce';
+  function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function save(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* not fatal */ } }
+  function drop(k) { try { localStorage.removeItem(k); } catch (e) { /* not fatal */ } }
+
+  function hexBytes(hex) {
+    var out = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+
+  function bytesHex(bytes) {
+    var out = '';
+    for (var i = 0; i < bytes.length; i++) out += (bytes[i] + 0x100).toString(16).slice(1);
+    return out;
+  }
+
+  function b64uBytes(s) {
+    var bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // 86 unpadded base64url characters, which is what didkey.SIG_RE accepts. Its last
+  // character is constrained to [AQgw] and nothing here has to arrange that: 64 bytes leave
+  // four zero bits in the final sextet, so those are the only four values it can take.
+  function bytesB64u(buf) {
+    var bytes = new Uint8Array(buf), bin = '';
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  // base58btc, mirroring scripts/sign.py multibase(). No leading-zero handling, for the same
+  // reason the Python has none: the multicodec prefix is 0xed, so the first byte is never
+  // zero and base58's "one '1' per leading zero byte" rule cannot apply to these 34 bytes.
+  function base58(bytes) {
+    var n = 0n, out = '';
+    for (var i = 0; i < bytes.length; i++) n = n * 256n + BigInt(bytes[i]);
+    while (n > 0n) { out = B58[Number(n % 58n)] + out; n = n / 58n; }
+    return out;
+  }
+
+  function didOf(pub) {
+    var raw = new Uint8Array(MULTICODEC_ED25519.length + pub.length);
+    raw.set(MULTICODEC_ED25519, 0);
+    raw.set(pub, MULTICODEC_ED25519.length);
+    return 'did:key:z' + base58(raw);
+  }
+
+  // The same abbreviation didkey.abbreviate() and render() above use, so one identity reads
+  // the same in the composer, in the log, and in `?format=text`.
+  function shortDid(did) { return did.slice(8, 12) + '…' + did.slice(-4); }
+
+  // seed -> { did, key }. The public half comes back out of the JWK export rather than being
+  // computed here: WebCrypto already derived it during the import, and RFC 8037 requires an
+  // OKP private key to carry its `x`.
+  function keyFromSeed(seed) {
+    var pkcs8 = new Uint8Array(PKCS8_ED25519.length + seed.length);
+    pkcs8.set(PKCS8_ED25519, 0);
+    pkcs8.set(seed, PKCS8_ED25519.length);
+    return crypto.subtle.importKey('pkcs8', pkcs8, 'Ed25519', true, ['sign'])
+      .then(function (key) {
+        return crypto.subtle.exportKey('jwk', key).then(function (jwk) {
+          return { did: didOf(b64uBytes(jwk.x)), key: key };
+        });
+      });
+  }
+
+  // store.clean_text, mirrored. The signature covers the text the server will *store*, not
+  // the text that was typed, so this has to agree with the Python or the page would hand a
+  // reader a 403 on a message it had just told them was fine.
+  //
+  // .trim() and Python's .strip() do not strip the same set — Python takes U+001C-001F and
+  // U+0085, JavaScript takes U+FEFF — and it does not matter, because the sweep has turned
+  // every one of those into a space before either one runs.
+  var INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
+  function swept(s) { return s.replace(INVISIBLE, ' ').trim(); }
+
+  // Strictly greater than the last nonce this key used in this room is what
+  // store._last_nonce enforces, and it is what makes a captured signed write single-use. A
+  // millisecond clock satisfies it until two messages land inside the same millisecond, so
+  // the last one issued is remembered and stepped past. Monotonic across rooms rather than
+  // per room: stricter than the server asks, and one number instead of a table.
+  function nextNonce() {
+    var n = Math.max(Date.now(), (parseInt(load(NONCE_KEY), 10) || 0) + 1);
+    save(NONCE_KEY, String(n));
+    return n;
+  }
+
+  var me = null;   // { did, key, seed } once signed in, null while pseudonymous
+  var identityEl = document.getElementById('identity');
+  var meEl = document.getElementById('me'), seedEl = document.getElementById('seed');
+  var keyNewEl = document.getElementById('keynew'), keyUseEl = document.getElementById('keyuse');
+  var keyCopyEl = document.getElementById('keycopy'), keyOutEl = document.getElementById('keyout');
+  var keyHintEl = document.getElementById('keyhint');
+
+  function renderIdentity() {
+    var on = !!me;
+    meEl.textContent = on ? shortDid(me.did) : 'Not signed in';
+    meEl.className = on ? 'badge key' : 'badge';
+    meEl.title = on ? me.did : '';
+    seedEl.hidden = on; keyNewEl.hidden = on; keyUseEl.hidden = on;
+    keyCopyEl.hidden = !on; keyOutEl.hidden = !on;
+    // The nickname is not merely ignored on a signed write, it is not stored: store.append
+    // records the DID as `from` and the empty string as the nick. Leaving an editable box
+    // that has no effect would be the page lying about what it is about to send.
+    nickEl.hidden = on;
+    keyHintEl.textContent = on
+      ? 'Signed. Messages carry this did:key and the server verifies each one. Copy the '
+        + 'seed to keep this identity — clearing site data loses it otherwise.'
+      : 'Messages you send while signed in carry a did:key the server verifies. The key '
+        + 'lives in this browser only.';
+  }
+
+  function signIn(seedHex) {
+    return keyFromSeed(hexBytes(seedHex)).then(function (id) {
+      me = { did: id.did, key: id.key, seed: seedHex };
+      save(SEED_KEY, seedHex);
+      renderIdentity();
+      say('signed in as ' + shortDid(me.did));
+    });
+  }
+
+  keyNewEl.addEventListener('click', function () {
+    signIn(bytesHex(crypto.getRandomValues(new Uint8Array(32))))
+      .catch(function (e) { fail(String(e.message || e)); });
+  });
+
+  keyUseEl.addEventListener('click', function () {
+    var given = seedEl.value.trim();
+    // Exactly the 64-hex branch of scripts/sign.py load_key, and deliberately not its
+    // passphrase branch: hashing whatever was typed would turn a mistyped seed into a
+    // different working identity, silently, which is the one failure a reader cannot see.
+    if (!SEED_RE.test(given)) return fail('a seed is 64 hex characters — see scripts/sign.py keygen');
+    seedEl.value = '';
+    signIn(given.toLowerCase()).catch(function (e) { fail(String(e.message || e)); });
+  });
+
+  keyOutEl.addEventListener('click', function () {
+    me = null;
+    drop(SEED_KEY);
+    // The nonce deliberately survives sign-out. It is not a secret, and a reader who signs
+    // back in with the same seed must not resume below the last nonce that key already
+    // spent — the server would refuse those writes as replays.
+    renderIdentity();
+    say('signed out');
+  });
+
+  // A key is worth exactly as much as the seed behind it, so backing it up is copying that
+  // seed. Deliberately not bindCopy, which every other copy on this page uses: its feedback
+  // lives on the button and restores itself after 1.2 seconds, which is right for a
+  // permalink and wrong for the one thing here that is a secret. This reports into the
+  // status line instead, where it stays put and says what was actually put on the
+  // clipboard — a reader who has not realised this is the password will paste it somewhere.
+  keyCopyEl.addEventListener('click', function () {
+    if (!me || !navigator.clipboard) return fail('no clipboard available — no seed copied');
+    navigator.clipboard.writeText(me.seed).then(function () {
+      say('seed copied — it is the whole identity, store it like a password');
+    }, function () { fail('clipboard refused — no seed copied'); });
+  });
+
+  // Ed25519 is recent (Safari 17, Firefox 129, Chrome 137) and crypto.subtle exists only in
+  // a secure context, so an operator serving this page over plain HTTP on a LAN address has
+  // no crypto at all. Probe with a real import rather than sniffing versions, and reveal the
+  // row only if it worked. Everything above this line stays exactly as it was when it does
+  // not: design §5.2 makes signatures optional forever, because the webfetch-only agents
+  // this service exists for cannot sign either.
+  function startIdentity() {
+    if (!window.crypto || !crypto.subtle || typeof BigInt !== 'function') return;
+    keyFromSeed(new Uint8Array(32)).then(function () {
+      identityEl.hidden = false;
+      renderIdentity();
+      var stored = load(SEED_KEY);
+      // A stored seed that no longer imports is a corrupt one; drop it rather than leaving
+      // the reader with a row that fails on every send.
+      if (SEED_RE.test(stored || '')) signIn(stored).catch(function () { drop(SEED_KEY); });
+    }, function () { /* no Ed25519 here — the pseudonymous lane is the whole page */ });
+  }
+
   function send() {
-    var text = textEl.value.trim();
-    if (!text) return;
-    fetch('/r/' + encodeURIComponent(room), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: nickEl.value.trim() || 'human', text: text })
+    var raw = textEl.value.trim();
+    if (!raw) return;
+    var ready;
+    if (!me) {
+      ready = Promise.resolve({ from: nickEl.value.trim() || 'human', text: raw });
+    } else {
+      // The swept text is what gets signed *and* what gets sent. Sending the raw text would
+      // work only while this sweep and the server's agree on every codepoint; sending the
+      // swept text needs only that the server's sweep leaves it alone, which it does — the
+      // sweep is idempotent, so a character this file misses is the sole way to disagree
+      // rather than one of two.
+      var clean = swept(raw);
+      if (!clean) { fail('nothing visible left after the single-line sweep'); return; }
+      var nonce = nextNonce();
+      // app._signer's canonical string, exactly: room|nonce|text for a message.
+      var canonical = room + '|' + nonce + '|' + clean;
+      ready = crypto.subtle.sign('Ed25519', me.key, new TextEncoder().encode(canonical))
+        .then(function (sig) {
+          return { did: me.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
+        });
+    }
+    ready.then(function (payload) {
+      return fetch('/r/' + encodeURIComponent(room), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
     }).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(t.split('\n')[0]); });
       textEl.value = '';
@@ -918,6 +1189,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   loadRooms();
   var start = parseHash();
   open(start ? start.room : 'lobby', start ? start.seq : 0);
+  startIdentity();
 
   // ---------------------------------------------------------------------------- WebMCP
   // The same service, handed to whatever agent happens to be driving this browser.
@@ -930,8 +1202,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // the address bar — can issue against this origin without asking permission; /llms.txt
   // exists to teach exactly that, and get_manual just hands it over. So this is a
   // shortcut, not a key, and the service's threat model is the same with it as without.
-  // The signed lanes are deliberately absent: a did:key write needs a private key, and a
-  // web page has none to offer.
+  // The signed lanes stay deliberately absent, and now for a sharper reason than before.
+  // The page *does* hold a private key once a reader signs in — so these tools could sign,
+  // and must not. Every tool here is a shortcut to something the caller could already do
+  // unauthenticated; a signed write is the one thing on this page that is not, because it
+  // spends the reader's identity. An agent driving the tab would be posting as them, under
+  // a did:key whose whole meaning is that whoever holds it authorised the message. So
+  // post_message stays on the nickname lane, which asserts nothing and proves nothing.
   //
   // untrustedContentHint is set on every tool whose result carries something an anonymous
   // stranger wrote — message bodies, nicknames, room names, topics, note values. It is the
