@@ -303,6 +303,53 @@ def test_the_cold_fill_is_single_flighted_too():
     assert "fill(" in cold[: cold.index("\n")], "the cold path must join the shared fill"
 
 
+def test_from_origin_fails_closed_instead_of_escaping_to_the_fail_open_handler():
+    """A source assertion, deliberately, and narrow — there is no JS harness in this repo.
+
+    The same shape of bug `test_the_edge_cached_lane_is_entered_only_by_a_get` guards
+    against on the healthz lane, reachable here too until fixed: `fromOrigin`'s origin
+    fetch is what a cold `revalidating()` read awaits directly (`if (!hit) return
+    asResponse(await fill(...))`). An unhandled timeout or connection failure there
+    throws past `fill`'s `.finally`, out of `revalidating`, and into the top-level
+    fail-open handler — which retries with `fetch(request)` and no deadline of its own,
+    doubling the work against exactly the stalled origin this lane already waited
+    ORIGIN_REVALIDATE_MS for, and leaving the caller to wait out whatever that unbounded
+    retry does instead of the bounded budget this lane already spent.
+
+    The background refresh path (`ctx.waitUntil(fill(...).catch(() => {}))`) already
+    swallows this; the cold path has no such catch of its own, so the fetch inside
+    `fromOrigin` must not be able to throw past it.
+
+    The same signal guards the body read too: `fetch()` can resolve once headers arrive
+    while the body is still streaming, and the deadline can fire while `arrayBuffer()` is
+    still consuming it, rejecting with AbortError from a call site the fetch-only guard
+    never reaches. The guarded region has to cover that read as well, not just the
+    request.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    origin = _between(worker, "async function fromOrigin(", "function fill(")
+    fetch_call = "await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) })"
+    assert fetch_call in origin, "fromOrigin's origin fetch moved — update this test with it"
+    guarded = origin[: origin.index(fetch_call)]
+    assert "try {" in guarded, (
+        "fromOrigin's origin fetch must be wrapped in a try so a timeout or connection "
+        "failure cannot escape to the fail-open handler, which retries with no timeout "
+        "of its own"
+    )
+    after_fetch = origin[origin.index(fetch_call) :]
+    assert "catch (err)" in after_fetch, "the origin fetch needs a catch, not just a try"
+    before_catch = after_fetch[: after_fetch.index("catch (err)")]
+    assert "arrayBuffer()" in before_catch, (
+        "the body read must sit inside the same try as the fetch — the deadline can fire "
+        "while the body is still streaming, and an AbortError from arrayBuffer() outside "
+        "the guard escapes to the fail-open handler exactly like an unguarded fetch would"
+    )
+    after_catch = after_fetch[after_fetch.index("catch (err)") :]
+    assert "status: 503" in after_catch, (
+        "an origin failure here must resolve to a bounded reply, not reject the promise"
+    )
+
+
 def test_a_caller_specific_reply_never_becomes_the_shared_copy():
     """/rooms carries a budget footer once a caller's read allowance runs low, and the handler
     keeps that reply out of any shared cache (`return resp if note else _edge_cacheable`).
