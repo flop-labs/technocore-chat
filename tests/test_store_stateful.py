@@ -273,6 +273,23 @@ class StoreLifecycle(RuleBasedStateMachine):
         if expected is not None:
             assert seqs == expected, f"{room}: read {seqs}, expected {expected}"
 
+    @rule(
+        room=st.sampled_from(ROOMS),
+        nick=st.sampled_from(NICKS),
+        since=st.one_of(st.none(), st.integers(min_value=0, max_value=40)),
+    )
+    def read_filtered(self, room: str, nick: str, since: int | None) -> None:
+        """A filter changes which lines you are shown, never what the scan covered: the
+        filtered view is the plain view minus the dropped lines, with the same first_seq
+        and last_seq, so a cursor taken from either resumes at the same place."""
+        plain = store.read_messages(self.root, room, limit=store.MAX_LIMIT, since=since)
+        view = store.read_messages(
+            self.root, room, limit=store.MAX_LIMIT, since=since, keep=lambda m: m["from"] == nick
+        )
+        assert view["messages"] == [m for m in plain["messages"] if m["from"] == nick]
+        assert view["count"] == len(view["messages"])
+        assert (view["first_seq"], view["last_seq"]) == (plain["first_seq"], plain["last_seq"])
+
     def _expected_read(self, room: str, limit: int, since: int | None) -> list[int] | None:
         """What the read must return, or None when an age sits on the expiry boundary."""
         ttl = store.EPHEMERAL_TTL_SECONDS if store.is_ephemeral(room) else None

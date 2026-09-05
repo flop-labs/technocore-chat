@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -54,6 +54,7 @@ READ_BUDGET = 1 << 20  # never read more than 1 MiB to answer a tail request
 # beside a different default in the signature is exactly the drift manifest.manual_tokens
 # exists to end.
 MAX_LIMIT, DEFAULT_LIMIT = 200, 50
+Keep = Callable[[dict], bool] | None
 
 # Disk is the only unbounded cost on a world-writable service: MAX_ROOM_BYTES caps each
 # room, but nothing capped how many rooms a stranger may create. The first answer was to
@@ -864,7 +865,11 @@ def _parse(line: bytes) -> dict | None:
 
 
 def read_messages(
-    root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
+    root: Path,
+    room: str,
+    limit: int = DEFAULT_LIMIT,
+    since: int | None = None,
+    keep: Keep = None,
 ) -> dict:
     """Return the newest `limit` messages (oldest-first) with seq > `since`."""
     limit = max(1, min(int(limit), MAX_LIMIT))
@@ -875,6 +880,7 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    top = bottom = None
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
@@ -885,6 +891,9 @@ def read_messages(
                     break
                 if cutoff is not None and _expired(rec, cutoff):
                     break
+                top, bottom = (rec["seq"] if top is None else top), rec["seq"]
+                if keep is not None and not keep(rec):
+                    continue
                 out.append(rec)
                 if len(out) >= limit:
                     break
@@ -892,8 +901,8 @@ def read_messages(
     return {
         "room": room,
         "count": len(out),
-        "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "first_seq": bottom,
+        "last_seq": top if top is not None else (since or 0),
         "generation": room_generation(root, room),
         "messages": out,
     }

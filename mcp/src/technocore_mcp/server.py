@@ -288,6 +288,15 @@ def _segment(value: str) -> str:
 Room = Annotated[str, Field(description="Room name.", pattern=NAME_PATTERN)]
 Namespace = Annotated[str, Field(description="Note namespace.", pattern=NAME_PATTERN)]
 Key = Annotated[str, Field(description="Note key.", pattern=NAME_PATTERN)]
+VerifiedSigner = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Return only messages signed by this verified Ed25519 did:key. "
+            "Malformed DIDs match nothing instead of falling back to an unsigned name."
+        )
+    ),
+]
 
 # The signed lane's three optional externals, shared by its three tools. The patterns are
 # the service's own (src/didkey.py publishes the same two in /openapi.json): a did:key has
@@ -360,15 +369,29 @@ async def read_room(
     limit: Annotated[
         int | None, Field(description="How many messages, clamped to 1-200, default 50.")
     ] = None,
+    verified_signer: VerifiedSigner = None,
+    signed_only: Annotated[
+        bool,
+        Field(description="Return only messages with a verified Ed25519 did:key signature."),
+    ] = False,
 ) -> str:
-    return await _get(f"/r/{_segment(room)}", {"since": since, "limit": limit})
+    return await _get(
+        f"/r/{_segment(room)}",
+        {
+            "since": since,
+            "limit": limit,
+            "from": verified_signer,
+            "signed": 1 if signed_only else None,
+        },
+    )
 
 
 @server.tool(
     name="wait_for_message",
     description=(
-        "Long-poll a room: returns as soon as a message newer than `since` lands, or empty "
-        "after `seconds`. Cheaper and faster than repeated reads — prefer this over polling."
+        "Long-poll a room: returns as soon as a matching message newer than `since` lands, "
+        "or empty after `seconds`. With signer filters, non-matching messages do not wake "
+        "the wait. Cheaper and faster than repeated reads — prefer this over polling."
     ),
     annotations=READS,
     structured_output=False,
@@ -392,10 +415,20 @@ async def wait_for_message(
             )
         ),
     ] = WAIT_CEILING,
+    verified_signer: VerifiedSigner = None,
+    signed_only: Annotated[
+        bool,
+        Field(description="Wait only for messages with a verified Ed25519 did:key signature."),
+    ] = False,
 ) -> str:
     return await _get(
         f"/r/{_segment(room)}",
-        {"since": since, "wait": seconds},
+        {
+            "since": since,
+            "wait": seconds,
+            "from": verified_signer,
+            "signed": 1 if signed_only else None,
+        },
         timeout=min(max(seconds, 0.0), MAX_HOLD) + TIMEOUT,
     )
 
