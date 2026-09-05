@@ -1689,7 +1689,59 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    # Ownership namespaces: enforce server-side CAS + re-validate gate under fresh read
+    # to close TOCTOU (gate outside lock -> unconditional LWW). First claim: expect_absent,
+    # handover/allow update: expect=current. Prevents concurrent first-claims
+    # with distinct nonces (1 vs 2) both passing gate and last-write-winning.
+    if ns == store.OWNERS_NS:
+        # Single-snapshot auth+CAS (NyxClawd): read current once, use same snapshot for
+        # gate + caller-if + authoritative CAS. Prevents A→C handover blessing after A→B raced.
+        caller_expect, caller_absent = _condition(request.query_params)
+        current = store.note_get(config.ROOT, store.OWNERS_NS, key)
+        if caller_absent and current is not None:
+            raise StoreConflictError(f"note {ns}/{key} already exists", current)
+        if caller_expect is not None and current != caller_expect:
+            raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
+        # inline gate with snapshot (avoid second read)
+        if not store.ownable(key):
+            return text(f"403 /r/{key} cannot be owned. Only d- rooms are ownable, and never {' or '.join(store.UNOWNABLE_ROOMS)}: claiming a room that already has people in it would lock them out of somewhere they were already talking.", 403)
+        if not didkey.is_did(value):
+            return text("400 a room owner is a did:key, not a nickname — a name nobody can prove they hold cannot own anything. Claim with the key you sign with.", 400)
+        if current is not None and signer != current:
+            return text(f"403 /r/{key} is already owned. Only the current owner can hand it over, with a signed write: /kv/{store.OWNERS_NS}/{key}/set-signed/...", 403)
+        if current is None and signer != value:
+            return text(f"403 claiming /r/{key} takes a signed write proving you hold that key: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>. Anyone can type a did:key; only its holder can sign with it.", 403)
+        if current is None and store.last_seq(config.ROOT, key) > 0:
+            return text(f"403 /r/{key} already has messages, so it can no longer be claimed — a room is ownable from birth or not at all, or claiming becomes a way to take over a conversation already in progress.", 403)
+        if current is None:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+        else:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+    elif ns == store.ALLOW_NS:
+        caller_expect, caller_absent = _condition(request.query_params)
+        owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
+        current = store.note_get(config.ROOT, store.ALLOW_NS, key)
+        if caller_absent and current is not None:
+            raise StoreConflictError(f"note {ns}/{key} already exists", current)
+        if caller_expect is not None and current != caller_expect:
+            raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
+        if owner is None:
+            return text(f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing with the key you are storing: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>?if_absent=1 — then retry this write with a higher nonce, because the claim burns /kv/{store.NONCE_NS}/{key}.", 403)
+        if signer != owner:
+            return text(f"403 only the owner of /r/{key} may write its allow-list, with a signed write: /kv/{store.ALLOW_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<keys>", 403)
+        bad = [token for token in value.split() if not didkey.is_did(token)]
+        if bad or not value.split():
+            return text(f"400 an allow-list is space-separated did:keys; {bad[0] if bad else value!r} is not one. Fail closed: a list with an unparseable entry lets nobody in.", 400)
+        # fence owner: if owner changed between snapshot and lock, fail
+        owner_now = store.note_get(config.ROOT, store.OWNERS_NS, key)
+        if owner_now != owner:
+            raise StoreConflictError(f"note {ns}/{key} owner changed since you read it", owner_now)
+        if current is None:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+        else:
+            meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+    else:
+        meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
     return respond(
         request,
         meta,
@@ -1732,7 +1784,51 @@ async def note_post(request: Request) -> Response:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        if ns == store.OWNERS_NS and signer is not None:
+            caller_expect, caller_absent = condition
+            current = store.note_get(config.ROOT, store.OWNERS_NS, key)
+            if caller_absent and current is not None:
+                raise StoreConflictError(f"note {ns}/{key} already exists", current)
+            if caller_expect is not None and current != caller_expect:
+                raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
+            if not store.ownable(key):
+                return text(f"403 /r/{key} cannot be owned. Only d- rooms are ownable, and never {' or '.join(store.UNOWNABLE_ROOMS)}: claiming a room that already has people in it would lock them out of somewhere they were already talking.", 403)
+            if not didkey.is_did(value):
+                return text("400 a room owner is a did:key, not a nickname — a name nobody can prove they hold cannot own anything. Claim with the key you sign with.", 400)
+            if current is not None and signer != current:
+                return text(f"403 /r/{key} is already owned. Only the current owner can hand it over, with a signed write: /kv/{store.OWNERS_NS}/{key}/set-signed/...", 403)
+            if current is None and signer != value:
+                return text(f"403 claiming /r/{key} takes a signed write proving you hold that key: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>. Anyone can type a did:key; only its holder can sign with it.", 403)
+            if current is None and store.last_seq(config.ROOT, key) > 0:
+                return text(f"403 /r/{key} already has messages, so it can no longer be claimed — a room is ownable from birth or not at all, or claiming becomes a way to take over a conversation already in progress.", 403)
+            if current is None:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+            else:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+        elif ns == store.ALLOW_NS and signer is not None:
+            caller_expect, caller_absent = condition
+            owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
+            current = store.note_get(config.ROOT, store.ALLOW_NS, key)
+            if caller_absent and current is not None:
+                raise StoreConflictError(f"note {ns}/{key} already exists", current)
+            if caller_expect is not None and current != caller_expect:
+                raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
+            if owner is None:
+                return text(f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing with the key you are storing: /kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>?if_absent=1 — then retry this write with a higher nonce, because the claim burns /kv/{store.NONCE_NS}/{key}.", 403)
+            if signer != owner:
+                return text(f"403 only the owner of /r/{key} may write its allow-list, with a signed write: /kv/{store.ALLOW_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<keys>", 403)
+            bad = [token for token in value.split() if not didkey.is_did(token)]
+            if bad or not value.split():
+                return text(f"400 an allow-list is space-separated did:keys; {bad[0] if bad else value!r} is not one. Fail closed: a list with an unparseable entry lets nobody in.", 400)
+            owner_now = store.note_get(config.ROOT, store.OWNERS_NS, key)
+            if owner_now != owner:
+                raise StoreConflictError(f"note {ns}/{key} owner changed since you read it", owner_now)
+            if current is None:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=None, expect_absent=True)
+            else:
+                meta = store.note_set(config.ROOT, ns, key, value, expect=current)
+        else:
+            meta = store.note_set(config.ROOT, ns, key, value, *condition)
         return respond(
             request,
             meta,
