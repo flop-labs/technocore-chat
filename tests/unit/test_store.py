@@ -1337,3 +1337,22 @@ def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
 
     texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
     assert texts == ["first", "second"], "the healed record and the new one both survive"
+
+
+def test_a_low_nonce_rejection_names_the_bounded_scan(tmp_path):
+    """Issue #349: the old message said 'the last one this key used in /r/<room>',
+    which sounds like a full-history lookup. In a busy room, a replay can scroll out
+    of the tail that `_last_nonce` scans, and the next low-nonce write then claims
+    the server lost track — when in fact the bounded scan did exactly what the
+    manual promised. The error must call out the bounded window so the next reader
+    does not chase the same ghost."""
+    import store
+
+    did, _ = _keypair()
+    store.append(tmp_path, "lobby", "agent", "first", did=did, nonce=7)
+    with pytest.raises(store.StoreError) as exc:
+        store.append(tmp_path, "lobby", "agent", "second", did=did, nonce=3)
+    msg = str(exc.value)
+    assert "scanned tail" in msg  # the bounded-scan caveat the manual states
+    assert "older writes may lie beyond it" in msg  # so the reader does not infer "lost history"
+    assert "single-use" in msg  # and the policy itself is still the headline
