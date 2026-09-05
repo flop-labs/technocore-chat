@@ -9,17 +9,31 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
     """One shared app, a fresh ROOT per test: config.override re-binds the knob (and app's
     copy of it) for exactly this test, where the old fixture re-imported app against a
-    CHAT_ROOT env var. The limiter buckets and the /rooms cache are process state a fresh
-    import used to reset for free, so they are cleared here instead."""
+    CHAT_ROOT env var. The limiter buckets and the three memo caches behind /rooms are
+    process state a fresh import used to reset for free, so they are cleared here instead.
+
+    Their clock is pinned here too. Cache validity is part of the cache key now (see
+    store._time_bucket), so the boundary between one window and the next is a key change —
+    and unpinned those boundaries are cut on a free-running clock, which lands one inside
+    roughly one test in every ROOMS_CACHE_SECONDS of suite time. A test that pins a 60s
+    window "far above anything it spends" would still miss on those, for a reason no test
+    body could name. Anchoring the buckets to the moment the fixture ran puts a fast test
+    inside bucket 0 for the whole of it, and leaves a test that wants a window to pass
+    saying so out loud."""
     import app as app_module
     import config
     import limit
+    import store
 
+    origin = time.monotonic()
+    monkeypatch.setattr(store, "_time_bucket", lambda now, ttl: int((now - origin) // ttl))
     app_module._buckets.clear()
-    app_module._rooms_cache.clear()
+    app_module._rooms_walk.cache_clear()
+    store._cached_window.cache_clear()
+    store._topics_memo.cache_clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     # The duplicate ring is the same kind of process state the buckets are: a fresh
@@ -153,11 +167,11 @@ def _race_before_lock(monkeypatch, store, path, action):
     fired = []
 
     @contextmanager
-    def hook(target):
+    def hook(target, shared=False, nb=False):
         if target == path and not fired:
             fired.append(True)
             action()
-        with real_locked(target):
+        with real_locked(target, shared, nb):
             yield
 
     monkeypatch.setattr(store, "_locked", hook)

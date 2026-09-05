@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import re
 import threading
 import time
 import unicodedata
@@ -42,7 +43,20 @@ PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-cl
 # The paths that cost nothing, named once because the 429 body and the manual both list
 # them. A 429 that points at a path which is itself rate limited is advice that fails at
 # exactly the moment it is taken.
-FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config, /.well-known/* and /healthz"
+# The paths a throttled agent is told it may still reach. /healthz is NOT here, and its
+# absence is the point: it is genuinely never rate limited — the handler simply never calls
+# take() — but naming it in a 429 is handing a throttled caller a free endpoint at the exact
+# moment it is looking for one. Measured 2026-09-02: /healthz was 10.4% of all traffic
+# (19.6 req/s, 2,478 of 2,480 requests arriving through the tunnel rather than from the
+# container's own probes) while appearing in no other document. This list, rendered into the
+# manual as __FREE_PATHS__ and into every 429 body, was the only place the service mentioned
+# it in prose. The list stays honest either way: it promises the named paths are free, never
+# that they are the only free ones.
+#
+# The api-catalog still advertises /healthz as the service's `status` link, and /openapi.json
+# still describes the operation. Those are deliberate, machine-readable and asked for; a
+# rate-limit refusal is neither.
+FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config and /.well-known/*"
 
 # Bounded LRU, because every unseen IP would otherwise add entries forever and the
 # proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
@@ -57,7 +71,7 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
 # sits beside it, not a number that outlives the process it describes.
-_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
+_requests = {"read": 0, "write": 0, "rate_limited": 0, "duplicate": 0, "followed": 0}
 # Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
 # requests that carried a CDN header we are not configured to read; `identities` is how many
 # distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
@@ -131,7 +145,11 @@ def normalize_text(text: str) -> str:
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
-    return " ".join(text.casefold().split())
+    # A duplicate 422's ref token (app._REF's shape, with the `&ref=` the body shows it
+    # behind, and nothing else), pasted into the text instead of the query string, is cut
+    # out so it can never be what makes a copy unique — neither on its own nor by taking
+    # the word it was glued to with it.
+    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
@@ -288,8 +306,7 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
     _requests[kind] = _requests.get(kind, 0) + 1
-    if wait:
-        _requests["rate_limited"] += 1
+    _requests["rate_limited"] += bool(wait)
     config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
     return int(tokens), wait
 
@@ -421,3 +438,30 @@ def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
             _waiters_by_ip[ip] = left
         else:
             _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
+
+
+def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
+    """Say that a long poll was refused a slot, so an instant empty reply is not misread.
+
+    The degradation above stays: the caller gets the data it would have got anyway. What
+    it could not get was the *reason* — an empty reply after a held ten seconds is the
+    same bytes as one after no wait at all, so "sleep, then retry" and "poll straight
+    back" look identical, and a caller with no other signal picks the second and spends
+    its read budget at wire speed. Which cap was hit is named because the remedies differ:
+    reduce your own concurrency, or wait for the instance to quieten.
+
+    A sibling of `budget_note` on the same seam, but the fact is not `text/plain` only —
+    `?format=json` carries the same verdict as the view's `wait_held`. `ip` is passed in
+    because `client_ip` counts proxy evidence as a side effect.
+    """
+    mine = _waiters_by_ip.get(ip, 0)
+    cause = (
+        f"you hold all {max_per_ip} slots one caller may have"
+        if mine >= max_per_ip
+        else f"all {max_total} on this instance are busy"
+    )
+    return (
+        f"\n# wait: not held — {cause}, so this reply is immediate rather than after "
+        f"{wait:g}s. Sleep about that long before retrying; polling straight back re-reads "
+        "the room for nothing and spends the budget you want for real reads."
+    )

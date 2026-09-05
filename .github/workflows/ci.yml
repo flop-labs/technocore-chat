@@ -17,6 +17,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Separate job, not a step in `test`: this one downloads a Pyodide toolchain and an npm
+  # wrangler, which has nothing to do with the service and would push a 10-minute budget.
+  # It exists because the deploy path had three independent breakages that every other gate
+  # in this file was blind to — the bundle would not resolve, the Worker would not start,
+  # and it served one request per isolate — and none of them is visible from Python tests.
+  worker:
+    name: "mcp worker bundles"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      # pywrangler installs prebuilt wheels only, so the wrapper has to be a wheel before
+      # the Worker can bundle it. This is the step a human forgets; here it cannot be.
+      - name: Build the wrapper wheel the Worker resolves against
+        # `-o` is relative to the working directory, not to `--project`, so the wheel has
+        # to be aimed at mcp/dist — that is where the Worker's `find-links = ["../dist"]`
+        # looks, and a repo-root `dist/` leaves it resolving against an absent directory.
+        run: uv build --wheel -o mcp/dist --project mcp
+
+      # `--dry-run` resolves against the Pyodide index and bundles without deploying, which
+      # is where all three breakages showed up. It needs no Cloudflare credentials.
+      #
+      # The `grep -q ERROR` is not belt-and-braces: pywrangler exits 0 when the Pyodide
+      # install fails, so the exit code alone reports a broken bundle as a pass. Fail on
+      # the log instead, and print it either way.
+      - name: Resolve and bundle the Worker
+        working-directory: mcp/worker
+        run: |
+          set -o pipefail
+          uv run pywrangler deploy --dry-run 2>&1 | tee bundle.log
+          if grep -qE '^ERROR|Installation of packages into the Python Worker failed' bundle.log; then
+            echo "::error::pywrangler reported an error while exiting 0 — the bundle is broken."
+            exit 1
+          fi
+          grep -q 'Total Upload' bundle.log || {
+            echo "::error::pywrangler produced no bundle."; exit 1; }
+
   test:
     name: "lint + tests + image"
     runs-on: ubuntu-latest
@@ -62,7 +108,15 @@ jobs:
       - name: Core size report and check
         run: |
           uv run sz.py
-          uv run sz.py --check
+          # Fork PRs cannot update sz-baseline.json: queue-guard protects that
+          # maintainer-generated file. Enforce the immutable policy caps on PRs;
+          # keep the ratchet check on pushes to main, where maintainers can
+          # regenerate the baseline after reviewing the merged change.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            uv run sz.py --caps
+          else
+            uv run sz.py --check
+          fi
 
       # The example is the repo's one-command promise made executable: self-booting on
       # a free port, self-cleaning, deterministic. All four PR-#54 review findings lived
@@ -70,9 +124,9 @@ jobs:
       - name: Run the example end-to-end
         run: bash examples/beautiful_chat.sh
 
-      # The MCP wrapper is a separate distribution with no dependencies, so nothing else
-      # would notice a broken pyproject until someone ran `uv publish`. Its tests are in
-      # the suite above; this is the packaging half.
+      # The MCP wrapper is a separate distribution with its own dependency line, so nothing
+      # else would notice a broken pyproject until someone ran `uv publish`. Its tests are
+      # in the suite above; this is the packaging half.
       - name: Build and verify the MCP wrapper
         run: |
           uv build --project mcp --out-dir dist/mcp
@@ -117,10 +171,10 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-      - run: uv sync --frozen --group contract
+      - run: uv sync --frozen
 
       # Tuned so the fuzzer spends its budget on handlers rather than on the parts that
-      # exist to stop it. CHAT_MAX_WAIT is published as the `wait` maximum, and at the
+      # exist to stop it. CHAT_MAX_WAIT is the ceiling `wait` clamps to, and at the
       # default 10 a few generated long polls cost more than the whole run; without the
       # rate bumps the limiter answers most of it with a 429 that conforms and checks
       # nothing. Everything else is the shipped configuration.
@@ -140,13 +194,18 @@ jobs:
       # so a failure is a change in this service. ~800 requests in under ten seconds.
       #
       # Checks are named rather than `all`, because two of the rest assume things this
-      # service breaks on purpose: negative_data_rejection expects schema-invalid input to
-      # be refused, but a mistyped `?wait=` or `?limit=` is ignored (`_cursor` falls back);
-      # positive_data_acceptance expects valid input to succeed, but a valid write to a
-      # mailbox or a reserved namespace is refused. What remains is what must hold — no
-      # 500s, every response matching the status, content type, headers and schema
-      # promised, and the two 405 checks, since Allow is the machine-readable half of a
-      # refused method.
+      # service breaks on purpose: positive_data_acceptance expects valid input to succeed,
+      # but a valid write to a mailbox or a reserved namespace is refused; and
+      # negative_data_rejection's generator also invents a query parameter the document
+      # does not list and expects a refusal, which this service will never give — ignoring
+      # unknown query parameters is what makes the documented `?n=` cache-buster work at
+      # all. Turning that one mutation off is a config-file setting the CLI has no flag
+      # for, so the negative half of the contract is enforced by tests/test_contract.py
+      # (in-process, on every `pytest`, with `allow-extra-parameters` off and the input
+      # doctrine of docs/design.md §3.5 behind it) rather than here. What this job asserts
+      # is the over-the-wire half: no 500s, every response matching the status, content
+      # type, headers and schema promised, and the two 405 checks, since Allow is the
+      # machine-readable half of a refused method.
       #
       # --warnings lists what to *enable*. Three are left out because they can never clear:
       # missing_auth (POST /r/events only ever 403s, and there are no credentials to

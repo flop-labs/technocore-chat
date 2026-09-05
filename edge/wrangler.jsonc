@@ -1,0 +1,68 @@
+{
+  // Origin-first edge fallback for the document surface. See README.md beside this file,
+  // and src/worker.js for why it proxies rather than serves.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "technocore-edge",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-08-01",
+
+  // JavaScript, unlike mcp/worker which is a Python Worker. That one is Python because it
+  // wraps the Python MCP SDK and there is one implementation of the tools; this one wraps
+  // nothing. A Python Worker here would pull the Pyodide runtime and its vendored wheel set
+  // — ~20 MB and 884 files, per the entries .dockerignore already carries to keep that out
+  // of the image — to run about forty lines that call fetch() twice.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // The Worker decides what to serve and when; assets must never answer on their own,
+    // or a snapshot would pre-empt the live origin and defeat the whole design.
+    "run_worker_first": true
+  },
+
+  // Plain routes, NOT a custom domain: technocore.chat already has an origin — the chat
+  // service, reached through a Cloudflare tunnel — and these attach in front of it for
+  // sixteen exact paths. mcp/worker uses `custom_domain` because the Worker *is* the origin
+  // for its hostname; the opposite job, and the opposite setting.
+  //
+  // Enumerated per path rather than a prefix or a suffix. /r/ and /kv/ are ~80% of traffic
+  // and are writes as often as reads, so a broad pattern would put every message this
+  // service carries through a Worker that can do nothing for it — and would add a hop, and
+  // a failure mode, to the hot lane. Nothing here is a wildcard for the same reason a cache
+  // rule here is never keyed on a suffix: `/r/lobby/say/bob/notes.md` ends in `.md`.
+  "routes": [
+    { "pattern": "technocore.chat/", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/llms.txt", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/skill.md", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/patterns.md", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/interop.md", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/auth.md", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/humans", "zone_name": "technocore.chat" },
+    // Edge-cached, never snapshotted — see EDGE_CACHED in snapshot.py.
+    { "pattern": "technocore.chat/healthz", "zone_name": "technocore.chat" },
+    // Served from the edge copy always, refreshed in the background — EDGE_REVALIDATE.
+    // The trailing * is load-bearing: a route pattern is matched against the whole URL,
+    // query string included, so "technocore.chat/rooms" matches a bare /rooms and nothing
+    // else. Every caller that matters sends one — /humans asks for ?format=json&limit=200
+    // and agents for ?format=json — so without it the lane is attached to the one form of
+    // the request nobody makes. This is the only route whose reply depends on its query.
+    { "pattern": "technocore.chat/rooms*", "zone_name": "technocore.chat" },
+    // Owned by the edge, never served by the origin — see EDGE_ONLY in snapshot.py.
+    { "pattern": "technocore.chat/favicon.ico", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/robots.txt", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/sitemap.xml", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/openapi.json", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/config", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/agent.json", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/api-catalog", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/ai-catalog.json", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/agent-skills/index.json", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/mcp/server-card.json", "zone_name": "technocore.chat" },
+    { "pattern": "technocore.chat/.well-known/security.txt", "zone_name": "technocore.chat" }
+  ],
+
+  // Off: the generated workers.dev hostname would answer for these paths with no origin
+  // behind it, so every request there would fall through to the snapshot and serve a copy
+  // as if it were live. mcp/worker leaves it on because that Worker is self-contained.
+  "workers_dev": false,
+  "observability": { "enabled": true }
+}
