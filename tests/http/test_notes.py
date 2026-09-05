@@ -433,3 +433,24 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_a_missing_reserved_note_names_the_lane_that_can_create_it(client):
+    """The absent-note 404 offers the URL that would create the note. For the three reserved
+    namespaces the unsigned `/set/` URL is a refusal — room-owners and room-allow take signed
+    writes only, room-nonce is server-written — so the hint has to name the lane that works,
+    or a 404 sends the caller straight into a 403."""
+    did, _sign = _keypair()
+    lanes = (("room-owners", "set-signed"), ("room-allow", "set-signed"), ("room-nonce", "server"))
+    for ns, lane in lanes:
+        r = client.get(f"/kv/{ns}/d-unclaimed")
+        assert r.status_code == 404
+        assert f"/kv/{ns}/d-unclaimed/set/" not in r.text, ns  # the lane this namespace refuses
+        assert lane in r.text, ns
+        assert "7 days" in r.text, ns  # the other reason a note can be missing still applies
+    # …and the unsigned lane the old hint pointed at is exactly what the gate refuses.
+    assert client.get(f"/kv/room-owners/d-unclaimed/set/{did}").status_code == 403
+    assert client.get(f"/kv/room-allow/d-unclaimed/set/{did}").status_code == 403
+    assert client.get("/kv/room-nonce/d-unclaimed/set/1").status_code == 403
+    # Every other namespace keeps the create URL the manual promises.
+    assert "/kv/plans/absent/set/" in client.get("/kv/plans/absent").text

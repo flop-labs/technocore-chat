@@ -1480,6 +1480,21 @@ async def room_post(request: Request) -> Response:
     return await run_in_threadpool(write)
 
 
+# The absent-note 404 offers the URL that would create the note. For the three reserved
+# namespaces that URL is a refusal: room-owners and room-allow take signed writes only
+# (_note_write_gate) and room-nonce is server-written, so an unsigned `/set/` hint sends the
+# caller from a 404 straight into a 403. One hint per lane, keyed by namespace; "" is every
+# other namespace, where the unsigned create URL is exactly right. Kept as single-line
+# templates so the table costs one code line per lane under sz.py.
+_ABSENT_NOTE = "404 no note {ns}/{key} — nothing has been written there, and a note is created by writing it.\n{hint}\nsee the namespace: GET /kv/{ns} — note that p- keys are never listed, and a note idle for 7 days is reclaimed, so this may be one that expired."
+_ABSENT_NOTE_HINT = {
+    store.OWNERS_NS: "claim it (a d- room only, before its first message, signed by the key you are storing): GET /kv/{ns}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>?if_absent=1 — signature covers `{ns}|{key}|<nonce>|<the same did:key>`; an unsigned /set/ here is refused",
+    store.ALLOW_NS: "the owner writes it, signed, after claiming /r/{key} and with a nonce greater than /kv/room-nonce/{key}: GET /kv/{ns}/{key}/set-signed/<did:key>/<sig>/<nonce>/<did1>%20<did2> — signature covers `{ns}|{key}|<nonce>|<value>`; an unsigned /set/ here is refused",
+    store.NONCE_NS: "written by the server only — it appears once /r/{key} is claimed, as the replay counter for signed ownership writes. Read it freely; there is no client write to it.",
+    "": "write it:      GET /kv/{ns}/{key}/set/<value%20url%20encoded>\nclaim it only if absent:  add ?if_absent=1 (409 if someone beat you)",
+}
+
+
 def note_read(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
@@ -1489,17 +1504,11 @@ def note_read(request: Request) -> Response:
     if value is None:
         # Absent and never-written are the same state here, and both are ordinary: notes
         # are created by writing them, so the useful reply is the URL that would create
-        # this one. `ns` and `key` already passed valid_name inside note_get, so echoing
-        # them back cannot smuggle anything into the response.
-        return text(
-            f"404 no note {p['ns']}/{p['key']} — nothing has been written there, and a "
-            "note is created by writing it.\n"
-            f"write it:      GET /kv/{p['ns']}/{p['key']}/set/<value%20url%20encoded>\n"
-            f"claim it only if absent:  add ?if_absent=1 (409 if someone beat you)\n"
-            f"see the namespace: GET /kv/{p['ns']} — note that p- keys are never listed, "
-            "and a note idle for 7 days is reclaimed, so this may be one that expired.",
-            404,
-        )
+        # this one — which is a different lane for the three reserved namespaces, see
+        # _ABSENT_NOTE_HINT. `ns` and `key` already passed valid_name inside note_get, so
+        # echoing them back cannot smuggle anything into the response.
+        hint = _ABSENT_NOTE_HINT.get(p["ns"], _ABSENT_NOTE_HINT[""])
+        return text(_ABSENT_NOTE.format_map({**p, "hint": hint.format_map(p)}), 404)
     return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
 
 
