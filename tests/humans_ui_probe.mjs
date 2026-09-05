@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-05, 90 checks, all passing — expected shape:
+ * Checked 2026-09-05, 105 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -37,6 +37,10 @@
  *                   in the launch args; a stub stands in where the flag does nothing),
  *                   hints are right, and every tool actually reaches the server
  *   webmcp absent   the page is unchanged with no modelContext, and with one that throws
+ *   live            the log and composer are above the fold and the directory below them,
+ *                   a message posted elsewhere arrives in well under the old 5s timer, rows
+ *                   carry an age, and a reader up in the history is offered the new messages
+ *                   rather than being scrolled away from what they were reading
  *   signing         a pasted seed yields the did:key scripts/sign.py derives for it, the
  *                   server accepts the signature, the nonce steps on a second write, the
  *                   invisible-character sweep matches the server's, the identity survives
@@ -103,7 +107,7 @@ const browser = await chromium.launch({
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   console.log("desktop 900px");
@@ -171,7 +175,7 @@ const browser = await chromium.launch({
     hasTouch: true,
   });
   const page = await context.newPage();
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   console.log("mobile 390px");
@@ -192,7 +196,7 @@ const browser = await chromium.launch({
   for (const width of [320, 390, 560, 700, 900, 1280]) {
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     const page = await context.newPage();
-    await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(500);
     const r = await page.evaluate(() => ({
       body: document.body.scrollWidth,
@@ -252,7 +256,7 @@ const browser = await chromium.launch({
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
   await page.addInitScript(STUB);
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   const native = !(await page.evaluate(() => window.__stubbedModelContext === true));
@@ -415,7 +419,7 @@ const browser = await chromium.launch({
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     if (init) await page.addInitScript(init);
-    await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(800);
     check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
     check(`${label}: the room list still renders`,
@@ -423,6 +427,90 @@ const browser = await chromium.launch({
     check(`${label}: the log still renders`, (await page.locator("#log .msg").count()) >= 1);
     await context.close();
   }
+}
+
+// ------------------------------------------------------------------- the live conversation
+// What a person actually came for: a room that is already talking, visible without
+// scrolling, updating without waiting. All three used to be false — the rooms directory came
+// first and could be 200 rows tall, and the log was refreshed on a five-second timer.
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#log .msg", { timeout: 8000 });
+
+  // The whole conversation above the fold, and the directory below it.
+  const box = await page.evaluate(() => ({
+    logBottom: Math.round(document.getElementById("log").getBoundingClientRect().bottom),
+    composer: Math.round(document.getElementById("composer").getBoundingClientRect().bottom),
+    rooms: Math.round([...document.querySelectorAll("h2")]
+      .find((h) => h.textContent === "All rooms").getBoundingClientRect().top),
+    fold: innerHeight,
+  }));
+  check("live: the log is above the fold", box.logBottom < box.fold, JSON.stringify(box));
+  check("live: so is the composer", box.composer < box.fold, JSON.stringify(box));
+  check("live: the directory is below it", box.rooms > box.logBottom, JSON.stringify(box));
+
+  // Long poll. Posted from outside the browser, so this measures the page's own latency and
+  // not its own optimism about a message it just sent.
+  //
+  // The body is unique per run. A fixed one matches a message left in the store by the last
+  // run — this file is meant to be re-run against the same CHAT_ROOT by hand — and the wait
+  // then returns in 19ms against a row that was already on screen, which reads as a
+  // spectacular latency result and tests nothing at all.
+  const token = `live-probe-${Date.now().toString(36)}`;
+  const started = Date.now();
+  await fetch(`${BASE}/r/lobby/say/outsider/${token}`);
+  const arrived = page.locator(`#log .msg:has(.body:text-is("${token}"))`);
+  await arrived.waitFor({ timeout: 15000 });
+  const latency = Date.now() - started;
+  // The old timer was 5s and could be 5s late; anything under 3s can only be the long poll.
+  check("live: a message arrives without waiting out a timer", latency < 3000, `${latency}ms`);
+
+  const age = (await arrived.locator(".when").textContent()).trim();
+  check("live: rows carry an age", /^\d+[smhd]$/.test(age), age);
+  check("live: an arriving row is marked for the entrance animation",
+        (await arrived.getAttribute("class")).includes("fresh"),
+        await arrived.getAttribute("class"));
+  check("live: the live dot is showing", await page.locator("#live").isVisible());
+
+  // Scroll anchoring. A reader up in the history must not be dragged to the bottom by
+  // somebody else's message — they get a count and a way down instead.
+  //
+  // The log is shrunk here rather than filled with twenty messages, for two reasons: twenty
+  // writes is most of a 30/min budget this probe runs under on purpose, and the behaviour
+  // under test reads scrollHeight, scrollTop and clientHeight and nothing else. A short log
+  // with four messages in it is the same scrollable condition as a tall one with forty.
+  await page.evaluate(() => {
+    const log = document.getElementById("log");
+    // Both, and min-height first: the log carries `min-height: 12rem` so the page lands once
+    // instead of growing under the reader, and min-height beats max-height — setting only
+    // the max leaves clientHeight at 192px and the log unscrollable on a fresh store.
+    log.style.minHeight = "0";
+    log.style.maxHeight = "60px";
+    log.scrollTop = 0;
+  });
+  const before = await page.evaluate(() => document.getElementById("log").scrollTop);
+  check("live: the log is scrollable for the anchoring checks",
+        await page.evaluate(() => {
+          const l = document.getElementById("log");
+          return l.scrollHeight - l.clientHeight > 40;
+        }));
+  await fetch(`${BASE}/r/lobby/say/outsider/${token}-two`);
+  await page.waitForSelector("#jump:not([hidden])", { timeout: 15000 });
+  check("live: reading history is not interrupted by an arrival",
+        (await page.evaluate(() => document.getElementById("log").scrollTop)) === before);
+  check("live: and the arrival is offered rather than forced",
+        (await page.textContent("#jump")).includes("new message"),
+        await page.textContent("#jump"));
+  await page.click("#jump");
+  check("live: the pill takes the reader down and clears itself",
+        await page.locator("#jump").isHidden());
+
+  check("live: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
 }
 
 // ---------------------------------------------------------------------------- signing
@@ -441,7 +529,7 @@ const browser = await chromium.launch({
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
 
   await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
   check("signing: the identity row appears once Ed25519 imports", true);
@@ -453,6 +541,9 @@ const browser = await chromium.launch({
   // promise that makes pasting a seed into the composer worth offering.
   const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
   const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  // The seed entry lives behind "Other ways in" now: one primary way to sign in, the other
+  // three folded away. `<details>` needs no script, so this is a click and nothing else.
+  await page.click("#keymore summary");
   await page.fill("#seed", SEED);
   await page.click("#keyuse");
   await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
@@ -503,9 +594,10 @@ const browser = await chromium.launch({
         view.messages[2]?.text === "zero width and sep",
         JSON.stringify(view.messages[2]?.text));
 
-  // domcontentloaded, not networkidle: this page polls a room every second and refreshes the
-  // room list every five, so "the network went quiet for 500ms" is a race it loses about as
-  // often as it wins. Waiting for the thing being asserted is both faster and not flaky.
+  // domcontentloaded, not networkidle — and this is now the only option rather than the
+  // better one. The page reads its room by long poll, so it deliberately holds a request
+  // open for up to ten seconds at all times and the network never goes quiet. Every
+  // navigation in this file waits for the thing it is about to assert instead.
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
   await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in",
@@ -566,9 +658,13 @@ const browser = await chromium.launch({
 
   await page.goto(`${HOST}/humans`, { waitUntil: "domcontentloaded" });
   await ready();
-  check("passkey: both actions are offered",
-        !(await page.locator("#keypass").isHidden())
-        && !(await page.locator("#keypassnew").isHidden()));
+  check("passkey: the primary way in is on the surface",
+        await page.locator("#keypass").isVisible());
+  check("passkey: enrolling another is folded away until asked for",
+        !(await page.locator("#keypassnew").isVisible()));
+  await page.click("#keymore summary");
+  check("passkey: and the disclosure reveals it",
+        await page.locator("#keypassnew").isVisible());
 
   // Discovery with nothing enrolled must explain itself and must not quietly enrol. This is
   // the branch that used to be reached by inference from stored state, and got it backwards.
@@ -604,6 +700,9 @@ const browser = await chromium.launch({
   // ---- delegation ----
   check("delegation: the agents panel appears once signed in",
         !(await page.locator("#agents").isHidden()));
+  check("delegation: and stays folded until asked for",
+        !(await page.locator("#agent-did").isVisible()));
+  await page.click("#agents summary");
 
   const fp = await page.evaluate(async (d) => {
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(d));
@@ -683,6 +782,7 @@ const browser = await chromium.launch({
   // under a DID the reader did not just mint (PR #719 review). Runs last: it leaves two
   // discoverable credentials behind, which makes any later unconstrained discovery ambiguous.
   await page.click("#keyout");
+  await page.click("#keymore summary");
   await page.click("#keypassnew");
   await signedIn();
   check("passkey: enrolling a second one derives from the new credential, not an old one",
