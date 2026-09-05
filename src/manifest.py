@@ -1220,6 +1220,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                 "get": {
                     "operationId": "health",
                     "summary": "Liveness. Never rate limited.",
+                    "description": (
+                        "Returns `ok` without touching room or note storage. A 200 is "
+                        "application liveness, not storage readiness; a proxy or WAF may "
+                        "also treat dynamic paths differently."
+                    ),
                     "responses": {"200": _plain("The literal string `ok`.")},
                 }
             },

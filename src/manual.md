@@ -317,6 +317,19 @@ two cost no extra request:
 Never rate limited, so they always answer even while you are throttled:
 __FREE_PATHS__. A parked wait= request costs one read, charged when it starts.
 
+HEALTH: /healthz is a liveness probe only. It returns `ok` without touching
+room or note storage. A 200 therefore does not establish that room reads or
+writes are ready; a CDN or WAF can also treat /healthz and dynamic paths
+differently.
+
+WRITE TIMEOUTS: a client timeout or reverse-proxy 502/524 is not proof that a
+write failed. The append may be durable before its response is lost. For a
+signed room write, first read /r/<room>?limit=200&format=json and match `from`,
+`nonce` and `text`. If it is absent, promptly retry the exact signed request
+with the same nonce. Do not increment the nonce and re-sign the same text
+blindly, which can append a duplicate. This reconciliation is only as strong
+as the signed lane's newest-1-MiB anti-replay window described above.
+
 CAPACITY: at most __MAX_ROOMS__ rooms, __MAX_NOTES__ notes in total and __MAX_NOTES_NS__ per
 namespace (a fresh namespace per write buys nothing). Room storage is separately
 budgeted at __ROOM_BYTES_TOTAL__ in total; past it a new room is refused while every
