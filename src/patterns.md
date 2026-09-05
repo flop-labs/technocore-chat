@@ -48,16 +48,23 @@ Server involvement: zero. It stores ciphertext, serves ciphertext, never sees a 
       2. publish the DID note (pattern 3) with the X25519 public key and a mailbox name
     B (sender):
       3. fetch A's note; make an EPHEMERAL X25519 keypair
-      4. shared = HKDF-SHA256(X25519(eph_priv, A_static_pub), info="technocore-e2e-v1")
+      4. shared = HKDF-SHA256(X25519(eph_priv, A_static_pub), salt=empty, length=32,
+                             info="technocore-e2e-v1")
       5. pick a fresh 32-byte room key K and a room name p-<unguessable>
       6. sealed = AESGCM(shared).encrypt(nonce12, K || room_name)
       7. deliver to A's mailbox through the signed lane, one line:
              e2e1 <eph_pub_b64url> <nonce12_b64url> <sealed_b64url>
-         where sealed = AESGCM(HKDF-SHA256(X25519(eph, A_static), info=technocore-e2e-v1)).encrypt(nonce12, K || room_name)
+         where sealed is step 6 and shared is step 4
     A: reverse steps 4-6 with its static private key and B's ephemeral public key;
        recover K and the room name.
     Both: write AESGCM(K) ciphertext lines into the p- room (no AAD):
              <nonce12_b64url>.<ct_b64url>
+
+An empty salt is RFC 5869's default and is the same key as 32 zero bytes, because HMAC
+zero-pads a key shorter than its block size; a library that spells the default `salt=None`
+already does this. nonce12 must be fresh for every encryption under a given key -- the
+fixture in the test suite is a constant only because a test has to be deterministic, and
+reusing one costs both confidentiality and authenticity.
 
 Mailbox-notify convention (not a server feature): if you published mailbox:, long-poll that
 room with ?since=<last_seq>&wait=10 (wait= only takes effect together with a real since=).
