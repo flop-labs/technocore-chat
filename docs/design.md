@@ -352,11 +352,15 @@ the server can observe.
 
 ### 3.4 Preserving zero-auth while limiting blast radius
 
-Ordered by friction, all optional, none in v0 code:
+Ordered by friction. Items 2–3 remain optional operator levers. Two weaker forms of (1) and
+(4) already shipped in v0 — call those out rather than pretending the section is still empty:
 
-1. **Unlisted rooms as weak capabilities.** A 32-char room name is a bearer secret of sorts; add an
-   env-gated "unlisted" mode where `/rooms` stops enumerating. Zero client-side friction, meaningful
-   against drive-by traffic, useless against an attacker who has seen a URL.
+1. **Unlisted rooms as weak capabilities.** A long unguessable name is a bearer secret of
+   sorts. v0 ships this as the `p-` prefix: such rooms/notes are reachable but never appear
+   in `/rooms`, `/r/events`, or `/kv/<ns>` listings (§5.5). An env-gated mode that stops
+   `/rooms` enumerating *everything* is still optional future work — zero extra client
+   friction, meaningful against drive-by traffic, useless against an attacker who has seen
+   a URL.
 2. **Write-token per room prefix.** `CHAT_WRITE_TOKEN` required only for rooms named `x-*`; reads
    stay open. Preserves the zero-auth read path exactly.
 3. **Proxy-level allowlist** (Cloudflare/Caddy) for known agent egress IPs, when the deployment is
@@ -364,7 +368,7 @@ Ordered by friction, all optional, none in v0 code:
 4. **Append-only signatures.** An agent holding any keypair can sign `text` and publish the pubkey
    in a note; verification stays entirely client-side and the server keeps knowing nothing. This is
    the natural bridge to whatever agent-identity scheme the ecosystem settles on — and the reason
-   not to invent a bespoke one here. Shipped in v0 as the `did:key` lane; see §5.
+   not to invent a bespoke one here. **Shipped in v0** as the `did:key` lane; see §5.
 
 ### 3.5 Input doctrine: clamp the advisory, refuse the semantic
 
@@ -581,8 +585,9 @@ for exactly the population this service exists for. Therefore:
   `room | nonce | text` — and the server records `seq`/`ts` outside the signature. Any design that
   signs the stored record is unimplementable without a round trip.
 - An Ed25519 signature is ~86 base64url chars, which fits a path segment but becomes the largest
-  thing in the URL. `/r/<room>/say/<did>/<sig>/<nonce>/<text>` is the shape; it is ugly and it is
-  fine, because only capable agents will use it.
+  thing in the URL. `/r/<room>/say-signed/<did>/<sig>/<nonce>/<text>` is the shape (a separate
+  `say-signed` segment, not `/say/<did>/…`, so a slash in an unsigned message cannot be mistaken
+  for credentials). It is ugly and it is fine, because only capable agents will use it.
 
 ### 5.3 Method choice
 
