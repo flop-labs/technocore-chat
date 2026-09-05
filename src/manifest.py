@@ -162,12 +162,13 @@ _NAME_PARAM = {"in": "path", "required": True, "schema": _NAME_SCHEMA}
 
 # The signed lane's three fields, generated from the regexes didkey enforces.
 #
-# They appear in three operations — `saySigned`, `writeNoteSigned` and the `did`/`sig`/
-# `nonce` members of the room POST body — and had drifted into three different strengths:
-# an unbounded `+` on the room lane that accepted a four-character DID, a bare `string` on
-# the note lane that accepted anything at all, and prose on the POST body that a code
-# generator cannot read. A client is built against the copy it happened to find, so the
-# weakest one was the real contract. There is now one.
+# They appear in four operations — `saySigned`, `writeNoteSigned` and the `did`/`sig`/
+# `nonce` members of both POST bodies — and had drifted into different strengths: an
+# unbounded `+` on the room lane that accepted a four-character DID, a bare `string` on the
+# note lane that accepted anything at all, and prose on a POST body that a code generator
+# cannot read. A client is built against the copy it happened to find, so the weakest one
+# was the real contract. Credential shapes are now shared; nonce replay semantics remain
+# lane-specific.
 _DID_LENGTH = len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
 _DID_SCHEMA = {
     "type": "string",
@@ -199,23 +200,40 @@ _SIG_SCHEMA = {
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_TEXT_CHARS}
 _VALUE_SCHEMA = {"type": "string", "minLength": 1, "maxLength": store.MAX_VALUE_CHARS}
 
-_NONCE_SCHEMA = {
+_NONCE_SHAPE = {
     "type": "string",
     "pattern": f"^{didkey.NONCE_PATTERN}$",
+}
+_MESSAGE_NONCE_SCHEMA = {
+    **_NONCE_SHAPE,
     "description": (
-        "A counter, 1-19 digits, that must exceed the last one this key spent here. Any "
-        "counter you already have works, a millisecond clock included."
+        "A 1-19 digit counter that must exceed the last nonce this key used in this room. "
+        "A millisecond timestamp works only when it passes that comparison."
+    ),
+}
+_OWNERSHIP_NONCE_SCHEMA = {
+    **_NONCE_SHAPE,
+    "description": (
+        "A 1-19 digit counter for this room's `room-owners` and `room-allow` writes. "
+        "If `/kv/room-nonce/<room>` is absent, any valid counter works; if present, read "
+        "it and choose a greater value. That server-written counter is shared by every "
+        "signer. A millisecond timestamp works only when it passes the comparison."
     ),
 }
 
 # What a POST body means once it carries a `did`: the other two credentials become
-# required, and their exact shapes — the same ones the signed GET lanes publish on their
-# path segments — start applying. Hung off `did` rather than written on the properties
-# because that is where the handler reads them (docs/design.md §3.5): a body with no `did`
-# is an unsigned write, and `sig`/`nonce` on one are ignored rather than validated.
-_SIGNED_LANE = {
+# required, and their exact shapes and lane-specific nonce rule — the same ones the signed
+# GET lanes publish on their path segments — start applying. Hung off `did` rather than
+# written on the properties because that is where the handler reads them (docs/design.md
+# §3.5): a body with no `did` is an unsigned write, and `sig`/`nonce` on one are ignored
+# rather than validated.
+_MESSAGE_SIGNED_LANE = {
     "required": ["sig", "nonce"],
-    "properties": {"sig": _SIG_SCHEMA, "nonce": _NONCE_SCHEMA},
+    "properties": {"sig": _SIG_SCHEMA, "nonce": _MESSAGE_NONCE_SCHEMA},
+}
+_OWNERSHIP_SIGNED_LANE = {
+    "required": ["sig", "nonce"],
+    "properties": {"sig": _SIG_SCHEMA, "nonce": _OWNERSHIP_NONCE_SCHEMA},
 }
 
 _MESSAGE_SCHEMA = {
@@ -309,7 +327,7 @@ _ROOM_POST_BODY = {
                             "<text> is the text after the single-line sweep."
                         )
                     },
-                    "nonce": {"description": _NONCE_SCHEMA["description"]},
+                    "nonce": {"description": _MESSAGE_NONCE_SCHEMA["description"]},
                 },
                 "required": ["text"],
                 # The two lanes name their author differently, and the schema said neither
@@ -325,7 +343,7 @@ _ROOM_POST_BODY = {
                 # properties unconditionally. The handler reads them only on the signed
                 # lane, so publishing their patterns on a body with no `did` would be a
                 # constraint nothing enforces (docs/design.md §3.5).
-                "dependentSchemas": {"did": _SIGNED_LANE},
+                "dependentSchemas": {"did": _MESSAGE_SIGNED_LANE},
             }
         }
     },
@@ -729,7 +747,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {**_NAME_PARAM, "name": "room"},
                         {"in": "path", "name": "did", "required": True, "schema": _DID_SCHEMA},
                         {"in": "path", "name": "sig", "required": True, "schema": _SIG_SCHEMA},
-                        {"in": "path", "name": "nonce", "required": True, "schema": _NONCE_SCHEMA},
+                        {
+                            "in": "path",
+                            "name": "nonce",
+                            "required": True,
+                            "schema": _MESSAGE_NONCE_SCHEMA,
+                        },
                         {
                             "in": "path",
                             "name": "text",
@@ -968,14 +991,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                                 "world-writable and refuses it."
                                             ),
                                         },
-                                        "nonce": {"description": _NONCE_SCHEMA["description"]},
+                                        "nonce": {
+                                            "description": _OWNERSHIP_NONCE_SCHEMA["description"]
+                                        },
                                     },
                                     "required": ["value"],
                                     # Same rule as the room lane, and the same reason the
                                     # credential shapes hang off `did` rather than sitting
                                     # on the properties: without one this is an unsigned
                                     # write and the handler never reads them.
-                                    "dependentSchemas": {"did": _SIGNED_LANE},
+                                    "dependentSchemas": {"did": _OWNERSHIP_SIGNED_LANE},
                                 }
                             }
                         },
@@ -1057,7 +1082,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         {**_NAME_PARAM, "name": "key"},
                         {"in": "path", "name": "did", "required": True, "schema": _DID_SCHEMA},
                         {"in": "path", "name": "sig", "required": True, "schema": _SIG_SCHEMA},
-                        {"in": "path", "name": "nonce", "required": True, "schema": _NONCE_SCHEMA},
+                        {
+                            "in": "path",
+                            "name": "nonce",
+                            "required": True,
+                            "schema": _OWNERSHIP_NONCE_SCHEMA,
+                        },
                         {
                             "in": "path",
                             "name": "value",
@@ -1443,8 +1473,10 @@ def agent_manifest(
                 "raw signature rather than editing its tail."
             ),
             "nonce": (
-                "1-19 digits, strictly greater than the last nonce that key used in that "
-                "room. For notes the counter is server-written at /kv/room-nonce/<room>."
+                "1-19 digits. For a message: greater than the last nonce that key used in "
+                "that room. For an ownership note: any valid counter if "
+                "/kv/room-nonce/<room> is absent; otherwise greater than that "
+                "server-written counter, which is shared by every signer."
             ),
             "canonicalisation": (
                 "Sign the text *after* the single-line sweep — the bytes that get stored — "

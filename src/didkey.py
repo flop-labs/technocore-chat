@@ -59,8 +59,10 @@ DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 # is these four. A did:key already has exactly one spelling (tests/unit/test_didkey.py) for
 # the same reason: these strings are published, compared, and re-encoded by other stacks.
 SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
-# A nonce is a plain counter (a millisecond clock works): it must count up per key per
-# room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
+# A nonce is a plain 1-19 digit counter. Callers enforce its ordering: message counters
+# are per key per room, while signed ownership-note writes use one server-written room
+# counter shared by every signer. A millisecond timestamp works only when it exceeds the
+# relevant lane's current guard.
 NONCE_PATTERN = r"[0-9]{1,19}"
 
 SIG_RE = re.compile(SIG_PATTERN)
