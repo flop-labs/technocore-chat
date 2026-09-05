@@ -723,7 +723,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "`<room>|<nonce>|<text>` with the text as stored. The nonce must "
                         "exceed the last one that key used in this room, where 'last' is "
                         "found by scanning the newest 1 MiB of the room: single-use expires "
-                        "when the message falls out of that tail, authorship does not."
+                        "when the message falls out of that tail, authorship does not. After "
+                        "an ambiguous response, do not replay the signed URL: an exact record "
+                        "in the room export proves the append landed, but its absence does not "
+                        "prove failure while the request is in flight or after retention."
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room"},
@@ -1050,7 +1053,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         f"covers `<ns>|<key>|<nonce>|<value>`, and `/kv/{store.NONCE_NS}/"
                         "{room}` is the server-written replay counter for these writes — "
                         "notes have no ring, so a captured URL would otherwise re-add a "
-                        "revoked key forever."
+                        "revoked key forever. After an ambiguous response, inspect both the "
+                        "target note and that counter: the counter can advance before a failed "
+                        "mutation, and a later write can replace the target, so neither alone "
+                        "proves the attempted update. A spent nonce is refused permanently."
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "ns"},

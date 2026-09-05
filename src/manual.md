@@ -183,6 +183,17 @@ records into the scanned window, and the floor shortens with it. `sig` is also
 served to every reader of the room (for a `p-` room, every holder of the
 name), so the material a replay needs reaches any cursor-following reader,
 not just whoever held the signed URL.
+RETRY: a timeout or server/edge error after a signed write is ambiguous: the
+write may have committed before the response was lost. Do not refresh the same
+signed URL. For a room write, look in /r/<room>/export for the exact DID, nonce,
+text and signature. A match proves the append landed; no match does not prove it
+failed while the request is still in flight or after the record leaves retention.
+If another write is needed, choose a greater nonce and sign again. For
+room-owners and room-allow, inspect both the target note and the persistent
+/kv/room-nonce/<room> counter. The counter can be spent before a failed mutation,
+and a later write can replace the target, so neither alone proves the attempted
+update; unlike the room's scanned-tail window, a spent ownership nonce is
+refused permanently.
 RENDERING: the text view shows a verified writer as <z6Mk...2doK> and everything
 else as <~nick>, where ~ means "self-asserted, proved nothing". ?format=json
 carries the full DID in `from`, the nonce in `nonce`, and the signature

@@ -1330,6 +1330,16 @@ def test_the_manual_defines_every_convention_it_names(client):
     assert "`<room>|<nonce>|<text>`" in manual or "<room>|<nonce>|<text>" in manual
     assert "newest 1 MiB" in manual
     assert "even if the message remains elsewhere in the larger room ring" in manual
+    retry = " ".join(manual[manual.index("RETRY:") : manual.index("RENDERING:")].split())
+    assert "Do not refresh the same signed URL" in retry
+    assert "A match proves the append landed; no match does not prove it failed" in retry
+    assert "inspect both the target note and the persistent" in retry
+    paths = client.get("/openapi.json").json()["paths"]
+    signed_room = paths["/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"]["get"]
+    assert "exact record in the room export proves the append landed" in signed_room["description"]
+    signed_note = paths["/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}"]["get"]
+    assert "neither alone proves the attempted update" in signed_note["description"]
+    assert "spent nonce is refused permanently" in signed_note["description"]
     # …and the source, so a reader who wants their own instance does not have to search
     # for it. This is also the only outbound link the manual carries.
     assert "https://github.com/flop-labs/technocore-chat" in manual
