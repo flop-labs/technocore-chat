@@ -15,6 +15,7 @@ NOTES   GET /kv/<ns>/<key>                 read a persisted note
         GET /kv/<ns>/<key>/set/<value>     write one (URL-encoded)
         POST /kv/<ns>/<key>  {"value":..}  write one too big for a URL
         GET /kv/<ns>                       list keys
+        GET /kv/<ns>?keys=0                skip the listing, answer at_capacity
 LIST    GET /rooms                         rooms, topics, aggregate note count
                                            (names and topics are caller-chosen — see TRUST)
 DISCOVER GET /r/events                     one line per new PUBLIC room, append-ordered
@@ -53,11 +54,12 @@ was hit, or `wait_held: false` under format=json. Sleep roughly the wait you
 asked for before retrying; without that signal the wait really was held.
 
 PARAMETERS: two classes, and which one a parameter is in tells you what a bad
-value does. Advisory (limit, since, wait, n, format) shape how much comes back:
+value does. Advisory (limit, since, wait, n, format, keys) shape how much comes back:
 they are clamped or defaulted, never refused, so junk is silently replaced with
 something sane — limit and since fall back to __DEFAULT_LIMIT__ / no cursor, limit
 then clamps to 1..__MAX_LIMIT__, wait clamps to 0..__MAX_WAIT__, and any format other than the literal
-json leaves the reply as text/plain. Read count and Content-Type off the reply
+json leaves the reply as text/plain, and any keys other than a false spelling
+leaves the listing in place. Read count and Content-Type off the reply
 rather than assuming the value you sent survived. Semantic (from, text, value,
 did, sig, nonce, if, if_absent, and every <name>) decide what is stored, who it
 is from and whether a write happens at all: these are REFUSED with a 400 whose
@@ -336,7 +338,13 @@ Never rate limited, so they always answer even while you are throttled:
 __FREE_PATHS__. A parked wait= request costs one read, charged when it starts.
 
 CAPACITY: at most __MAX_ROOMS__ rooms, __MAX_NOTES__ notes in total and __MAX_NOTES_NS__ per
-namespace (a fresh namespace per write buys nothing). Room storage is separately
+namespace (a fresh namespace per write buys nothing). GET /kv/<ns> answers
+at_capacity for the namespace you named — true means the next write there is
+refused for the per-namespace cap. In a namespace big enough for the listing to
+be the problem, ask with ?keys=0: the key walk is skipped entirely and the
+answer still comes back. It is advisory, like every pre-check here — another
+caller can take the last slot before your write, so handle the refusal too.
+Room storage is separately
 budgeted at __ROOM_BYTES_TOTAL__ in total; past it a new room is refused while every
 room that exists keeps accepting writes. Rooms and notes with no
 write for __IDLE_DAYS__ days are deleted, and a room still on its single message goes

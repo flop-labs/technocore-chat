@@ -13,6 +13,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `list_notes(root: pathlib.Path, ns: str) -> list[str]` — (undocumented)
 - `list_rooms(root: pathlib.Path) -> list[str]` — (undocumented)
 - `note_get(root: pathlib.Path, ns: str, key: str) -> str | None` — (undocumented)
+- `note_ns_stats(root: pathlib.Path, ns: str) -> dict` — Whether a namespace the caller already named is at capacity, and what that
 - `note_path(root: pathlib.Path, ns: str, key: str) -> pathlib.Path` — Where a note lives — `notes/<ns>/<shard>/<key>.txt`.
 - `note_set(root: pathlib.Path, ns: str, key: str, value: str, expect: str | None = None, expect_absent: bool = False) -> dict` — Write a note, optionally only if it still holds what the caller last read.
 - `note_stats(root: pathlib.Path) -> dict` — Aggregate note usage. Deliberately blind: no namespace, no key, ever.

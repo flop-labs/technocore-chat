@@ -433,3 +433,84 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_note_list_reports_at_capacity_for_the_namespace_named(client):
+    """#510: a caller who already named a namespace (to get this listing at all) can
+    learn its occupancy without deriving it from len(keys) -- prohibitively expensive
+    at the sizes where it matters -- and without gaining anything they could not
+    already compute from the keys they were just handed."""
+    import store
+
+    client.get("/kv/plans/next/set/ship%20the%20thing")
+    client.get("/kv/plans/later/set/ship%20the%20other%20thing")
+    body = client.get("/kv/plans?format=json").json()
+    assert body["ns"] == "plans"
+    assert sorted(body["keys"]) == ["later", "next"]
+    assert body["at_capacity"] is False
+    assert body["capacity_per_namespace"] == store.MAX_NOTES_PER_NS
+
+
+def test_note_list_at_capacity_is_false_for_an_empty_namespace(client):
+    import store
+
+    body = client.get("/kv/never-written?format=json").json()
+    assert body["at_capacity"] is False
+    assert body["keys"] == []
+    assert body["capacity_per_namespace"] == store.MAX_NOTES_PER_NS
+
+
+def test_note_list_keys_0_reports_at_capacity_without_listing(client):
+    """A regression yukkie3276 raised on #568: note_list() must not pay the cost
+    of a full listing when the caller only wants occupancy. ?keys=0 skips
+    store.list_notes() entirely -- keys comes back empty even though the
+    namespace holds real notes, while at_capacity/capacity_per_namespace are still
+    correct. This is the occupancy-only path #510 asked for: at namespace sizes
+    where the full listing 503s, this is the only way to learn anything at all."""
+    import store
+
+    client.get("/kv/plans/next/set/ship%20the%20thing")
+    client.get("/kv/plans/later/set/ship%20the%20other%20thing")
+
+    body = client.get("/kv/plans?format=json&keys=0").json()
+    assert body["ns"] == "plans"
+    assert body["keys"] == []
+    assert body["at_capacity"] is False
+    assert body["capacity_per_namespace"] == store.MAX_NOTES_PER_NS
+
+    # Omitting the param preserves today's default: the full listing still comes back.
+    default_body = client.get("/kv/plans?format=json").json()
+    assert sorted(default_body["keys"]) == ["later", "next"]
+
+
+def test_note_list_at_capacity_flips_true_at_the_cap(client):
+    """The boundary itself: at_capacity must actually flip, not just report a
+    plausible-looking False everywhere it has been checked so far. A real
+    MAX_NOTES_PER_NS is 131,072 notes -- too many to write in a test -- so the
+    cap is lowered instead."""
+    import config
+
+    with config.override(MAX_NOTES_PER_NS=2):
+        client.get("/kv/small/a/set/1")
+        assert client.get("/kv/small?format=json").json()["at_capacity"] is False
+        client.get("/kv/small/b/set/2")
+        body = client.get("/kv/small?format=json").json()
+        assert body["at_capacity"] is True
+        assert body["capacity_per_namespace"] == 2
+
+
+def test_note_list_at_capacity_counts_a_hidden_p_key(client):
+    """The property this redesign exists to guarantee: at_capacity must reflect
+    a p- key even though that key never appears in keys. If this test failed
+    with at_capacity False while the namespace held a p- note at the cap, the
+    field would be silently wrong about exactly the write it is meant to predict
+    -- a caller trusting it would attempt a write that gets refused anyway.
+    If it failed the other way (True with room actually free), a legitimate
+    write would look pre-blocked when it is not. Both directions matter here."""
+    import config
+
+    with config.override(MAX_NOTES_PER_NS=1):
+        client.get("/kv/hidden/p-secret/set/shh")
+        body = client.get("/kv/hidden?format=json").json()
+        assert body["keys"] == [], "a p- key must never appear in the listing"
+        assert body["at_capacity"] is True, "but it must still count toward the cap"

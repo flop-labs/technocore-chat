@@ -112,19 +112,39 @@ IF_ABSENT = dict.fromkeys(("1", "true", "yes", "on"), True) | dict.fromkeys(
 )
 # Rendered from the same mapping rather than typed out beside it, and the empty spelling is
 # named rather than quoted — an empty pair of backticks reads as a typo, not as a value.
-_IF_ABSENT_TRUE = "`" + "`, `".join(k for k, means in IF_ABSENT.items() if means) + "`"
-_IF_ABSENT_FALSE = (
+_BOOL_TRUE = "`" + "`, `".join(k for k, means in IF_ABSENT.items() if means) + "`"
+_BOOL_FALSE = (
     "`" + "`, `".join(k for k, means in IF_ABSENT.items() if not means and k) + "`, or empty"
 )
 _IF_ABSENT_RULE = (
-    f"Write only if the note does not exist yet. True: {_IF_ABSENT_TRUE}. False: "
-    f"{_IF_ABSENT_FALSE}. Matched case-insensitively, and a JSON `true`/`false` also works "
+    f"Write only if the note does not exist yet. True: {_BOOL_TRUE}. False: "
+    f"{_BOOL_FALSE}. Matched case-insensitively, and a JSON `true`/`false` also works "
     "on the POST lane; anything else is a 400 naming this parameter rather than a guess at "
     "what you meant. A *true* one together with `if=` is refused: those two conditions "
     "contradict, and there is no correct pick between them. A false one is not a condition "
     "at all, so it sits beside `if=` as an ordinary compare-and-set — a client that "
     "serialises every parameter it holds, `false` included, is not penalised for it."
 )
+# `?keys=` on the note-listing lane takes the same spellings, for the same reason and against
+# the same failure: the set the server honours and the set this document publishes are one
+# object. Bound to the table rather than copied from it — two tables that happen to agree
+# today is the exact shape #282 drifted out of, and a `keys=` the server quietly ignores
+# sends the caller back to the full listing this parameter exists to let them skip.
+KEYS = IF_ABSENT
+_KEYS_RULE = (
+    "List the key names. Default true — omit this and the listing is unchanged. False: "
+    f"{_BOOL_FALSE}; true: {_BOOL_TRUE}. Matched case-insensitively. A false one answers "
+    "with `keys: []` and skips the namespace walk entirely, which is the only affordable "
+    "way to read `at_capacity` in a namespace large enough for the listing itself to be "
+    "the problem. Anything else is read as true and you get the full listing — advisory "
+    "under the input doctrine, since a misread spelling costs latency, never correctness."
+)
+_KEYS_PARAM = {
+    "in": "query",
+    "name": "keys",
+    "schema": {"type": "string"},
+    "description": _KEYS_RULE,
+}
 _IF_ABSENT_PARAM = {
     "in": "query",
     "name": "if_absent",
@@ -272,6 +292,46 @@ _ROOM_VIEW_SCHEMA = {
         },
     },
     "required": ["room", "count", "last_seq", "messages"],
+}
+
+
+# The note-listing response. Written out because `{"type": "object"}` described a body that
+# now carries a capacity answer as well as key names, and a generated client cannot offer a
+# field the contract does not name — least of all the one the cheap lane exists to serve.
+_NOTE_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ns": _NAME_SCHEMA,
+        "keys": {
+            "type": "array",
+            "items": _NAME_SCHEMA,
+            "description": (
+                "Key names in this namespace, minus every `p-…` one — those are never "
+                "listed. Empty on a `keys=` false, which is not the same as an empty "
+                "namespace: read `at_capacity` for that, or ask again without the "
+                "parameter."
+            ),
+        },
+        "at_capacity": {
+            "type": "boolean",
+            "description": (
+                "True when the next write to this namespace is refused for the "
+                "per-namespace cap. A threshold, not a count: it reflects the same "
+                "physical total the refusal itself compares against, `p-…` notes "
+                "included, so it answers before the write rather than after. Advisory — "
+                "another caller may take the last slot between this read and your write, "
+                "so a write still has to handle its own refusal."
+            ),
+        },
+        "capacity_per_namespace": {
+            "type": "integer",
+            "description": (
+                "The cap `at_capacity` is measured against. Also published as "
+                "`notes_per_namespace` in /.well-known/agent.json."
+            ),
+        },
+    },
+    "required": ["ns", "keys", "at_capacity", "capacity_per_namespace"],
 }
 
 
@@ -893,9 +953,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "Namespaces are never enumerated — there is no listing of "
                         "namespaces — and keys named `p-…` are never listed either."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "ns"}, _FORMAT_PARAM],
+                    "parameters": [
+                        {**_NAME_PARAM, "name": "ns"},
+                        _KEYS_PARAM,
+                        _FORMAT_PARAM,
+                    ],
                     "responses": {
-                        "200": _text_or_json("Key names.", {"type": "object"}),
+                        "200": _text_or_json(
+                            "Key names, and whether the namespace is at its cap.",
+                            _NOTE_LIST_SCHEMA,
+                        ),
                         "400": _BAD_NAME,
                         "429": _RATE_LIMITED,
                     },
