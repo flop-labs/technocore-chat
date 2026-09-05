@@ -725,3 +725,119 @@ def test_the_byte_gauge_tracks_creates_and_a_reap_settles_overwrites(tmp_path, m
     monkeypatch.setattr(store, "REAP_EVERY", 0)
     store._reap(tmp_path)
     assert store.note_stats(tmp_path)["bytes"] == 17, "and a reap settles it"
+
+
+# ------------------------------------------------------------------ the reaper's lock spans
+
+
+def _due(root: Path) -> None:
+    """Make the next pass due without setting REAP_EVERY to 0. The distinction matters here:
+    these tests drive writes from inside a pass, and with the interval at 0 every one of those
+    writes would start a nested pass of its own and the thing being measured would be two."""
+    (root / ".reaped").unlink(missing_ok=True)
+
+
+def _span(root: Path, name: str):
+    return (root / name).with_suffix(".create")
+
+
+def test_a_reap_never_holds_a_create_span_across_its_walk(tmp_path, monkeypatch) -> None:
+    """The contention this pass was profiled for. `_reconcile_note_count` held
+    `.notes-count.create` exclusively around a walk of every note — 29 s at production size —
+    and the tail block held `.usage.create` around a sized scan of every room. Every create in
+    the service takes those spans shared, so once per REAP_EVERY every writer in the store
+    queued behind a walk of the whole store: 72.5% of all CPU samples were threads parked in
+    `fcntl.flock`.
+
+    Asked as a property rather than a timing. From inside the walk, try both spans shared and
+    non-blocking: a `BlockingIOError` means somebody holds one exclusively, and the only
+    candidate is the pass that is walking. A regression here does not fail a functional test —
+    it just makes the service slow at scale — which is why it is pinned.
+    """
+    import store
+
+    _seed(tmp_path, 4)
+    store.append(tmp_path, "room", "bot", "hi")
+    real_walk = store._walk
+    held = []
+
+    def walk_but_probe_both_spans_first(d, suffix):
+        for name in (store.NOTES_FILE, store.USAGE_FILE):
+            try:
+                with store._locked(_span(tmp_path, name), shared=True, nb=True):
+                    pass
+            except BlockingIOError:
+                held.append(f"{name} during {suffix}")
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_probe_both_spans_first)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert not held, f"the pass walked while holding a create span: {held}"
+
+
+def test_a_reap_counts_from_the_walk_it_already_makes(tmp_path, monkeypatch) -> None:
+    """The walk the reaper does to find idle files and the walk it did to count them were the
+    same walk, made twice — the second one under the span. It stats every entry either way, so
+    the count and the byte total are already in hand.
+
+    `_count_notes` and `_count_rooms` stay, because a counter file that cannot be parsed still
+    has to be rebuilt from somewhere; they are simply not on this path any more. Both halves
+    are asserted against the disk afterwards, so "cheaper" cannot mean "wrong".
+    """
+    import store
+
+    _seed(tmp_path, 3)
+    store.append(tmp_path, "room", "bot", "hi")
+    store.note_set(tmp_path, "ns0", "second", "value")
+    walked = []
+    monkeypatch.setattr(store, "_count_notes", lambda root: walked.append("notes") or (0, 0))
+    monkeypatch.setattr(store, "_count_rooms", lambda root: walked.append("rooms") or (0, 0))
+    _due(tmp_path)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    assert walked == [], f"the pass walked the store a second time for {walked}"
+    assert store._read_counts(tmp_path, store.NOTES_FILE) == store._count_notes(tmp_path)
+    assert store._read_counts(tmp_path, store.USAGE_FILE) == store._count_rooms(tmp_path)
+
+
+def test_a_create_the_walk_could_not_see_leaves_the_count_at_or_above_the_disk(
+    tmp_path, monkeypatch
+) -> None:
+    """The bound that replaces exactness, held to in the direction that matters.
+
+    Counting from an unlocked walk means a create can land after the walk has passed the
+    place it would have appeared. Writing what the walk saw would then put the count *below*
+    the disk, and a low count admits a note the cap should refuse — the same breach the old
+    exclusive hold existed to prevent. So the pass reads the counter with the creates waited
+    out at both ends and adds back what it grew by in between.
+
+    Driven from the orphan-lock sweep, which runs after both walks and before either count is
+    installed, so the create really is invisible to the walk rather than timed to be.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "first", "v")
+    real_walk = store._walk
+    creator = []
+
+    def walk_but_let_a_create_land_after_the_walks(d, suffix):
+        if suffix == ".txt.lock" and not creator:
+            creator.append(
+                threading.Thread(target=store.note_set, args=(tmp_path, "ns", "unseen", "v"))
+            )
+            creator[0].start()
+            creator[0].join(10)  # the pass holds no span here, so this cannot deadlock
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_let_a_create_land_after_the_walks)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert creator and not creator[0].is_alive(), "premise: the create finished inside the pass"
+    on_disk = store._count_notes(tmp_path)
+    assert on_disk[0] == 2, "premise: the walk had already passed the namespace"
+    assert store._note_count(tmp_path) >= on_disk[0], "a count below the disk breaches the cap"
+    assert store._note_totals(tmp_path) == on_disk, "and the create is counted exactly once"
