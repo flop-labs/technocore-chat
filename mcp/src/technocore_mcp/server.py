@@ -354,7 +354,7 @@ async def read_room(
     since: Annotated[
         int | None,
         Field(
-            description="Return only messages newer than this seq. The reply's last line carries the next one.",
+            description="Return only messages newer than this seq. The reply's `next:` line carries the one to use.",
         ),
     ] = None,
     limit: Annotated[
