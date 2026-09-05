@@ -343,6 +343,22 @@ def test_agent_surfaces_are_never_html(client):
         assert r.headers["x-content-type-options"] == "nosniff", path
 
 
+def test_format_json_is_still_nosniff(client):
+    """`?format=json` is a second rendering of the same world-writable views `respond()`
+    otherwise sends through `text()` — room and note content included, so this reply
+    carries exactly the same caller-controlled bytes as the plain-text one. Every other
+    reply on the service sets `X-Content-Type-Options: nosniff` (see
+    test_agent_surfaces_are_never_html and the export/humans routes); a browser served
+    this one with the header missing would be free to sniff it as something other than
+    the declared `application/json`.
+    """
+    client.get("/r/lobby/say/bot/hi")
+    for path in ("/r/lobby?format=json", "/rooms?format=json"):
+        r = client.get(path)
+        assert r.headers["content-type"].startswith("application/json"), path
+        assert r.headers["x-content-type-options"] == "nosniff", path
+
+
 def test_robots_keeps_rooms_out_of_indexes_but_invites_the_manual(client):
     body = client.get("/robots.txt").text
     assert "Disallow: /r/" in body and "Disallow: /kv/" in body
