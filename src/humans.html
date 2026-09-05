@@ -1641,13 +1641,48 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     return out;
   }
 
+  // Which record wins for each agent: highest nonce, ties to the last one written.
+  //
+  // Re-issuing is the documented way to keep a delegation alive, because expiry is the only
+  // revocation this format has — so a note holds several records naming one agent and
+  // something has to say which is current. The nonce does, exactly as it does for a signed
+  // message. And it is not tidiness: the note is world-writable, so anyone can re-add a
+  // superseded record, which really was signed by the root and may not have expired, so it
+  // verifies. Without this rule, narrowing a delegation from `*` to `r:lobby` could be
+  // undone by putting the old one back.
+  function newest(records) {
+    var best = {};
+    records.forEach(function (d, i) {
+      var rank = /^[0-9]+$/.test(d.nonce) ? Number(d.nonce) : -1;
+      if (!(d.agent in best) || rank >= best[d.agent][0]) best[d.agent] = [rank, i];
+    });
+    var winners = {};
+    Object.keys(best).forEach(function (agent) { winners[best[agent][1]] = true; });
+    return winners;
+  }
+
+  // The note without any record naming this agent, so a re-issue replaces rather than piles
+  // up. Token-walked like every other read of this format, and everything that is not one of
+  // this agent's records — a `mailbox:` entry, another agent's grant — is copied through.
+  function withoutAgent(note, agent) {
+    var f = note.split(/\s+/), out = [];
+    for (var i = 0; i < f.length; i++) {
+      if (f[i] === DELEGATE_TOKEN && f[i + 1] === agent && i + DELEGATE_FIELDS < f.length) {
+        i += DELEGATE_FIELDS;
+        continue;
+      }
+      if (f[i]) out.push(f[i]);
+    }
+    return out.join(' ');
+  }
+
   function delegationRow(d, state) {
     var row = document.createElement('div');
     row.className = 'deleg ' + (state === 'live' ? 'ok' : 'dead');
     var label = document.createElement('span');
     label.className = 'state';
     // The word carries the state, never the colour alone — same rule the error badge follows.
-    label.textContent = state === 'live' ? 'live' : state === 'expired' ? 'expired' : 'forged';
+    label.textContent = state;
     var who = document.createElement('span');
     who.className = 'body';
     who.textContent = shortDid(d.agent);
@@ -1678,14 +1713,16 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var root = me.did;
     return notePath(root).then(readNote).then(function (note) {
       var found = parseDelegations(note), now = Date.now() / 1000;
-      return Promise.all(found.map(function (d) {
+      var current = newest(found);
+      return Promise.all(found.map(function (d, i) {
         // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
         // so reporting it as merely "expired" would dignify a signature that was never this
         // key's in the first place.
         return verifyDelegation(root, d).then(
           function (ok) {
             return { d: d, state: !ok ? 'forged'
-                                      : Number(d.expires) > now ? 'live' : 'expired' };
+                                      : Number(d.expires) <= now ? 'expired'
+                                      : current[i] ? 'live' : 'superseded' };
           },
           function () { return { d: d, state: 'forged' }; }
         );
@@ -1719,10 +1756,16 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             // A space, not a newline: the server would rewrite a newline to exactly this,
             // and writing what will be stored keeps the value we post identical to the one
             // the next compare-and-swap reads back.
-            var next = previous ? previous + ' ' + record : record;
+            // Replace this agent's previous grant rather than appending beside it. Expiry
+            // is the only revocation, so re-issuing is routine, and appending would grow the
+            // note by a record a week per agent against a cap of about forty.
+            var kept = previous ? withoutAgent(previous, agent) : '';
+            var next = kept ? kept + ' ' + record : record;
             // Compare-and-swap on the previous body, never a blind overwrite. This note is
             // world-writable and may hold a `mailbox:` line or another delegation that
             // arrived between the read and the write; a 409 here means re-read, not retry.
+            // The condition is the *untrimmed* previous body: it is what the server holds,
+            // and a compare-and-swap against anything else can only ever fail.
             var payload = { value: next };
             if (previous) payload['if'] = previous; else payload.if_absent = true;
             return fetch('/kv/' + path.ns + '/' + path.key, {

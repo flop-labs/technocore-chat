@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-05, 105 checks, all passing — expected shape:
+ * Checked 2026-09-05, 109 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -50,7 +50,8 @@
  *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
- *                   ONE line a note can hold; four malformed ones are refused before a fetch
+ *                   ONE line a note can hold; re-issuing replaces rather than appends; four
+ *                   malformed ones are refused before a fetch
  *
  * The webmcp and signing sections both post messages, which reorders /rooms — they run
  * last, after every check that reads the seeded list.
@@ -751,9 +752,33 @@ const browser = await chromium.launch({
         (await page.locator(".deleg.ok .state").count()) === 2,
         await page.textContent("#status"));
 
+  // Re-issuing is the documented way to keep a grant alive, so it must replace rather than
+  // pile up: a record a week per agent against a cap of about forty fills the note in under
+  // a year. Same agent, new scope and expiry — the row count must not move.
+  await delegate(AGENT, "kv:plans", "45");
+  check("delegation: re-issuing replaces the grant instead of appending",
+        (await page.locator(".deleg").count()) === 2,
+        `${await page.locator(".deleg").count()} rows`);
+  // Named explicitly rather than by row position: the replaced record is appended at the end,
+  // so `.deleg` is the *other* agent — which in this run also carries kv:plans, and the loose
+  // version of this check passed on that coincidence rather than on the re-issue.
+  // The last four characters, not the first four: the page abbreviates a DID as
+  // `z6Mk…vLSK`, and `z6Mk` is the prefix every ed25519 did:key shares, so matching on it
+  // selects every row.
+  const reissued = page.locator(`.deleg:has-text("${AGENT.slice(-4)}")`);
+  check("delegation: and the re-issue is the one that counts",
+        (await reissued.textContent()).includes("kv:plans"),
+        await reissued.textContent());
+
   const note = await (await fetch(`${HOST}${notePath}`)).text();
+  check("delegation: the note carries the re-issued scope for that agent",
+        note.includes(`delegate: ${AGENT} kv:plans`),
+        note.slice(note.indexOf("delegate:"), note.indexOf("delegate:") + 90));
   check("delegation: published to the DID note path",
         note.includes(`delegate: ${AGENT}`) && note.includes(`delegate: ${AGENT2}`), notePath);
+  check("delegation: one record per agent survives in the note",
+        (note.match(/delegate:/g) || []).length === 2,
+        `${(note.match(/delegate:/g) || []).length} records`);
   check("delegation: the note's existing content survived the append",
         note.includes("mailbox: mb-probe"), note.slice(0, 120));
   check("delegation: and the note really is a single line",

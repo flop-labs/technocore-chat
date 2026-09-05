@@ -71,7 +71,10 @@ defaults to a millisecond clock. Expiry is the ONLY revocation this format has
 so delegate for days, not years, and re-issue.
 
 'check' reads a note (a file, or stdin) and reports every delegation in it
-against a root did:key: which verify, which have expired, and which are forged.
+against a root did:key: which verify, which have expired, which are forged,
+and which a later re-issue has superseded. Where two records name one agent the
+higher nonce wins — re-issuing is how a delegation stays alive, and without that
+rule putting an old record back would undo a narrowed scope.
 Records are found by scanning for the `delegate:` token, not by line — a note is
 always one line, because the server's sweep turns every newline into a space.
 It needs no key and no network, which is the property that matters: a
@@ -262,6 +265,27 @@ def delegations(body: str) -> list[tuple[str, str, str, str, str]]:
     return out
 
 
+def newest(records: list[tuple[str, str, str, str, str]]) -> set[int]:
+    """The indices of the record that wins for each agent: highest nonce, ties to the last.
+
+    Re-issuing is the documented way to keep a delegation alive, since expiry is the only
+    revocation this format has — so a note accumulates several records naming one agent, and
+    something has to say which of them is current. The nonce does, exactly as it does for a
+    signed message.
+
+    This is not tidiness. The note is world-writable, so anyone can re-add a *superseded*
+    record: it was really signed by the root and it may not have expired, so it verifies. If
+    every valid record counted, narrowing a delegation from `*` to `r:lobby` could be undone
+    by putting the old one back. Highest-nonce-wins makes that a no-op.
+    """
+    best: dict[str, tuple[int, int]] = {}
+    for i, (agent, _scope, _expires, nonce, _sig) in enumerate(records):
+        rank = int(nonce) if nonce.isdigit() else -1
+        if agent not in best or rank >= best[agent][0]:
+            best[agent] = (rank, i)
+    return {i for _rank, i in best.values()}
+
+
 def check_note(root: str, body: str) -> int:
     """Report every delegation in `body` against `root`. Returns the count that verify.
 
@@ -270,7 +294,9 @@ def check_note(root: str, body: str) -> int:
     supposed to be visibly inert rather than fatal.
     """
     key, live, now = public_key(root), 0, int(time.time())
-    for agent, scope, expires, nonce, sig in delegations(body):
+    records = delegations(body)
+    current = newest(records)
+    for i, (agent, scope, expires, nonce, sig) in enumerate(records):
         try:
             key.verify(
                 base64.urlsafe_b64decode(sig + "=="),
@@ -284,6 +310,11 @@ def check_note(root: str, body: str) -> int:
             continue
         if not expires.isdigit() or int(expires) <= now:
             print(f"EXPIRED    {agent} {scope}  (expired {expires})")
+            continue
+        # Checked after the signature and the expiry, so a superseded record is only ever
+        # reported as superseded when it was otherwise a real, live grant.
+        if i not in current:
+            print(f"SUPERSEDED {agent} {scope}  (a higher nonce than {nonce} names this key)")
             continue
         # Rounded up: a delegation issued for 30 days is "30d left" a second later, where
         # flooring would report 29 and make every fresh delegation look already shortened.

@@ -245,3 +245,78 @@ def test_the_page_scans_for_the_token_the_same_way(page, sign):
     which is what it did before review caught it."""
     assert "note.split(/\\s+/)" in page, "the page must scan fields, not lines"
     assert "note.split('\\n')" not in page
+
+
+def test_a_re_issue_supersedes_the_grant_it_replaces(sign, capsys):
+    """Expiry is the only revocation this format has, so re-issuing is the documented way to
+    keep a delegation alive — and a note therefore ends up holding several records naming one
+    agent. The nonce says which is current, exactly as it does for a signed message."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    agent_did = sign.did_of(agent)
+    note = " ".join(
+        [
+            _line(sign, root, agent_did, scope="*", nonce="1"),
+            _line(sign, root, agent_did, scope="r:lobby", nonce="2"),
+        ]
+    )
+
+    assert sign.check_note(sign.did_of(root), note) == 1
+    out = capsys.readouterr().out
+    assert "SUPERSEDED" in out
+    # The narrower, newer grant is the one that counts.
+    assert [line for line in out.splitlines() if line.startswith("OK ")][0].endswith(
+        "(1d left, nonce 2)"
+    )
+
+
+def test_putting_a_superseded_grant_back_does_not_restore_it(sign, capsys):
+    """The reason the rule is not merely tidiness.
+
+    The note is world-writable, so anyone may re-add an old record. It really was signed by
+    the root and it may not have expired, so it verifies — and if every valid record counted,
+    narrowing a delegation from `*` to `r:lobby` could be undone by whoever kept a copy of the
+    wider one. Order is not the defence either: this puts the old record *last*.
+    """
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    agent_did = sign.did_of(agent)
+    wide = _line(sign, root, agent_did, scope="*", nonce="1")
+    narrow = _line(sign, root, agent_did, scope="r:lobby", nonce="2")
+
+    assert sign.check_note(sign.did_of(root), f"{narrow} {wide}") == 1
+    out = capsys.readouterr().out
+    assert "OK         " + agent_did + " r:lobby" in out
+    assert "SUPERSEDED " + agent_did + " *" in out
+
+
+def test_superseding_is_per_agent_and_never_across_them(sign, capsys):
+    """A high nonce for one agent must not retire another agent's grant. Two agents, two
+    live delegations, whatever the nonces look like beside each other."""
+    root = _key(ROOT_SEED)
+    first = sign.did_of(_key(AGENT_SEED))
+    second = sign.did_of(Ed25519PrivateKey.from_private_bytes(bytes.fromhex("44" * 32)))
+    note = " ".join(
+        [
+            _line(sign, root, first, scope="r:lobby", nonce="9"),
+            _line(sign, root, second, scope="kv:plans", nonce="2"),
+        ]
+    )
+
+    assert sign.check_note(sign.did_of(root), note) == 2
+    assert "SUPERSEDED" not in capsys.readouterr().out
+
+
+def test_the_page_supersedes_and_replaces_the_same_way(page, sign):
+    """Written twice and pinned twice. The page has to agree on which record wins, and it
+    additionally strips an agent's old record when publishing a new one — appending would
+    grow the note by a record per re-issue against a cap of about forty."""
+    assert "function newest(records)" in page
+    assert "function withoutAgent(note, agent)" in page
+    # Ties go to the last record written, on both sides.
+    assert "rank >= best[d.agent][0]" in page
+    assert "rank >= best[agent][0]" in _signer_source()
+    # And the publish path drops the agent's previous grant rather than appending to it.
+    assert "withoutAgent(previous, agent)" in page
+
+
+def _signer_source() -> str:
+    return (ROOT / "scripts" / "sign.py").read_text(encoding="utf-8")
