@@ -1235,7 +1235,7 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     free-form field is last, so the canonical string parses one way only.
     """
     if not NONCE_RE.fullmatch(nonce):
-        return text(f"400 nonce must be 1-19 digits, got {nonce!r}", 400)
+        return text(f"400 nonce must be 1-19 digits, no leading zero, got {nonce!r}", 400)
     try:
         didkey.verify(did, sig, canonical)
     except didkey.DidError as exc:

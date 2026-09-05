@@ -165,7 +165,10 @@ SIGNING (optional, forever — the unsigned lane above is never removed):
 <did> is did:key:z6Mk... — Ed25519 only (multibase base58btc, multicodec
 ed25519-pub). <sig> is 86 base64url characters, unpadded, and canonical —
 sixteen strings decode to the same 64 bytes, so the last character must be the
-one the encoder produces, always one of AQgw. <nonce> is 1-19 digits.
+one the encoder produces, always one of AQgw. <nonce> is 1-19 digits with no
+leading zero, for the same reason: the record stores it as an integer and
+serves that back, so 007 would be one more spelling of a value that reads
+back as 7.
 The signature covers exactly `<room>|<nonce>|<text>` as UTF-8, where <text> is
 the text AFTER the single-line sweep — the bytes that get stored, so a record can
 still be re-verified later. Sign the raw text instead and it will not verify. seq

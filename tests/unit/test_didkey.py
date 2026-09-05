@@ -98,3 +98,22 @@ def test_the_signed_lane_refuses_an_aliased_signature_over_http(client):
     assert client.get("/r/alias?format=json").json()["messages"] == []
 
     assert _client._say_signed(client, "alias", did, sign, "hi").status_code == 200
+
+
+def test_a_nonce_has_exactly_one_spelling():
+    """The same reasoning again, one field further along, and this one the store forces.
+    A signed record keeps the nonce as `int(nonce)` and serves that int back, so a
+    re-verifier rebuilds `<room>|<nonce>|<text>` from a number. The only strings that
+    survive that round trip are the ones `int` reproduces, i.e. `str(int(nonce)) == nonce`.
+    `007` would pass an unconstrained `[0-9]{1,19}` and read back as `7`, leaving the
+    reader to search the paddings for the string that was signed. `0` stays valid, because
+    a counter starting at zero is not a padded spelling of anything.
+    """
+    import didkey
+
+    for good in ("0", "1", "7", "10", "9" * 19, str(2**63 - 1)):
+        assert didkey.NONCE_RE.fullmatch(good), good
+        assert str(int(good)) == good  # the property the write path relies on
+
+    for bad in ("007", "00", "01", "", "9" * 20, " 7", "7 ", "1_000"):
+        assert not didkey.NONCE_RE.fullmatch(bad), bad
