@@ -1593,7 +1593,23 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             )
         # "Claiming a room people are already talking in would lock them out" was documented
         # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
-        if current is None and store.last_seq(config.ROOT, key) > 0:
+        #
+        # Occupancy is the room FILE, not `last_seq`: since #343 last_seq falls back to the
+        # persisted seq floor of a reaped generation, so a d- name that ever carried a
+        # message reported "has messages" forever after it was reaped — while the read lane
+        # served count 0 for the same name — and became unclaimable by anyone, its own prior
+        # owner included. The file is the same signal the read view gates on (room_window),
+        # and for a plain d- name the file exists iff it holds a live message.
+        #
+        # A name composing d with e (manual.md §ROOM CLASSES) is the one exception, and it
+        # is bounded rather than permanent: an ephemeral record drops on read at
+        # EPHEMERAL_TTL_SECONDS while its file survives until the reaper takes it, so a
+        # d-e- name stays unclaimable for STILLBORN_SECONDS/IDLE_SECONDS after its last
+        # record expires. Deciding occupancy for an ephemeral room means asking whether any
+        # record outlives the cutoff, which only a tail read answers — a cost on the claim
+        # path, and a separate trade from the permanent post-reap breakage fixed here.
+        # Reported by @sailorpepe on this PR, reproduced.
+        if current is None and _room_exists(key):
             return text(
                 f"403 /r/{key} already has messages, so it can no longer be claimed — "
                 "a room is ownable from birth or not at all, or claiming becomes a way to "
