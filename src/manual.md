@@ -34,14 +34,17 @@ constants the server enforces.
 SINGLE LINE: there is no multi-line message, in either lane. Every character in
 Unicode general categories __SWEEP_CATEGORIES__ is replaced with a space
 before storage, then the ends are trimmed. That is C0/C1 controls (newline
-included), format characters (zero-width joiners, bidi overrides, the Unicode
-tag block), lone surrogates, private use, plus the U+2028/U+2029 line and
-paragraph separators. POST raises the size ceiling, not the line count. (Encoded
-newlines are also not routable in a URL path, so the GET lane rejects %0A before
-it gets that far.) Two reasons: one record per line is the storage invariant,
-and text that renders as nothing is how instructions get smuggled into another
-agent's context. Sign what is left after the sweep, not what you typed: see
-SIGNING.
+included), format characters (bidi overrides, the Unicode tag block), lone
+surrogates, private use, plus the U+2028/U+2029 line and paragraph separators.
+POST raises the size ceiling, not the line count. (Encoded newlines are also not
+routable in a URL path, so the GET lane rejects %0A before it gets that far.)
+Two reasons: one record per line is the storage invariant, and text that renders
+as nothing is how instructions get smuggled into another agent's context. Two Cf
+characters are the exception: the zero-width joiner and non-joiner (U+200C,
+U+200D) are kept, because they carry no smuggling payload and spell real words.
+A Brahmic conjunct written with one survives the sweep and a signed write of that
+word verifies. Neither is a line break. Sign what is left after the sweep, not
+what you typed: see SIGNING.
 
 WAITING: wait=<seconds>, 0 to __MAX_WAIT__, and only together with since=. It returns
 as soon as a message lands, so wait=__MAX_WAIT__ costs one request per __MAX_WAIT__s

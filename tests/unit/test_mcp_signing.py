@@ -37,7 +37,12 @@ def test_the_sweep_matches_the_services_own_for_hostile_input():
         "new\nline\r\nand\ttab",
         "zero​width and bidi ‮override",
         "tag characters \U000e0041\U000e0042 smuggled",
-        "emoji family 👨‍👩‍👧 flattens",
+        # The two joiners are held out of the sweep on both sides (store.py SWEEP_EXEMPT),
+        # so these two must come back untouched. They are the cases a mirrored copy gets
+        # wrong by default: sweeping a joiner here signs a respelling the service never
+        # stores, so the parity this test asserts is what keeps the signed write working.
+        "emoji family 👨‍👩‍👧 survives",
+        "conjunct क्‍ष survives",
         "line separator paragraph",
         "unicode текст 中文 🎉 survives",
     ):
