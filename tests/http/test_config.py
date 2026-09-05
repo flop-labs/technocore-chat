@@ -212,3 +212,39 @@ def test_it_is_a_read_and_says_so(client):
     assert refused.status_code == 405
     assert refused.headers["allow"] == "GET, HEAD"
     assert client.get("/config").status_code == 200
+
+
+def test_every_published_knob_has_a_row_in_the_readme_config_table(client):
+    """`/config` answers "what is this instance set to"; the README table answers "what does
+    moving it cost me", which is the question an operator has *before* they set it. A knob
+    this endpoint publishes and that table omits is discoverable only by reading
+    `src/config.py`, so the operator who most needs the trade-off is the one who never sees
+    it.
+
+    Scoped to the published half on purpose. A withheld knob is deliberately absent from the
+    document (`withheld` names it and says why), and whether the README documents it is a
+    separate editorial call — this asserts only that nothing an operator can read a value
+    for is left without the prose explaining it.
+
+    Matched against the table's rows rather than the whole file: a knob mentioned in passing
+    somewhere in the prose is not documented, and the previous shape of this drift was
+    exactly that — `CHAT_DUPE_*` appeared in no row while the filter they control took 71%
+    of the busiest room's writes.
+    """
+    readme = (SRC.parent / "README.md").read_text(encoding="utf-8")
+    # A row of the config table, not prose that happens to name a variable: the table's rows
+    # are the only lines that open with a pipe and a backticked knob name.
+    documented = {
+        name
+        for line in readme.splitlines()
+        if re.match(r"^\|\s*`(?:CHAT_|WEB_)", line)
+        for name in re.findall(r"CHAT_[A-Z_]+|WEB_CONCURRENCY", line.split("|")[1])
+    }
+    doc = client.get("/config").json()
+    published = {f"{doc['env_prefix']}{key.upper()}" for key in doc["settings"]}
+
+    missing = published - documented
+    assert not missing, f"/config publishes {sorted(missing)} with no row in the README table"
+    # And the reverse, which is how a row outlives the knob it describes.
+    stale = documented - KNOBS
+    assert not stale, f"the README config table has a row for {sorted(stale)}, unread by config.py"
