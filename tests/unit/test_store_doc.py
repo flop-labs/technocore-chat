@@ -3,15 +3,29 @@
 Regenerates the page the same way scripts/gen_store_doc.py does and diffs against the
 committed copy: a signature change or a new public function fails here until the doc is
 regenerated.
+
+Skipped under mutation. mutmut rewrites every function in src/store.py into a numbered
+family (`x__at_capacity__mutmut_1`, …), so the generated page cannot match the committed
+one and every public-function check sees names no doc could carry. The failure would be
+the instrumentation, never a stale doc, and a mutation run that cannot finish its baseline
+reports nothing at all.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import inspect
+import os
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("MUTANT_UNDER_TEST") is not None,
+    reason="src/store.py is mutmut-instrumented; a generated-doc diff measures that, not drift",
+)
 
 
 def _render() -> str:
