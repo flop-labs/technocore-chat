@@ -993,7 +993,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "409": _plain(
                             "The condition failed. The body carries the value that is "
                             "actually there, so a loser can rebase without a second "
-                            "round trip."
+                            "round trip. That value is another caller's, marked untrusted "
+                            "in the sentence ahead of it rather than on a line of its own, "
+                            "so it stays the exact, last-line text ?if= expects back."
                         ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
@@ -1031,7 +1033,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
                         "404": _UNROUTABLE_PATH,
-                        "409": _plain("Condition failed; the body carries the current value."),
+                        "409": _plain(
+                            "Condition failed; the body carries the current value, marked "
+                            "untrusted without disturbing where ?if= expects to find it."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 }
