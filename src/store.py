@@ -271,7 +271,11 @@ REAP_EVERY = 300
 # This is the disposal half of the §II.2.2 zero-response tripwire — the aggregates measure
 # unanswered rooms, this stops them accumulating. Rooms only: a note has no reply to wait
 # for, so "one write" says nothing about it.
-STILLBORN_SECONDS = 86400
+#
+# A knob (CHAT_STILLBORN_SECONDS) rather than the constant this was, because on a deployment
+# where most rooms are one-message it — not MAX_ROOMS — is what sets the room turnover rate.
+# The default is the 86400 it was hardcoded to, so an instance that sets nothing does not move.
+STILLBORN_SECONDS = config.STILLBORN_SECONDS
 STILLBORN_MESSAGES = 1
 
 # Room name classes. A name is a chain of leading `<class>-` markers followed by a body,
@@ -2004,7 +2008,7 @@ def _at_capacity(cap: int, what: str) -> StoreError:
         f"{what} limit reached ({cap} is the cap, and this would be a new one). "
         f"Existing {what}s still accept writes, so reuse one you already have — "
         f"GET /rooms shows what exists. Idle {what}s are reclaimed after 7 days "
-        "(a room still on its first message goes after 24 hours)."
+        f"(a room still on its first message goes after {STILLBORN_SECONDS // 3600} hours)."
     )
 
 
@@ -2080,7 +2084,7 @@ def _check_room_capacity(root: Path, path: Path) -> None:
             "number of rooms, so a shorter name buys nothing. Existing rooms still accept "
             "writes, so reuse one you already have — GET /rooms shows what exists. Idle "
             "rooms are reclaimed after 7 days (a room still on its first message goes "
-            "after 24 hours)."
+            f"after {STILLBORN_SECONDS // 3600} hours)."
         )
 
 
