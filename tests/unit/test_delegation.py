@@ -320,3 +320,83 @@ def test_the_page_supersedes_and_replaces_the_same_way(page, sign):
 
 def _signer_source() -> str:
     return (ROOT / "scripts" / "sign.py").read_text(encoding="utf-8")
+
+
+# Spellings Number() accepts and /[0-9]/ does not, plus one Python's str.isdigit() accepts
+# and JavaScript never will. Each is a way for two verifiers of one record to disagree about
+# whether a grant is live — which, since expiry is this format's only revocation, is the
+# whole ballgame. Reported on PR #719 against the browser half; the Unicode one is the same
+# trap PR #54 fixed for nonces, from the other side.
+NONCANONICAL = ["Infinity", "1e99", "0x7fffffff", "١٢٣", "+123", "1_0", "12.0"]
+# An empty expiry leaves four fields where five are required, so `delegations()` never yields
+# a record at all — the refusal happens one layer earlier than the grammar.
+UNPARSEABLE = [""]
+
+
+@pytest.mark.parametrize("spelling", NONCANONICAL)
+def test_a_noncanonical_expiry_is_refused_however_it_is_spelled(sign, capsys, spelling):
+    """`Infinity` is the sharp one: it is a real number in JavaScript and larger than any
+    clock, so a root-signed record carrying it renders as a grant that never expires."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    note = _line(sign, root, sign.did_of(agent), expires=spelling)
+
+    assert sign.check_note(sign.did_of(root), note) == 0
+    assert "EXPIRED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("spelling", UNPARSEABLE)
+def test_an_expiry_that_breaks_the_field_count_is_not_a_record(sign, capsys, spelling):
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    note = _line(sign, root, sign.did_of(agent), expires=spelling)
+
+    assert sign.delegations(note) == []
+    assert sign.check_note(sign.did_of(root), note) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_whitespace_in_a_signed_field_reads_as_forged(sign, capsys):
+    """Padding a field cannot smuggle a value past either verifier, and the mechanism is
+    worth naming: the record is whitespace-delimited, so a signature over `" 123"` is read
+    back as `123` — the reader is checking a different string than the issuer signed, and it
+    fails to verify. Not expiry enforcement; the layer under it."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    note = _line(sign, root, sign.did_of(agent), expires=" 123")
+
+    assert [d[2] for d in sign.delegations(note)] == ["123"]
+    assert sign.check_note(sign.did_of(root), note) == 0
+    assert "FORGED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("spelling", NONCANONICAL + UNPARSEABLE + [" 123"])
+def test_the_page_reads_expiry_under_the_same_grammar(page, spelling):
+    """The other half of the same assertion, against the page's own regex rather than a
+    description of it. `DIGITS_RE` is read out of the served bytes and applied here, so a
+    change to it that reopens the gap fails this."""
+    match = re.search(r"var DIGITS_RE = /\^\[0-9\]\{1,19\}\$/;", page)
+    assert match is not None, "the page must read expiry under an anchored ASCII-digit rule"
+    assert re.fullmatch(r"[0-9]{1,19}", spelling) is None
+
+
+def test_both_sides_spell_the_digit_grammar_the_same_way(page, sign):
+    """One grammar, written twice. sign.py's DIGITS_RE and the page's must agree, because a
+    record is verified by whichever of them the reader happens to be holding."""
+    assert sign.DIGITS_RE.pattern == "[0-9]{1,19}"
+    assert "var DIGITS_RE = /^[0-9]{1,19}$/;" in page
+    # And the nonce that decides which record supersedes is read under it too, on both
+    # sides — a Unicode-digit nonce ranking on one and not the other would flip which grant
+    # is current.
+    assert "DIGITS_RE.fullmatch(nonce)" in _signer_source()
+    assert "DIGITS_RE.test(d.nonce)" in page
+
+
+def test_a_valid_expiry_still_passes_on_both_sides(sign, capsys):
+    """The guard rails have to leave the road open: an ordinary ten-digit unix second is
+    what every delegation this tooling issues actually carries."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    ordinary = str(int(time.time()) + 86400)
+    assert re.fullmatch(r"[0-9]{1,19}", ordinary)
+    assert (
+        sign.check_note(sign.did_of(root), _line(sign, root, sign.did_of(agent), expires=ordinary))
+        == 1
+    )
+    assert "OK " in capsys.readouterr().out

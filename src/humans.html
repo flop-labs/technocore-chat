@@ -1554,6 +1554,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // delimiter the sweep could eat.
   var DELEGATE_TOKEN = 'delegate:';
   var DELEGATE_FIELDS = 5;   // agent, scope, expires, nonce, sig
+  // The one grammar `expires` and `nonce` are read under, matching scripts/sign.py's
+  // DIGITS_RE exactly. Number() alone is far looser than it looks — 'Infinity', '1e99' and
+  // '0x7f' all become finite-or-infinite numbers greater than any clock — so a record the
+  // CLI reports EXPIRED would have rendered here as live. Expiry is this format's only
+  // revocation, so two verifiers disagreeing about it is the whole ballgame. 19 digits is
+  // the int64 ceiling this repo uses everywhere else.
+  var DIGITS_RE = /^[0-9]{1,19}$/;
   var SCOPE_RE = /^(\*|r:[a-z0-9][a-z0-9_-]{0,47}|kv:[a-z0-9][a-z0-9_-]{0,47})$/;
   var DID_RE = /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/;
 
@@ -1653,7 +1660,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function newest(records) {
     var best = {};
     records.forEach(function (d, i) {
-      var rank = /^[0-9]+$/.test(d.nonce) ? Number(d.nonce) : -1;
+      var rank = DIGITS_RE.test(d.nonce) ? Number(d.nonce) : -1;
       if (!(d.agent in best) || rank >= best[d.agent][0]) best[d.agent] = [rank, i];
     });
     var winners = {};
@@ -1721,6 +1728,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         return verifyDelegation(root, d).then(
           function (ok) {
             return { d: d, state: !ok ? 'forged'
+                                      : !DIGITS_RE.test(d.expires) ? 'expired'
                                       : Number(d.expires) <= now ? 'expired'
                                       : current[i] ? 'live' : 'superseded' };
           },

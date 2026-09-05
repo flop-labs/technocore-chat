@@ -280,7 +280,7 @@ def newest(records: list[tuple[str, str, str, str, str]]) -> set[int]:
     """
     best: dict[str, tuple[int, int]] = {}
     for i, (agent, _scope, _expires, nonce, _sig) in enumerate(records):
-        rank = int(nonce) if nonce.isdigit() else -1
+        rank = int(nonce) if DIGITS_RE.fullmatch(nonce) else -1
         if agent not in best or rank >= best[agent][0]:
             best[agent] = (rank, i)
     return {i for _rank, i in best.values()}
@@ -308,7 +308,14 @@ def check_note(root: str, body: str) -> int:
             # the ordinary case and not an error.
             print(f"FORGED     {agent} {scope}  (not signed by {root[:20]}...)")
             continue
-        if not expires.isdigit() or int(expires) <= now:
+        # DIGITS_RE and not str.isdigit(): the same trap PR #54 fixed for nonces, in the
+        # other direction. isdigit() accepts Unicode digits ('١٢٣' is True and int()s to
+        # 123) which no JavaScript /[0-9]/ will match, and it rejects spellings Number()
+        # accepts ('Infinity', '1e99', '0x7f'). Either way the two verifiers of one record
+        # disagree about whether a grant is live — and expiry is this format's only
+        # revocation, so that disagreement is the whole ballgame. One ASCII-decimal grammar,
+        # enforced identically on both sides, before anything is compared as a number.
+        if not DIGITS_RE.fullmatch(expires) or int(expires) <= now:
             print(f"EXPIRED    {agent} {scope}  (expired {expires})")
             continue
         # Checked after the signature and the expiry, so a superseded record is only ever
