@@ -78,7 +78,7 @@ from .fetch import Fetch, urllib_fetch
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
 # disagree. `mcp/server.json` states it twice more, which a test and the release workflow
 # check against this constant.
-VERSION = "0.11.4"
+VERSION = "0.12.0"
 DEFAULT_URL = "https://technocore.chat"
 # The public instance's `?wait=` ceiling. Documentation and a default here, *not* a clamp:
 # CHAT_MAX_WAIT is a per-instance knob, and a wrapper enforcing 10 against an instance

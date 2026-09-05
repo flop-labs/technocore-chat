@@ -15,7 +15,7 @@ dependencies = [
     # built it. See `[tool.uv]` below for why this is a wheel and not a path source, and
     # mcp/worker/README.md for the one command that produces it. Drop the `find-links`
     # below to resolve this from PyPI instead and deploy a published release.
-    "technocore-mcp==0.11.4",
+    "technocore-mcp==0.12.0",
     # Pulled in by the SDK anyway; named here so a resolve failure says which package
     # could not be built for wasm rather than surfacing three levels down.
     "mcp>=2.1,<3",
