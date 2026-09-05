@@ -21,6 +21,7 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
@@ -117,6 +118,23 @@ def test_clean_text_over_limit_raises_store_error(limit: int, extra: int, filler
         assert str(exc).startswith("text too long")
         return
     raise AssertionError(f"over-limit text accepted: {len(out)} chars, no StoreError")
+
+
+def test_clean_text_over_limit_raises_even_when_the_padding_is_invisible() -> None:
+    """The length gate has to run on `text` as given, not on the swept-and-stripped
+    result: the sweep replaces one character with one space (same length), but `.strip()`
+    can shrink one arbitrarily, so a raw value padded past `limit` with characters that
+    land at an edge and become leading or trailing space reads as short once stripped.
+
+    Reproduces the exact shape schemathesis found in GET /r/{room}/say/{nick}/{text}: a
+    short, legitimate-looking message trailed by thousands of control characters, well
+    over `limit` on the wire and against the schema's own published `maxLength`, accepted
+    because the check ran after the padding was already gone.
+    """
+    limit = 4096
+    text = "bug found here" + ("\x1e" * 8000)  # \x1e is Cc: swept to space, then stripped
+    with pytest.raises(store.StoreError, match="text too long"):
+        store.clean_text(text, limit=limit)
 
 
 # ------------------------------------------------------------------------ names
