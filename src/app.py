@@ -1865,13 +1865,21 @@ async def stats(request: Request) -> Response:
     cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
     bounded tail reads of the engagement rollup — cheap per minute, not per request.
     """
-    supplied = request.headers.get("x-stats-token", "")
+    # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
+    # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
+    # in the token raised — and an unhandled TypeError is a 500, which is the one answer an
+    # unrouted path never gives. That undid the paragraph below: a prober who could not tell
+    # this route from a missing one by its 404 could tell by sending a single high byte.
+    # latin-1 round-trips the wire bytes exactly, so this compares what was actually sent to
+    # the token's UTF-8; it stays constant-time, and a token an operator set to non-ASCII —
+    # which the string compare could never match, on either side — now can be.
+    supplied = request.headers.get("x-stats-token", "").encode("latin-1")
     # `and` order matters: with no token configured the endpoint must not exist at all,
-    # and compare_digest("", "") is True.
+    # and compare_digest(b"", b"") is True.
     # The same bytes an unmatched path gets. The point of answering 404 rather than 401 is
     # that a prober cannot tell this endpoint from a path that was never routed, and a
     # distinctive body would give that back — so the two must not drift apart.
-    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN):
+    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
         return text(NOT_FOUND, 404)
     global _stats_cache
     fresh_at, cached = _stats_cache
