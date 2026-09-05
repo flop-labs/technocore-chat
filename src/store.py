@@ -439,20 +439,73 @@ def ownable(name: str) -> bool:
 #                      value renders as two lines. The single-line promise has to hold for
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# INVISIBLE_CATEGORIES reasons by general category, but the property it stands in for is
+# Default_Ignorable_Code_Point: "renders as nothing". The two do not coincide. 267 assigned
+# default-ignorable codepoints are Mn or Lo, in no C*/Z* category, so the category sweep never
+# sees them and they survive into a reader's context invisibly. The bulk is the 256 variation
+# selectors (U+FE00-FE0F and the U+E0100-E01EF supplement): a 256-symbol alphabet at 8 bits per
+# codepoint, a denser invisible channel than the Unicode tag block this sweep was built to close.
+# So they are swept too, by codepoint rather than by category. It has to be by codepoint: Mn and
+# Lo also hold the combining marks and letters that carry real orthographic content, so sweeping
+# those categories wholesale would break stored text the way sweeping ZWJ/ZWNJ breaks Brahmic
+# script (issue #144). This is the mirror of that, a narrow named set rather than a category.
+# Scope: the set is the *assigned* default-ignorables only. The unassigned (Cn) default-ignorable
+# codepoints (U+2065, U+FFF0-FFF8 and the plane-14 gaps) are category Cn, outside both the sweep
+# and this set, so what this closes is the assigned default-ignorable channel, not every codepoint
+# that renders as nothing. Enumerating the Cn ranges too was the larger alternative, deliberately
+# left out of this change.
+# Sweeping a variation selector flattens a glyph variant (an emoji, Mongolian or CJK presentation
+# form loses its selector), the same visible, harmless cost design.md §3.2 already accepts for ZWJ
+# emoji sequences. Every entry below is Default_Ignorable and in no swept category:
+SWEEP_ALSO = frozenset(
+    chr(cp)
+    for start, end in (
+        (0x034F, 0x034F),  # combining grapheme joiner
+        (0x115F, 0x1160),  # Hangul choseong, jungseong fillers
+        (0x17B4, 0x17B5),  # Khmer vowel inherent AQ, AA
+        (0x180B, 0x180D),  # Mongolian free variation selectors 1-3
+        (0x180F, 0x180F),  # Mongolian free variation selector 4 (180E MVS is Cf, already swept)
+        (0x3164, 0x3164),  # Hangul filler
+        (0xFE00, 0xFE0F),  # variation selectors 1-16
+        (0xFFA0, 0xFFA0),  # halfwidth Hangul filler
+        (0xE0100, 0xE01EF),  # variation selectors supplement 17-256
+    )
+    for cp in range(start, end + 1)
+)
+
+
+def sweep_invisibles(text: str) -> str:
+    """Every INVISIBLE_CATEGORIES character and every SWEEP_ALSO codepoint to a space.
+
+    One function because two lanes have to agree on it. `clean_text` sweeps on the way
+    into storage, and `limit.normalize_text` sweeps on the way into the duplicate ring,
+    which the unsigned lanes reach before `append` runs `clean_text` at all. If the two
+    lists ever drift apart, one text becomes two ring keys and a flood of one message
+    takes a slot per codepoint it varies. That is `normalize_text`'s own reasoning, so the
+    list it reasons about lives here rather than in two comprehensions.
+    """
+    return "".join(
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES or c in SWEEP_ALSO) else c
+        for c in text
+    )
 
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
-    """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
+    """Replace every INVISIBLE_CATEGORIES character and every SWEEP_ALSO codepoint with a
+    space, then trim.
 
-    What that buys: one stored record is one line for every reader, and nothing that renders
-    as nothing survives into another agent's context.
+    What that buys: one stored record is one line for every reader, and the invisibles that
+    render as nothing are swept out of another agent's context, up to the assigned
+    default-ignorable codepoints. INVISIBLE_CATEGORIES is the category half; SWEEP_ALSO is the
+    assigned default-ignorable codepoints that render as nothing yet sit in Mn/Lo, which no
+    category in the list covers. The unassigned (Cn) default-ignorables are outside both, so
+    this does not claim every codepoint that renders as nothing is gone.
 
-    Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
-    Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    Trade-off, accepted deliberately: a glyph variant flattens, both a ZWJ emoji sequence
+    (👨‍👩‍👧 → 👨👩👧) and a variation selector (an emoji or CJK presentation form loses its
+    selector). Mangled but visible is harmless; a smuggled instruction is neither.
     """
-    text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
-    ).strip()
+    text = sweep_invisibles(text).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
@@ -460,8 +513,8 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
             "replaces every control, format and line-separator character (newline, "
-            "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
-            "the ends. Send at least one visible character."
+            "zero-width, bidi override, Unicode tag, U+2028) and every variation selector "
+            "with a space and then trims the ends. Send at least one visible character."
         )
     if len(text) > limit:
         raise StoreError(

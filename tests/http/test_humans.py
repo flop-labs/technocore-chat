@@ -155,6 +155,14 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "C1 control": "a\u0085b",
         "soft hyphen": "a\u00adb",
         "zero-width joiner": "a\u200db",
+        # Default-ignorable but Mn/Lo, so INVISIBLE_CATEGORIES misses them: they render as
+        # nothing yet survived the category sweep until SWEEP_ALSO. The variation selectors are
+        # the dense channel, a 256-symbol invisible alphabet.
+        "variation selector-16": "a\ufe0fb",
+        "variation selector supplement": "a\U000e0100b",
+        "combining grapheme joiner": "a\u034fb",
+        "Mongolian free variation selector": "a\u180bb",
+        "Hangul filler": "a\u3164b",
         # Zl/Zp: invisible here, a line break to plenty of plain-text consumers. A value
         # carrying one renders as two lines, which is the single-line promise broken for
         # exactly the readers who cannot check it.

@@ -278,17 +278,23 @@ def test_nfkc_moves_no_character_across_the_swept_boundary() -> None:
     catching half of what it reports.
 
     Holds on unicodedata 15.0.0 and 15.1.0, measured.
+
+    Membership, not output: `sweep_invisibles` maps a swept character to a space, and a `Zs`
+    character like U+00A0 folds to an ordinary space without ever being swept, so testing the
+    output would report all fifteen of those as crossings.
     """
+
+    def swept(char: str) -> bool:
+        return unicodedata.category(char) in store.INVISIBLE_CATEGORIES or char in store.SWEEP_ALSO
+
     crossings = []
     for cp in range(0x110000):
         char = chr(cp)
-        was_swept = unicodedata.category(char) in store.INVISIBLE_CATEGORIES
+        was_swept = swept(char)
         folded = unicodedata.normalize("NFKC", char)
         # "Invisible after folding" means every character of the decomposition is swept:
         # that is what decides whether the sweep can still see it.
-        now_swept = bool(folded) and all(
-            unicodedata.category(c) in store.INVISIBLE_CATEGORIES for c in folded
-        )
+        now_swept = bool(folded) and all(swept(c) for c in folded)
         if was_swept != now_swept:
             crossings.append(cp)
 
@@ -297,3 +303,24 @@ def test_nfkc_moves_no_character_across_the_swept_boundary() -> None:
         f"U+{crossings[0]:04X} ({unicodedata.category(chr(crossings[0]))}): normalize_text "
         f"sweeps after folding and clean_text sweeps before, so the two now disagree"
     )
+
+
+def test_both_lanes_sweep_the_same_set_so_one_text_is_one_ring_key() -> None:
+    """`clean_text` and `limit.normalize_text` must sweep the same codepoints.
+
+    They are different functions for good reasons (see `normalize_text`), but the unsigned
+    lanes key the ring before `append` ever runs `clean_text`, so a codepoint one sweeps and
+    the other keeps turns one text into two ring keys. A flood then buys a slot per variant.
+    Both call `store.sweep_invisibles` now, and this asserts the consequence rather than the
+    call: the set is read off the constants, so adding a codepoint to either without adding
+    it to both lands here.
+    """
+    probes = sorted(store.SWEEP_ALSO) + [
+        chr(cp) for cp in (0x200B, 0x200E, 0x2028, 0xE0041, 0x00AD)
+    ]
+    for char in probes:
+        text = f"a{char}b"
+        assert store.clean_text(text).casefold() == limit.normalize_text(text), (
+            f"U+{ord(char):04X} ({unicodedata.category(char)}) is swept by one lane and kept "
+            f"by the other, so {text!r} takes two ring slots"
+        )

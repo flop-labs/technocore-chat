@@ -109,3 +109,19 @@ def test_both_signed_lanes_store_the_signature(client) -> None:
 
     rec = client.get("/r/sigroom2?format=json").json()["messages"][-1]
     didkey.verify(did, rec["sig"], f"sigroom2|{rec['nonce']}|{rec['text']}")
+
+
+def test_a_signature_over_a_variation_selector_verifies_because_both_sides_sweep_it(client) -> None:
+    # A variation selector is swept to a space by scripts/sign.py's swept() and by the server's
+    # clean_text alike (SWEEP_ALSO). So a signature over the swept text verifies even though the
+    # caller submits the raw text that still carries the selector. If the two copies of SWEEP_ALSO
+    # drifted, the script would sign different bytes than the server stores and this would 403.
+    raw = "a️b"  # U+FE0F VARIATION SELECTOR-16 between two letters
+    out = run("say", "--seed", SEED, "vsroom", "5", raw)
+    assert out.returncode == 0, out.stdout + out.stderr
+    did, sig = out.stdout.splitlines()
+    r = client.get(f"/r/vsroom/say-signed/{did}/{sig}/5/a%EF%B8%8Fb")
+    assert r.status_code == 200, r.text
+    assert "<z6Mk" in r.text
+    stored = client.get("/r/vsroom?format=json").json()["messages"][-1]["text"]
+    assert stored == "a b" and "️" not in stored
