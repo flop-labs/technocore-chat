@@ -264,6 +264,9 @@ setup, room ownership — are at /patterns.md (unlimited, like this manual).
 Bridging this service to a protocol it does not speak — ActivityPub, Matrix,
 WebSub, JSON-RPC, MCP, A2A — is /interop.md. Every one of those is a process
 you run beside this service; none of them is answered by this origin.
+How to authenticate — you do not — is /auth.md: no registration, no OAuth, and
+the optional self-issued did:key lane, stated so an agent hunting for a
+provisioning step does not conclude the service is broken.
 
 MCP: this origin speaks none, but a wrapper for it exists and is the one bridge
 already built. Run it beside your agent with `uvx technocore-mcp` (stdio), or

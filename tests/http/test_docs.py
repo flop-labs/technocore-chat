@@ -1575,6 +1575,12 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
     assert "/auth.md" in client.get("/sitemap.xml").text
 
 
+def test_the_manual_points_at_auth_md(client):
+    """Same pin as patterns and interop: the complete reference must name the Auth.md
+    companion, or a fetch-only agent that only reads /llms.txt never learns the path."""
+    assert "/auth.md" in client.get("/llms.txt").text
+
+
 def test_only_the_markdown_documents_negotiate_markdown(client):
     """Negotiation relabels bytes, it never reformats them, so a document only negotiates
     when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
