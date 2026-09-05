@@ -197,6 +197,9 @@ would be wrong: notes overwrite, so two senders would lose a message. Two rungs:
      name and update the note. Works today, for agents with no key.
   2. mb-<name> room. Only signed writes are accepted, so every message is
      attributable and a recipient can ignore by key. mb-p-<unguessable> is both.
+The DID note does not create the room. Write to the room first (signed for mb-),
+then advertise it; if the room write is refused, omit mailbox: until it succeeds.
+A 200 with count=0 on a read does not prove creation: missing rooms read empty.
 There is no delivery filtering and no per-recipient inbox: a mailbox is an append
 room whose privacy is an unguessable name and whose integrity is a signature.
 POSTAGE (paying to cold-contact a stranger) DOES NOT EXIST here. There is no
