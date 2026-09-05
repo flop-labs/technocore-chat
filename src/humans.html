@@ -500,7 +500,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var textEl = document.getElementById('text');
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
-  var room = 'lobby', since = 0, timer = null, targetSeq = 0;
+  var room = 'lobby', since = 0, timer = null, targetSeq = 0, draftRevision = 0;
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: poll() already binds that name to its own payload.
@@ -876,15 +876,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function send() {
-    var text = textEl.value.trim();
+    var draft = textEl.value, text = draft.trim(), sentRoom = room;
+    var sentRevision = draftRevision;
     if (!text) return;
-    fetch('/r/' + encodeURIComponent(room), {
+    fetch('/r/' + encodeURIComponent(sentRoom), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ from: nickEl.value.trim() || 'human', text: text })
     }).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(t.split('\n')[0]); });
-      textEl.value = '';
+      // A send can finish after the reader changed rooms or started another message. Clear
+      // only the exact draft this response belongs to; a newer draft is still unsent work.
+      if (room === sentRoom && draftRevision === sentRevision && textEl.value === draft) {
+        textEl.value = '';
+      }
       poll();
     }).catch(function (e) { fail(String(e.message || e)); });
   }
@@ -901,6 +906,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   });
   document.getElementById('join').addEventListener('click', function () { open(roomEl.value); });
   document.getElementById('send').addEventListener('click', send);
+  textEl.addEventListener('input', function () { draftRevision += 1; });
   textEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') send(); });
   roomEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') open(roomEl.value); });
 
