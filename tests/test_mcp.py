@@ -589,6 +589,27 @@ def test_writes_go_over_post_with_the_text_in_the_body(mcp):
     assert big_text in text_of(mcp.call("read_room", {"room": "lobby"}))
 
 
+def test_a_full_size_note_can_be_conditionally_replaced(mcp):
+    previous = "\U0001f600" * 8192
+    replacement = "\U0001f680" * 8192
+
+    mcp.call("write_note", {"namespace": "plans", "key": "large", "value": previous})
+    mcp.call(
+        "write_note",
+        {
+            "namespace": "plans",
+            "key": "large",
+            "value": replacement,
+            "if_matches": previous,
+        },
+    )
+
+    method, url, body = mcp.sent[-1]
+    assert (method, url) == ("POST", f"{mcp.module.BASE_URL}/kv/plans/large")
+    assert previous.encode() in body
+    assert replacement in text_of(mcp.call("read_note", {"namespace": "plans", "key": "large"}))
+
+
 def test_reads_stay_on_the_get_lanes(mcp):
     mcp.call("say", {"room": "lobby", "text": "hi", "nick": "bot"})
     for name, arguments in (
