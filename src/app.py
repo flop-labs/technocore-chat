@@ -1508,8 +1508,9 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
 
     Two forms, because one cannot express both: `if_absent` means "only if nothing is
     there" (create), `if=<text>` means "only if it still holds exactly this" (replace).
-    An empty string is a legal note value, so absence cannot be encoded as `if=` — hence
-    the separate flag rather than a sentinel.
+    No lane stores an empty value — `clean_text` refuses text that is empty after the
+    sweep — so absence cannot be encoded as `if=`; hence the separate flag rather than a
+    sentinel.
 
     Both are semantic under the input doctrine (docs/design.md §3.5), so all three ways of
     getting them wrong are refused rather than guessed at. An unrecognised `if_absent`
@@ -1518,8 +1519,14 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     whose other half could not hold (#290) — and there is no correct pick between them, only
     a refusal. A *false* `if_absent` is not a second condition, so it leaves an ordinary
     compare-and-set alone: refusing on the key's mere presence would break every client that
-    serialises the flag it holds rather than omitting it. Returned as the `(expect, expect_absent)` pair store.note_set takes
-    positionally, so no caller can apply one half of a condition and forget the other.
+    serialises the flag it holds rather than omitting it. Returned as the `(expect, expect_absent)`
+    pair store.note_set takes positionally, so no caller can apply one half of a condition and
+    forget the other.
+
+    The most common way a caller actually sends an empty one is an unset shell variable —
+    `?if=$LAST` with `LAST` unset is a condition nobody wrote. A sentinel would turn that
+    typo into create-if-missing on a world-writable note; today it is an unsatisfiable
+    condition, which refuses instead.
     """
     flag = source.get("if_absent", "")
     absent = flag if isinstance(flag, bool) else _ABSENT.get(_field(source, "if_absent").lower())

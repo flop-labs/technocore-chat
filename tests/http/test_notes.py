@@ -128,12 +128,32 @@ def test_if_absent_creates_exactly_once(client):
 
 
 def test_cas_distinguishes_absent_from_empty_and_works_over_post(client):
-    # An empty string is a legal value, so absence cannot be encoded as if=<empty>.
+    # Absence is its own flag rather than if=<empty>: see below for why if=<empty> refuses.
     assert client.post("/kv/coord/n", json={"value": "0", "if_absent": True}).status_code == 200
     r = client.post("/kv/coord/n", json={"value": "1", "if": "0"})
     assert r.status_code == 200
     assert client.post("/kv/coord/n", json={"value": "2", "if": "0"}).status_code == 409
     assert "1" in client.get("/kv/coord/n").text
+
+
+def test_an_empty_condition_is_unsatisfiable_rather_than_a_sentinel(client):
+    """`?if=` with nothing after it is what an unset variable expands to, so it must not
+    mean anything. Neither branch of `_condition` may read it as absence: on a note that
+    is there the write is refused, and on one that is not it stays not there — a sentinel
+    reading would silently create the note instead. The sweep is why no stored value can
+    ever equal it, so the condition is unsatisfiable in both directions by construction.
+    """
+    assert client.get("/kv/coord/empty/set/").status_code == 400  # nothing to match, ever
+    assert client.post("/kv/coord/empty", json={"value": ""}).status_code == 400
+
+    client.get("/kv/coord/held/set/value")
+    assert client.get("/kv/coord/held/set/clobbered?if=").status_code == 409
+    assert "value" in client.get("/kv/coord/held").text  # refused, not overwritten
+
+    assert client.get("/kv/coord/gone/set/created?if=").status_code == 409
+    assert client.get("/kv/coord/gone").status_code == 404  # refused, not created
+    assert client.post("/kv/coord/gone", json={"value": "created", "if": ""}).status_code == 409
+    assert client.get("/kv/coord/gone").status_code == 404  # same on the POST lane
 
 
 def test_unconditional_write_still_overwrites(client):
