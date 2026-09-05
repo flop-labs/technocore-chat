@@ -34,6 +34,7 @@ def client(tmp_path, monkeypatch):
     app_module._rooms_walk.cache_clear()
     store._cached_window.cache_clear()
     store._topics_memo.cache_clear()
+    store._ROOM_CACHE.clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     # The duplicate ring is the same kind of process state the buckets are: a fresh

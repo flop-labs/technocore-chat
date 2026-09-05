@@ -729,6 +729,11 @@ _PENDING_LOCK = threading.Lock()
 # here, since it only bumps on a pass that actually reaped something.
 BATCH_MESSAGES = 64
 
+# Per-room write-path cache: avoids re-reading last_seq and last nonce from the file
+# on every append.  Initialized lazily on first write to each room, lost on restart
+# (re-read from the file).  Protected by the per-room lock — no separate lock needed.
+_ROOM_CACHE: dict[tuple[Path, str], dict] = {}
+
 
 def _bump(root: Path, **deltas: int) -> None:
     """Add to the lifetime counters, atomically.
@@ -765,23 +770,22 @@ def _bump(root: Path, **deltas: int) -> None:
     batch: Counter[str] = Counter()
     with _PENDING_LOCK:
         (pending := _PENDING.setdefault(root, Counter())).update(deltas)
-        # `messages` is the only counter bumped per append, and the only one nothing reads
-        # for freshness: app.py's ROOMS_STAMP_KEYS leaves it out on purpose, so no cache
-        # anywhere is waiting for it. Every other key marks a structural event — a create, a
-        # reap, a topic write — that another worker's stamp *is* waiting for, and those keep
-        # paying for their write immediately. So a bump that is only messages rides along.
+        # Message bumps ride along until the batch reaches BATCH_MESSAGES, at which
+        # point one flock acquisition flushes the whole batch.  This avoids a flock on
+        # every single append — the hot path — while bounding staleness to 64 messages.
         if deltas.keys() == {"messages"} and pending["messages"] < BATCH_MESSAGES:
             return
     try:
-        # LOCK_NB for a message flush only. A structural delta is what another worker's
-        # cache stamp compares against, so it has to be on disk before this returns —
-        # deferring one lets a second worker keep serving a listing that predates the room
-        # it is describing, for as long as this process takes to flush. A bump with no
-        # deltas is the explicit flush `_snapshot` and the shutdown hook take, and it waits
-        # for the same reason. Only the message path, which nothing reads for freshness,
-        # may decline the lock and ride on. `.counters.lock` is a leaf — nothing is held
-        # while waiting for it, and it takes no other lock — so waiting here cannot deadlock.
-        with _locked(root / COUNTERS_FILE, nb=deltas.keys() == {"messages"}):
+        # Hot-path counters (`messages`, `notes_written`) use LOCK_NB so that note
+        # writes and message batches never serialize through the flock (#588).
+        # Structural deltas (rooms_created, reaped_*, topics_written) block to
+        # preserve cross-worker stamp ordering for /rooms.
+        #
+        # `.counters.lock` is a leaf — nothing is held while waiting for it, and it
+        # takes no other lock — so there is no deadlock risk.
+        _HOT_PATH_KEYS = {"messages", "notes_written"}
+        _has_structural = bool(set(deltas) - _HOT_PATH_KEYS) if deltas else False
+        with _locked(root / COUNTERS_FILE, nb=bool(deltas) and not _has_structural):
             # Under the flock: read the authoritative file, not a cached snapshot, so a
             # batch from any other process or worker is added to what is really there.
             with _PENDING_LOCK:
@@ -1686,6 +1690,7 @@ def _reap(root: Path) -> None:
                             room = p.name[: -len(".jsonl")]
                             _set_seq_entry(root, room, max(0, last_seq(root, room)))
                         p.unlink(missing_ok=True)
+                        _ROOM_CACHE.pop((root, p.stem), None)
                         config._dbg(2, "reap", room=p.name, reason=reason)
                         if stillborn_rule:
                             reaped[f"reaped_{reason}"] += 1
@@ -2341,6 +2346,25 @@ def _write_record(
         # Under the lock, before the write: two concurrent first-writers must not both
         # decide they created the room and announce it twice.
         created = not path.exists()
+        # Invalidate cache on create/recreate or when the file is larger than the
+        # cached size (another worker may have written since our last append, or the
+        # room was migrated from a flat layout).  The size check is one stat, cheaper
+        # than the two reverse_lines reads it replaces.
+        _cache_key = (root, room)
+        rc = _ROOM_CACHE.get(_cache_key)
+        if created or rc is None:
+            _ROOM_CACHE.pop(_cache_key, None)
+            rc = None
+        if rc is not None:
+            try:
+                cur_size = path.stat().st_size
+            except OSError:
+                cur_size = 0
+            if cur_size != rc.get("file_size", -1):
+                rc = None
+        if rc is None:
+            rc = {"last_seq": last_seq(root, room), "file_size": path.stat().st_size if path.exists() else 0}
+            _ROOM_CACHE[_cache_key] = rc
         # Also under the lock, or two concurrent replays of one captured URL would both
         # read the same "last nonce" and both write.
         if did is not None:
@@ -2353,25 +2377,35 @@ def _write_record(
                     "a signed write must carry a nonce: it is what makes a captured "
                     "signed URL single-use. Send 1-19 digits, counting up per key per room"
                 )
+            # Nonce validation is NOT cached: _last_nonce scans a bounded tail of
+            # the room file, and the protocol permits replay once newer traffic buries
+            # the original past that tail (tested by
+            # test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail).
+            # Caching would break that invariant.
             previous = _last_nonce(root, room, did)
             if previous is not None and nonce <= previous:
                 raise StoreError(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
-        rec["seq"] = last_seq(root, room) + 1
+        rec["seq"] = rc["last_seq"] + 1
         line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
         # unparseable line, so the *next* message would be lost too — the torn record must
         # cost only itself.
-        size = path.stat().st_size if path.exists() else 0
-        if size:
-            with path.open("rb") as f:
+        #
+        # Single open for tear-check + append: avoids a separate stat() + rb open,
+        # eliminating one syscall and a TOCTOU window where another thread could write
+        # between the stat and the open. `a+b` creates the file if it does not exist yet,
+        # so the new-room path (size == 0) skips the tear check naturally.
+        with path.open("a+b") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size:
                 f.seek(size - 1)
                 if f.read(1) != b"\n":
                     line = b"\n" + line
-        with path.open("ab") as f:
             f.write(line)
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
@@ -2382,6 +2416,14 @@ def _write_record(
         # `line` gained a leading newline — so this is exact, not an estimate.
         if size + len(line) > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
+            # Compact rewrites the file; the cached file_size no longer matches.
+            # Invalidate so the next write re-reads last_seq from the new file.
+            _ROOM_CACHE.pop(_cache_key, None)
+            rc = None
+        if rc is not None:
+            # Update the write-path cache: the seq just written is now the room's head.
+            rc["last_seq"] = rec["seq"]
+            rc["file_size"] = size + len(line)
     if created:
         # Bump the room's generation: a (re)created room is a new conversation, and the read
         # view exposes the old generation's number so a stateful client can detect the
