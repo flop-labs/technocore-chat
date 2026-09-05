@@ -56,9 +56,9 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     full = limit.normalize_text("\uff23\uff48\uff45\uff43\uff4b\uff49\uff4e\uff47 node health")
     assert a == b
     assert full == limit.normalize_text("checking node health")
-    # A zero-width joiner and a line separator are invisible to the store and to this.
+    # ZWJ (U+200D) is orthographic, preserved; line separator (U+2028) is swept.
     assert limit.normalize_text("con\u200dsensus\u2028node") == limit.normalize_text(
-        "con sensus node"
+        "con\u200dsensus node"
     )
 
 

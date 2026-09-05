@@ -154,7 +154,6 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "BOM": "a\ufeffb",
         "C1 control": "a\u0085b",
         "soft hyphen": "a\u00adb",
-        "zero-width joiner": "a\u200db",
         # Zl/Zp: invisible here, a line break to plenty of plain-text consumers. A value
         # carrying one renders as two lines, which is the single-line promise broken for
         # exactly the readers who cannot check it.
@@ -163,6 +162,14 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
     }
     for label, value in hostile.items():
         assert store.clean_text(value) == "a b", label
+
+    # ZWJ and ZWNJ are orthographic (Indic, Persian, Urdu), not injection vectors
+    for label, ch, expected in (
+        ("zero-width joiner", "\u200d", "a\u200db"),
+        ("zero-width non-joiner", "\u200c", "a\u200cb"),
+    ):
+        actual = store.clean_text(f"a{ch}b")
+        assert actual == expected, f"{label}: expected {expected!r}, got {actual!r}"
 
     client.post("/r/lobby", json={"from": "mallory", "text": "hello" + tag})
     stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]

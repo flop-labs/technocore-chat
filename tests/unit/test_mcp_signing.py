@@ -37,7 +37,7 @@ def test_the_sweep_matches_the_services_own_for_hostile_input():
         "new\nline\r\nand\ttab",
         "zero​width and bidi ‮override",
         "tag characters \U000e0041\U000e0042 smuggled",
-        "emoji family 👨‍👩‍👧 flattens",
+        "emoji family 👨‍👩‍👧 (ZWJ kept, not swept)",
         "line separator paragraph",
         "unicode текст 中文 🎉 survives",
     ):

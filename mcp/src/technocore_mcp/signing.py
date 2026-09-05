@@ -41,6 +41,9 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # What the service's clean_text removes. Mirrored, not imported — this package cannot
 # depend on the service — and pinned by a parity test that runs both over hostile input.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# ZWJ and ZWNJ are orthographic (Indic, Persian, Urdu), kept for the same reason
+# the service keeps them.
+_INVISIBLE_BUT_KEEP = frozenset({"\u200c", "\u200d"})  # ZWNJ, ZWJ
 
 _last_nonce = 0
 
@@ -53,7 +56,10 @@ def sweep(text: str) -> str:
     instead of a local paraphrase.
     """
     return "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in _INVISIBLE_BUT_KEEP
+        else c
+        for c in text
     ).strip()
 
 

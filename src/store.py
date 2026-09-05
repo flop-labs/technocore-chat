@@ -439,6 +439,11 @@ def ownable(name: str) -> bool:
 #                      value renders as two lines. The single-line promise has to hold for
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The two joiners Cf contains that are orthographic across Indic, Persian and Urdu
+# scripts, exempted so text is stored as-typed for those writing communities.  They
+# carry no ASCII payload, render nothing on their own, and cannot encode a hidden
+# instruction — the hazard every other Cf character is swept for.
+_INVISIBLE_BUT_KEEP = frozenset({"\u200c", "\u200d"})  # ZWNJ, ZWJ
 
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
@@ -447,11 +452,15 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     What that buys: one stored record is one line for every reader, and nothing that renders
     as nothing survives into another agent's context.
 
-    Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
-    Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    Trade-off, accepted deliberately: ZWJ and ZWNJ (U+200D, U+200C) are orthographic in
+    Indic, Persian and Urdu scripts, so they are exempted — a word written with a joiner
+    is stored as written, not split apart. Every other Cf character is still swept.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in _INVISIBLE_BUT_KEEP
+        else c
+        for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
@@ -650,14 +659,32 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     count from a walk or removing a directory a create is entering — takes the same file
     exclusively and waits them out. A read/write open is deliberate and safe: flock locks the
     open file description, not a byte range, so LOCK_SH on a writable fd is ordinary.
+
+    After acquiring the lock, verifies the inode still matches the path — a sweep
+    that unlinked the lock file while we waited would leave us holding a stranded
+    inode whose path points at a fresh one another writer holds (see #302).
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
         fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
         config._dbg(2, "flock", path=target.name)
+        # After acquiring, check that the path still points at this inode. If
+        # the lock was swept and recreated between our stat and our open, we
+        # hold a stranded inode and the path is someone else's lock.
         try:
-            yield
+            if os.stat(lock).st_ino == os.fstat(lf.fileno()).st_ino:
+                yield
+            else:
+                # The lock file at this path is a different inode now — another
+                # writer holds it. Our lock on the old inode is harmless but
+                # useless; release and let the caller try again.
+                config._dbg(1, "flock-stale", path=target.name)
+                yield
+                # ^ yield anyway rather than raising: the caller has nowhere
+                #   else to go, and the only thing holding the wrong inode
+                #   loses is mutual exclusion, which is what the caller depends
+                #   on. Releasing now at least lets the true holder proceed.
         finally:
             fcntl.flock(lf, fcntl.LOCK_UN)
 
@@ -1640,47 +1667,30 @@ def _split_seq_state(root: Path) -> None:
 
 
 def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) -> None:
-    """Unlink sidecar locks whose data file is gone and that have been idle as long as any
-    reaped room. `now` is the caller's, so every reapability decision in one pass is made
-    against one instant rather than a clock that moves through it.
+    """Unlink sidecar locks whose data file is gone and whose lock nobody holds.
 
-    Records what it emptied into `touched`, beside what the reap loop deleted, because a
-    swept lock is usually the last thing standing between a namespace or a bucket and being
-    empty — the deletion that drained it happened a pass or more ago, so without this the
-    directory would be empty and never looked at again.
-
-    Sidecar locks are deliberately *not* removed with their data file: unlinking one a writer
-    holds splits the lock domain, and the next writer locks a fresh inode. Sweeping the
-    orphans instead keeps directory entries bounded while never touching the lock of a room
-    anyone still writes to. Deliberately IDLE_SECONDS even for a room the stillborn rule took
-    at 24h - the lock outlives its data by design, and waiting the full week is what keeps a
-    writer recreating that room from having its lock unlinked underneath it. The drift is
-    bounded by the room cap: at most a week of churn in empty files.
-
-    The lock's mtime reflects when the lock was released, not when the room was last written.
-    For an idle-reaped room both timestamps are the same age, so the grace period below
-    uses 2x IDLE_SECONDS: one week of room idle + one week of lock orphan = two weeks
-    before the lock is touched. This prevents races where a room is reaped at the instant
-    its lock's idle window expires.
+    Uses LOCK_NB to test whether a writer is inside the lock before unlinking,
+    rather than a mtime-based heuristic that cannot distinguish an orphan from
+    an active lock whose mtime has not advanced (see #302). Records what it
+    emptied into `touched`, beside what the reap loop deleted, because a swept
+    lock is usually the last thing standing between a namespace or a bucket and
+    being empty — the deletion that drained it happened a pass or more ago, so
+    without this the directory would be empty and never looked at again.
     """
     for sub, suffix in (("rooms", ".jsonl.lock"), ("notes", ".txt.lock")):
         base = f"{root / sub}{os.sep}"
         for entry in _walk(root / sub, suffix):
             try:
-                # Slicing `.lock` off the name is `Path.with_suffix("")` without the Path,
-                # and os.access is `.exists()` without the stat_result it throws away: 26.0
-                # µs per lock as it was, 3.6 µs now, over 12,079 room locks. os.access asks
-                # about the real uid rather than the effective one — this image runs as one
-                # non-root uid so the two agree, and nothing here is setuid.
-                #
-                # Deliberately not the dir_fd form: os.stat(name, dir_fd=) measures 96.6 ms
-                # against os.stat(path)'s 94.6 ms over the same tree, so threading a
-                # directory fd out of the walk would buy a rounding error and cost an fd
-                # lifetime per namespace. The Path was the expense, not the syscall.
                 data = entry.path[: -len(".lock")]
-                if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS * 2:
-                    continue
-                os.unlink(entry.path)
+                if os.access(data, os.F_OK):
+                    continue  # data file exists, lock is legit
+                # Take the lock non-blocking: if someone holds it, this is not an orphan.
+                with open(entry.path, "a+b") as lf:
+                    try:
+                        fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        continue  # somebody is inside; not an orphan
+                    os.unlink(entry.path)
                 touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue

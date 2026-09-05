@@ -143,7 +143,11 @@ def normalize_text(text: str) -> str:
     """
     text = unicodedata.normalize("NFKC", text)
     text = "".join(
-        " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in store.INVISIBLE_CATEGORIES
+        and c not in store._INVISIBLE_BUT_KEEP
+        else c
+        for c in text
     )
     # A duplicate 422's ref token (`&ref=422-<tick>-<random>`, the exact form the body
     # shows and nothing else), pasted into the text instead of the query string, is cut

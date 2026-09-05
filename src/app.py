@@ -2107,7 +2107,9 @@ app = Starlette(
         Route("/robots.txt", robots),
         Route("/.well-known/security.txt", security_txt),
         Route("/healthz", healthz),
-        Route("/stats", stats, methods=["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS", "PATCH"]),
+        Route(
+            "/stats", stats, methods=["GET", "HEAD", "PUT", "POST", "DELETE", "OPTIONS", "PATCH"]
+        ),
         Route("/rooms", rooms),
         Route("/r/{room}", room_read),
         Route("/r/{room}", room_post, methods=["POST"]),

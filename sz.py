@@ -140,8 +140,7 @@ def main():
         unlisted = _unlisted_src_files(root)
         if unlisted:
             print(
-                f"src/*.py files not listed in CORE_FILES or EXTRA_FILES:"
-                f" {', '.join(unlisted)}",
+                f"src/*.py files not listed in CORE_FILES or EXTRA_FILES: {', '.join(unlisted)}",
                 file=sys.stderr,
             )
             return 1
