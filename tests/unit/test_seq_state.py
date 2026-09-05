@@ -152,6 +152,63 @@ def test_a_map_written_after_the_split_wins_over_the_shard(tmp_path) -> None:
     assert kept == {"gone": {"floor": 5, "gen": 1}}, "the backup lost the original state"
 
 
+def test_mixed_version_updates_reconcile_floor_and_generation_monotonically(tmp_path) -> None:
+    """A real pre-#598 worker was first verified in a separate process: after NEW splits,
+    its reap recreates the flat map with the room's floor but generation 0 because the map
+    it knew was renamed away. Alternate that faithful legacy transition with real NEW
+    recreates; neither format may make the durable high-water mark or generation regress."""
+    import store
+
+    room = "mixed-version"
+    _legacy(tmp_path, {room: {"floor": 0, "gen": 1}})
+    path = store.room_path(tmp_path, room)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(
+        b"".join(
+            orjson.dumps({"seq": seq, "ts": "old", "from": "bot", "text": f"old-{seq}"}) + b"\n"
+            for seq in (1, 2)
+        )
+    )
+    store._split_seq_state(tmp_path)
+
+    # What the real OLD reaper writes after the initial split, then the unlink it performs.
+    _legacy(tmp_path, {room: {"floor": 2, "gen": 0}})
+    path.unlink()
+    assert store.last_seq(tmp_path, room) == 2
+    assert store.room_generation(tmp_path, room) == 1
+
+    first, created = store._write_record(tmp_path, room, "bot", "new-3")
+    assert created and first["seq"] == 3
+    assert store.room_generation(tmp_path, room) == 2
+
+    # OLD reaps that recreation before NEW consumes the recovered flat map.
+    _legacy(tmp_path, {room: {"floor": 3, "gen": 0}})
+    path.unlink()
+    assert store.last_seq(tmp_path, room) == 3
+    assert store.room_generation(tmp_path, room) == 2
+
+    second, created = store._write_record(tmp_path, room, "bot", "new-4")
+    assert created and second["seq"] == 4
+    assert store.room_generation(tmp_path, room) == 3
+
+    store._split_seq_state(tmp_path)
+    assert not (tmp_path / ".seqstate").exists()
+    entry = store._read_seq_state(store._seq_state_path(tmp_path, room))[room]
+    assert entry["floor"] == 3
+    assert entry["gen"] == store.room_generation(tmp_path, room) == 3
+
+    third, created = store._write_record(tmp_path, room, "bot", "new-5")
+    assert not created and third["seq"] == 5
+
+    os.utime(path, (0, 0))
+    _reap_now(tmp_path)
+    assert store.last_seq(tmp_path, room) == 5
+    assert store.room_generation(tmp_path, room) == 3
+    fourth, created = store._write_record(tmp_path, room, "bot", "new-6")
+    assert created and fourth["seq"] == 6
+    assert store.room_generation(tmp_path, room) == 4
+
+
 # --------------------------------------------------------------------------- reads
 
 
