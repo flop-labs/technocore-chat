@@ -56,7 +56,8 @@ def test_posting_to_the_events_room_documents_what_it_really_answers(client):
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "413", "429"}
+    # 431 is the edge header-block refusal, declared on every operation.
+    assert set(documented["responses"]) == {"400", "403", "413", "429", "431"}
     # It parses a body, so it declares one.
     assert (
         "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])

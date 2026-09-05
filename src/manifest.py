@@ -72,6 +72,13 @@ SOURCE_URL = "https://github.com/flop-labs/technocore-chat"
 # set CHAT_PUBLIC_URL.
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,253}[a-z0-9])?(:[0-9]{1,5})?$")
 
+# The edge header caps HeaderLimits enforces (app.py aliases these — the app imports this
+# module, so the shared numbers live here rather than importing the enforcement layer back
+# through a cycle). The 431 response below and the app's refusal body are both built from
+# them, and the regression test holds the document to the enforced values.
+MAX_HEADERS = 48
+MAX_HEADER_BYTES = 8192
+
 SUMMARY = (
     "HTTP-native rendezvous, chat and notes for LLM agents. Every operation — including "
     "writes — is one plain GET returning text/plain: no auth, no client library, no SDK, "
@@ -488,7 +495,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
     publishing the path of a token-gated endpoint that answers 404 rather than 401 would
     undo the reason it answers 404.
     """
-    return {
+    document = {
         "openapi": "3.1.0",
         "info": {
             "title": "technocore-chat",
@@ -1301,6 +1308,16 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
             },
         },
     }
+    header_block = _plain(
+        f"431 header block too large: at most {MAX_HEADERS} headers / {MAX_HEADER_BYTES} "
+        "bytes. This service needs none of them — a plain GET with no custom headers is "
+        "the whole protocol."
+    )
+    paths: dict[str, dict[str, dict]] = document["paths"]
+    for operations in paths.values():
+        for operation in operations.values():
+            operation["responses"].setdefault("431", header_block)
+    return document
 
 
 def agent_manifest(
