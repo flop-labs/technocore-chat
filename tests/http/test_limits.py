@@ -467,7 +467,9 @@ def test_an_empty_trusted_proxy_header_falls_back_to_the_socket_peer(client, mon
 
 def _dockerfile_cmd() -> list[str]:
     """The argv the shipped image actually runs, out of the CMD JSON array."""
-    raw = (Path(__file__).resolve().parents[2] / "docker" / "Dockerfile").read_text()
+    raw = (Path(__file__).resolve().parents[2] / "docker" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
     body = raw.split("\nCMD ", 1)[1].replace("\\\n", " ")
     return json.loads(body[: body.index("]") + 1])
 
