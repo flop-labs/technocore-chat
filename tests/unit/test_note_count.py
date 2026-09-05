@@ -224,6 +224,30 @@ def test_a_second_writer_cannot_consume_the_first_writers_staging_file(
     assert store._note_totals(tmp_path) == (3, 30), "and must leave the old totals alone"
 
 
+def test_atomic_replace_falls_back_to_path_chmod_when_fd_chmod_is_unavailable(
+    tmp_path, monkeypatch
+) -> None:
+    """Windows exposes chmod but cannot apply it to an open file descriptor."""
+    import store
+
+    real_chmod = os.chmod
+    calls = []
+
+    def path_only(path, mode):
+        assert isinstance(path, (str, bytes, os.PathLike))
+        calls.append(path)
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(store.os, "supports_fd", set())
+    monkeypatch.setattr(store.os, "chmod", path_only)
+    target = tmp_path / "count"
+
+    store._replace(target, b"7")
+
+    assert calls
+    assert target.read_bytes() == b"7"
+
+
 # --------------------------------------------------------------------------- the cap
 
 # A worker: create notes as fast as it can into one shared root, and report how many the
