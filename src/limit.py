@@ -67,6 +67,15 @@ FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /ope
 # limiter state — which is why the authoritative limit belongs in the proxy (see README).
 MAX_BUCKETS = 20_000
 _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+# Guarded for the same reason _dupes is, and it is the same kind of lock: taking a token is
+# a read, some arithmetic and a write back, and Starlette runs every sync route in a real
+# thread pool. Left unguarded, N parallel requests from one IP all read the same balance,
+# all find it sufficient, and all are admitted while only the last decrement survives, so
+# the overdraft grows with concurrency rather than costing the fraction of a token a
+# two-thread race would. It is a leaf lock: held for a dict lookup, a few multiplications
+# and at most a handful of dict operations, never across I/O, so nothing can deadlock
+# against it and an uncontended acquire is cheaper than the arithmetic it guards.
+_buckets_lock = threading.Lock()
 
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
@@ -103,11 +112,10 @@ MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a d
 # drag its own window open by hammering: the phrase becomes acceptable again exactly
 # `window` after the last copy that landed, never later.
 #
-# Guarded by a lock, unlike every other structure in this module. The waiter counters are
-# safe unlocked because they are only ever touched by the single-threaded event loop, and
-# the buckets are read-modify-write on ONE key so a lost update costs a fraction of a
-# token. This one is neither: both write lanes reach it from a threadpool (the GETs are
-# sync endpoints, the POST goes through run_in_threadpool), and the sweep walks and
+# Guarded by its own leaf lock, like the token buckets above. The waiter counters are safe
+# unlocked because they are only ever touched by the single-threaded event loop. Both write
+# lanes reach this ring from a threadpool (the GETs are sync endpoints, the POST goes through
+# run_in_threadpool), and unlike a one-key bucket mutation its sweep walks and
 # deletes from the front while another thread may be inserting — which is an
 # `OrderedDict mutated during iteration` RuntimeError, or a KeyError on a key the other
 # thread just evicted, i.e. a 500 on exactly the write path the filter exists to protect.
@@ -289,19 +297,18 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     ip = client_ip(request, ip_header)
     if len(_identities) < MAX_IDENTITIES:
         _identities.add(ip)
-    now = time.monotonic()
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, now))
-    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
-    if tokens >= 1.0:  # granted: no wait, even when this was the last token
-        tokens -= 1.0
-        wait = 0.0
-    else:
-        wait = (1.0 - tokens) * 60.0 / per_min
-    _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
-    while len(_buckets) > max_buckets:
-        _buckets.popitem(last=False)
+    with _buckets_lock:
+        now = time.monotonic()
+        tokens, last = _buckets.get((ip, kind), (cap, now))
+        tokens = min(cap, tokens + (now - last) * per_min / 60.0)
+        granted = tokens >= 1.0
+        tokens -= float(granted)
+        wait = 0.0 if granted else (1.0 - tokens) * 60.0 / per_min
+        _buckets[(ip, kind)] = (tokens, now)
+        _buckets.move_to_end((ip, kind))
+        while len(_buckets) > max_buckets:
+            _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
@@ -317,10 +324,10 @@ def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
     `last` is deliberately left alone: it is the refill clock, and moving it would either
     grant free time or discard earned time. Only the balance changes.
     """
-    ip = client_ip(request, ip_header)
-    cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+    ip, cap = client_ip(request, ip_header), float(per_min if burst is None else burst)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
+        _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
     config._dbg(1, "refund", ip=ip, kind=kind)
 
 
