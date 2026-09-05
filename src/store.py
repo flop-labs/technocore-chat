@@ -1922,14 +1922,16 @@ def _note_totals(d: Path, rebuild=_count_notes, persist=False, name=NOTES_FILE) 
 
     Read without the lock, like `counters`: replacement is atomic, so a reader sees the old
     bytes or the new ones. Reading is safe unserialised; *persisting* what the read rebuilt
-    is not, so `persist` is off by default and only `_check_note_capacity` turns it on —
-    that one runs inside the create gate, which IS this file's lock, and every other write of
-    a count file is under the same lock. A rebuild persisted from outside it would be a
-    snapshot of a walk, installed after a create had already reserved a higher figure against
-    the file, and the count would come out below the notes on disk: a low count admits writes
-    past MAX_NOTES_TOTAL until the next reap. Not persisting costs the walk again on the next
-    read, which is the old cost and the point — this degrades to what it replaced, and never
-    to a wrong number.
+    is not, so `persist` is off by default. `_check_note_capacity` is the only caller that
+    ever turns it on, and only via its own `locked` flag: `_create_gate` calls it once early,
+    unlocked, before anything is made, and once more inside the create gate, which IS this
+    file's lock, and every other write of a count file is under the same lock — only that
+    second, authoritative call passes `locked=True`. A rebuild persisted from outside that
+    lock would be a snapshot of a walk, installed after a create had already reserved a
+    higher figure against the file, and the count would come out below the notes on disk: a
+    low count admits writes past MAX_NOTES_TOTAL until the next reap. Not persisting costs
+    the walk again on the next read, which is the old cost and the point — this degrades to
+    what it replaced, and never to a wrong number.
 
     A zero is never persisted, and that is load-bearing rather than an optimization:
     `_write_note_count` creates the directory it writes into, so persisting the zero a
@@ -2088,7 +2090,26 @@ def _check_room_capacity(root: Path, path: Path) -> None:
         )
 
 
-def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
+def _note_capacity_checker(root: Path, ns_dir: Path, path: Path):
+    """A zero-arg `check` for `_create_gate`, which calls it twice per create attempt: an
+    early, unlocked call that must not persist a rebuilt count (it can race a concurrent
+    reservation and clobber it -- see `_note_totals`), and a later, locked call that is
+    authoritative and safe to persist. `_create_gate` always calls unlocked-then-locked in
+    that order for a single creation attempt, so a fresh closure's state tracks which call
+    this is without touching `_create_gate` or the room capacity check.
+    """
+    state = {"locked": False}
+
+    def check() -> None:
+        _check_note_capacity(root, ns_dir, path, locked=state["locked"])
+        state["locked"] = True
+
+    return check
+
+
+def _check_note_capacity(
+    root: Path, ns_dir: Path, path: Path, *, locked: bool = False
+) -> None:
     """Both note caps, neither of which walks any more. Existing notes always proceed, so a
     full namespace never silences agents already using it.
 
@@ -2110,7 +2131,7 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # The namespace directory, passed in rather than taken from the note: `path.parent` is the
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
-    if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
+    if _note_totals(ns_dir, _ns_totals, persist=locked)[0] >= MAX_NOTES_PER_NS:
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     if _note_count(root) >= MAX_NOTES_TOTAL:
         raise StoreError(
@@ -2468,7 +2489,7 @@ def note_set(
     with _create_gate(
         root / NOTES_FILE,
         path,
-        lambda: _check_note_capacity(root, ns_dir, path),
+        _note_capacity_checker(root, ns_dir, path),
         lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
     ):
         if expect_absent or expect is not None:
