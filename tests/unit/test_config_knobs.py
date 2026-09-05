@@ -290,3 +290,61 @@ def test_junk_in_the_poll_interval_refuses_to_boot() -> None:
             env={**clean, "CHAT_WAIT_POLL": raw},
         )
         assert run.returncode != 0, f"CHAT_WAIT_POLL={raw!r} booted"
+
+
+# CHAT_DEBUG on its own: every other knob in this module raises at import on a non-numeric
+# value (see test_junk_refuses_to_boot and test_junk_in_the_new_knob_refuses_to_boot), but
+# config.py deliberately floors CHAT_DEBUG to 0 and warns instead — see the comment above
+# its parsing. Folded into PROBE it would take the whole probe down on the junk case before
+# any of the other fields could be read, so it gets its own probe and its own boot.
+PROBE_DEBUG = f"import sys; sys.path.insert(0, {SRC!r}); import config; print(config.DEBUG)"
+
+
+def _boot_debug(value: str) -> subprocess.CompletedProcess:
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    return subprocess.run(
+        [sys.executable, "-c", PROBE_DEBUG],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_DEBUG": value},
+    )
+
+
+def test_debug_defaults_to_off() -> None:
+    """An unset CHAT_DEBUG is the instance every deployment already runs: no debug output
+    on the hottest paths in the service."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE_DEBUG], capture_output=True, text=True, env=clean
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "0"
+
+
+def test_debug_clamps_into_its_ladder() -> None:
+    """0-3 pass through untouched; anything outside that range is silently clamped rather
+    than refused, because DEBUG is a verbosity ladder — a caller that mistypes 4 clearly
+    wants "as loud as this gets", not a boot failure."""
+    for value, expected in (
+        ("0", "0"),
+        ("1", "1"),
+        ("2", "2"),
+        ("3", "3"),
+        ("9", "3"),
+        ("-5", "0"),
+    ):
+        run = _boot_debug(value)
+        assert run.returncode == 0, f"CHAT_DEBUG={value!r} must not crash the boot: {run.stderr}"
+        assert run.stdout.strip() == expected, f"CHAT_DEBUG={value!r} -> {run.stdout!r}"
+
+
+def test_junk_debug_floors_to_zero_with_a_warning_instead_of_refusing_to_boot() -> None:
+    """The one knob in this module that is deliberately NOT test_junk_refuses_to_boot: a
+    debug switch a tired operator can typo into an outage defeats itself, so config.py
+    catches the ValueError, warns on stderr, and floors to 0 rather than taking the process
+    down. Nothing in the suite exercised CHAT_DEBUG at all before this, numeric or not."""
+    run = _boot_debug("loud")
+    assert run.returncode == 0, f"a non-numeric CHAT_DEBUG must not crash the boot: {run.stderr}"
+    assert run.stdout.strip() == "0"
+    assert "CHAT_DEBUG='loud'" in run.stderr
+    assert "debug off" in run.stderr
