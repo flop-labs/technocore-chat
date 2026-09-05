@@ -434,9 +434,32 @@ def test_say_without_a_nick_falls_back_to_the_session_anon_name(mcp):
     assert "<~alice> named" in text_of(mcp.call("read_room", {"room": "lobby"}))
 
 
+def test_note_value_strips_banner_and_budget_footer():
+    from technocore_mcp.server import _note_value
+
+    assert _note_value("!! UNTRUSTED CONTENT — x\n\nv1") == "v1"
+    assert _note_value("!! UNTRUSTED CONTENT — x\n\nv1\n# budget: 1 of 8 reads left") == "v1"
+    # A legal stored value that starts with the footer prefix must survive when no footer
+    # was appended — otherwise if_matches against "" stalls the same RMW loop this strip
+    # exists to unstick (review on #183).
+    assert (
+        _note_value("!! UNTRUSTED CONTENT — x\n\n# budget: my notes for today")
+        == "# budget: my notes for today"
+    )
+    assert (
+        _note_value(
+            "!! UNTRUSTED CONTENT — x\n\n# budget: my notes for today\n# budget: 1 of 8 reads left"
+        )
+        == "# budget: my notes for today"
+    )
+    # A body that is not framed (defensive): leave it alone rather than eat content.
+    assert _note_value("plain") == "plain"
+    assert _note_value("# budget: bare") == "# budget: bare"
+
+
 def test_notes_round_trip_and_a_failed_condition_returns_the_current_value(mcp):
     mcp.call("write_note", {"namespace": "plans", "key": "next", "value": "ship it"})
-    assert "ship it" in text_of(mcp.call("read_note", {"namespace": "plans", "key": "next"}))
+    assert text_of(mcp.call("read_note", {"namespace": "plans", "key": "next"})) == "ship it"
     assert "next" in text_of(mcp.call("list_notes", {"namespace": "plans"}))
     clash = mcp.call(
         "write_note",
@@ -445,6 +468,42 @@ def test_notes_round_trip_and_a_failed_condition_returns_the_current_value(mcp):
     # A 409 is information the model can act on — it carries what is actually stored — so
     # it comes back as an error *result*, not a JSON-RPC error the client swallows.
     assert clash.is_error is True and "ship it" in text_of(clash)
+
+
+def test_read_note_feeds_write_note_compare_and_set(mcp):
+    """read_note must return the stored value, not the HTTP banner — otherwise if_matches
+    never matches and the RMW loop the tools advertise never terminates. Same contract as
+    /humans noteValue; pin it here so a banner leak fails loudly."""
+    mcp.call("write_note", {"namespace": "plans", "key": "rmw", "value": "v1"})
+    current = text_of(mcp.call("read_note", {"namespace": "plans", "key": "rmw"}))
+    assert current == "v1"
+    assert "UNTRUSTED" not in current
+    ok = mcp.call(
+        "write_note",
+        {"namespace": "plans", "key": "rmw", "value": "v2", "if_matches": current},
+    )
+    assert ok.is_error is False
+    assert text_of(mcp.call("read_note", {"namespace": "plans", "key": "rmw"})) == "v2"
+
+
+def test_read_note_cas_survives_a_value_that_looks_like_the_budget_footer(mcp):
+    """A stored value starting with `# budget:` is legal; stripping it to "" would stall
+    if_matches the same way the banner leak did. Round-trip through HTTP framing."""
+    value = "# budget: my notes for today"
+    mcp.call("write_note", {"namespace": "plans", "key": "lookalike", "value": value})
+    current = text_of(mcp.call("read_note", {"namespace": "plans", "key": "lookalike"}))
+    assert current == value
+    ok = mcp.call(
+        "write_note",
+        {
+            "namespace": "plans",
+            "key": "lookalike",
+            "value": value + "!",
+            "if_matches": current,
+        },
+    )
+    assert ok.is_error is False
+    assert text_of(mcp.call("read_note", {"namespace": "plans", "key": "lookalike"})) == value + "!"
 
 
 def test_if_absent_creates_only_once(mcp):

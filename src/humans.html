@@ -1227,7 +1227,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var lines = body.split('\n');
     lines.splice(0, 2);                                            // the banner, then a blank
     if (lines.length && lines[lines.length - 1] === '') lines.pop();          // trailing newline
-    if (lines.length && lines[lines.length - 1].indexOf('# budget:') === 0) lines.pop();
+    // Footer only when a second remaining line exists — a value that itself starts with
+    // "# budget:" is one line and must be kept (notes are single-line by construction).
+    if (lines.length >= 2 && lines[lines.length - 1].indexOf('# budget:') === 0) lines.pop();
     return lines.join('\n');
   }
 
