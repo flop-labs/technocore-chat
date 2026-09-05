@@ -1,22 +1,29 @@
 /**
  * Drive /humans in a real browser and report what it actually does.
  *
- * Not a pytest module and not in CI: it needs Chromium, and adding a browser to a service
- * whose test suite is pure-Python with three pinned dependencies is a bigger decision than
- * this page warrants. The Python tests assert what the *served bytes* contain — that the
- * script never builds an anchor, never assigns innerHTML, that the copy label and the icon
- * templates are there. Those are the security invariants and they belong in CI. What they
- * cannot tell you is whether the page works: every one of them passes with the JavaScript
- * completely broken. That is what this is for.
+ * Not a pytest module: it needs Chromium. The Python tests assert what the *served bytes*
+ * contain — that the script never builds an anchor, never assigns innerHTML, that the copy
+ * label and the icon templates are there. Those are the security invariants and they belong
+ * in the Python suite. What they cannot tell you is whether the page works: every one of
+ * them passes with the JavaScript completely broken. That is what this is for.
  *
- *     npm i playwright && npx playwright install chromium
+ * This ran as a manual gate for as long as /humans was a read-only window, on the reasoning
+ * that adding a browser to a service whose suite is pure Python with three pinned
+ * dependencies was a bigger decision than the page warranted. The page now holds a signing
+ * key, derives one from an authenticator, and mints delegation records — and two P1s on
+ * PR #719 were both browser-side and both invisible to 684 passing Python tests. So it runs
+ * in CI now, in .github/workflows/humans.yml, on changes to the page and to the four things
+ * that can break it from underneath. The Python line is untouched: the dependency is
+ * tests/package.json and its lockfile, and `uv sync` never sees it.
+ *
+ *     cd tests && npm ci && npx playwright install chromium && cd ..
  *     CHAT_ROOT=/tmp/ui-store uv run uvicorn app:app --app-dir src --port 8099
  *     node tests/humans_ui_probe.mjs 8099
  *
  * Set CHROMIUM_PATH to reuse a Chromium you already have instead of downloading one.
  *
- * Exits non-zero on the first failed check, so it is usable as a manual gate before
- * shipping a change to the page.
+ * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
+ * as by the workflow.
  *
  * Checked 2026-09-05, 90 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
