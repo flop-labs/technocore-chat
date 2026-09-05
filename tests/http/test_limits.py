@@ -590,6 +590,47 @@ def test_chunked_body_is_stopped_at_the_same_cap_and_says_how_to_split_it(client
     assert "multiple room lines" in body and "multiple keys" in body
 
 
+def test_the_single_oversize_stream_chunk_is_refused_before_buffer_growth_so_that_the_cap_holds(
+    monkeypatch,
+):
+    """A server can provide one chunk larger than the cap, so reject it before extending raw.
+    The streaming promise is about the bytes held, not only the response status.
+    """
+    import asyncio
+    from typing import cast
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import Response
+
+    import app as app_module
+
+    class RequestStub:
+        headers = {}
+
+        async def stream(self):
+            yield b"x" * (app_module.MAX_BODY + 1)
+
+    class TrackingBytearray:
+        def __init__(self):
+            self.data = bytearray()
+            self.max_length = 0
+
+        def extend(self, chunk):
+            self.data.extend(chunk)
+            self.max_length = max(self.max_length, len(self.data))
+
+        def __len__(self):
+            return len(self.data)
+
+    raw = TrackingBytearray()
+    monkeypatch.setattr(app_module, "bytearray", lambda: raw, raising=False)
+    response = asyncio.run(app_module.read_json(cast(StarletteRequest, RequestStub())))
+
+    assert isinstance(response, Response)
+    assert response.status_code == 413
+    assert raw.max_length <= app_module.MAX_BODY
+
+
 def test_malformed_payload_shapes_are_400_not_500(client):
     for body in ("[1,2,3]", '"a string"', "42", "null", "true"):
         r = client.post(

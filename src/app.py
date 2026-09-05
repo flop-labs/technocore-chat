@@ -1395,9 +1395,9 @@ async def read_json(request: Request) -> dict | Response:
         return text(f"{too_large}\nyour Content-Length said {declared} bytes.", 413)
     raw = bytearray()
     async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > MAX_BODY:
+        if len(raw) + len(chunk) > MAX_BODY:
             return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+        raw.extend(chunk)
     try:
         # orjson here, stdlib json for the three documents below. orjson is ~4.7x on the
         # parse and, on a service whose whole job is hostile input, refuses the
