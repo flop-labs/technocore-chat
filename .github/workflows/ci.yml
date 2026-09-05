@@ -88,6 +88,15 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
 
+      # `--frozen` installs from the lockfile without checking it still agrees with
+      # pyproject.toml. That is the right flag for a reproducible install, and it is why a
+      # stale lock survives every job here: nothing in CI reads the two together. This is
+      # the assertion that does, and it never rewrites the file, so CI cannot paper over
+      # the drift it is checking for. Without it a version bump that misses `uv lock`
+      # leaves every contributor's tree dirty the moment they run `uv run` (#506).
+      - name: Lockfile agrees with pyproject
+        run: uv lock --check
+
       - name: Lint
         run: |
           uv run ruff check .
