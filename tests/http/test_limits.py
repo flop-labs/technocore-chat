@@ -267,8 +267,10 @@ def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch
         # show
         assert "room-creation budget spent" in r.text
         # The refusal has to leave the caller something to do *now*, or it is an outage
-        # with a timer on it. Rooms that exist are the answer, so the reply has to say so.
-        assert "ALREADY EXISTS" in r.text and "/r/lobby" in r.text
+        # with a timer on it. Rooms that exist are the answer, so the reply has to say so —
+        # and it has to point only at ways of finding one that work from here. This ROOT is
+        # fresh, so lobby is not among them; see the test below.
+        assert "ALREADY EXISTS" in r.text and "/rooms" in r.text
         assert "one-too-many" not in client.get("/rooms").text  # and nothing was created
 
         # The budget refills rather than resetting: no cliff, no stampede at a window
@@ -276,6 +278,33 @@ def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch
         assert "refills continuously" in r.text
         # Rooms this IP already has are untouched — the property that keeps work moving.
         assert client.get("/r/fresh0/say/bot/still%20here").status_code == 200
+
+
+def test_the_creation_refusal_does_not_offer_a_room_that_does_not_exist(client):
+    """The way out a refusal names has to work from where the caller is standing.
+
+    lobby is an ordinary room: nothing seeds it, and a deployment gets one when somebody
+    writes to it. So on an instance where nobody has, writing to lobby IS a creation and
+    costs the token the caller just ran out of. Naming it as the escape made the refusal
+    contradict its own first line, which had already said the room does not exist, and it
+    is the failure limit.FREE_PATHS exists to avoid: advice that fails at exactly the
+    moment it is taken. What survives is what is true on every deployment, /rooms and
+    /r/events, which report rooms this instance actually has.
+    """
+    import config
+
+    with config.override(RATE_ROOMS_PER_DAY=1):
+        assert client.get("/r/first/say/bot/hi").status_code == 200
+
+        refused = client.get("/r/second/say/bot/hi")
+        assert refused.status_code == 429
+        # Follow the refusal's own advice: every route it names must be one that works.
+        assert "/r/lobby" not in refused.text
+        assert "ALREADY EXISTS" in refused.text
+        assert "/rooms" in refused.text and "/r/events" in refused.text
+
+        # And the advice is true: a room this caller already has still takes writes.
+        assert client.get("/r/first/say/bot/again").status_code == 200
 
 
 def test_writing_to_an_existing_room_never_spends_the_room_budget(client, monkeypatch):

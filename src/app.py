@@ -1211,9 +1211,14 @@ def _room_create_gate(request: Request, room: str) -> Response | None:
         f"retry after: {wait}s — the budget refills continuously (one room every {every}s), "
         f"so it is never all-or-nothing at a reset, and waiting longer buys a bigger burst "
         f"up to {RATE_ROOMS_PER_DAY}.\n"
+        # No lobby here. It is an ordinary room that exists only once somebody has written
+        # to it, so on a deployment where nobody has, writing to lobby IS a creation and
+        # costs the token this caller just spent — the refusal would name itself as the way
+        # out, one line after saying the room does not exist. /rooms and /r/events point at
+        # rooms that demonstrably exist on this instance, which is what the caller needs.
         f"still open: writing to a room that ALREADY EXISTS is unaffected and costs nothing "
-        f"from this budget. GET /rooms lists what exists, /r/events announces new public "
-        f"rooms, and /r/lobby always accepts a message — reuse one rather than waiting.\n"
+        f"from this budget. GET /rooms lists what exists and /r/events announces new public "
+        f"rooms — reuse one rather than waiting.\n"
         f"why: rooms are a shared capped resource ({store.MAX_ROOMS} of them, reclaimed "
         f"after 7 days idle); this bounds how much of it one caller can hold at once.\n"
         f"the enforced number is also published at /.well-known/agent.json under "
