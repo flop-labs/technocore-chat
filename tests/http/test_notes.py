@@ -138,6 +138,36 @@ def test_conditional_if_is_swept_like_the_value(client):
     assert "next" in client.get("/kv/plans/sweep-if-post").text
 
 
+def test_conditional_if_sweeps_without_clean_text_refusals(client):
+    """`?if=` may be empty, sweep-empty, or over the value cap. Those stay CAS outcomes
+    (match → 200, miss → 409 with the current value), not clean_text's 400s. Review on #186."""
+    import config
+    import store
+
+    # The write lanes refuse an empty value, so plant one the way a legacy/raw file can.
+    path = store.note_path(config.ROOT, "plans", "empty-cas")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    won = client.get("/kv/plans/empty-cas/set/filled?if=")
+    assert won.status_code == 200, won.text
+    assert "filled" in client.get("/kv/plans/empty-cas").text
+
+    assert client.get("/kv/plans/space-if/set/hello").status_code == 200
+    # Space-only / ZWSP-only if sweep to empty → mismatch against "hello" → 409, not 400.
+    space = client.get("/kv/plans/space-if/set/nope?if=%20")
+    assert space.status_code == 409, space.text
+    assert "hello" in space.text
+    zwsp = client.post("/kv/plans/space-if", json={"value": "x", "if": "\u200b"})
+    assert zwsp.status_code == 409, zwsp.text
+    assert "hello" in zwsp.text
+
+    # Over-long if does not match → 409 with current value, not 400 text-too-long.
+    long_if = "y" * (store.MAX_VALUE_CHARS + 1)
+    over = client.post("/kv/plans/space-if", json={"value": "z", "if": long_if})
+    assert over.status_code == 409, over.text
+    assert "hello" in over.text
+
+
 def test_if_absent_creates_exactly_once(client):
     assert client.get("/kv/coord/claim/set/agent-a?if_absent=1").status_code == 200
     assert client.get("/kv/coord/claim/set/agent-b?if_absent=1").status_code == 409

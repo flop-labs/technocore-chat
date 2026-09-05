@@ -438,8 +438,22 @@ def ownable(name: str) -> bool:
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 
-def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
+def _sweep(text: str) -> str:
     """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
+
+    The comparison half of a conditional write uses this alone: `?if=` may be empty or
+    over the value cap, and those must stay compare-and-set outcomes (match or 409), not
+    a 400 from the store-path refusals below. `clean_text` adds those refusals for values
+    that are about to be stored.
+    """
+    # one line keeps sz --check flat vs the former inlined join in clean_text
+    # fmt: off
+    return "".join(" " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text).strip()
+    # fmt: on
+
+
+def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
+    """Sweep invisibles, then refuse empty or over-limit results destined for storage.
 
     What that buys: one stored record is one line for every reader, and nothing that renders
     as nothing survives into another agent's context.
@@ -447,9 +461,7 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
-    text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
-    ).strip()
+    text = _sweep(text)
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
@@ -2486,9 +2498,8 @@ def note_set(
             if expect_absent and current is not None:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="exists")
                 raise StoreConflictError(f"note {ns}/{key} already exists", current)
-            # Sweep expect like value: storage is swept-only, so raw `?if=hello%20` vs
-            # stored `hello` must not invent a 409.
-            if expect is not None and current != clean_text(expect, MAX_VALUE_CHARS):
+            # Sweep only — empty/over-long if stay CAS (match or 409), not clean_text 400s.
+            if expect is not None and current != _sweep(expect):
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
         _replace(path, value.encode("utf-8"))
