@@ -275,7 +275,17 @@ REAP_EVERY = 300
 # A knob (CHAT_STILLBORN_SECONDS) rather than the constant this was, because on a deployment
 # where most rooms are one-message it — not MAX_ROOMS — is what sets the room turnover rate.
 # The default is the 86400 it was hardcoded to, so an instance that sets nothing does not move.
-STILLBORN_SECONDS = config.STILLBORN_SECONDS
+#
+# Clamped HERE rather than in config.py because both bounds are this module's: the value has to
+# be the one the reaper enforces, and the reaper is below.
+#   - Capped at IDLE_SECONDS, because `_reapable` tests the idle rule FIRST. Anything larger is
+#     unreachable — set ten days and the documents promise ten while the room goes on day seven.
+#   - Floored to a whole hour, because the manual renders it in them (`__STILLBORN_HOURS__`) and
+#     both capacity refusals compute the same `// 3600`. At 5400 the reaper would wait 90
+#     minutes while every document promised one hour.
+# config.py holds the other half of the floor (>= 3600), and /config publishes THIS value, not
+# config's, so what an operator reads back is what the reaper does.
+STILLBORN_SECONDS = min(IDLE_SECONDS, config.STILLBORN_SECONDS) // 3600 * 3600
 STILLBORN_MESSAGES = 1
 
 # Room name classes. A name is a chain of leading `<class>-` markers followed by a body,

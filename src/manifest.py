@@ -1629,7 +1629,9 @@ def config_document(version: str) -> dict:
             "dupe_min_length": config.DUPE_MIN_LENGTH,
             "dupe_max_copies": config.DUPE_MAX_COPIES,
             "ephemeral_ttl_seconds": config.EPHEMERAL_TTL_SECONDS,
-            "stillborn_seconds": config.STILLBORN_SECONDS,
+            # store's, not config's: store clamps to whole hours within IDLE_SECONDS, and
+            # this document's whole promise is that it reports what the handlers enforce.
+            "stillborn_seconds": store.STILLBORN_SECONDS,
             "fsync": config.FSYNC,
             "rooms_cache_seconds": _published_number(config.ROOMS_CACHE_SECONDS),
             "note_stats_cache_seconds": _published_number(config.NOTE_STATS_CACHE_SECONDS),
