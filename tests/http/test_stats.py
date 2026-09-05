@@ -11,6 +11,29 @@ from starlette.testclient import TestClient
 client = _client.client  # the shared TestClient fixture
 
 
+def test_a_graceful_shutdown_flushes_the_batched_counters(client):
+    """A rolling deploy is a SIGTERM, not a kill.
+
+    A plain message bump rides in memory until something structural, the message bound or a
+    snapshot flushes it (#588) — so without a shutdown hook every ordinary restart would drop
+    what each worker was still holding, which is a much larger and much more frequent loss
+    than the hard-kill window these counters actually document. `TestClient` runs the lifespan
+    only as a context manager, and that is the same startup/shutdown pair uvicorn drives.
+    """
+    import config
+    import store
+
+    client.get("/r/lobby/say/bot/one")  # creates the room: structural, so it lands at once
+    client.get("/r/lobby/say/bot/two")
+    assert store._PENDING[config.ROOT] == {"messages": 1}, "the second message should be riding"
+
+    with client:  # enter and leave: the ASGI lifespan, startup through shutdown
+        pass
+
+    assert store.counters(config.ROOT)["messages"] == 2, "the shutdown dropped the batch"
+    assert config.ROOT not in store._PENDING
+
+
 def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
     """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
     per-day room budget then bounds the whole world at once. Silent, and indistinguishable
@@ -36,7 +59,7 @@ def stats_client(tmp_path, monkeypatch):
     # config.override now, not the environment.
     monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
     app_module._buckets.clear()
-    app_module._rooms_cache.clear()
+    app_module._rooms_walk.cache_clear()
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     with config.override(  # every stats call recomputes, so a test can observe its writes

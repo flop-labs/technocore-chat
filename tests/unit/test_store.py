@@ -37,8 +37,8 @@ def _race_under_lock(monkeypatch, store, action):
     real_locked = store._locked
 
     @contextmanager
-    def hook(target):
-        with real_locked(target):
+    def hook(target, shared=False, nb=False):
+        with real_locked(target, shared, nb):
             action(target)
             yield
 
@@ -86,6 +86,10 @@ def test_room_disk_is_capped_independently_of_the_room_count(tmp_path, monkeypat
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 400)
     store.append(tmp_path, "room0", "bot", "x" * 300)  # room0 + events ≈ 452B, over budget
+    # The reaper is what establishes the byte figure the cap reads (#578): the create path
+    # stopped walking every bucket per new room, so the budget bites off the last pass.
+    (tmp_path / ".reaped").unlink()
+    store._reap(tmp_path)
     with pytest.raises(store.StoreError, match="room storage is full") as refused:
         store.append(tmp_path, "overflow", "bot", "hi")
     message = str(refused.value)
@@ -126,7 +130,7 @@ def test_the_byte_budget_bounds_growth_and_not_only_creation(tmp_path, monkeypat
 
     # Now make the budget look spent, as a reap pass would have recorded it, and keep
     # writing. The room that receives the writes yields back to its guaranteed floor.
-    (tmp_path / store.USAGE_FILE).write_text(str(store.MAX_TOTAL_ROOM_BYTES + 1))
+    (tmp_path / store.USAGE_FILE).write_text(f"2 {store.MAX_TOTAL_ROOM_BYTES + 1}")
     assert fill("second") <= store.RESERVED_ROOM_BYTES
     assert fill("first") <= store.RESERVED_ROOM_BYTES, "an existing large room must yield too"
 
@@ -143,15 +147,18 @@ def test_the_byte_budget_binds_at_the_cap_and_not_one_byte_past_it(tmp_path, mon
 
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)  # far from binding: bytes must do it
     store.append(tmp_path, "room0", "bot", "hi")
-    used = store._scan(tmp_path / "rooms", ".jsonl", sized=True)[1]
+    count, used = store._count_rooms(tmp_path)
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", used)  # exactly at the budget
+    # The figure the cap compares against is the one the last reap recorded (#578), so put
+    # the store exactly on the number there rather than only on disk.
+    store._write_note_count(tmp_path, count, used, name=store.USAGE_FILE)
 
     with pytest.raises(store.StoreError, match="room storage is full"):
         store.append(tmp_path, "overflow", "bot", "hi")
 
     # The same equality on the growth half: at the budget a room gets its floor, not the
     # full ring, or "the budget bounds growth" is off by one byte.
-    (tmp_path / store.USAGE_FILE).write_text(str(used))
+    (tmp_path / store.USAGE_FILE).write_text(f"{count} {used}")
     assert store._ring_limit(tmp_path) == store.RESERVED_ROOM_BYTES
 
 
@@ -181,7 +188,7 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
     # shifts that produce it are one character from reporting megabytes as terabytes.
     monkeypatch.setattr(store, "MAX_ROOMS", 10_000)
     monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 3 << 20)
-    monkeypatch.setattr(store, "_scan", lambda *a, **k: (1, 5 << 20))  # 5 MiB on disk
+    store._write_note_count(tmp_path, 1, 5 << 20, name=store.USAGE_FILE)  # 5 MiB on disk
     with pytest.raises(store.StoreError, match="5 MiB of a 3 MiB budget"):
         store.append(tmp_path, "overflow", "bot", "hi")
 
@@ -943,6 +950,7 @@ def test_message_counter_survives_the_reaper(tmp_path):
 
     for i in range(3):
         store.append(tmp_path, "doomed", "bot", f"m{i}")
+    store._bump(tmp_path)  # a plain message rides in `_PENDING` until something flushes it
     assert store.counters(tmp_path)["messages"] == 3
 
     for room in ("doomed", "events"):
@@ -978,6 +986,7 @@ def test_message_counter_survives_compaction(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 1024)
     for i in range(60):
         store.append(tmp_path, "busy", "bot", f"message number {i} with some padding text")
+    store._bump(tmp_path)  # as above: flush before reading the counter, not after reaping
     on_disk = sum(1 for _ in store.room_path(tmp_path, "busy").open("rb"))
     assert on_disk < 60  # the ring dropped lines
     assert store.counters(tmp_path)["messages"] == 60  # the counter did not
@@ -1084,6 +1093,7 @@ def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_pa
     tail and reuses every other window from the memo — O(changed), not O(shown)."""
     import store
 
+    store._cached_window.cache_clear()  # module-level state; the counts below are exact
     store.append(tmp_path, "aaa", "bot", "one")
     store.append(tmp_path, "bbb", "bot", "two")
     calls = []
@@ -1103,10 +1113,15 @@ def test_room_windows_are_memoized_against_the_stat_the_walk_already_does(tmp_pa
     assert calls == ["aaa"], "only the changed room is re-read"
     assert {r["room"]: r["last_seq"] for r in view["rooms"]}["aaa"] == 2
 
-    monkeypatch.setattr(store, "_WINDOW_MEMO_MAX", 1)
+    held = store._cached_window.cache_info().currsize
     store.append(tmp_path, "aaa", "bot", "third-message")
     store.room_stats(tmp_path)
-    assert len(store._window_memo) == 1  # the bound holds under eviction
+    info = store._cached_window.cache_info()
+    # The stat is the key, so aaa's superseded window is not deleted when the room changes,
+    # it stops being asked for: the memo took the new stat and kept the old one, and maxsize
+    # is the only thing that ever reclaims it. tests/unit/test_memo_caches.py is where that
+    # bound is exercised past its limit, under threads.
+    assert (info.currsize, info.maxsize) == (held + 1, store._WINDOW_MEMO_MAX)
 
 
 def test_topic_previews_ride_the_notes_counter_not_only_a_clock(tmp_path):
@@ -1157,3 +1172,133 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert rec is not None and rec["from"] == did  # legal JSON, and it parses to the DID
     assert did.encode() not in room.read_bytes()  # but not present as itself, so:
     assert store._last_nonce(tmp_path, "lobby", did) is None
+
+
+def test_a_room_idle_for_exactly_the_threshold_is_not_reapable_yet(tmp_path):
+    """The retention promise is four comparisons, and this pins two of their boundaries.
+
+    `_age` asks callers for "the threshold plus a margin", so the thresholds themselves
+    were only ever tested from outside them: `>` and `>=` behaved identically for every
+    existing caller, and an off-by-one in a retention rule does not fail — it deletes a
+    day early or keeps data a week too long, and nobody finds out from a stack trace.
+    `_reapable` takes `now` as an argument, so the boundary is exact here, not raced.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_text('{"seq":1,"ts":"t","from":"a","text":"hi"}\n', encoding="utf-8")
+    mtime = os.stat(p).st_mtime
+
+    assert store._reapable(p, mtime + store.IDLE_SECONDS, stillborn_rule=False) is None
+    assert store._reapable(p, mtime + store.IDLE_SECONDS + 1, stillborn_rule=False) == "idle"
+
+    # The stillborn rule has its own threshold and the same boundary question. One record
+    # is at STILLBORN_MESSAGES, so this file qualifies on content and only the clock decides.
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS, stillborn_rule=True) is None
+    assert store._reapable(p, mtime + store.STILLBORN_SECONDS + 1, stillborn_rule=True) == (
+        "stillborn"
+    )
+
+
+def test_a_room_holding_undecodable_bytes_is_counted_not_crashed_on(tmp_path):
+    """ "An unreadable file is not stillborn" has to survive bytes that are not text.
+
+    _stillborn opens the file in binary and lets _parse refuse a line, which is what keeps
+    a torn write from either crashing the reaper or condemning a live room. Read as text
+    instead, the same file raises UnicodeDecodeError on iteration — a ValueError, which the
+    `except OSError` here does not catch — and the reaper dies on a room it was only
+    counting. Nothing exercised that: every room a test hands the reaper is valid UTF-8.
+    """
+    import store
+
+    p = tmp_path / "room.jsonl"
+    p.write_bytes(
+        b'{"seq":1,"ts":"t","from":"a","text":"one"}\n'
+        b"\xff\xfe not utf-8, a torn write at EOF\n"
+        b'{"seq":2,"ts":"t","from":"b","text":"two"}\n'
+    )
+    # Two real records is past STILLBORN_MESSAGES, so the room is answered, not stillborn —
+    # and reaching that answer at all is the half the binary mode buys.
+    assert store._stillborn(p) is False
+    assert store._reapable(p, os.stat(p).st_mtime, stillborn_rule=True) is None
+
+
+def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path):
+    """Retention is the byte budget, at every record size.
+
+    `COMPACT_MAX_LINES` sits beside the budget in `_compact`, and the comment on it says it
+    "only bounds how much the compactor holds in memory at once". A flat 5000 made that
+    false: it bound first for any record under ~1 KB, which is every ordinary message. A
+    full ring of ~81-byte records compacted to 5000 records / 400 KB — 7.6% of the floor
+    the ring model promises, with every `since=` cursor further back than 5000 losing
+    history the ring still owed it.
+
+    Deriving the cap from the budget restores the stated meaning: at the smallest record
+    the write path emits (~73 B) the byte budget always stops the scan first, so the count
+    can only ever bind on malformed input, which is the memory case it is for.
+
+    Asserted at the small end because that is the end that broke, and against `keep` rather
+    than a record count so it keeps holding if the record shape changes.
+    """
+    import json
+
+    import store
+
+    path = tmp_path / "small.jsonl"
+    record = {"seq": 0, "ts": "2026-08-27T00:00:00.000000Z", "from": "bot", "text": "hi"}
+    written = size = 0
+    with path.open("wb") as handle:  # built directly: 140k append() calls is not a unit test
+        while size <= store.MAX_ROOM_BYTES:
+            written += 1
+            record["seq"] = written
+            line = (json.dumps(record) + "\n").encode()
+            handle.write(line)
+            size += len(line)
+
+    store._compact(path, cutoff=None, keep=store.COMPACT_KEEP_BYTES)
+
+    data = path.read_bytes()
+    seqs = [json.loads(line)["seq"] for line in data.splitlines()]
+    # Within one record of the budget, not merely "more than the old cap".
+    assert len(data) > store.COMPACT_KEEP_BYTES - 200, (
+        f"retained {len(data)} of a {store.COMPACT_KEEP_BYTES} byte budget"
+    )
+    assert len(data) <= store.COMPACT_KEEP_BYTES
+    assert seqs == sorted(seqs), "compaction must leave the file ascending by seq"
+    assert seqs[-1] == written, "the newest record must survive compaction"
+
+
+def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
+    """The compaction check adds `size + len(line)` rather than stat()ing a file it has just
+    written while holding the room lock. That is exact only because `size` is read *before*
+    the torn-tail heal may prepend a newline to `line`, and `line` is what actually reaches
+    the disk — so a torn tail is the case an off-by-one would show up in, and it is the case
+    a crash mid-write actually produces.
+
+    Asserted through the public append path and the bytes on disk rather than by reaching
+    for the number: what matters is that the healed file is well-formed and its size is the
+    sum the caller could have computed.
+    """
+    import store
+
+    store.append(tmp_path, "torncalc", "bot", "first")
+    path = store.room_path(tmp_path, "torncalc")
+    with path.open("r+b") as f:  # a write cut short by a crash: the trailing newline is gone
+        f.truncate(path.stat().st_size - 1)
+
+    before = path.stat().st_size
+    store.append(tmp_path, "torncalc", "bot", "second")
+    after = path.stat().st_size
+
+    body = path.read_bytes()
+    assert body.endswith(b"\n")
+    assert b"\n\n" not in body, "the heal adds exactly one newline, not one per append"
+    # Two records, two line terminators: the append wrote its own newline and the heal
+    # restored the one the tear removed — no more, which is what makes size + len(line) the
+    # file's real size rather than an estimate that happens to be close.
+    assert body.count(b"\n") == 2
+    assert after == before + (len(body) - before)
+    assert after > before
+
+    texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
+    assert texts == ["first", "second"], "the healed record and the new one both survive"

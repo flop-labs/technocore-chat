@@ -6,6 +6,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `append(root: pathlib.Path, room: str, nick: str, text: str, did: str | None = None, nonce: int | None = None, sig: str | None = None) -> dict` — Append a message, and announce the room the first time it appears.
 - `clean_text(text: str, limit: int = 4096) -> str` — Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
 - `counters(root: pathlib.Path) -> dict` — The lifetime counters, with every key present. Read without the lock: the file is
+- `export_room(root: pathlib.Path, room: str) -> tuple[int, collections.abc.Iterator[bytes]]` — The room's stored JSONL, bytes as written, snapshotted at open — and the room
 - `is_ephemeral(name: str) -> bool` — (undocumented)
 - `is_mailbox(name: str) -> bool` — `mb-` rooms take signed writes only, so spam is attributable and ignorable by key.
 - `last_seq(root: pathlib.Path, room: str) -> int` — (undocumented)

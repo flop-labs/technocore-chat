@@ -47,6 +47,27 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
 - Removing dead code from core is a win on its own; open a pull request for it.
 
+## Overlapping work
+
+Several pull requests racing one issue cost more review than they save. Two checks are
+automated in `.github/workflows/queue-guard.yml`: a new pull request gets one comment listing
+open PRs that cite the same issues, and a *fork* PR touching `CHANGELOG.md` or
+`sz-baseline.json` — both maintainer-regenerated — fails. The file rule is the same either
+way; only the enforcement differs, because the check returns early for a branch in this
+repository and for OWNER/MEMBER/COLLABORATOR authors, which is where the release exception
+below lives. Do not read a green check as permission. What only you can do:
+
+- Verify claims against current `main`, not a cached copy of the source, and name the commit.
+- If an open PR already addresses the issue, review or build on it — with credit — rather than
+  filing a competitor. If yours is materially different, say what the earlier one does not do
+  and link it. Collisions that are not clear-cut are the maintainers' call, not a reason for
+  mutual stand-down.
+- Core size has two gates with different jobs. Pull requests run `sz.py --caps`, which enforces
+  the immutable policy ceilings without requiring a contributor to edit the protected
+  `sz-baseline.json`. Pushes to `main` run `sz.py --check`, so maintainers can regenerate the
+  ratchet after an approved change. A PR that grows core code therefore does not need to make a
+  protected-file edit just to obtain a green CI result.
+
 ## Tests and checks
 
 Run the same checks used by CI:
@@ -112,7 +133,9 @@ The public API is the HTTP surface: paths, response shapes, documented caps, and
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
 fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
 accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
-unless a maintainer asks.
+unless a maintainer asks — packaging a release is when they ask, and that pull request folds
+`[Unreleased]` into a dated section, because `release.yml` refuses to tag a version the changelog
+has no section for.
 
 The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
 version changes to a dedicated release change unless a maintainer asks otherwise.
@@ -150,6 +173,7 @@ In the pull request description:
 - Explain what changes for a caller and why the change is needed. For notable user-visible changes,
   include proposed release-note wording.
 - Link related issues and note dependencies on other open pull requests.
+- Name the `main` commit you verified the change against (see "Overlapping work").
 - Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
 - Call out documentation updates and compatibility implications.
 - Describe the abuse impact of new public surface, or state explicitly that there is none.
