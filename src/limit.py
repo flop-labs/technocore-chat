@@ -268,10 +268,10 @@ def client_ip(request: Request, ip_header: str = "") -> str:
         if forwarded:
             return forwarded
         return request.client.host if request.client else "?"
-    # Not configured to read one. Note whether the request looks proxied anyway, so a
-    # misconfiguration is visible in /stats instead of only in a support ticket.
-    if any(h in request.headers for h in PROXY_IP_HEADERS):
-        _proxy_evidence["proxied_requests"] += 1
+    # Not configured to read one. The proxied-request tally lives in take(), not here:
+    # one request asks for its own IP several times (take for its kind, take again through
+    # the room-creation gate, refund when it loses that race, _waiter_slot for a long poll),
+    # so counting here counted lookups and put the proxied share of traffic above 100%.
     return request.client.host if request.client else "?"
 
 
@@ -286,6 +286,14 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
     """
+    # Once per request: every request makes exactly one take that is not the room-creation
+    # gate. Walked at 019b57a: 13 `take(request` sites in app.py, twelve non-create and one
+    # per handler, the thirteenth the create gate (@zkasuran, #359). A future handler that
+    # takes twice outside the gate would resurrect the over-count this fixes.
+    # gate, and `ip_header` empty is the same "not configured to read one" case client_ip
+    # used to note. /stats publishes this as a count of requests (app.py, README).
+    if kind != "create" and not ip_header and any(h in request.headers for h in PROXY_IP_HEADERS):
+        _proxy_evidence["proxied_requests"] += 1
     ip = client_ip(request, ip_header)
     if len(_identities) < MAX_IDENTITIES:
         _identities.add(ip)
@@ -452,7 +460,8 @@ def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:
 
     A sibling of `budget_note` on the same seam, but the fact is not `text/plain` only —
     `?format=json` carries the same verdict as the view's `wait_held`. `ip` is passed in
-    because `client_ip` counts proxy evidence as a side effect.
+    rather than re-derived because the caller already has it; `client_ip` no longer counts
+    proxy evidence, so calling it twice is now merely wasteful rather than wrong.
     """
     mine = _waiters_by_ip.get(ip, 0)
     cause = (

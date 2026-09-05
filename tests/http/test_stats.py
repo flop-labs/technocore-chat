@@ -171,3 +171,44 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
         second = stats_client.get("/stats", headers=headers)
         assert first.status_code == second.status_code == 200
         assert calls == [1]
+
+
+def test_the_proxy_counter_counts_requests_not_ip_lookups(stats_client):
+    """`proxied_requests_ignored` is published as a count of *requests* — src/limit.py, the
+    /stats prose in app.py and the README all say so, and an operator reads it beside
+    `requests.*` to get the proxied share of traffic.
+
+    A single request asks for its own IP more than once, though: `take()` for its own kind,
+    `take()` again through the room-creation gate, `refund()` if it loses that race, and
+    `_waiter_slot` for a long poll. Counting inside `client_ip()` therefore counted lookups,
+    and a room-creating write scored 2 against `requests.write` of 1 — a proxied share above
+    100%. The exact numbers are the assertion: the pre-existing test above uses `>=`, which
+    is why this went unseen.
+    """
+    import app as app_module
+
+    cdn = {"CF-Connecting-IP": "203.0.113.7"}
+    token = {"X-Stats-Token": "s3cret"}
+
+    def proxied():
+        return stats_client.get("/stats", headers=token).json()["client_identity"][
+            "proxied_requests_ignored"
+        ]
+
+    # A write to a room that does not exist: charges the write bucket *and* the create gate.
+    app_module._proxy_evidence["proxied_requests"] = 0
+    assert (
+        stats_client.get("/r/freshroom/say/bob/hello%20there%20everyone", headers=cdn).status_code
+        == 200
+    )
+    assert proxied() == 1
+
+    # A long poll: the read bucket, then the waiter slot.
+    app_module._proxy_evidence["proxied_requests"] = 0
+    stats_client.get("/r/freshroom?since=1&wait=1", headers=cdn)
+    assert proxied() == 1
+
+    # And a caller with no CDN header still contributes nothing.
+    app_module._proxy_evidence["proxied_requests"] = 0
+    stats_client.get("/r/freshroom/say/bob/a%20second%20message%20here")
+    assert proxied() == 0

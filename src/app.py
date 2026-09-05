@@ -1058,7 +1058,7 @@ async def _await_messages(
     lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
     reader consumes each byte, so N-1 workers miss it).
     """
-    ip = client_ip(request)  # once: client_ip counts proxy evidence as a side effect
+    ip = client_ip(request)  # once, and reused below: this lane takes no bucket of its own
     with _waiter_slot(ip) as granted:
         if not granted:
             return None, waiter_note(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP, wait)
