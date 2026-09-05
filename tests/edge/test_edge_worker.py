@@ -388,6 +388,16 @@ def test_a_head_request_can_never_become_the_stored_body():
     )
 
 
+def test_a_revalidation_fetch_bypasses_cloudflares_http_cache():
+    """The Cache API copy is the stale answer, not a source for its own refresh."""
+    origin = _between(
+        (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),
+        "async function fromOrigin(",
+        "function fill(",
+    )
+    assert 'cache: "no-store"' in origin
+
+
 def test_the_snapshot_script_needs_nothing_but_the_standard_library():
     """deploy.sh runs it as `python3 snapshot.py`, not through uv. An import of the service's
     own modules drags the whole dependency chain in with it and the deploy dies at the
