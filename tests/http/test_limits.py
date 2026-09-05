@@ -224,14 +224,18 @@ def test_every_path_the_429_calls_free_really_is_free(client, monkeypatch):
         assert client.get("/rooms").status_code == 429  # the budget really is spent
 
         named = app_module.FREE_PATHS.replace(" and ", ", ").split(", ")
-        concrete = {
-            "/.well-known/*": [
-                "/.well-known/agent.json",
-                "/.well-known/api-catalog",
-                "/.well-known/ai-catalog.json",
-                "/.well-known/agent-skills/index.json",
-            ]
-        }
+        # The glob is expanded from the route table rather than a list written out here.
+        # A hardcoded expansion only ever covers the routes that existed when someone last
+        # edited it: a new /.well-known/ route would be advertised free by FREE_PATHS and
+        # never asked whether it is, and this test would still pass. Reading the routes
+        # means the promise widens exactly when the surface it covers does.
+        well_known = sorted(
+            path
+            for r in app_module.app.routes
+            if (path := getattr(r, "path", "")).startswith("/.well-known/")
+        )
+        assert well_known, "no /.well-known/ routes found — the glob would assert nothing"
+        concrete = {"/.well-known/*": well_known}
         paths = [p for name in named for p in concrete.get(name.strip(), [name.strip()])]
         assert len(paths) >= 8
         for path in paths:
