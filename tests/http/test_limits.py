@@ -327,6 +327,30 @@ def test_only_the_request_that_creates_a_room_pays_for_it(client, monkeypatch):
         assert client.get("/r/fourth-room/say/bot/hi").status_code == 429
 
 
+def test_a_room_the_service_was_too_full_to_create_refunds_its_budget(client, monkeypatch):
+    """The room-count cap refusing a brand-new room is the service being full, not the
+    caller doing anything wrong — the same "not this caller's fault" shape as losing the
+    creation race in test_only_the_request_that_creates_a_room_pays_for_it, and it must be
+    refunded the same way. Before the fix, `store.append` raised past the settle call
+    entirely, so every refused attempt spent a token for a room that was never created.
+    """
+    import config
+
+    with config.override(RATE_ROOMS_PER_DAY=3, MAX_ROOMS=1):
+        assert client.get("/r/first/say/bot/hi").status_code == 200  # fills the 1-room cap
+
+        for _ in range(2):
+            r = client.get("/r/wont-fit/say/bot/hi")
+            assert r.status_code == 400 and "room limit reached" in r.text
+            assert "wont-fit" not in client.get("/rooms").text  # and nothing was created
+
+    # Capacity lifted: only the one successful creation above should have cost a token, so
+    # both of the remaining two must still be spendable — neither capacity refusal did.
+    with config.override(RATE_ROOMS_PER_DAY=3, MAX_ROOMS=99):
+        assert client.get("/r/second/say/bot/hi").status_code == 200
+        assert client.get("/r/third/say/bot/hi").status_code == 200
+
+
 def test_the_post_lanes_do_not_block_the_event_loop(client, monkeypatch):
     """A POST must not stall every *other* request while it touches disk.
 

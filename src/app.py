@@ -2005,7 +2005,10 @@ async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
 
 
 async def on_bad_input(request: Request, exc: Exception) -> Response:
-    return text(f"400 {exc}", 400)
+    """400 for a malformed or refused write. limit.on_bad_input also settles the room-
+    creation budget — see its docstring; the knobs are read here and passed in for the
+    same reason limited() takes text= and max_wait= instead of importing app."""
+    return limit.on_bad_input(request, exc, text, RATE_ROOMS_PER_DAY, CLIENT_IP_HEADER)
 
 
 async def on_conflict(request: Request, exc: Exception) -> Response:
