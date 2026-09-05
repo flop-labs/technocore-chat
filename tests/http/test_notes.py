@@ -225,15 +225,14 @@ def test_a_replayed_signed_url_is_refused_while_the_message_is_still_there(clien
     assert client.get("/r/lobby?format=json").json()["count"] == 2
 
 
-def test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail(client, tmp_path):
-    """The far side of test_a_replayed_signed_url_is_refused_while_the_message_is_still_there.
+def test_a_replay_is_refused_while_the_original_signed_record_is_physically_retained(
+    client, tmp_path
+):
+    """Replay authority follows physical room retention, not only the newest READ_BUDGET bytes.
 
-    `_last_nonce` scans the newest READ_BUDGET bytes of tail for the DID, and its
-    docstring is explicit that the bound is the retention model working as designed:
-    once newer traffic buries the record past that tail, the same signed URL is
-    accepted again, even while the record remains in the room ring. That boundary was
-    stated in prose only - pin it, so a change that moves it (record-size growth such
-    as the `sig` field, a budget change) fails here instead of shipping silently.
+    Newer traffic may bury a signed record beyond the ordinary tail-read budget while that
+    record still exists in the room ring. The captured signed URL must remain single-use for
+    as long as that authoritative record is physically retained.
     """
     import orjson
 
@@ -242,24 +241,116 @@ def test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail(
     did, sign = _keypair()
     url = f"/r/lobby/say-signed/{did}/{sign('lobby|7|once')}/7/once"
     assert client.get(url).status_code == 200
+
     path = store.room_path(tmp_path, "lobby")
     original = path.read_bytes()
+
     seq = 2
     with path.open("ab") as f:
         written = 0
         while written < store.READ_BUDGET + 65536:
             line = (
-                orjson.dumps({"seq": seq, "ts": store._now(), "from": "~bury", "text": "x" * 200})
+                orjson.dumps(
+                    {
+                        "seq": seq,
+                        "ts": store._now(),
+                        "from": "~bury",
+                        "text": "x" * 200,
+                    }
+                )
                 + b"\n"
             )
             f.write(line)
             written += len(line)
             seq += 1
+
+    before = path.read_bytes()
+    before_seq = store.last_seq(tmp_path, "lobby")
+
     assert path.stat().st_size > store.READ_BUDGET
-    r = client.get(url)
-    assert r.status_code == 200
-    # buried past the scan tail, not reaped: the original record is still in the ring
-    assert path.read_bytes().startswith(original)
+    assert path.stat().st_size < store.MAX_ROOM_BYTES
+    assert before.startswith(original)
+
+    replay = client.get(url)
+
+    assert replay.status_code == 400
+    assert "not greater than 7" in replay.text
+    assert path.read_bytes() == before
+    assert store.last_seq(tmp_path, "lobby") == before_seq
+
+
+def test_replay_authority_survives_compaction_and_ends_when_the_record_is_removed(
+    client, tmp_path, monkeypatch
+):
+    """A nonce stays spent exactly as long as its signed room record is retained."""
+    import orjson
+
+    import store
+
+    cap = 8192
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", cap)
+
+    room = "replay-compact"
+    path = store.room_path(tmp_path, room)
+
+    while not path.exists() or path.stat().st_size < cap - 2500:
+        store.append(tmp_path, room, "bury", "x" * 300)
+
+    did, sign = _keypair()
+    url = f"/r/{room}/say-signed/{did}/{sign(f'{room}|7|once')}/7/once"
+    assert client.get(url).status_code == 200
+
+    store.append(tmp_path, room, "bury", "x" * 3000)
+
+    def retained_records():
+        return [orjson.loads(line) for line in path.read_bytes().splitlines()]
+
+    records = retained_records()
+    assert records[0]["seq"] > 1, "the room must actually have compacted"
+    assert any(r.get("from") == did and r.get("nonce") == 7 for r in records)
+
+    replay = client.get(url)
+    assert replay.status_code == 400
+    assert "not greater than 7" in replay.text
+
+    for _ in range(6):
+        if not any(r.get("from") == did and r.get("nonce") == 7 for r in retained_records()):
+            break
+        store.append(tmp_path, room, "bury", "x" * 3000)
+
+    records = retained_records()
+    assert not any(r.get("from") == did and r.get("nonce") == 7 for r in records)
+
+    replay_after_removal = client.get(url)
+    assert replay_after_removal.status_code == 200
+
+
+def test_ephemeral_replay_authority_follows_physical_not_visible_retention(
+    client, tmp_path, monkeypatch
+):
+    """TTL may hide a signed record before physical retention forgets its nonce."""
+    import store
+
+    room = "e-replay-retention"
+    did, sign = _keypair()
+    url = f"/r/{room}/say-signed/{did}/{sign(f'{room}|7|once')}/7/once"
+
+    real_now = store._now
+    monkeypatch.setattr(store, "_now", lambda: "2020-01-01T00:00:00.000000Z")
+    assert client.get(url).status_code == 200
+    monkeypatch.setattr(store, "_now", real_now)
+
+    path = store.room_path(tmp_path, room)
+    view = client.get(f"/r/{room}?format=json").json()
+
+    assert view["messages"] == []
+    raw = path.read_bytes()
+    assert did.encode() in raw
+    assert b'"nonce":7' in raw
+
+    replay = client.get(url)
+    assert replay.status_code == 400
+    assert "not greater than 7" in replay.text
 
 
 def test_a_did_quoted_in_another_agents_text_is_not_that_agents_nonce(client):

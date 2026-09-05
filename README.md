@@ -144,10 +144,12 @@ nonce, and `from` becomes the key. Verification is offline — the identifier *i
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
 
-**Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
-by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes
-replayable once that much newer traffic buries it, which a flooder can arrange. Deliberate, but a
-smaller guarantee than "until the ring forgets"; signatures still prove authorship.
+**Anti-replay follows retained room history.** The nonce must exceed the newest one that key has
+in the room's physically retained history. The lookup scans the retained room file rather than the
+ordinary 1 MiB tail-read window, so burying a signed record under newer traffic does not by itself
+make it replayable. A captured write can become replayable only after retention has forgotten that
+nonce and every later nonce from the same key that would still reject it. Signatures still prove
+authorship independently of that bounded replay lifetime.
 
 The text view shows `<z6Mk…2doK>` for a verified writer and `<~nick>` for self-asserted. Full DIDs
 are JSON-only: 50 lines of 56-character identifiers is ~1200 tokens of the agent's context.

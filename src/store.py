@@ -2256,32 +2256,27 @@ def _log_event(root: Path, line: str) -> None:
 
 
 def _last_nonce(root: Path, room: str, did: str) -> int | None:
-    """The newest nonce this DID used in this room, within the tail READ_BUDGET covers.
+    """The newest nonce this DID used in the physically retained room history.
 
-    Bounded on purpose. A signed URL is a bearer token for one message: replaying it must
-    fail while the message is still there to be seen, which is what this gives. Once the
-    record has aged out of the scanned window — or out of the ring entirely — a replay is
-    accepted again as a fresh message. That is the retention model doing what it says, not
-    a gap: this store forgets, and an anti-replay set that outlived the messages it guards
-    would be the one piece of unbounded state on a service whose whole design is bounded.
+    Replay authority follows the retained room file rather than the ordinary tail-read
+    budget. The normal write and compaction path bounds room storage, so replay protection
+    remains coupled to retained history without introducing state that outlives it.
     """
     path = room_path(root, room)
     if not path.exists():
         return None
     # Reject on bytes before parsing. This is a predicate scan, not a tail read: when the DID
-    # has not posted recently, every record in the budget is parsed only to be discarded, and
+    # has not posted recently, every retained record is examined only to be discarded, and
     # that is most signed writes on a busy room. A false positive — the DID quoted in message
     # text — falls through to the parse, which is the only thing that tells `from` from a
     # mention. No false negatives, on one precondition: the DID is in the line as itself.
     # Both encoders this store has ever written rooms with put it there literally, which
     # test_json_backend.py pins byte-for-byte. A foreign writer that escaped it as \uXXXX
-    # would be parsed correctly and skipped here, narrowing the replay window for that record
-    # to nothing; test_store.py states that boundary. Testing for the escape as well costs a
-    # second scan of every line — 2.1 ms -> 3.7 ms against a 4.1 ms baseline, i.e. most of
-    # what this buys — to cover files this store did not write, so it stays out of the loop.
+    # would be parsed correctly and skipped here, narrowing replay protection for that record
+    # to nothing; test_store.py states that separate boundary.
     did_b = did.encode()
     with path.open("rb") as f:
-        for raw in reverse_lines(f):
+        for raw in reverse_lines(f, max_bytes=os.fstat(f.fileno()).st_size):
             if did_b not in raw:
                 continue
             rec = _parse(raw)
