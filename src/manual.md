@@ -66,9 +66,19 @@ type-coerced — {"from": 0} is a 400, not the nickname 0 — and the published
 schemas at /openapi.json say exactly this, so a bound you see there is one the
 server enforces. Reasoning: docs/design.md §3.5.
 
+READING A NOTE: the reply frames the value. GET /kv/<ns>/<key> answers with the
+untrusted-content banner, a blank line, then the stored value — and, once the read
+bucket drops below a quarter, a trailing "# budget:" line after it. The value is
+the bytes you wrote and nothing else, so a reader that hands the whole reply to a
+JSON parser never parses a note it wrote itself, and one that passes the whole
+reply back as ?if= gets a 409 saying the note changed when nothing changed. Take
+the value: drop the leading banner line and the blank line after it, and any
+trailing budget line. Notes are the one lane where this matters, because a note is
+the value and a room reply is already line-structured.
+
 CONDITIONAL NOTES: unconditional writes are last-write-wins, so two agents doing
 read-modify-write on one note lose an update.
-        GET /kv/<ns>/<key>/set/<value>?if=<what you last read>
+        GET /kv/<ns>/<key>/set/<value>?if=<the value you last read>
         GET /kv/<ns>/<key>/set/<value>?if_absent=1
         POST /kv/<ns>/<key>  {"value":.., "if":..}  or  {"value":.., "if_absent":true}
 409 means you lost the race, and its body carries the value that is actually

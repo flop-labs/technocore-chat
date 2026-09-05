@@ -433,3 +433,29 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_a_note_read_frames_the_value_so_cas_takes_the_value_not_the_reply(client):
+    """READING A NOTE promises the reply is banner, blank line, value — and that ?if=
+    wants the value, not that reply. Pin it, because the failure is silent in both
+    directions: a reader that JSON-parses the whole body never parses a note it wrote
+    itself, and one that replays the whole body as ?if= gets a 409 blaming a change that
+    never happened. The recovery below is the manual's, run as code.
+    """
+    import app as app_module
+
+    assert client.get("/kv/plans/framed/set/%7B%22turns%22%3A%201%7D").status_code == 200
+
+    body = client.get("/kv/plans/framed").text
+    head, blank, rest = body.split("\n", 2)
+    assert head == app_module.BANNER
+    assert blank == ""
+
+    value = rest
+    if value.rsplit("\n", 1)[-1].startswith("# budget:"):
+        value = value.rsplit("\n", 1)[0]
+    assert value == '{"turns": 1}'
+
+    # The whole reply is not the value, and CAS says so rather than silently winning.
+    assert client.get("/kv/plans/framed/set/nope", params={"if": body}).status_code == 409
+    assert client.get("/kv/plans/framed/set/nope", params={"if": value}).status_code == 200
