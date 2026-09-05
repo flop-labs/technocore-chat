@@ -1,0 +1,5 @@
+node_modules/
+private-key.json
+nonce-state.json
+nonce-state.json.tmp
+.env
