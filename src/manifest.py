@@ -274,6 +274,95 @@ _ROOM_VIEW_SCHEMA = {
     "required": ["room", "count", "last_seq", "messages"],
 }
 
+_ROOM_LISTING_SCHEMA = {
+    "type": "object",
+    "description": "One listed public room and its bounded-window measurements.",
+    "properties": {
+        "room": {"type": "string", "description": "Public room name."},
+        "last_seq": {"type": "integer", "description": "Newest sequence number in the room."},
+        "bytes": {"type": "integer", "description": "Current JSONL size of the room in bytes."},
+        "idle_seconds": {
+            "type": "integer",
+            "description": "Whole seconds since the room's last write when measured.",
+        },
+        "topic": {
+            "type": ["string", "null"],
+            "description": "The caller-controlled topic note, or null when none is set.",
+        },
+        "window": {
+            "type": "integer",
+            "description": "Number of messages scanned for this room's engagement ratios.",
+        },
+        "zero_response_share": {
+            "type": ["number", "null"],
+            "description": "Fraction of the scanned window with no later message from a different nickname; null when empty.",
+        },
+        "nick_diversity": {
+            "type": ["number", "null"],
+            "description": "Distinct nicknames divided by messages in this room's scanned window; null when empty.",
+        },
+    },
+    "required": [
+        "room",
+        "last_seq",
+        "bytes",
+        "idle_seconds",
+        "topic",
+        "window",
+        "zero_response_share",
+        "nick_diversity",
+    ],
+}
+
+_ROOM_NOTES_SCHEMA = {
+    "type": "object",
+    "description": "Service-wide note occupancy; namespaces are intentionally not listed.",
+    "properties": {
+        "total": {"type": "integer", "description": "Current number of stored notes."},
+        "bytes": {"type": "integer", "description": "Current total note storage in bytes."},
+        "capacity": {"type": "integer", "description": "Global note-count cap."},
+        "capacity_per_namespace": {
+            "type": "integer",
+            "description": "Maximum notes in one namespace.",
+        },
+    },
+    "required": ["total", "bytes", "capacity", "capacity_per_namespace"],
+}
+
+_ROOM_ENGAGEMENT_SCHEMA = {
+    "type": "object",
+    "description": "Engagement measurements over the listed rooms returned by this request. The selected rooms are newest-first and depend on `limit`; these values are not a service-wide census.",
+    "properties": {
+        "window_cap": {
+            "type": "integer",
+            "description": "Maximum messages scanned per listed room.",
+        },
+        "windowed_messages": {
+            "type": "integer",
+            "description": "Total messages scanned across the listed rooms' windows.",
+        },
+        "zero_response_share": {
+            "type": ["number", "null"],
+            "description": "Pooled zero-response share across the listed rooms' scanned windows; null when no messages were scanned.",
+        },
+        "nick_diversity": {
+            "type": ["number", "null"],
+            "description": "Distinct nicknames divided by scanned messages across the listed rooms; null when no messages were scanned.",
+        },
+        "windowed_note_to_message_ratio": {
+            "type": ["number", "null"],
+            "description": "Service-wide note count divided by `windowed_messages` from this request; it is therefore not a same-scope ratio and changes with `limit`. Null when no messages were scanned.",
+        },
+    },
+    "required": [
+        "window_cap",
+        "windowed_messages",
+        "zero_response_share",
+        "nick_diversity",
+        "windowed_note_to_message_ratio",
+    ],
+}
+
 
 # The room POST body. Hoisted because `/r/events` is parsed with exactly this one before it
 # is refused, so documenting the refusal without the body would describe a lane that reads
@@ -845,12 +934,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             {
                                 "type": "object",
                                 "properties": {
-                                    "rooms": {"type": "array", "items": {"type": "object"}},
+                                    "rooms": {"type": "array", "items": _ROOM_LISTING_SCHEMA},
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
-                                    "notes": {"type": "object"},
-                                    "engagement": {"type": "object"},
+                                    "notes": _ROOM_NOTES_SCHEMA,
+                                    "engagement": _ROOM_ENGAGEMENT_SCHEMA,
                                     "untrusted": {
                                         "type": "object",
                                         "description": (
