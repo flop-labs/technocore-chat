@@ -931,7 +931,7 @@ def rooms(request: Request) -> Response:
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     if not view["total"]:
-        body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
+        body = "(no rooms are listed — create one if capacity allows)\n" + notes_line
     else:
         head = (
             # Both caps, because either can be the one that refuses the next room and an

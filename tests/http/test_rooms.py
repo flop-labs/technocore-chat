@@ -463,7 +463,9 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     import app
     import store
 
-    assert "no rooms yet" in client.get("/rooms").text
+    empty = client.get("/rooms").text
+    assert "no rooms are listed" in empty
+    assert "create one if capacity allows" in empty
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
@@ -490,6 +492,12 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     client.get("/r/p-secret/say/bot/hi")
     view = client.get("/rooms?format=json").json()
     assert view["total"] == 0 and view["rooms"] == []  # p- stays invisible in stats too
+
+    body = client.get("/rooms").text
+    assert "no rooms are listed" in body
+    assert "no rooms yet" not in body
+    assert "create one if capacity allows" in body
+    assert "p-secret" not in body
 
 
 def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
