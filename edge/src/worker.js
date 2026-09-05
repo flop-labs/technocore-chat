@@ -234,7 +234,17 @@ async function revalidating(request, ctx, pathname, seconds) {
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await route(request, env, ctx);
+      const response = await route(request, env, ctx);
+      // One place, for every lane: stored() and revalidating() both build their reply from
+      // a GET regardless of the caller's own method, because the shared/stored copy is
+      // always a GET's — see test_a_head_request_can_never_become_the_stored_body for the
+      // half of this that protects the cache itself. This is the other half: a HEAD caller
+      // must never receive that GET's body back, which every lane above this line would
+      // otherwise do, since none of them checks the method on the way out.
+      if (request.method === "HEAD") {
+        return new Response(null, { status: response.status, headers: response.headers });
+      }
+      return response;
     } catch (err) {
       // Fail open. This Worker sits in front of the liveness endpoint now, so an exception
       // in it must not become the service looking dead: hand the request to the origin and
