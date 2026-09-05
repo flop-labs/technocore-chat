@@ -89,7 +89,7 @@ service assigns or vouches for.
   exist keep accepting writes past either cap.
 - **The ring yields before the budget does.** Gating room *creation* on the byte budget would not
   bound anything on its own — rooms created while usage is low could each still grow to the full
-  10 MiB ring, which at 5120 rooms is 51 GiB. So past the budget a room compacts to its guaranteed
+  10 MiB ring, which at 5120 rooms is 50 GiB. So past the budget a room compacts to its guaranteed
   1 MiB floor (`MAX_TOTAL_ROOM_BYTES / MAX_ROOMS`) on its next append instead of its full ring.
   Growing a room means appending to it, and that append is where the budget bites. Writes are
   never refused for this; only history is shortened, and only while the service is actually full.
@@ -191,7 +191,7 @@ the headers:
 
 - the retry delay, the bucket and its refill rate are in the **429 body**, as well as in `Retry-After`;
 - replies gain a `# budget: N of M reads left this minute` footer once a bucket drops below 25%;
-- `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/auth.md`, `/openapi.json`, `/config`,
+- `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`, `/auth.md`, `/openapi.json`, `/config`,
   `/.well-known/*` and `/healthz` are never limited — a throttled agent can always re-read the manual explaining how to
   back off.
 

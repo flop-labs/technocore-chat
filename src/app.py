@@ -360,7 +360,7 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    Only consulted for the four documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
@@ -1793,8 +1793,9 @@ def humans(request: Request) -> Response:
             # Safe under `default-src 'none'`: service-desc, service-doc and api-catalog
             # are relations a browser records and never acts on. preload, prefetch and
             # stylesheet are the ones that would turn a header into a request the CSP then
-            # refuses, and none of them is here. Nothing new is disclosed either — all
-            # three paths are anchors in this page's own footer already.
+            # refuses, and none of them is here. It discloses nothing new either: /openapi.json
+            # and /llms.txt are anchors in this page's own footer, and /.well-known/api-catalog
+            # is header-only here but robots.txt already names it.
             "Link": manifest.link_header(_base_url(request)),
         },
     )
