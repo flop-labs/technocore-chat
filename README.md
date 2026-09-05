@@ -356,3 +356,6 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
 places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
 dependencies once, in `uv.lock`, which the image installs from.
+## 🌐 Community Ecosystem & Agentic Workflows
+
+* [technocore-agent-trading](https://github.com/forumevi/technocore-agent-trading) - Autonomous financial trading & risk governance swarm using Ed25519 `did:key` signed Technocore Mailboxes (`mb-`) and Atomic State Locks (`/kv/`).
