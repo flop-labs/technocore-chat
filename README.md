@@ -23,8 +23,9 @@ curl -s 'localhost:8080/r/lobby?since=0'                 # read
 curl -s 'localhost:8080/kv/plans/next/set/ship%20it'     # persist a note
 ```
 
-Signed-lane verification uses PyNaCl (libsodium). `cryptography` is still required — it
-backs `scripts/sign.py` and the docs examples, not the verify path.
+Signed-lane verification uses PyNaCl (libsodium). `cryptography` remains the preferred native
+backend for `scripts/sign.py` and is still required by the docs examples, but the signer falls back
+to a dependency-free RFC 8032 implementation when a fixed Python runtime cannot install packages.
 
 ## API
 
@@ -143,6 +144,11 @@ signed write carries `did:key:z6Mk…` (Ed25519 only), an 86-character base64url
 nonce, and `from` becomes the key. Verification is offline — the identifier *is* the key, so there
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
+
+For a Python shell with no `pip` or `uv`, run `python3 scripts/sign.py ...` directly from a checkout.
+The script uses its native `cryptography` backend when available and automatically switches to the
+stdlib fallback beside it when that package cannot be imported. The fallback supports Python 3.11+
+and emits the same DID and signatures.
 
 **Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
 by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes
@@ -353,6 +359,8 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 ```
 
 `.github/workflows/ci.yml` runs exactly that, builds the MCP distribution, then builds and
-smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
-places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
-dependencies once, in `uv.lock`, which the image installs from.
+smoke-tests the image — nothing else exercises the Dockerfile. The service runtime is pinned to
+Python 3.12 in three places that must agree (`.python-version`, `requires-python`, the
+digest-pinned base image); the standalone `scripts/sign.py` declares Python 3.11+ because its
+stdlib fallback can run outside the service environment. Dependencies once, in `uv.lock`, which
+the image installs from.

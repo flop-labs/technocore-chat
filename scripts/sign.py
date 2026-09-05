@@ -1,12 +1,15 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = ["cryptography"]
 # ///
 """A minimal Ed25519 did:key signer for technocore-chat's signed lane.
 
 Standalone on purpose: 'uv run scripts/sign.py ...' provisions its own
 cryptography dependency from the PEP 723 header above, so a human or an agent
-can drive the signed lane with no checkout, no venv and no test suite.
+can drive the signed lane with no checkout, no venv and no test suite. If a
+fixed Python runtime cannot install packages, invoke 'python3 scripts/sign.py
+...' directly; the dependency-free RFC 8032 backend beside this file takes
+over automatically when cryptography cannot be imported.
 
 The whole point of this file is the canonical string. The server verifies a
 signature over exactly what it stores:
@@ -23,7 +26,7 @@ be re-verified later against the bytes on disk.
 Key material comes from --seed or $SIGN_SEED:
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
   * anything else       -> SHA-256 of it (so a passphrase works; weaker than
-                           randomness, fine for a demo, not for a identity you
+                           randomness, fine for a demo, not for an identity you
                            care about)
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
@@ -53,16 +56,29 @@ import os
 import re
 import secrets
 import unicodedata
+from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey as _CryptoPrivateKey,
+    )
+except BaseException as exc:  # noqa: BLE001 - broken pyo3 wheels can raise outside Exception
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+        raise
+    _CryptoPrivateKey = None
+
+if __package__:
+    from .stdlib_ed25519 import Ed25519PrivateKey as _StdlibPrivateKey
+else:
+    from stdlib_ed25519 import Ed25519PrivateKey as _StdlibPrivateKey
 
 PREFIX = "did:key:z6Mk"  # multibase 'z' + the fixed ed25519-pub prefix base58-encodes to z6Mk
 MULTICODEC_ED25519 = b"\xed\x01"  # varint ed25519-pub, the two bytes every z6Mk key decodes from
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-# The sweep, mirrored from src/store.py clean_text: these are the categories it
+# The sweep is mirrored from src/store.py clean_text: these are the categories it
 # replaces with a space. Kept in step with the server, not imported from it —
-# this script must run with only 'cryptography' beside it.
+# this script must run with only cryptography or its sibling stdlib backend.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 MAX_TEXT_CHARS = 4096  # messages
@@ -100,21 +116,32 @@ def multibase(raw: bytes) -> str:
     return out
 
 
-def load_key(seed_arg: str | None) -> tuple[Ed25519PrivateKey, str]:
+def _new_key(seed: bytes) -> Any:
+    """Prefer native Ed25519, falling back when its wheel cannot load or construct."""
+    if _CryptoPrivateKey is not None:
+        try:
+            return _CryptoPrivateKey.from_private_bytes(seed)
+        except BaseException as exc:  # noqa: BLE001 - broken pyo3 wheels can fail this way too
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+    return _StdlibPrivateKey.from_private_bytes(seed)
+
+
+def load_key(seed_arg: str | None) -> tuple[Any, str]:
     """The Ed25519 key for --seed / $SIGN_SEED, plus a human-readable provenance."""
     given = seed_arg or os.environ.get("SIGN_SEED")
     if given is None:
         raise SystemExit("no key: pass --seed <hex|passphrase> or set $SIGN_SEED")
     if len(given) == 64:
         try:
-            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), given
+            return _new_key(bytes.fromhex(given)), given
         except ValueError:
             pass  # 64 chars but not hex — fall through and hash it like any passphrase
     digest = hashlib.sha256(given.encode()).hexdigest()
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({given!r})"
+    return _new_key(bytes.fromhex(digest)), f"sha256({given!r})"
 
 
-def did_of(key: Ed25519PrivateKey) -> str:
+def did_of(key: Any) -> str:
     raw = key.public_key().public_bytes_raw()
     mb = "z" + multibase(MULTICODEC_ED25519 + raw)  # multibase tag + base58btc; fixed 'z6Mk' head
     if len(mb) != 48:  # 2 codec bytes + 32 key bytes base58-encode to 48 chars, always
@@ -122,7 +149,7 @@ def did_of(key: Ed25519PrivateKey) -> str:
     return "did:key:" + mb
 
 
-def signature(key: Ed25519PrivateKey, message: str) -> str:
+def signature(key: Any, message: str) -> str:
     """86 unpadded base64url characters, the encoding the server's SIG_RE expects."""
     raw = key.sign(message.encode("utf-8"))
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -157,7 +184,7 @@ def main() -> None:
 
     if args.cmd == "keygen":
         seed = secrets.token_hex(32)
-        key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
+        key = _new_key(bytes.fromhex(seed))
         print(f"seed: {seed}")
         print(f"did:  {did_of(key)}")
         return
