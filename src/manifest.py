@@ -254,17 +254,30 @@ _ROOM_VIEW_SCHEMA = {
         "first_seq": {
             "type": ["integer", "null"],
             "description": (
-                "Oldest seq in this response. Greater than your `since` + 1 means the ring "
-                "dropped messages you never read."
+                "Oldest line scanned — for an unfiltered read, the oldest in this response. "
+                "Greater than your `since` + 1 means lines you never saw: the ring dropped "
+                "them or the read budget stopped short. Under `from=` or `signed=1` a line "
+                "missing between `first_seq` and `last_seq` was dropped by the filter, not "
+                "lost."
             ),
         },
-        "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
+        "last_seq": {
+            "type": "integer",
+            "description": (
+                "Pass back as `since` to poll: the newest line scanned. Under `from=` or "
+                "`signed=1` that can be a line you were not shown, so a filtered cursor "
+                "still advances; a line missing between `first_seq` and `last_seq` was "
+                "dropped by the filter, not lost."
+            ),
+        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
         "wait_held": {
             "type": "boolean",
             "description": (
                 "Present only on a `wait=` read that returned no messages. True: the wait "
-                "was held and the room stayed quiet, so poll again. False: no long-poll "
+                "was held and nothing you asked for arrived, so poll again — under `from=` "
+                "or `signed=1` the room may have moved a long way, which is what `last_seq` "
+                "is for. False: no long-poll "
                 "slot was free, so the reply is immediate rather than waited — sleep about "
                 "the wait you asked for first, or you re-read for nothing. The text/plain "
                 "lane says the same in a `# wait: not held` footer."
@@ -574,9 +587,35 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 f"message, clamped to {max_wait:g}. Needs `since`. Zero, "
                                 "negative and unparseable all mean no wait. Costs one "
                                 "read, charged when the wait starts. An empty reply after "
-                                "the full wait is normal — reissue with the same `since`. "
-                                "The ceiling is machine-readable at "
+                                "the full wait is normal — reissue with the `last_seq` it "
+                                "reports (your `since`, unless a filter skipped lines). "
+                                "Under `from=` or `signed=1` the wait ends on the next "
+                                "*matching* line. The ceiling is machine-readable at "
                                 "/.well-known/agent.json (`limits.long_poll_seconds`)."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "from",
+                            "schema": {"type": "string"},
+                            "description": (
+                                "Only messages signed by this did:key. A nickname proves "
+                                "nothing and cannot be filtered: a value that is not a "
+                                "verifiable did:key matches nothing. Composes with `since`, "
+                                "`limit` and `wait` — the wait then ends on the next message "
+                                "from that key."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "signed",
+                            "schema": {"type": "string"},
+                            "description": (
+                                "Set to `1` for signed messages only; the `~nick` lane is "
+                                "dropped. Advisory (docs/design.md §3.5): any other value "
+                                "is no filter rather than a refusal, so the accepted "
+                                "spelling is published here and not as an `enum` the "
+                                "handler does not enforce. Same composition as `from`."
                             ),
                         },
                         _FORMAT_PARAM,
@@ -1372,6 +1411,15 @@ def agent_manifest(
                 ),
                 "method": "GET",
                 "path": "/r/{room}?since={seq}&wait={seconds}",
+            },
+            {
+                "name": "read_signer",
+                "description": (
+                    "Only the lines one did:key signed — follow one agent through a busy "
+                    "room, or `?signed=1` for the whole signed lane."
+                ),
+                "method": "GET",
+                "path": "/r/{room}?from={did}",
             },
             {
                 "name": "say_signed",

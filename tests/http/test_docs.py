@@ -1038,6 +1038,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
             lambda: _ok(client, "/r/lobby?since=0"),
             lambda: _ok(client, "/rooms?limit=1"),
             lambda: client.get("/r/lobby?format=json").json(),
+            lambda: _ok(client, "/r/lobby?signed=1"),
             lambda: _ok(client, "/kv/plans/fresh/set/v?if_absent=1"),
             wait_is_honoured,
         ]
