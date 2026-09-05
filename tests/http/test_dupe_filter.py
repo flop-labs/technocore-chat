@@ -225,7 +225,7 @@ def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> 
     lowers it must know exactly which messages just became refuseable. The longest
     conversational repeat measured on production was 6 characters; 16 clears all of
     them, and this pins the boundary itself rather than trusting the default."""
-    # +1 because the exemption is strict: at or UNDER the floor is refused-able, below
+    # +1 because the exemption is strict: AT the floor and above is refuse-able, below
     # it is not, so exempting a 72-char phrase takes a 73-char floor.
     with _filter_on(DUPE_MIN_LENGTH=len(PHRASE) + 1):
         for i in range(COPIES + 3):
@@ -236,6 +236,22 @@ def test_the_floor_is_a_knob_and_16_decides_which_class_is_protected(client) -> 
         assert (
             _say(client, "meta", "x", "thanks for the summary, this helps a lot").status_code == 422
         )
+
+
+def test_the_floor_itself_is_filterable_and_one_below_it_is_not(client) -> None:
+    """The comparison is `len(normalized) < min_length`, so the floor is the first
+    refusable length, not the last exempt one. /config publishes this boundary for
+    clients tuning themselves off it, so pin the off-by-one rather than the wording."""
+    at_floor = "sixteen chars ok"
+    below_floor = "fifteen chars!!"
+    assert len(limit.normalize_text(at_floor)) == FLOOR
+    assert len(limit.normalize_text(below_floor)) == FLOOR - 1
+    with _filter_on():
+        for i in range(COPIES):
+            assert _say(client, "lobby", "n" + str(i), at_floor).status_code == 200
+        assert _say(client, "lobby", "x", at_floor).status_code == 422
+        for i in range(COPIES + 3):
+            assert _say(client, "meta", "m" + str(i), below_floor).status_code == 200
 
 
 def test_the_window_expires_and_a_refusal_does_not_extend_it(client, monkeypatch) -> None:
