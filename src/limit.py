@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import ipaddress
 import re
 import threading
 import time
@@ -67,6 +68,7 @@ FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /ope
 # limiter state — which is why the authoritative limit belongs in the proxy (see README).
 MAX_BUCKETS = 20_000
 _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+_buckets_lock = threading.Lock()
 
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
@@ -263,16 +265,16 @@ def client_ip(request: Request, ip_header: str = "") -> str:
     different notions of "IP" would each be bypassable by whichever header the other
     ignored.
     """
-    if ip_header:
-        forwarded = request.headers.get(ip_header, "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-        return request.client.host if request.client else "?"
-    # Not configured to read one. Note whether the request looks proxied anyway, so a
-    # misconfiguration is visible in /stats instead of only in a support ticket.
-    if any(h in request.headers for h in PROXY_IP_HEADERS):
+    raw = request.headers.get(ip_header, "").split(",")[0].strip() if ip_header else ""
+    if not ip_header and any(h in request.headers for h in PROXY_IP_HEADERS):
         _proxy_evidence["proxied_requests"] += 1
-    return request.client.host if request.client else "?"
+    try:
+        addr = ipaddress.ip_address(raw := raw or (request.client.host if request.client else "?"))
+        if isinstance(addr, ipaddress.IPv6Address):
+            return str(addr.ipv4_mapped or ipaddress.ip_network(f"{addr}/64", False))
+    except ValueError:
+        pass
+    return raw
 
 
 def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BUCKETS):
@@ -287,21 +289,18 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
     """
     ip = client_ip(request, ip_header)
-    if len(_identities) < MAX_IDENTITIES:
-        _identities.add(ip)
+    len(_identities) < MAX_IDENTITIES and _identities.add(ip)
     now = time.monotonic()
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, now))
-    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
-    if tokens >= 1.0:  # granted: no wait, even when this was the last token
-        tokens -= 1.0
-        wait = 0.0
-    else:
-        wait = (1.0 - tokens) * 60.0 / per_min
-    _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
-    while len(_buckets) > max_buckets:
-        _buckets.popitem(last=False)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, now))
+        tokens = min(cap, tokens + (now - last) * per_min / 60.0)
+        wait = 0.0 if tokens >= 1.0 else (1.0 - tokens) * 60.0 / per_min
+        tokens -= 1.0 if wait == 0.0 else 0.0
+        _buckets[(ip, kind)] = (tokens, now)
+        _buckets.move_to_end((ip, kind))
+        while len(_buckets) > max_buckets:
+            _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
@@ -319,8 +318,9 @@ def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
     """
     ip = client_ip(request, ip_header)
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
+        _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
     config._dbg(1, "refund", ip=ip, kind=kind)
 
 
@@ -358,10 +358,8 @@ def refill_rate(per_min: int) -> str:
     both accurate and the more useful form: "one every 30s" is a sleep, "0.03 tokens/s" is
     arithmetic the reader has to do first.
     """
-    per_second = per_min / 60.0
-    if per_second >= 1.0:
-        return f"{per_second:.1f} tokens/s"
-    return f"one token every {60.0 / per_min:.0f}s"
+    p = per_min / 60.0
+    return f"{p:.1f} tokens/s" if p >= 1 else f"one token every {1 / p:.0f}s"
 
 
 def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: float) -> Response:
@@ -433,11 +431,10 @@ def _waiter_slot(ip: str, max_total: int, max_per_ip: int):
         yield True
     finally:
         _waiters_total -= 1
-        left = _waiters_by_ip.get(ip, 1) - 1
-        if left > 0:
+        if (left := _waiters_by_ip.get(ip, 1) - 1) > 0:
             _waiters_by_ip[ip] = left
         else:
-            _waiters_by_ip.pop(ip, None)  # never let the table grow per distinct IP
+            _waiters_by_ip.pop(ip, None)
 
 
 def waiter_note(ip: str, max_total: int, max_per_ip: int, wait: float) -> str:

@@ -71,7 +71,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 from starlette.applications import Starlette
 
-from . import signing
+from . import scanner, signing
 from .fetch import Fetch, urllib_fetch
 
 # The single place this package's version is written: `mcp/pyproject.toml` reads it from
@@ -710,6 +710,33 @@ async def read_docs(
     page: Literal["manual", "patterns", "skill", "interop", "auth", "config"] = "manual",
 ) -> str:
     return await _get(PAGES[page])
+
+
+@server.tool(
+    name="technocore_scan",
+    description=(
+        "Evaluate untrusted room text or note content for adversarial prompt injections, "
+        "instruction resets, homoglyph obfuscation (confusables), fake token contracts, "
+        "and syntactic sender provenance before deciding whether to act on it."
+    ),
+    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    structured_output=False,
+)
+async def technocore_scan(
+    text: Annotated[str, Field(description="The message text or note value to evaluate.")],
+    sender: Annotated[
+        str | None,
+        Field(description="The message's author or nick (optional, evaluated for provenance)."),
+    ] = None,
+) -> str:
+    result = scanner.evaluate_text(text, sender)
+    lines = [
+        f"verdict: {result['verdict']}",
+        f"reason: {result['reason']}",
+        f"provenance: {result['provenance']}",
+        f"details: {result['details']}",
+    ]
+    return "\n".join(lines)
 
 
 # DNS-rebinding protection guards a *local* server: it stops a page in the user's browser

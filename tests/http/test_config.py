@@ -171,11 +171,15 @@ def test_a_published_setting_is_a_number_json_can_carry(client):
     already did.
     """
     for knob in ("CHAT_ROOMS_CACHE_SECONDS", "CHAT_NOTE_STATS_CACHE_SECONDS"):
+        import os
+
+        env = os.environ.copy()
+        env[knob] = "inf"
         boot = subprocess.run(
             [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(SRC)!r}); import app"],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", knob: "inf"},
+            env=env,
         )
         assert boot.returncode != 0, f"app booted with a non-finite {knob}"
         assert "must be a finite number" in boot.stderr

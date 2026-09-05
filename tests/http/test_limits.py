@@ -418,10 +418,10 @@ def test_rate_limit_buckets_are_bounded(client, monkeypatch):
     # whole loop is one client (the test socket) and nothing rotates.
     with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
         for i in range(50):
-            client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
+            client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8:{i:x}::1"})
         assert len(app_module._buckets) <= 8
         # the survivors are the most recent callers, so an active client keeps its budget
-        assert ("2001:db8::31", "read") in app_module._buckets
+        assert ("2001:db8:31::/64", "read") in app_module._buckets
 
 
 def test_no_forwarded_header_is_trusted_by_default(client, monkeypatch):

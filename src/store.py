@@ -8,9 +8,10 @@ Design constraints (see docs/design.md):
     built from unvalidated input (traversal impossible by construction)
 """
 
-from __future__ import annotations
-
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows / non-POSIX compatibility
 import hashlib
 import os
 import re
@@ -642,12 +643,14 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+        if fcntl is not None:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -682,7 +685,10 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o644)
+            try:
+                os.fchmod(f.fileno(), 0o644)
+            except AttributeError:
+                pass  # fchmod not available on Windows
             f.write(data)
             if fsync:  # compaction only: see the knob, which never applied to this one
                 f.flush()
@@ -1659,7 +1665,13 @@ def _reap(root: Path) -> None:
     except FileNotFoundError:
         pass
     root.mkdir(parents=True, exist_ok=True)
-    marker.touch()
+    try:
+        with _locked(marker):
+            if marker.exists() and time.time() - marker.stat().st_mtime < REAP_EVERY:
+                return
+            marker.touch()
+    except OSError:
+        pass
     # Rooms only: the stillborn rule is a room rule, so folding reaped notes into the same
     # two counters would make "idle" mean two different things in one number.
     reaped = {"reaped_idle": 0, "reaped_stillborn": 0}

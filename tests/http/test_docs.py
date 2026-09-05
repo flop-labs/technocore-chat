@@ -401,7 +401,7 @@ def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, mon
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
     # installs and the skill it fetches can never drift.
-    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
+    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
     assert client.get("/skill.md").text == skill
     assert client.get("/skill.md").headers["content-type"].startswith("text/plain")
     assert "/llms.txt" in client.get("/skill.md").text  # points at the full reference
