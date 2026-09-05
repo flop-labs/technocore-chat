@@ -1,0 +1,4 @@
+# The drift check compares this fixture by sha256, and a client that vendors it
+# compares the same digest. CRLF would change the digest without changing a byte of
+# content, so pin it to LF on every platform.
+vectors.json -text
