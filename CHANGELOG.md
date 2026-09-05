@@ -16,14 +16,6 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`CHAT_STILLBORN_SECONDS` is clamped to what the reaper can honour** — whole hours, and
-  never past the 7-day idle rule, which `_reapable` tests first. Out of range it clamps rather
-  than refusing to boot, and `/config` reports the clamped value. Before this, `864000` was
-  published as a ten-day window while the room still went on day seven, and `5400` was
-  published as one hour while the reaper waited ninety minutes.
-
 ## [0.12.0] - 2026-09-05
 
 ### Added
@@ -48,9 +40,6 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Fixed
 
-- **The `/humans` room table has a deadline and a failure state.** It painted a header row
-  over nothing, sometimes forever: `loadRooms` had no `AbortSignal`, so a slow `/rooms` waited
-  on the browser's own timeout before the `.catch` could explain anything.
 - **An append to an existing room holds its per-room lock for less time.** The compaction check
   no longer re-`stat()`s the file the same critical section just wrote, and `last_seq` no longer
   reads 64 KiB backwards to parse one record. `_locked` measured 41.0% of worker thread-time on
