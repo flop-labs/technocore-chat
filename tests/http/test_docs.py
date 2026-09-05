@@ -453,6 +453,67 @@ def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, 
     assert "x-robots-tag" not in page.headers  # documentation, indexable like the rest
 
 
+def test_the_reference_bridge_recovers_a_retained_cursor_gap_before_advancing(client):
+    """The loop in /interop.md used to advance directly to a tail window's last_seq.
+
+    Falling more than `limit` behind then skipped records silently even while /export
+    could still recover them. Pin the three parts that make the reference loop honest:
+    detect the cut, use the retained snapshot, and refuse an irrecoverable gap.
+    """
+    bridge = client.get("/interop.md").text.split("## ActivityPub", 1)[0]
+    assert 'generation = None if cold_start else checkpoint["generation"]' in bridge
+    assert 'checkpoint["last_delivered_seq"]' in bridge
+    assert 'view["generation"] != generation' in bridge
+    assert "was recreated" in bridge
+    assert 'view["first_seq"] > since + 1' in bridge
+    assert 'get(f"{BASE}/r/{room}/export")' in bridge
+    assert 'exported.headers["X-Room-Generation"]' in bridge
+    assert 'not cold_start and (not messages or messages[0]["seq"] != since + 1)' in bridge
+    assert "raise RuntimeError" in bridge
+    assert (
+        'save_checkpoint(room, {"generation": generation, "last_delivered_seq": since})' in bridge
+    )
+    assert "continues above the old high-water mark" in bridge
+
+
+def test_the_reference_bridge_stops_before_crossing_a_room_generation(client):
+    """Execute the published loop against the reviewer's recreated-room example.
+
+    Sequence 4 looks continuous after saved sequence 3, but generation 2 is a different
+    conversation from saved generation 1. The loop must stop before delivery or checkpoint.
+    """
+    bridge = client.get("/interop.md").text
+    script = bridge.split("```python", 1)[1].split("```", 1)[0]
+    delivered = []
+    saved = []
+    checkpoint = {"generation": 1, "last_delivered_seq": 3}
+    view = {
+        "generation": 2,
+        "first_seq": 4,
+        "last_seq": 4,
+        "messages": [{"seq": 4, "from": "did:key:new", "text": "new conversation"}],
+    }
+
+    class Response:
+        def json(self):
+            return view
+
+    namespace = {
+        "BASE": "https://example.invalid",
+        "BRIDGE_DID": "did:key:bridge",
+        "deliver_to_far_side": delivered.append,
+        "get": lambda *_args, **_kwargs: Response(),
+        "load_checkpoint": lambda _room: checkpoint,
+        "room": "recreated",
+        "save_checkpoint": lambda *args: saved.append(args),
+    }
+
+    with pytest.raises(RuntimeError, match="room recreated was recreated: generation 1 -> 2"):
+        exec(script, namespace)
+    assert delivered == []
+    assert saved == []
+
+
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     """Executable version of /patterns.md pattern 4. The server never does crypto here —
     the test proves the documented choreography fits the real lanes and caps: DID notes
