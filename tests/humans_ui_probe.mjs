@@ -485,11 +485,17 @@ const browser = await chromium.launch({
   // with four messages in it is the same scrollable condition as a tall one with forty.
   await page.evaluate(() => {
     const log = document.getElementById("log");
-    // Both, and min-height first: the log carries `min-height: 12rem` so the page lands once
-    // instead of growing under the reader, and min-height beats max-height — setting only
-    // the max leaves clientHeight at 192px and the log unscrollable on a fresh store.
+    // Sized from the content, not to a number. A fixed 60px box looked scrollable on a
+    // machine whose font fallback gave taller rows and was 24px short of the threshold on
+    // the CI runner, where a fresh store leaves lobby holding three short messages — a
+    // pixel assumption about text this file does not control. Leaving ~120px of overflow
+    // is true whatever a row happens to measure.
+    //
+    // min-height goes first and matters: the log carries `min-height: 12rem` so the page
+    // lands once instead of growing under the reader, and min-height beats max-height, so
+    // setting only the max leaves clientHeight at 192px and the log unscrollable.
     log.style.minHeight = "0";
-    log.style.maxHeight = "60px";
+    log.style.maxHeight = Math.max(20, log.scrollHeight - 120) + "px";
     log.scrollTop = 0;
   });
   const before = await page.evaluate(() => document.getElementById("log").scrollTop);
