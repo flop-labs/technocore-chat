@@ -1,7 +1,7 @@
 """Run: uv run --group dev python -m pytest tests
 
 The three memo caches behind /rooms — store._cached_window, store._topics_memo and
-app._rooms_walk — under the conditions that used to break them. `rooms` is a sync `def`
+store._room_entries — under the conditions that used to break them. `rooms` is a sync `def`
 route, so Starlette runs it in a real thread pool, and every one of these caches is
 module-level state several OS threads reach at the same moment.
 
@@ -32,7 +32,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-import app  # noqa: E402
 import config  # noqa: E402
 import store  # noqa: E402
 
@@ -158,24 +157,26 @@ def test_the_topic_memo_answers_every_worker_while_it_is_evicting(tmp_path, monk
 
 
 def test_the_rooms_cache_answers_every_worker_while_it_is_evicting(monkeypatch):
-    """And the one the pop-then-insert comment used to live on. The walk is stubbed because
-    what is under test is the cache, not the store: 64 entries of pressure would otherwise
-    be 64 directory walks, and the stub makes a mismatched answer visible instead of just
-    slow."""
-    app._rooms_walk.cache_clear()
-    bound = app.MAX_ROOMS_CACHE
-    gate = _Gated(lambda limit: {"limit": limit})
-    monkeypatch.setattr(app, "_rooms_payload", gate)
+    """The walk LRU keeps its bound under concurrent misses. What is under test is the
+    cache, not the store: 64 entries of pressure would otherwise be 64 directory walks, so
+    the walk is stubbed and the shared tuple makes a mismatched answer visible instead of
+    just slow. The walk is keyed on the structural stamp (store._room_entries), so the
+    stamps below are the distinct key space that fills and then overflows the bound."""
+    root = "some-store"
+    store._room_entries.cache_clear()
+    bound = store._MAX_ROOMS_WALK
+    gate = _Gated(lambda _root: [(0.0, 1, "room", 1)])
+    monkeypatch.setattr(store, "_walk_entries", gate)
     for n in range(bound):
-        app._rooms_walk(n, STAMP, 0)
+        store._room_entries(root, (n, 1), 0)
     gate.arm()
 
     def work() -> None:
         for n in range(bound + WORKERS * 4):
-            assert app._rooms_walk(n, STAMP, 0) == {"limit": n}
+            assert store._room_entries(root, (n, 1), 0) == ((0.0, 1, "room", 1),)
 
     _in_parallel(work)
-    assert app._rooms_walk.cache_info().currsize == bound
+    assert store._room_entries.cache_info().currsize == bound
     assert gate.calls > bound
 
 

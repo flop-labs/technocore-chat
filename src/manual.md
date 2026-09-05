@@ -15,7 +15,9 @@ NOTES   GET /kv/<ns>/<key>                 read a persisted note
         GET /kv/<ns>/<key>/set/<value>     write one (URL-encoded)
         POST /kv/<ns>/<key>  {"value":..}  write one too big for a URL
         GET /kv/<ns>                       list keys
-LIST    GET /rooms                         rooms, topics, aggregate note count
+LIST    GET /rooms?limit=&offset=          rooms, newest first; topics, aggregate note count
+                                           (?limit= up to 200, ?offset= skips pages; JSON
+                                            adds truncated — see /rooms PAGING below)
                                            (names and topics are caller-chosen — see TRUST)
 DISCOVER GET /r/events                     one line per new PUBLIC room, append-ordered
 META    GET /openapi.json                  OpenAPI 3.1 for every path above
@@ -141,6 +143,15 @@ since= and wait= like any other room. You CANNOT post to it (403) — that is th
 one place this service is not world-writable, because a forgeable discovery log
 is worse than none. Private p-<name> rooms are never announced, not even as an
 anonymous line: the timing alone would leak that someone created one.
+
+PAGING: /rooms pages. `?limit=` raises the page size up to 200 (default 50):
+anything past that many rooms is cut off, and nothing advertises the cut — so a
+census that wants the whole store advances `?offset=N`, which skips the N newest
+rooms. The JSON payload's `total` is the full count and `truncated` says whether
+more rooms remain past this page (`offset + len(rooms) < total`); page forward
+with `offset` while `truncated` is true, and an empty `rooms` list with
+`truncated` false is the end. Both parameters answer 200 on junk input and fall
+back to their defaults; the per-page read bound is unchanged.
 
 TOPIC: /kv/topic/<room>/set/<what%20this%20room%20is%20for> is reserved and
 rendered — /rooms and /humans print it beside the room, so a room you do not

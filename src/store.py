@@ -1219,6 +1219,42 @@ def list_rooms(root: Path) -> list[str]:
     return sorted(n for n in names if _listable(n))
 
 
+# One /rooms walk, cached on the structural stamp and the TTL bucket only — NOT limit and
+# NOT offset. The walk (readdir, a stat per listable room, a full sort) is the expensive
+# half of /rooms; the page (which rooms, how many, what window/topic reads) is a cheap
+# slice done per request in room_stats against this one list. Keying the whole walk on
+# limit/offset, as the page LRU in app.py used to, meant one entry per distinct page a
+# caller asked for — paging a large listing at limit=50 opened ~1,080 slots in a 64-entry
+# cache and walked the store on every miss (#576). Dropping limit and offset from the key
+# makes every page the same `(stamp, bucket)` = one walk, and the LRU bound then holds 64
+# walks instead of 64 pages. Returned as tuples so one entry is safe to hand to every
+# thread — a caller mutating the sort would corrupt every other thread's page. Root is a
+# str for the reason the store's other memo keys use str.
+_MAX_ROOMS_WALK = 64
+
+
+def _walk_entries(root: Path) -> list:
+    """The uncached walk room_stats runs when no cached listing is supplied."""
+    entries = []
+    for e in _walk(root / "rooms", ".jsonl"):
+        name = e.name[: -len(".jsonl")]
+        if not _listable(name):
+            continue
+        try:
+            st = e.stat()
+        except OSError:
+            continue  # reaped between the readdir and the stat
+        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
+    entries.sort(reverse=True)
+    return entries
+
+
+@lru_cache(maxsize=_MAX_ROOMS_WALK)
+def _room_entries(root: str, stamp: tuple, bucket: int) -> tuple:
+    """The cached sorted listing described above the constant. Immutable by shape."""
+    return tuple(_walk_entries(Path(root)))
+
+
 def _time_bucket(now: float, ttl: float) -> int:
     """A coarse clock for a cache whose validity window is part of its key.
 
@@ -1301,32 +1337,37 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
+def room_stats(
+    root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0, *, entries: list | tuple | None = None
+) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
     memoized against that same stat — so a walk re-reads only rooms that changed since
     the last one. See WINDOW_BYTES for the per-room worst-case bound.
+
+    `limit` is capped to MAX_LIMIT and `offset` is clamped into the listing, so a page
+    past the tail is an empty list with `truncated` False — a caller pages forward by
+    advancing `offset` while `truncated` is True, and `total` stays the full count so a
+    completed census is `offset + len(rooms)` catching up to it.
+
+    `entries` is an optional pre-walked sorted listing (the cached `_room_entries`): the
+    caller's way of paying for the expensive walk once per `(stamp, bucket)` and reusing it
+    across every page, so distinct `limit`/`offset` never re-walk the store. When None the
+    walk runs here, once, which is the uncached/cold path.
     """
     now = time.time()
-    entries = []
-    for e in _walk(root / "rooms", ".jsonl"):
-        name = e.name[: -len(".jsonl")]
-        if not _listable(name):
-            continue
-        try:
-            st = e.stat()
-        except OSError:
-            continue  # reaped between the readdir and the stat
-        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    entries.sort(reverse=True)
+    if entries is None:
+        entries = _walk_entries(root)
+    offset = min(max(0, offset), len(entries))
+    page = entries[offset : offset + max(1, min(int(limit), MAX_LIMIT))]
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root)["topics_written"], root_key)
     mono = time.monotonic()
-    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+    for mtime, size, name, mtime_ns in page:
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
@@ -1344,6 +1385,10 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         "total": len(entries),
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
+        # Whether more rooms exist past this page (`offset + len(rooms) < total`). Always
+        # present so a client parses a shape it can rely on and pages forward while it is
+        # true; `total` is the full count so a completed census is exact.
+        "truncated": offset + len(shown) < len(entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
