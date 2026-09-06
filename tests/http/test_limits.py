@@ -248,6 +248,40 @@ def test_budget_warning_appears_before_the_wall(client, monkeypatch):
         assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
 
 
+def test_the_warning_thins_out_so_the_reply_stays_shareable(client):
+    """The footer makes a reply `no-store`, so emitting it on every reply switches the CDN
+    off for exactly the callers polling hardest — measured in production at 47.7% of room
+    reads `bypass` against a 7.2% hit rate. It now lands on a stride of the remaining budget.
+
+    Asserted at a production-sized budget, because the stride scales with it: below 24/min
+    it is 1 and every in-band reply still warns, which is what the test above depends on.
+    """
+    import limit
+
+    band = [n for n in range(601) if n * 4 <= 600]
+    warned = [n for n in band if limit.budget_note("read", n, 600)]
+    assert warned, "a caller in the warning band must still be told"
+    assert len(warned) < len(band) // 10, (
+        f"{len(warned)} of {len(band)} in-band replies warn — too many to be cacheable"
+    )
+    # Never at zero left: a caller pinned at its ceiling is granted a token the moment one
+    # refills, so warning there would warn on every one of its replies — the case this
+    # exists to remove.
+    assert not limit.budget_note("read", 0, 600)
+    # A stride cannot be stepped over: consecutive values cannot both skip it.
+    gaps = [b - a for a, b in zip(warned, warned[1:], strict=False)]
+    assert gaps and max(gaps) == min(gaps), f"uneven stride {gaps}"
+
+
+def test_a_small_budget_still_warns_on_every_reply(client):
+    """The stride is `per_min // 24`, so a deployment with no requests to spare gets 1 —
+    the every-reply behaviour, because thinning a warning nobody has room to miss is worse
+    than the cacheability it would buy."""
+    import limit
+
+    assert all(limit.budget_note("read", n, 8) for n in range(3))
+
+
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
     """The room cap bounds the service; this bounds how much of it one caller can take.
 
