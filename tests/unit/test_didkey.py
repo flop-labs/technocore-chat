@@ -42,7 +42,6 @@ def test_a_did_key_has_exactly_one_spelling(client):
     assert didkey.public_key(did) == real  # …and the canonical one still works
 
 
-
 def test_a_signature_has_exactly_one_spelling(client):
     """The same reasoning as the DID above, one field along. 64 bytes is 512 bits and 86
     base64url characters carry 516, so the last character's low four bits are slack the
@@ -99,6 +98,7 @@ def test_the_signed_lane_refuses_an_aliased_signature_over_http(client):
     assert client.get("/r/alias?format=json").json()["messages"] == []
 
     assert _client._say_signed(client, "alias", did, sign, "hi").status_code == 200
+
 
 def test_b58_leading_zero_bytes_round_trip():
     """base58btc encodes leading 0x00 bytes as leading '1' characters.
