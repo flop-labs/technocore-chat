@@ -842,11 +842,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var HOLD_MS = 8000;
   var holdUntil = 0;
   function badge(msg, cls) { status.textContent = msg; status.className = cls; }
-  function say(msg) { holdUntil = Date.now() + HOLD_MS; badge(msg, 'badge live'); }
-  function fail(msg) {
-    holdUntil = Date.now() + HOLD_MS;
-    badge('error — ' + msg, 'badge err');
-  }
+  // How long the heartbeat stays off the badge. HOLD_MS is "long enough to read", which is
+  // the right answer for an outcome and the wrong one for a wait still in progress: a caller
+  // that is still working passes its own window and hands the badge back when it settles.
+  // Nothing that reports a result needs that — saying the result resets this by itself.
+  function hold(ms) { holdUntil = Date.now() + ms; }
+  function say(msg) { hold(HOLD_MS); badge(msg, 'badge live'); }
+  function fail(msg) { hold(HOLD_MS); badge('error — ' + msg, 'badge err'); }
   // The pump's own line, which never talks over an answer the reader is still reading.
   function beat(msg) { if (Date.now() >= holdUntil) badge(msg, 'badge live'); }
 
@@ -1532,6 +1534,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var ctl = new AbortController();
     ceremony = ctl;
     say(working);
+    // Held for as long as this takes, not for a count of seconds. CEREMONY_MS allows two
+    // minutes because the cross-device flow legitimately runs that long — scan the code,
+    // walk to the phone, approve there — and a fixed window expiring mid-ceremony puts
+    // `seq N` back over the one line explaining the wait. That is the bug this whole change
+    // is about, with a delay in front of it. The settle below hands the badge back.
+    hold(Infinity);
     derive(ctl.signal)
       .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
       .catch(function (e) {
@@ -1561,8 +1569,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         fail(String(e.message || e));
       })
       // Settled either way: stop holding a controller whose request is over, so the next
-      // click starts clean instead of aborting a ghost.
-      .then(function () { if (ceremony === ctl) ceremony = null; });
+      // click starts clean instead of aborting a ghost, and let the badge go back to the
+      // heartbeat. Skipped when this ceremony was replaced rather than finished — the
+      // successor owns both, and its own hold is the one that should stand.
+      .then(function () {
+        if (ceremony !== ctl) return;
+        ceremony = null;
+        hold(HOLD_MS);
+      });
   }
 
   keyPassEl.addEventListener('click', function () {

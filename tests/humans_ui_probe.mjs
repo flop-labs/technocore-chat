@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-06, 119 checks, all passing — expected shape:
+ * Checked 2026-09-06, 121 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -51,8 +51,8 @@
  *                   sign-out; discovery with nothing enrolled refuses instead of enrolling
  *                   and opens the disclosure holding the button it tells them to press;
  *                   a ceremony nobody answers is replaced by the next click rather than
- *                   wedging the page, and says what it is waiting for loudly enough to
- *                   survive the room's own heartbeat on the same badge
+ *                   wedging the page, and holds the badge against the room's own heartbeat
+ *                   for as long as it runs — then hands it back when it settles
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
  *                   ONE line a note can hold; re-issuing replaces rather than appends; four
@@ -751,6 +751,19 @@ const browser = await chromium.launch({
         (await page.textContent("#status")) === "waiting for your passkey…",
         await page.textContent("#status"));
 
+  // …and does not creep back over it later. A hold measured in seconds cannot be right for
+  // a wait CEREMONY_MS deliberately allows two minutes of: the cross-device flow is a reader
+  // walking to another room for their phone, and handing the badge back to `seq N` while
+  // they are still holding it is the original bug with a delay in front of it. Ten seconds
+  // and a second message, so a poll certainly lands after any few-second window would have
+  // lapsed (Codex review, #747).
+  await page.waitForTimeout(8000);
+  await fetch(`${BASE}/r/lobby/say/probe/still%20waiting`);
+  await page.waitForTimeout(2000);
+  check("passkey: nor once a short hold window would have lapsed",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
   // The whole point of replacing it rather than refusing it: the reader gets in on the next
   // click, from the same document, having reloaded nothing.
   await answers(true);
@@ -759,6 +772,17 @@ const browser = await chromium.launch({
   check("passkey: the same passkey recovers the same DID from empty storage",
         (await page.getAttribute("#me", "title")) === did,
         await page.getAttribute("#me", "title"));
+
+  // The hold that ceremony took is released, not leaked. It held the badge with no deadline
+  // — the only way to cover a two-minute wait honestly — so failing to hand it back would
+  // freeze the seq for the life of the document, which is the same badge lost to the same
+  // bug from the other direction. Past HOLD_MS from the sign-in line, with a poll after it.
+  await page.waitForTimeout(9000);
+  await fetch(`${BASE}/r/lobby/say/probe/heartbeat%20resumes`);
+  await page.waitForTimeout(2000);
+  check("passkey: and the badge goes back to the room once the ceremony settles",
+        /^seq \d+$/.test(await page.textContent("#status")),
+        await page.textContent("#status"));
 
   // Coming back later, in the same browser, with its storage untouched. The page will not
   // re-derive a passkey identity on load and that is deliberate: deriving one costs a
