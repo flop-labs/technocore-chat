@@ -14,6 +14,7 @@ import importlib.util
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 import _client
@@ -222,7 +223,7 @@ def test_the_static_first_set_is_a_subset_of_what_is_snapshotted():
 
 
 def test_the_edge_cached_lane_is_entered_only_by_a_get():
-    """A source assertion, deliberately, and narrow — there is no JS harness in this repo.
+    """A source assertion, deliberately, and narrow — the query probe does not model this lane.
 
     `route` admits GET and HEAD. The Cache API does not: `cache.put` rejects a request whose
     method is not GET. So a HEAD reaching this lane throws inside `edgeCached`, unwinds to
@@ -244,12 +245,11 @@ def test_the_edge_cached_lane_is_entered_only_by_a_get():
 def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
     """A source assertion, deliberately, and narrow.
 
-    There is no JS harness in this repo, and the difference this guards is behavioural
-    rather than cosmetic: `s-maxage` is a shared-cache directive, so only Cloudflare holds
-    the copy, while a bare `max-age` would let a browser, a monitoring client or a
-    downstream proxy reuse `ok` without contacting the edge at all. That puts liveness
-    staleness outside Cloudflare's control and beyond the reach of a purge — on the one
-    endpoint whose entire job is to be current.
+    The focused query probe below does not model browser or downstream-cache behaviour:
+    `s-maxage` is a shared-cache directive, so only Cloudflare holds the copy, while a bare
+    `max-age` would let a browser, a monitoring client or a downstream proxy reuse `ok`
+    without contacting the edge at all. That puts liveness staleness outside Cloudflare's
+    control and beyond the reach of a purge — on the one endpoint whose entire job is current.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     assert "s-maxage=${seconds}" in worker
@@ -259,11 +259,12 @@ def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
 
 
 def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
-    """The property the lane exists for, asserted on the source for want of a JS harness —
-    and the one a later edit would quietly remove. /rooms is an O(total-rooms) walk (#576)
-    whose cost under concurrency is queueing rather than work (bench/rooms.py), so no cache
-    window is reliably longer than it: whoever arrives after one closes pays the whole cost
-    and holds an anyio thread doing it. Returning the copy unconditionally is what breaks it.
+    """The property the lane exists for, beyond what the focused query probe models.
+
+    A later edit could quietly remove it. /rooms is an O(total-rooms) walk (#576) whose cost
+    under concurrency is queueing rather than work (bench/rooms.py), so no cache window is
+    reliably longer than it: whoever arrives after one closes pays the whole cost and holds
+    an anyio thread doing it. Returning the copy unconditionally is what breaks it.
     """
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     lane = worker[worker.index("async function revalidating(") :]
@@ -287,7 +288,7 @@ def test_the_refresh_interval_is_not_faster_than_the_origin_can_answer(client):
 
 
 def _between(text: str, start: str, end: str) -> str:
-    """One function's source, for the assertions there is no JS harness to make properly."""
+    """One function's source, for properties outside the focused query probe."""
     body = text[text.index(start) :]
     return body[: body.index(end)]
 
@@ -366,6 +367,78 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     assert listed(f"limit={limit['max']}") == listed(f"limit={limit['max'] * 100000}")
     # And zero means one, the handler's `or 1` — the edge arithmetic mirrors it exactly.
     assert listed("limit=0") == listed("limit=1")
+
+
+def test_repeated_rooms_parameters_keep_the_origins_effective_values(client):
+    """The Worker must canonicalise the value Starlette selects, not a different occurrence.
+
+    QueryParams.get() and URLSearchParams.get() disagree for repeated names. Drive the real
+    origin first, then execute the tracked Worker with local Cache API/fetch doubles and require
+    its stored key and outbound canonical request to name that same representation and row count.
+    """
+    for name in ("repeat-a", "repeat-b", "repeat-c"):
+        client.get(f"/r/{name}/say/nick/hello")
+
+    cases = {
+        "/rooms?limit=1&limit=2&format=json": "/rooms?format=json&limit=2",
+        "/rooms?limit=2&limit=1&format=json": "/rooms?format=json&limit=1",
+        "/rooms?limit=1&limit=1&format=json": "/rooms?format=json&limit=1",
+        "/rooms?format=json&format=text": "/rooms",
+        "/rooms?format=text&format=json": "/rooms?format=json",
+        "/rooms?format=json&format=json": "/rooms?format=json",
+        "/rooms?limit=1&limit=2&format=json&format=text": "/rooms?limit=2",
+        "/rooms?limit=2&limit=1&format=text&format=json": "/rooms?format=json&limit=1",
+        "/rooms?format=json&limit=2": "/rooms?format=json&limit=2",
+        "/rooms?limit=2&ignored=yes": "/rooms?limit=2",
+        "/rooms": "/rooms",
+    }
+
+    def semantics(path: str) -> tuple[str, int]:
+        response = client.get(path)
+        content_type = response.headers["content-type"].partition(";")[0]
+        if content_type == "application/json":
+            return content_type, len(response.json()["rooms"])
+        found = re.match(r"# (\d+) of \d+ rooms", response.text)
+        assert found, response.text
+        return content_type, int(found.group(1))
+
+    origin = {path: semantics(path) for path in cases}
+    expected = {path: semantics(canonical) for path, canonical in cases.items()}
+    assert origin == expected, "the expected canonical paths must follow the origin itself"
+
+    snapshot = _snapshot_module()
+    payload = {
+        "worker": str(EDGE / "src" / "worker.js"),
+        "routing": {
+            "types": {},
+            "static_first": [],
+            "edge_only": [],
+            "edge_cached": {},
+            "edge_revalidate": snapshot.EDGE_REVALIDATE,
+            "edge_key": snapshot.rooms_key(),
+        },
+        "urls": ["https://technocore.chat" + path for path in cases],
+    }
+    probe = pathlib.Path(__file__).with_name("rooms_query_probe.mjs")
+    completed = subprocess.run(
+        ["node", str(probe)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    edge = {row["request"]: row for row in json.loads(completed.stdout)}
+
+    mismatches = []
+    for path, canonical in cases.items():
+        wanted = "https://technocore.chat" + canonical
+        row = edge["https://technocore.chat" + path]
+        if row["cacheKey"] != wanted or row["canonicalRequest"] != wanted:
+            mismatches.append(
+                f"{path}: origin {origin[path]}, cache {row['cacheKey']}, "
+                f"outbound {row['canonicalRequest']}, expected {wanted}"
+            )
+    assert not mismatches, "\n".join(mismatches)
 
 
 def test_a_head_request_can_never_become_the_stored_body():
