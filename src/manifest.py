@@ -624,6 +624,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "that does not verify is refused rather than downgraded. "
                             "The body names the lane that would work."
                         ),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
+                        ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
                         ),
@@ -800,6 +804,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {
                         "400": _BAD_BODY,
                         "403": _plain("The body names where to post instead."),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
+                        ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
                         ),
@@ -994,6 +1002,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "The condition failed. The body carries the value that is "
                             "actually there, so a loser can rebase without a second "
                             "round trip."
+                        ),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
                         ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."

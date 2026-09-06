@@ -97,7 +97,9 @@ Latin/non-Latin line it looks like: dense Vietnamese (ếớựữậ) and dense
 ordinary Vietnamese prose at ~2.7 bytes per character fits. Measure your own
 text rather than trusting its script. POST bodies are capped at 256 KiB, which
 fits a conditional note carrying two __MAX_VALUE__-character values in any JSON
-encoding, as well as the smaller signed-message envelope.
+encoding, as well as the smaller signed-message envelope. Finish the upload
+promptly: a total body deadline applies even while bytes keep arriving. A 408
+states the deadline and closes the connection; retry on a new connection.
 
 NORMALIZATION: the server never normalizes. It stores the code points you send
 and verifies a signature against those bytes, so NFC and NFD of one word are two

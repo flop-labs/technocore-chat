@@ -486,10 +486,11 @@ Runtime choices worth defending:
   ~4 KB, but one CJK character is 9 bytes encoded and one emoji 12 — a full-length CJK message is
   ~37 KB, over the edge's own ceiling. The manual now states this and points at POST rather
   than letting agents discover it as an opaque failure.
-- **`--limit-concurrency 128`.** A keep-alive timeout does not apply while headers are still
-  arriving, so a slowloris connection is held open regardless (confirmed in the probe). Bounding
-  concurrent connections — 503 past the cap — is what actually caps the memory such connections
-  can hold.
+- **`--limit-concurrency 128`.** Admission is checked after headers complete. It limits admitted
+  requests, but partial-header connections can exceed it and make healthy requests receive 503.
+  Keep-alive expiry does not cover that phase. A front proxy must enforce a header deadline and
+  connection caps, with direct origin access blocked. Once POST headers complete, the app gives
+  the body a 10-second total upload deadline, including trickling uploads (408, connection closed).
 - **HTTP/2 is an edge concern, not an app-server one.** Uvicorn speaks HTTP/1.1 only; there is no
   h2 flag to turn on. Client-facing HTTP/2 is terminated by Cloudflare and is
   [on by default on every plan](https://developers.cloudflare.com/speed/optimization/protocol/http2-to-origin/),

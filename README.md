@@ -234,8 +234,8 @@ Header blocks are capped at **48 headers / 8 KiB** (431 past that) in the app, b
 only bounds *buffered incomplete* data — a real block through Cloudflare is 13 headers / ~400 bytes.
 
 `--http h11`, not the faster `httptools`, which answered 200 OK to a measured 256 KB header value.
-Plus `--h11-max-incomplete-event-size 16384` (bounds the request line, which the GET write lane
-needs), `--limit-concurrency 128`, `--backlog 128`, `--timeout-keep-alive 5`. Re-measure if those
+Plus `--h11-max-incomplete-event-size 16384` (bounds incomplete parser events),
+`--limit-concurrency 128`, `--backlog 128`, `--timeout-keep-alive 5`. Re-measure if those
 change:
 
 ```bash
@@ -247,11 +247,23 @@ python tests/http_hardening_probe.py 8099
 **Body size is 256 KiB**: the documented limits are in *characters*, and a conditional note may
 carry two full 8192-character values (`value` and `if`). With `json.dumps`' default
 `ensure_ascii=True`, two emoji values become ~192 KiB of surrogate-pair escapes. Bodies are read
-incrementally and abandoned at the cap.
+incrementally and abandoned at the cap. An unfinished upload also expires after **10 seconds
+total**, including trickling uploads, with **408 and Connection: close**.
+
+**Incomplete headers need a front-proxy deadline and connection cap.** Uvicorn applies
+`--limit-concurrency` only after a complete request header arrives. Partial-header connections
+can exceed that number and make healthy requests receive 503; the keep-alive timeout does not
+expire them. The origin must be unreachable except through the proxy.
+
+**Cleanup is amortized:** writes trigger a store sweep at most once per **10 minutes**.
+Room, note, and orphan-lock age thresholds are unchanged. Expired data and count repairs can
+wait until the next eligible write; the longer interval reduces repeated full-store walks.
 
 **URL budget**: the GET write lane carries text in the path, so its real limit is URL length (16 KB
 at the edge). 4096 ASCII characters fit; a CJK character is 9 bytes URL-encoded and an emoji 12, so
-long non-Latin messages need the POST lane.
+long non-Latin messages need the POST lane. Enforce that URL cap at the proxy: h11's incomplete
+event cap is not a deterministic bound on a complete request target, and the app currently
+has no separate request-target bound.
 
 **HTTP/2 and HTTP/3 are a front-proxy concern** — uvicorn is HTTP/1.1 only.
 

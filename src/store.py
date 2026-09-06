@@ -267,7 +267,9 @@ SNAPSHOT_EVERY = 300
 # available after an interval is missed, instead of losing the window entirely.
 SNAPSHOT_KEEP_SECONDS = 30 * 3600
 IDLE_SECONDS = 7 * 86400  # untouched rooms/notes are reaped, so squatting expires
-REAP_EVERY = 300
+# A full store walk is worth amortizing: cleanup and count repair may lag ten minutes.
+# Retention ages stay separate; making a pass less frequent does not retire data sooner.
+REAP_EVERY = 600
 # A room that never got past its first message is a monologue, not a conversation: someone
 # said one thing, nobody answered, and it is holding a slot against MAX_ROOMS. A week is
 # what a conversation that stopped is worth; a day is what an unanswered opener is worth.
@@ -2556,15 +2558,8 @@ def _write_record(
         # Also under the lock, or two concurrent replays of one captured URL would both
         # read the same "last nonce" and both write.
         if did is not None:
-            # The signature is `did: str | None, nonce: int | None`, which does not say
-            # that a signed write must carry both. Assert it rather than assume it: with
-            # nonce None this used to reach `None <= int` and raise TypeError — a 500 on
-            # the replay-protection path instead of a refusal that says what was wrong.
-            if nonce is None:
-                raise StoreError(
-                    "a signed write must carry a nonce: it is what makes a captured "
-                    "signed URL single-use. Send 1-19 digits, counting up per key per room"
-                )
+            # Validated before _reap and the create gate above; narrow the optional type.
+            assert nonce is not None
             previous = _last_nonce(root, room, did)
             if previous is not None and nonce <= previous:
                 raise StoreError(
@@ -2670,6 +2665,12 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
+    # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
+    # and namespace: those artifacts survive a failed reservation but consume no quota.
+    # This is a valid observation even if another caller creates immediately afterwards;
+    # existing notes still compare under the lock below.
+    if expect is not None and not path.exists():
+        raise StoreConflictError(f"note {ns}/{key} changed since you read it", None)
     _reap(root)
     # No cap check before the gate any more. One ran here to shed a full store's worth of
     # refusals without queueing for a service-wide create gate first; the gate is NOTES_FILE's

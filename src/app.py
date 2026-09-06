@@ -67,6 +67,7 @@ MAX_HEADER_BYTES = 8192
 # each, ~192 KiB before the envelope. 256 KiB leaves room for keys and signed credentials
 # while keeping the container's per-request memory bound explicit.
 MAX_BODY = 256 << 10
+BODY_TIMEOUT = 10  # total upload seconds, including callers that keep trickling bytes
 # RATE_READ / RATE_WRITE / RATE_ROOMS_PER_DAY live in config; the comment that floors them
 # moved with them. Both are per deployment, which is why no document states them as prose:
 # /.well-known/agent.json publishes what this process actually enforces, and the manual
@@ -195,9 +196,6 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # Thin adapter over limit.take: the knobs are read HERE, at call time, so
     # monkeypatch.setattr(app, "MAX_BUCKETS", ...) and config.override() keep reaching
     # the bucket arithmetic.
-    left, wait = limit.take(
-        request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
-    )
     # Deliberately no /rooms cache clear here. It was only ever the fast path — it runs
     # *before* the store write, so `_rooms_stamp` is what closes the race against a
     # concurrent walker — and every structural write it caught moves a counter that stamp
@@ -205,7 +203,9 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # worker, which is the exact cost `messages` left the stamp to stop paying: a local
     # clear on a worker taking its share of ~24 messages/second empties the cache as
     # reliably as a stamp turning over 72 times per window did.
-    return left, wait
+    return limit.take(
+        request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
+    )
 
 
 def _room_exists(room: str) -> bool:
@@ -720,12 +720,7 @@ class HeaderLimits:
                     f"(max {MAX_HEADERS} / {MAX_HEADER_BYTES}). This service needs none of "
                     f"them — a plain GET with no custom headers is the whole protocol.\n"
                 )
-                await Response(
-                    body,
-                    status_code=431,
-                    media_type="text/plain; charset=utf-8",
-                    headers={"Cache-Control": "no-store"},
-                )(scope, receive, send)
+                await text(body, 431)(scope, receive, send)
                 return
             ref = _REF.search(scope.get("query_string", b""))
             if ref:
@@ -1382,6 +1377,8 @@ async def read_json(request: Request) -> dict | Response:
     so the streaming half is not redundant — it is the only bound that applies there.
     Reading incrementally is also what lets MAX_BODY be generous enough for a full-length
     message or note in any encoding without ever holding more than the cap in memory.
+    The total deadline bounds time as well as bytes: a trickling caller otherwise holds
+    a connection forever, since uvicorn's keep-alive timeout excludes active requests.
     """
     too_large = (
         f"413 body too large: the cap is {MAX_BODY} bytes, which fits the documented "
@@ -1394,10 +1391,15 @@ async def read_json(request: Request) -> dict | Response:
     if declared and declared > MAX_BODY:
         return text(f"{too_large}\nyour Content-Length said {declared} bytes.", 413)
     raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > MAX_BODY:
-            return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+    try:
+        async with asyncio.timeout(BODY_TIMEOUT):
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > MAX_BODY:
+                    return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+    except TimeoutError:
+        expired = f"408 body upload exceeded {BODY_TIMEOUT:g}s. Send complete JSON promptly; retry on a new connection."
+        return text(expired, 408, extra_headers={"Connection": "close"})
     try:
         # orjson here, stdlib json for the three documents below. orjson is ~4.7x on the
         # parse and, on a service whose whole job is hostile input, refuses the
