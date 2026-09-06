@@ -1706,10 +1706,11 @@ def note_write_signed(request: Request) -> Response:
     denied = _note_write_gate(ns, key, value, signer)
     if denied:
         return denied
+    condition = _condition(request.query_params)
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,
         meta,
