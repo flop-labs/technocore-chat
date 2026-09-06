@@ -43,6 +43,7 @@ from pathlib import Path
 
 CORE_FILES = ("src/app.py", "src/config.py", "src/didkey.py", "src/limit.py", "src/store.py")
 EXTRA_FILES = ("src/manifest.py",)
+POLICY_FILES = frozenset(CORE_FILES + EXTRA_FILES)
 BASELINE = Path(__file__).resolve().parent / "sz-baseline.json"
 # Token types that carry no code: layout, comments, and the encoding/end markers.
 _SKIP_TOKENS = {
@@ -126,6 +127,18 @@ def main():
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
+    if args.check or args.caps:
+        unlisted = sorted(
+            str(path.relative_to(root))
+            for path in (root / "src").glob("*.py")
+            if str(path.relative_to(root)) not in POLICY_FILES
+        )
+        if unlisted:
+            print(
+                "size policy missing src files: " + ", ".join(unlisted),
+                file=sys.stderr,
+            )
+            return 1
     files = measure_all(root)
     core_total = sum(v["code_lines"] for k, v in files.items() if k.startswith("core/"))
     # {} rather than None when unneeded: every branch that subscripts baseline is guarded
