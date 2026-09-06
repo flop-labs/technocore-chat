@@ -1674,7 +1674,10 @@ def config_document(version: str) -> dict:
             "fsync": "true when a room append is flushed to disk before its 200",
             "rooms_cache_seconds": "seconds one /rooms walk is shared for; 0 disables",
             "note_stats_cache_seconds": "seconds the note-capacity gauge is reused for; 0 disables",
-            "edge_cache_seconds": "s-maxage on /rooms and plain room reads; 0 means no-store",
+            "edge_cache_seconds": (
+                "s-maxage on /rooms, plain room reads and note reads (/kv); a reply "
+                "carrying a budget footer and a long-poll stay no-store; 0 means no-store"
+            ),
             "static_cache_seconds": "s-maxage on the documents; 0 means no-store",
         },
         "withheld": _WITHHELD,

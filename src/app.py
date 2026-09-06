@@ -461,6 +461,20 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
     return text((body_text if body_text is not None else render(view)) + note)
 
 
+def _shareable(resp: Response, private: object) -> Response:
+    """A read is the CDN's to share unless something in it belongs to one caller.
+
+    `private` is whatever made it theirs — a budget footer, or a long-poll that was held —
+    and only its truth is read, so a caller cannot be told apart by a copy someone else got.
+
+    The rule was already at the two room reads; the two note reads had no cache marking at
+    all, so /kv went to the origin every time even though the CDN's cache rule covers it.
+    One helper rather than four copies of the conditional, because the thing being decided
+    is identical and the note reads are joining it rather than inventing a second rule.
+    """
+    return resp if private else _edge_cacheable(resp)
+
+
 def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
     """Mark a world-readable read as shareable by the CDN in front, for `secs` (`swr` is
     stale-while-revalidate, and defaults to the 5x the polled reads have always used).
@@ -967,9 +981,8 @@ def rooms(request: Request) -> Response:
             )
         )
     note = budget_note("read", left, RATE_READ)
-    resp = respond(request, view, body, note)
     # A budget footer is one caller's pacing — a reply carrying one stays no-store.
-    return resp if note else _edge_cacheable(resp)
+    return _shareable(respond(request, view, body, note), note)
 
 
 # Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
@@ -1026,8 +1039,7 @@ async def room_read(request: Request) -> Response:
     # Ahead of the budget footer: a wait that did not happen is what the caller must act
     # on first, and acting on it is what stops the next request being an instant re-poll.
     note = unheld + budget_note("read", left, RATE_READ)
-    resp = respond(request, view, note=note)
-    return resp if wait or note else _edge_cacheable(resp)
+    return _shareable(respond(request, view, note=note), note or wait)
 
 
 async def _await_messages(
@@ -1502,7 +1514,13 @@ def note_read(request: Request) -> Response:
             "and a note idle for 7 days is reclaimed, so this may be one that expired.",
             404,
         )
-    return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
+    note = budget_note("read", left, RATE_READ)
+    # Shareable now: a note's bytes are the same for every caller that can name it, and an
+    # unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly the
+    # callers who could already read it. Staleness is EDGE_CACHE_SECONDS, the same window
+    # room reads take, and it cannot race a claim: `?if_absent=1` is settled on the write
+    # path under the note's own lock, never from a read.
+    return _shareable(text(f"{BANNER}\n\n{value}" + note), note)
 
 
 def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
@@ -1751,11 +1769,10 @@ def note_list(request: Request) -> Response:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     ns = request.path_params["ns"]
     keys = store.list_notes(config.ROOT, ns)
-    return respond(
-        request,
-        {"ns": ns, "keys": keys},
-        "\n".join(f"/kv/{ns}/{k}" for k in keys),
-        budget_note("read", left, RATE_READ),
+    note = budget_note("read", left, RATE_READ)
+    return _shareable(
+        respond(request, {"ns": ns, "keys": keys}, "\n".join(f"/kv/{ns}/{k}" for k in keys), note),
+        note,
     )
 
 
