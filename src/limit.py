@@ -141,13 +141,17 @@ _dupes_lock = threading.Lock()
 # land 64. What it measures is composition, not rate: 137s apart, 4235s apart or once a
 # week all meet the same bar, because the bar is what the room READS like.
 #
-# Digests and nothing else. An instant beside each one was the obvious shape (it is what
-# _dupes holds) and it was wrong twice over: nothing here reads a time — expiry is the
-# window's job and this rule has none — and it made a *pair* the thing dupe_release
-# matched on, so two reservations of one text landing on the same time.monotonic() float
-# were two identical pairs and releasing either wiped both. Entries carrying no identity
-# beyond their digest cannot have that bug: every copy of a digest is interchangeable, so
-# giving one back is `list.remove`, exactly as the window's release is.
+# A (reserved-at instant, digest) pair, so each ring slot carries the same identity the
+# window's timestamp already gives a _dupes entry. Nothing here reads that time — expiry is
+# the window's job and this rule has none — it exists ONLY so dupe_release matches the slot
+# its OWN reservation added, never a newer one. Bare digests could not do that: every copy
+# of a digest is interchangeable, so a stale release (the write it reserved for failed long
+# after a later copy of the same text landed and stuck) would `list.remove` that later,
+# successful slot and drop the room's live count of the phrase to zero. The instant breaks
+# the tie the digest cannot. An earlier draft stored the same pair but *filtered* on it
+# (dropping every equal entry), which wiped both slots when two reservations shared one
+# time.monotonic() float — the release below removes exactly one with `list.remove`, so a
+# collision costs one slot and the other copy survives, which is the whole point.
 #
 # Rejected: reading the room's own messages for a true denominator — that is a store read
 # inside the lock below, the one thing its critical section promises never to do.
@@ -175,7 +179,7 @@ _dupes_lock = threading.Lock()
 # survives an even split and only an uneven one moves it. The authoritative fix for that is
 # the same as for the rate limit: one worker, or a shared store in front of it.
 DUPE_RING, DUPE_SHARE, MAX_RING_ROOMS = 64, 0.5, 512
-_rings: OrderedDict[str, tuple[bytes, ...]] = OrderedDict()
+_rings: OrderedDict[str, tuple[tuple[float, bytes], ...]] = OrderedDict()
 
 
 def normalize_text(text: str) -> str:
@@ -258,7 +262,7 @@ def dupe_refused(
     with _dupes_lock:
         # The share cap first, and before anything is recorded: a refusal here may no more
         # extend a window than one below does, and the room's ring is the cheaper check.
-        if _rings.get(room, ()).count(key[1]) + 1 > DUPE_SHARE * DUPE_RING:
+        if sum(d == key[1] for _, d in _rings.get(room, ())) + 1 > DUPE_SHARE * DUPE_RING:
             return True
         # Three touches of the pre-existing window logic below are not the share cap and
         # would not otherwise be in this change: `pop`-then-reinsert in place of `get` plus
@@ -275,7 +279,7 @@ def dupe_refused(
             _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
             return True
         _dupes[key] = (live + (now,))[-max_copies:]
-        _rings[room] = (_rings.pop(room, ()) + (key[1],))[-DUPE_RING:]
+        _rings[room] = (_rings.pop(room, ()) + ((now, key[1]),))[-DUPE_RING:]
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
         # the oldest so a burst cannot turn one write into a pause, and the hard caps that
         # actually hold the memory whatever the sweep leaves behind. `any` rather than the
@@ -309,12 +313,12 @@ def dupe_release(room: str, text: str, now: float, window: float, min_length: in
 
     ONE entry from each of the two structures the reservation touched, which is why they
     come back in one loop rather than two blocks: one timestamp from the window's tuple for
-    this text, one digest from the room's share ring. `list.remove` in both cases, so a
-    concurrent accept of the same text keeps its own entry — and note what makes that true
-    of the ring: its entries are bare digests, all of them interchangeable, so "the one
-    reserved" is a question with no answer and giving back any one is exactly right. An
-    earlier draft stored (instant, digest) pairs and filtered on the pair, which released
-    TWO slots whenever two reservations shared a time.monotonic() float.
+    this text, one (instant, digest) slot from the room's share ring. Both are matched on
+    the reservation's OWN `now`, so a release only ever gives back the slot it added: a
+    stale release cannot remove a later, successful copy of the same text, because that copy
+    carries a different instant even though its digest is identical (the reviewer's race in
+    #734). `list.remove` in both cases, removing exactly one match, so two reservations that
+    collide on one time.monotonic() float cost one slot between them and the other survives.
 
     Silent when either entry has already been swept or evicted — that is the same free
     window this would have opened, arrived at by another route. The ring slot matters as
@@ -331,7 +335,7 @@ def dupe_release(room: str, text: str, now: float, window: float, min_length: in
         # Annotated `list[tuple]` because the two maps have different key and value types
         # and a checker reading the pair as a union rejects every line below it; the rule
         # being applied is identical for both, which is the whole reason they share a loop.
-        both: list[tuple] = [(_dupes, key, now), (_rings, room, key[1])]
+        both: list[tuple] = [(_dupes, key, now), (_rings, room, (now, key[1]))]
         for mapping, slot, entry in both:
             held = list(mapping.pop(slot, ()))
             if entry in held:

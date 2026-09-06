@@ -184,6 +184,32 @@ def test_releasing_what_was_never_reserved_is_silent() -> None:
     assert not limit._dupes
 
 
+def test_a_stale_release_cannot_wipe_a_later_successful_copy() -> None:
+    """The reviewer's race in #734. A reservation is taken, its ring slot is evicted by a
+    ring's worth of other filterable messages, then the SAME text lands again and sticks -
+    and only now does the original reservation's write fail and release. That release runs
+    at the original 'now', and must not remove the later, successful slot: bare digests let
+    it (every copy of a digest was interchangeable), the (instant, digest) pair does not."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    room = "r"
+    digest = limit._dupe_key(room, LONG, FLOOR)[1]
+
+    def ring_count() -> int:
+        return sum(d == digest for _, d in limit._rings.get(room, ()))
+
+    assert refused(LONG, now=0.0) is False  # reserve X at now=0
+    for i in range(limit.DUPE_RING):  # a full ring of distinct texts evicts X's slot
+        assert refused("distinct filler phrase number " + str(i), now=1.0) is False
+    assert ring_count() == 0, "X's original slot has been pushed out of the ring"
+    assert refused(LONG, now=float(WINDOW + 1)) is False  # X lands again, and this one sticks
+    assert ring_count() == 1
+    limit.dupe_release(room, LONG, 0.0, WINDOW, FLOOR)  # the ORIGINAL reservation, now stale
+    assert ring_count() == 1, "the later successful copy must survive"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
 def test_concurrent_writers_never_corrupt_the_ring() -> None:
     """Every write lane reaches the ring from a threadpool - the GET lanes are sync
     endpoints, the POST goes through run_in_threadpool - so the check, the record, the
@@ -425,7 +451,7 @@ def test_releasing_a_reserved_copy_gives_back_its_ring_slot_too() -> None:
     assert refused(other, now=1e6 + 1) is False
     limit.dupe_release("r", LONG, 1e6, WINDOW, FLOOR)
     key = limit._dupe_key("r", other, FLOOR)
-    assert key is not None and limit._rings["r"] == (key[1],)
+    assert key is not None and limit._rings["r"] == ((1e6 + 1, key[1]),)
     limit._dupes.clear()
     limit._rings.clear()
 
@@ -434,11 +460,12 @@ def test_releasing_one_of_two_copies_reserved_at_the_same_instant_frees_one_slot
     """Two threads reserving the same text can be handed the same time.monotonic() float -
     rare, and reachable, because the clock's resolution is not the lock's.
 
-    An earlier draft stored the ring as (instant, digest) pairs and released by removing
-    every entry equal to the pair, which in exactly this case removed BOTH slots: one
-    failed write gave back a slot the other reservation was still holding, and the text
-    got a free extra share of the room. Bare digests cannot have that bug - each is one
-    interchangeable entry, and giving one back is `remove`, which removes one.
+    The ring stores (instant, digest) pairs so a stale release matches only its own slot
+    (test_a_stale_release_cannot_wipe_a_later_successful_copy), and a collision on the
+    instant makes two slots that are byte-identical. That is safe only because release
+    removes ONE match with `list.remove`, not every equal entry: an earlier draft filtered
+    on the pair and dropped BOTH slots here, handing back a slot the other reservation was
+    still holding. One failed write must free exactly one slot.
 
     Asserted on both structures, since the window's tuple has the same collision.
     """
@@ -448,9 +475,9 @@ def test_releasing_one_of_two_copies_reserved_at_the_same_instant_frees_one_slot
     assert key is not None
     assert refused(LONG, now=7.0) is False
     assert refused(LONG, now=7.0) is False, "two reservations, one instant"
-    assert limit._rings["r"] == (key[1], key[1])
+    assert limit._rings["r"] == ((7.0, key[1]), (7.0, key[1]))
     limit.dupe_release("r", LONG, 7.0, WINDOW, FLOOR)  # only one of the two failed
-    assert limit._rings["r"] == (key[1],), "one released slot, not both"
+    assert limit._rings["r"] == ((7.0, key[1]),), "one released slot, not both"
     assert limit._dupes[key] == (7.0,), "and the window's copy count agrees"
     limit._dupes.clear()
     limit._rings.clear()
