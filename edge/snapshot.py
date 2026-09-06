@@ -142,6 +142,7 @@ def rooms_key() -> dict:
         "/rooms": {
             "match": dict(ROOMS_KEY_MATCH),
             "clamped": {"limit": {"min": 1, "max": 200}},
+            "vary": ["Origin"],
         }
     }
 

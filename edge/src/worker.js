@@ -86,7 +86,7 @@ const inFlight = new Map();
 /** The key a copy is stored under: the reply space, not the URL space. Parameters the origin
  * ignores are dropped so they cannot multiply entries. Null means "no shared copy for this
  * request" — never a guess. */
-function cacheKey(url, pathname) {
+function cacheKey(url, pathname, request) {
   const spec = EDGE_KEY[pathname];
   if (!spec) return null;
   const keep = new URLSearchParams();
@@ -105,7 +105,15 @@ function cacheKey(url, pathname) {
   }
   keep.sort();
   const query = keep.toString();
-  return new Request(url.origin + pathname + (query ? "?" + query : ""), { method: "GET" });
+  const headers = new Headers();
+  for (const name of spec.vary ?? []) {
+    const value = request?.headers.get(name);
+    if (value !== null && value !== undefined) headers.set(name, value);
+  }
+  return new Request(url.origin + pathname + (query ? "?" + query : ""), {
+    method: "GET",
+    headers,
+  });
 }
 
 /** A 5xx is the origin failing to answer. A 4xx is the origin answering "no", which is a
@@ -139,7 +147,7 @@ async function stored(request, env, pathname, { fallback }) {
 
 async function edgeCached(request, pathname, seconds) {
   const cache = caches.default;
-  const key = cacheKey(new URL(request.url), pathname) ?? request;
+  const key = cacheKey(new URL(request.url), pathname, request) ?? request;
   const hit = await cache.match(key);
   if (hit) return hit;
 
@@ -207,17 +215,18 @@ async function fromOrigin(request, key) {
 
 /** One origin walk per key, however many readers are waiting on it. */
 function fill(request, key) {
-  const pending = inFlight.get(key.url);
+  const identity = key.url + "\u0000" + (key.headers.get("Origin") ?? "");
+  const pending = inFlight.get(identity);
   if (pending) return pending;
-  const job = fromOrigin(request, key).finally(() => inFlight.delete(key.url));
-  inFlight.set(key.url, job);
+  const job = fromOrigin(request, key).finally(() => inFlight.delete(identity));
+  inFlight.set(identity, job);
   return job;
 }
 
 const asResponse = (r) => new Response(r.body, { status: r.status, headers: r.headers });
 
 async function revalidating(request, ctx, pathname, seconds) {
-  const key = cacheKey(new URL(request.url), pathname);
+  const key = cacheKey(new URL(request.url), pathname, request);
   // No canonical key: serve from the origin without touching the shared copy.
   if (!key) return fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
 

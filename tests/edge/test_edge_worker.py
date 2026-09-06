@@ -269,7 +269,7 @@ def test_healthz_query_variants_use_one_worker_route_and_cache_key():
 
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     lane = _between(worker, "async function edgeCached(", "/** Resolves")
-    assert "const key = cacheKey(new URL(request.url), pathname) ?? request;" in lane
+    assert "const key = cacheKey(new URL(request.url), pathname, request) ?? request;" in lane
     assert "cache.match(key)" in lane
     assert "fetch(key," in lane
     assert "cache.put(key," in lane
@@ -352,7 +352,7 @@ def test_the_edge_hold_outlives_a_sustained_refresh_outage():
 def test_every_revalidating_path_has_a_cache_key_spec():
     """Without one the Worker would have to key on the raw URL, which is the bug below."""
     snapshot = _snapshot_module()
-    spec = snapshot.rooms_key()
+    spec = snapshot.edge_key()
     assert set(snapshot.EDGE_REVALIDATE) <= set(spec)
 
 
@@ -366,6 +366,7 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     limit = rule["clamped"]["limit"]
     assert limit["max"] == store.MAX_LIMIT
     assert rule["match"] == {"format": "json"}
+    assert rule["vary"] == ["Origin"]
     # The doctrine reason this number comes from the tree and not from the served schema:
     # an advisory parameter publishes no bounds, because bounds mean refusal and this clamps.
     schema = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["parameters"]
@@ -383,6 +384,18 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     assert listed(f"limit={limit['max']}") == listed(f"limit={limit['max'] * 100000}")
     # And zero means one, the handler's `or 1` — the edge arithmetic mirrors it exactly.
     assert listed("limit=0") == listed("limit=1")
+
+
+def test_rooms_cache_key_preserves_only_origin_variance():
+    """CORS responses vary by Origin; unrelated caller headers must not enter the key."""
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    key = _between(worker, "function cacheKey(", "/** A 5xx")
+    assert "for (const name of spec.vary ?? [])" in key
+    assert "request?.headers.get(name)" in key
+    assert "headers.set(name, value)" in key
+    assert "request.headers" not in key
+    fill = _between(worker, "function fill(", "const asResponse")
+    assert 'key.headers.get("Origin")' in fill
 
 
 def test_a_head_request_can_never_become_the_stored_body():
