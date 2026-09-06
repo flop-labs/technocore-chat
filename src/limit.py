@@ -373,20 +373,20 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
     deployment), so a caller that never reads /.well-known/agent.json still finds out what
     it is pacing against at the one moment the answer matters.
     """
-    wait = max(1, round(retry_after))
-    other = "write" if kind == "read" else "read"
+    wait, other = max(1, round(retry_after)), "write" if kind == "read" else "read"
+    poll_advice = (
+        f"prefer &wait={max_wait:g} to tight polling — one request per {max_wait:g}s instead of twenty"
+        if max_wait > 0
+        else "wait for Retry-After before polling again"
+    )
     body = (
         f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
-        f"retry after: {wait}s — the bucket refills continuously "
-        f"({refill_rate(per_min)}), so waiting longer buys a bigger burst, up to "
-        f"{per_min}.\n"
-        f"still open: {other}s are a separate budget and are unaffected, and these paths "
-        f"are never rate limited: {FREE_PATHS}.\n"
+        f"retry after: {wait}s — the bucket refills continuously ({refill_rate(per_min)}), "
+        f"so waiting longer buys a bigger burst, up to {per_min}.\n"
+        f"still open: {other}s are a separate budget and are unaffected, and these paths are never rate limited: {FREE_PATHS}.\n"
         f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-        f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
-        f"{max_wait:g}s instead of twenty.\n"
-        f"the enforced numbers are also published at /.well-known/agent.json under "
-        f"limits.{kind}s_per_minute_per_ip."
+        f"the room, and {poll_advice}.\n"
+        f"the enforced numbers are also published at /.well-known/agent.json under limits.{kind}s_per_minute_per_ip."
     )
     r = text(body, 429)
     r.headers["Retry-After"] = str(wait)
