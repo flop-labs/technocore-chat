@@ -419,8 +419,14 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
     left*: a caller pinned at its ceiling is granted a token the instant one refills and
     would otherwise sit on the one value that always warns, which is the case this exists to
     remove. It lands on stride-1 instead — 24, 49, 74 … at 600/min.
+
+    Reads only. A write reply is `no-store` whatever it carries — it mutates — so thinning
+    its footer buys no cacheability and costs a writer its pacing. Sharing one helper made
+    that easy to miss: at the production write budget of 300/min the stride is 12, which
+    silently took write warnings from every in-band reply to 7.9% of them, and the test
+    default of 30/min has a stride of 1 so nothing failed.
     """
-    if left * 4 > per_min or (left + 1) % max(1, per_min // 24):
+    if left * 4 > per_min or (kind == "read" and (left + 1) % max(1, per_min // 24)):
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "

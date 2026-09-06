@@ -273,6 +273,27 @@ def test_the_warning_thins_out_so_the_reply_stays_shareable(client):
     assert gaps and max(gaps) == min(gaps), f"uneven stride {gaps}"
 
 
+def test_only_reads_are_thinned_because_only_reads_can_be_shared(client):
+    """The stride buys cacheability, and a write reply has none to buy: it mutates, so it is
+    `no-store` whatever it carries. Thinning it would cost a writer its pacing for nothing.
+
+    Gated because sharing one helper made it easy to miss, and the defaults hid it: at the
+    production write budget of 300/min the stride is 12 and write warnings silently fell to
+    7.9% of in-band replies, while the test default of 30/min has a stride of 1 and passed.
+    """
+    import limit
+
+    for per_min in (30, 300, 600):
+        band = [n for n in range(per_min + 1) if n * 4 <= per_min]
+        warned = [n for n in band if limit.budget_note("write", n, per_min)]
+        assert warned == band, (
+            f"write warnings thinned at {per_min}/min: {len(warned)} of {len(band)}"
+        )
+    # And the read side is still thinned at the same budget, so this is not just both off.
+    read_band = [n for n in range(601) if n * 4 <= 600]
+    assert len([n for n in read_band if limit.budget_note("read", n, 600)]) < len(read_band)
+
+
 def test_a_small_budget_still_warns_on_every_reply(client):
     """The stride is `per_min // 24`, so a deployment with no requests to spare gets 1 —
     the every-reply behaviour, because thinning a warning nobody has room to miss is worse
