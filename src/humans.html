@@ -521,22 +521,25 @@
     </div>
     <p class="hint" id="keyhint">Sign in and your messages carry a <code>did:key</code> the
     server verifies — a name nobody else can post under, and the way into mailbox rooms and
-    room ownership. A passkey brings the same identity back on your other devices.</p>
+    room ownership. A passkey <em>is</em> that key: it derives the same <code>did:key</code>
+    every time and nothing is kept here, so the identity comes back when you return, and on
+    any device the passkey syncs to. No passkey for this site yet? Make one under
+    <strong>Other ways in</strong>.</p>
     <details id="keymore">
       <summary>Other ways in</summary>
       <div class="row">
-        <button id="keypassnew" class="btn-secondary">New passkey</button>
+        <button id="keypassnew" class="btn-secondary">Create a passkey</button>
         <button id="keynew" class="btn-secondary">Create a key</button>
         <input id="seed" placeholder="…or paste a 64-character hex seed" maxlength="64"
                spellcheck="false" autocomplete="off"
                aria-label="Ed25519 seed, 64 hex characters">
         <button id="keyuse" class="btn-secondary">Use seed</button>
       </div>
-      <p class="hint"><strong>New passkey</strong> enrols another one, a second identity
-      beside any you already hold. <strong>Create a key</strong> stores a key in this browser
-      and nowhere else — back it up or lose it. <strong>Use seed</strong> takes the 64 hex
-      characters <code>scripts/sign.py keygen</code> prints, so one identity works here and
-      on the command line.</p>
+      <p class="hint"><strong>Create a passkey</strong> enrols one — your first, or another
+      identity beside any you already hold. <strong>Create a key</strong> stores a key in
+      this browser and nowhere else — back it up or lose it. <strong>Use seed</strong> takes
+      the 64 hex characters <code>scripts/sign.py keygen</code> prints, so one identity works
+      here and on the command line.</p>
     </details>
   </div>
 
@@ -1540,8 +1543,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         // does not distinguish — so the message has to name them and point at the other
         // button.
         if (e && e.name === 'NotAllowedError') {
+          // The message names a button, and until this line that button was inside a
+          // disclosure the reader had never opened — a dead end dressed as a next step. A
+          // first-timer clicks the one primary control, is told nothing is saved for this
+          // site, and is pointed at something not on screen. So open it: the way forward is
+          // the thing they were just told to press.
+          //
+          // On this branch and not by inference from stored state — the distinction §5.6
+          // turns on. Revealing enrolment is not performing it, and the reader still has to
+          // ask. It fires on a cancelled prompt too, which WebAuthn does not let anyone tell
+          // apart from an empty authenticator; opening a disclosure at someone who changed
+          // their mind is the cheaper of the two mistakes.
+          keyMoreEl.open = true;
           return fail('no passkey used — cancelled, timed out, or none saved for this site '
-                      + 'yet (then: New passkey)');
+                      + 'yet (then: Create a passkey)');
         }
         fail(String(e.message || e));
       })

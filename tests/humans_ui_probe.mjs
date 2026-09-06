@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-06, 112 checks, all passing — expected shape:
+ * Checked 2026-09-06, 119 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -46,8 +46,10 @@
  *                   invisible-character sweep matches the server's, the identity survives
  *                   a reload, and signing out lands back on the nickname lane
  *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
- *                   seed, and hands the SAME did:key back to a browser whose storage has
- *                   been wiped; discovery with nothing enrolled refuses instead of enrolling;
+ *                   seed, and hands the SAME did:key back three ways a reader comes back —
+ *                   a browser whose storage has been wiped, a reload with it intact, and a
+ *                   sign-out; discovery with nothing enrolled refuses instead of enrolling
+ *                   and opens the disclosure holding the button it tells them to press;
  *                   a ceremony nobody answers is replaced by the next click rather than
  *                   wedging the page, and says what it is waiting for loudly enough to
  *                   survive the room's own heartbeat on the same badge
@@ -680,6 +682,9 @@ const browser = await chromium.launch({
   await page.click("#keymore summary");
   check("passkey: and the disclosure reveals it",
         await page.locator("#keypassnew").isVisible());
+  // Folded away again: a first-timer has never opened it, and what follows is about what
+  // that reader can see.
+  await page.click("#keymore summary");
 
   // Discovery with nothing enrolled must explain itself and must not quietly enrol. This is
   // the branch that used to be reached by inference from stored state, and got it backwards.
@@ -690,6 +695,16 @@ const browser = await chromium.launch({
         await page.textContent("#status"));
   check("passkey: and signed nobody in",
         (await page.textContent("#me")) === "Not signed in");
+
+  // Pointing at a button is only a next step if the button is on screen. The reader with no
+  // passkey is the one who needs enrolment most and the one least likely to go looking for
+  // it behind a disclosure they have no reason to open.
+  check("passkey: the dead end opens the way out rather than naming it",
+        await page.locator("#keypassnew").isVisible());
+  check("passkey: and the message names that button exactly",
+        (await page.textContent("#status"))
+          .includes(await page.textContent("#keypassnew")),
+        `${await page.textContent("#status")} / ${await page.textContent("#keypassnew")}`);
 
   await page.click("#keypassnew");
   await signedIn();
@@ -742,6 +757,35 @@ const browser = await chromium.launch({
   await page.click("#keypass");
   await signedIn();
   check("passkey: the same passkey recovers the same DID from empty storage",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // Coming back later, in the same browser, with its storage untouched. The page will not
+  // re-derive a passkey identity on load and that is deliberate: deriving one costs a
+  // user-verification prompt, and demanding a fingerprint from a reader who came to watch a
+  // room would have earned being closed. So the promise is narrower and has to hold exactly
+  // — it starts signed out, and one click brings back the DID they left with rather than
+  // minting a new one.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: coming back starts signed out rather than prompting on load",
+        (await page.textContent("#me")) === "Not signed in");
+  check("passkey: with nothing about the identity left in storage to restore it from",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: and one click hands back the same DID, not a new one",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // The same recovery without the reload: sign-out has to leave nothing behind, and the
+  // passkey has to be enough on its own to undo it.
+  await page.click("#keyout");
+  check("passkey: signing out drops the identity",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: and signing back in returns the same DID",
         (await page.getAttribute("#me", "title")) === did,
         await page.getAttribute("#me", "title"));
 
