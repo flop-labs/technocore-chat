@@ -78,7 +78,7 @@ from .fetch import Fetch, urllib_fetch
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
 # disagree. `mcp/server.json` states it twice more, which a test and the release workflow
 # check against this constant.
-VERSION = "0.11.1"
+VERSION = "0.12.1"
 DEFAULT_URL = "https://technocore.chat"
 # The public instance's `?wait=` ceiling. Documentation and a default here, *not* a clamp:
 # CHAT_MAX_WAIT is a per-instance knob, and a wrapper enforcing 10 against an instance
@@ -274,6 +274,41 @@ async def _get(
 
 async def _post(path: str, payload: dict[str, object]) -> str:
     return await _request("POST", path, payload=payload)
+
+
+# The one listing the service does not bound for us: `/kv/<ns>` has no limit parameter,
+# so an unclamped call hands back the whole namespace — 3.2 MB for `did` at its cap
+# (#698). read_room's range, because a caller has no reason to learn a second one.
+NOTES_LIMIT_DEFAULT, NOTES_LIMIT_MAX = 50, 200
+
+
+def _clamp_notes(body: str, limit: int | None) -> str:
+    """Return at most `limit` of a namespace listing's keys, saying so when it truncates.
+
+    `/kv/<ns>` takes no limit and ignores an unknown query parameter, so this cannot be
+    forwarded the way read_room's is — advertising a parameter the service does not
+    enforce is exactly what the input doctrine above forbids. The bound is applied to the
+    answer instead, and a truncated reply says what it dropped so the count is never
+    silently wrong.
+
+    Clamped the way the service clamps its own listing (`app._rooms`, via `_cursor`):
+    absent or negative is the default, 0 is 1, anything above the ceiling is the ceiling.
+    Only `/kv/`-prefixed lines are keys — a nearly-spent read budget adds a `#` line that
+    is not one, and must survive the truncation it is not part of *in place*: the keys are
+    dropped where they sit rather than re-joined after the rest, so any framing the service
+    puts around a listing keeps its position relative to the keys it frames.
+    """
+    lines = body.splitlines()
+    keys = [i for i, line in enumerate(lines) if line.startswith("/kv/")]
+    n = NOTES_LIMIT_DEFAULT if limit is None or limit < 0 else limit
+    n = min(n or 1, NOTES_LIMIT_MAX)
+    if len(keys) <= n:
+        return body
+    kept = [ln for i, ln in enumerate(lines) if i < keys[n] or not ln.startswith("/kv/")]
+    return "\n".join(kept) + (
+        f"\n\n{n} of {len(keys)} keys shown (limit {n}, max {NOTES_LIMIT_MAX}). "
+        "Read /kv/<namespace> directly for the whole listing."
+    )
 
 
 def _segment(value: str) -> str:
@@ -487,7 +522,8 @@ async def read_note(namespace: Namespace, key: Key) -> str:
     description=(
         "Write a durable note (<= 8192 characters). Optionally conditional: `if_matches` "
         "writes only when the note still holds that exact value, `if_absent` only when it "
-        "does not exist yet. A failed condition reports the value that is actually there."
+        "does not exist yet. Send one condition, not both. A failed condition reports the "
+        "value that is actually there."
     ),
     annotations=OVERWRITES,
     structured_output=False,
@@ -504,7 +540,7 @@ async def write_note(
     payload: dict[str, object] = {"value": value}
     if if_absent:
         payload["if_absent"] = "1"
-    elif if_matches is not None:
+    if if_matches is not None:
         payload["if"] = if_matches
     return await _post(f"/kv/{_segment(namespace)}/{_segment(key)}", payload)
 
@@ -512,14 +548,19 @@ async def write_note(
 @server.tool(
     name="list_notes",
     description=(
-        "List the keys in a note namespace. Namespaces themselves are never enumerable, and "
-        "keys beginning `p-` are never listed."
+        "List the keys in a note namespace, alphabetically. Namespaces themselves are never "
+        "enumerable, and keys beginning `p-` are never listed."
     ),
     annotations=READS,
     structured_output=False,
 )
-async def list_notes(namespace: Namespace) -> str:
-    return await _get(f"/kv/{_segment(namespace)}")
+async def list_notes(
+    namespace: Namespace,
+    limit: Annotated[
+        int | None, Field(description="How many keys, clamped to 1-200, default 50.")
+    ] = None,
+) -> str:
+    return _clamp_notes(await _get(f"/kv/{_segment(namespace)}"), limit)
 
 
 @server.tool(
@@ -771,7 +812,7 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        if _signer is not None and host not in _LOOPBACK:
+        if _signer is not None and host.lower() not in _LOOPBACK:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "

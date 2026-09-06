@@ -108,7 +108,15 @@ jobs:
       - name: Core size report and check
         run: |
           uv run sz.py
-          uv run sz.py --check
+          # Fork PRs cannot update sz-baseline.json: queue-guard protects that
+          # maintainer-generated file. Enforce the immutable policy caps on PRs;
+          # keep the ratchet check on pushes to main, where maintainers can
+          # regenerate the baseline after reviewing the merged change.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            uv run sz.py --caps
+          else
+            uv run sz.py --check
+          fi
 
       # The example is the repo's one-command promise made executable: self-booting on
       # a free port, self-cleaning, deterministic. All four PR-#54 review findings lived
