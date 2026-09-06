@@ -2665,13 +2665,14 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
+    _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
+    # Reap first: the sweep can remove an idle note that existed at request entry.
     # This is a valid observation even if another caller creates immediately afterwards;
     # existing notes still compare under the lock below.
     if expect is not None and not path.exists():
         raise StoreConflictError(f"note {ns}/{key} changed since you read it", None)
-    _reap(root)
     # No cap check before the gate any more. One ran here to shed a full store's worth of
     # refusals without queueing for a service-wide create gate first; the gate is NOTES_FILE's
     # own lock now, held for two small file operations (#578), so a refusal costs the lock it

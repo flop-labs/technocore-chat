@@ -72,3 +72,26 @@ def test_missing_note_cas_refusals_create_no_artifacts(client, tmp_path, lane):
     # Ordinary creation and CAS still work after the rejected requests.
     assert client.post("/kv/probe/key", json={"value": "old"}).status_code == 200
     assert client.post("/kv/probe/key", json={"value": "new", "if": "old"}).status_code == 200
+
+
+@pytest.mark.parametrize("lane", ["get", "post"])
+def test_reaped_note_cas_refusal_recreates_no_artifacts(client, tmp_path, lane):
+    endpoint = "/kv/probe/key"
+    assert client.post(endpoint, json={"value": "old"}).status_code == 200
+    path = store.note_path(tmp_path, "probe", "key")
+    lock = path.with_suffix(path.suffix + ".lock")
+    _client._age(path, store.IDLE_SECONDS + 60)
+    _client._age(lock, store.IDLE_SECONDS + 60)
+    _client._age(tmp_path / ".reaped", store.REAP_EVERY + 60)
+    # This note exists at request entry but the request's due sweep removes it.
+    assert path.exists()
+    if lane == "get":
+        response = client.get(endpoint + "/set/new", params={"if": "old"})
+    else:
+        response = client.post(endpoint, json={"value": "new", "if": "old"})
+    assert response.status_code == 409
+    assert "no note there" in response.text
+    assert not path.exists()
+    assert not lock.exists()
+    assert not store._note_ns_dir(tmp_path, "probe").exists()
+    assert store._note_count(tmp_path) == 0
