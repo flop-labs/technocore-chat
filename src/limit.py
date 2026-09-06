@@ -57,6 +57,8 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # requests from one IP can read the same bucket before either writes it back. The lock
 # guards only that read-modify-write — get, compute, assign, and the LRU touch/eviction
 # that rides along with it in take() — never I/O, so a held lock is always microseconds.
+# Scope: this covers _buckets only. The duplicate ring keeps its own _dupes_lock below,
+# and the waiter counters stay unlocked on the event loop.
 _buckets_lock = threading.Lock()
 
 # Request counters for /stats. Deliberately in-process (the store's counters are the
@@ -94,11 +96,12 @@ MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a d
 # drag its own window open by hammering: the phrase becomes acceptable again exactly
 # `window` after the last copy that landed, never later.
 #
-# Guarded by a lock, unlike every other structure in this module. The waiter counters are
-# safe unlocked because they are only ever touched by the single-threaded event loop, and
-# the buckets are read-modify-write on ONE key so a lost update costs a fraction of a
-# token. This one is neither: both write lanes reach it from a threadpool (the GETs are
-# sync endpoints, the POST goes through run_in_threadpool), and the sweep walks and
+# Guarded by its own leaf lock, like the token buckets above -- but its own, not
+# _buckets_lock. The waiter counters are the one unlocked structure left, safe because
+# only the single-threaded event loop touches them. A bucket mutation is a swap on ONE
+# key; this ring's write is not, which is why it needs more than the buckets' lock gives.
+# Both write lanes reach it from a threadpool (the GETs are sync endpoints, the POST goes
+# through run_in_threadpool), and unlike a bucket's single-key swap, the sweep walks and
 # deletes from the front while another thread may be inserting — which is an
 # `OrderedDict mutated during iteration` RuntimeError, or a KeyError on a key the other
 # thread just evicted, i.e. a 500 on exactly the write path the filter exists to protect.
