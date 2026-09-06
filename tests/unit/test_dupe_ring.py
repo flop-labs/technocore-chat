@@ -193,7 +193,9 @@ def test_a_stale_release_cannot_wipe_a_later_successful_copy() -> None:
     limit._dupes.clear()
     limit._rings.clear()
     room = "r"
-    digest = limit._dupe_key(room, LONG, FLOOR)[1]
+    key = limit._dupe_key(room, LONG, FLOOR)
+    assert key is not None
+    digest = key[1]
 
     def ring_count() -> int:
         return sum(d == digest for _, d in limit._rings.get(room, ()))
