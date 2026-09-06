@@ -6,7 +6,11 @@ import time
 from pathlib import Path
 
 import _client
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from starlette.testclient import TestClient
+
+import limit
 
 client = _client.client  # the shared TestClient fixture
 
@@ -273,25 +277,41 @@ def test_the_warning_thins_out_so_the_reply_stays_shareable(client):
     assert gaps and max(gaps) == min(gaps), f"uneven stride {gaps}"
 
 
-def test_only_reads_are_thinned_because_only_reads_can_be_shared(client):
-    """The stride buys cacheability, and a write reply has none to buy: it mutates, so it is
-    `no-store` whatever it carries. Thinning it would cost a writer its pacing for nothing.
+# Derandomized and deadline-free, matching tests/unit/test_parse_properties.py: a property
+# whose failures cannot be reproduced is worse than no property.
+_BUDGETS = settings(derandomize=True, deadline=None, max_examples=75)
 
-    Gated because sharing one helper made it easy to miss, and the defaults hid it: at the
-    production write budget of 300/min the stride is 12 and write warnings silently fell to
-    7.9% of in-band replies, while the test default of 30/min has a stride of 1 and passed.
+
+@given(per_min=st.integers(min_value=1, max_value=1200))
+@_BUDGETS
+def test_the_footer_contract_holds_at_every_budget(per_min):
+    """The footer's rules stated over the whole range of budgets, not the one the tests set.
+
+    This exists because of how the write regression got in. Every rate-knob test in this
+    suite picks a tiny budget so it can exhaust it in a few requests — RATE_READ=1, =8,
+    RATE_WRITE=2, =4, =8 — which is right for testing exhaustion and blind to anything that
+    scales with the budget. The read stride is `per_min // 24`, so at every budget any test
+    had ever used it was 1, the thinning never engaged, and applying it to writes as well
+    passed the whole suite. It showed up only at the production 300/min.
+
+    So the claims are asserted for all budgets rather than at a chosen one:
+
+      - a write footer is never thinned — its presence is exactly the threshold, whatever
+        the budget, because a write reply is `no-store` and has no sharing to buy;
+      - neither kind warns outside the threshold band;
+      - a read is never *silent* through the whole band, however the stride divides it.
     """
-    import limit
+    band = [n for n in range(per_min + 1) if n * 4 <= per_min]
+    above = [n for n in range(per_min + 1) if n * 4 > per_min]
 
-    for per_min in (30, 300, 600):
-        band = [n for n in range(per_min + 1) if n * 4 <= per_min]
-        warned = [n for n in band if limit.budget_note("write", n, per_min)]
-        assert warned == band, (
-            f"write warnings thinned at {per_min}/min: {len(warned)} of {len(band)}"
-        )
-    # And the read side is still thinned at the same budget, so this is not just both off.
-    read_band = [n for n in range(601) if n * 4 <= 600]
-    assert len([n for n in read_band if limit.budget_note("read", n, 600)]) < len(read_band)
+    assert [n for n in band if limit.budget_note("write", n, per_min)] == band, (
+        f"write warnings thinned at {per_min}/min"
+    )
+    assert not any(limit.budget_note("write", n, per_min) for n in above)
+    assert not any(limit.budget_note("read", n, per_min) for n in above)
+    assert [n for n in band if limit.budget_note("read", n, per_min)], (
+        f"a read caller at {per_min}/min is never warned at all"
+    )
 
 
 def test_a_small_budget_still_warns_on_every_reply(client):
