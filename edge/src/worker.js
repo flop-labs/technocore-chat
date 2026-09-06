@@ -1,13 +1,18 @@
 /**
- * Edge policy for the document surface: two lanes, chosen by whether a document's bytes
- * depend on the running configuration.
+ * Edge policy for the document surface. Five lanes, and snapshot.py owns which path is in
+ * which, so this Worker, deploy.sh and tests/edge/ cannot disagree about it. Two of them
+ * split the stored documents by whether a document's bytes depend on the running
+ * configuration:
  *
- *   static-first  /skill.md, /patterns.md, /robots.txt
+ *   static-first  /skill.md, /patterns.md
  *                 Served from the stored copy without asking the origin. Nothing in them
  *                 comes from config — enforced by tests/edge/, which renders each under two
- *                 different configs and requires identical bytes.
+ *                 different configs and requires identical bytes. /robots.txt looks like it
+ *                 belongs here but is origin-first: manifest.robots_txt embeds an absolute
+ *                 Sitemap URL built from CHAT_PUBLIC_URL, so its bytes move with a compose
+ *                 edit the way the static two's never do.
  *
- *   origin-first  everything else
+ *   origin-first  every other document
  *                 Proxied to the origin; the stored copy is served only when the origin
  *                 fails to answer at all. /llms.txt carries MAX_ROOMS and MAX_NOTES_PER_NS,
  *                 /openapi.json and /.well-known/agent.json carry the version and the whole
@@ -17,13 +22,20 @@
  *                 incidents, which is when these get read. Measured 2026-09-01: three
  *                 compose knobs changed on the box that day, none of them via a release.
  *
+ * The other three lanes hold paths that are never snapshotted at all, because a stored copy
+ * of them would be the wrong answer rather than a late one: edge-cached (/healthz, held for
+ * a few seconds and never falling back — a stored "ok" can only answer for a service that
+ * is gone), revalidating (/rooms, the edge copy always, refreshed behind the request) and
+ * edge-only (/favicon.ico, which the origin does not serve). route() tries them in that
+ * order, before the two document lanes; each is explained at its constant below.
+ *
  * Why the split rather than origin-first for everything: origin-first already survives an
  * outage, so the static lane is not about the origin being *down* — it is about the origin
  * being *slow*. That outage spent hours degraded rather than dead, and origin-first waits
- * out its timeout before falling back, so the three documents a reader most needs in order
+ * out its timeout before falling back, so the two documents a reader most needs in order
  * to back off and retry would each have cost a multi-second stall.
  *
- * The cost, accepted: the static three change on a release, so a stored copy is stale until
+ * The cost, accepted: the static two change on a release, so a stored copy is stale until
  * deploy.sh runs again. A release is a controlled moment; a compose edit is not.
  *
  * Not in front of /r/ or /kv/. Those are ~80% of traffic, are writes as often as reads, and
@@ -115,8 +127,8 @@ const isOriginFailure = (status) => status >= 500;
 
 /** The stored copy, with the Content-Type the origin gave it when it was captured.
  *
- * The type comes from the manifest rather than the asset server's guess because six of
- * these paths carry no file extension (/humans, /config, /.well-known/api-catalog among
+ * The type comes from the manifest rather than the asset server's guess because four of
+ * these documents carry no file extension (/humans, /config, /.well-known/api-catalog among
  * them), and a guess hands a browser HTML labelled text/plain or JSON as octet-stream.
  */
 async function stored(request, env, pathname, { fallback }) {

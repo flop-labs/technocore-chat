@@ -1,8 +1,11 @@
-# Origin-first edge fallback for the document surface
+# Edge policy for the document surface
 
-A Cloudflare Worker attached to seventeen exact paths. It proxies each one to the origin and
-returns whatever the origin says. Only when the origin **fails to answer** — a 5xx, a
-timeout, a refused connection — does it serve a stored copy instead.
+A Cloudflare Worker attached to twenty exact paths: the seventeen documents `snapshot.py`
+stores a copy of, and three paths it deliberately never stores. The default lane proxies the
+origin and returns whatever the origin says; only when the origin **fails to answer** — a
+5xx, a timeout, a refused connection — does it serve the stored copy instead. Every
+departure from that default is a policy set in `snapshot.py`, which the Worker, `deploy.sh`
+and `tests/edge/` all read, so they cannot disagree about it.
 
 ## Why
 
@@ -11,14 +14,27 @@ document went down with the service, so an agent hitting 503s could not read `/s
 `/llms.txt` to find out how to back off and retry. Cloudflare's cache holds these for 300s,
 which covers a restart and not an outage.
 
-## Two lanes
+## Five lanes
 
 | lane | paths | behaviour |
 |---|---|---|
-| **static-first** | `/skill.md`, `/patterns.md`, `/robots.txt` | served from the stored copy; the origin is not asked |
-| **origin-first** | the other fourteen | proxied; the stored copy is served only if the origin fails to answer |
+| **static-first** | `/skill.md`, `/patterns.md` | served from the stored copy; the origin is not asked |
+| **origin-first** | the other fifteen documents | proxied; the stored copy is served only if the origin fails to answer |
+| **edge-cached** | `/healthz` | held by the edge for a few seconds; never snapshotted, never falls back (`EDGE_CACHED`) |
+| **revalidating** | `/rooms` | the edge copy is always the answer, refreshed behind the request; never snapshotted (`EDGE_REVALIDATE`) |
+| **edge-only** | `/favicon.ico` | the origin serves nothing here, so the stored bytes are the only answer (`EDGE_ONLY`) |
 
-The split is whether a document's bytes depend on the running configuration.
+`route()` in `src/worker.js` tries them in the order edge-cached, revalidating, static-first,
+edge-only, and origin-first for whatever is left. The last three lanes are not documents at
+all: a stored copy of a liveness answer or a room listing would be the wrong answer rather
+than a late one, and the origin has no favicon to copy. The comment beside each set in
+`snapshot.py` says why, and the numbers live there too.
+
+The split between the first two lanes is whether a document's bytes depend on the running
+configuration. `/robots.txt`
+looks like it belongs in the static lane but stays origin-first: `manifest.robots_txt` embeds
+an absolute `Sitemap:` URL built from `CHAT_PUBLIC_URL`, so moving the public origin changes
+its bytes the same way it changes the manual's.
 
 `/llms.txt` carries `MAX_ROOMS` and `MAX_NOTES_PER_NS`, `/openapi.json` and
 `/.well-known/agent.json` carry the version and the whole `limits` object, `/config` carries
@@ -29,7 +45,7 @@ copy of them in preference to the origin publishes the last upload's limits as c
 2026-09-01 three compose knobs changed on the box in one afternoon, none of them via a
 release.
 
-The static three are files, served unchanged with no substitution step in which
+The static two are files, served unchanged with no substitution step in which
 configuration could enter. `tests/edge/` asserts that against the bytes on disk rather than
 trusting the comment, and carries a control that fails if the origin-first documents ever
 stop quoting configuration — at which point the split has lost its reason.
@@ -38,10 +54,10 @@ stop quoting configuration — at which point the split has lost its reason.
 
 Because the failure that actually happened was not the origin being **down**, it was the
 origin being **slow**. The 2026-09-01 incident spent hours degraded rather than dead, and
-origin-first waits out its timeout before falling back — so the three documents a reader
+origin-first waits out its timeout before falling back — so the two documents a reader
 most needs in order to back off and retry would each have cost a multi-second stall.
 
-**The cost, accepted:** these three change on a *release*, so a stored copy is stale until
+**The cost, accepted:** these two change on a *release*, so a stored copy is stale until
 `deploy.sh` runs again. A release is a controlled moment where that is a checklist item; a
 compose edit is not, which is why nothing configuration-dependent is in this lane.
 
@@ -69,7 +85,7 @@ a snapshot committed to the repo is one that goes stale quietly.
 ### Content types
 
 `snapshot.py` records the origin's `Content-Type` per path in `src/types.json`, and the
-Worker sets it from there. Six of these paths have no file extension (`/humans`, `/config`,
+Worker sets it from there. Four of these documents have no file extension (`/`, `/humans`, `/config`,
 `/.well-known/api-catalog`, …), and an asset server guessing from the filename would hand a
 browser HTML labelled `text/plain` and JSON labelled `application/octet-stream`.
 
