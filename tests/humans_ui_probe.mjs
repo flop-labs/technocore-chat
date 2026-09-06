@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-05, 109 checks, all passing — expected shape:
+ * Checked 2026-09-06, 112 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -47,7 +47,10 @@
  *                   a reload, and signing out lands back on the nickname lane
  *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
  *                   seed, and hands the SAME did:key back to a browser whose storage has
- *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
+ *                   been wiped; discovery with nothing enrolled refuses instead of enrolling;
+ *                   a ceremony nobody answers is replaced by the next click rather than
+ *                   wedging the page, and says what it is waiting for loudly enough to
+ *                   survive the room's own heartbeat on the same badge
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
  *                   ONE line a note can hold; re-issuing replaces rather than appends; four
@@ -649,13 +652,18 @@ const browser = await chromium.launch({
 
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable", { enableUI: false });
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
     options: {
       protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
       hasResidentKey: true, hasUserVerification: true, hasPrf: true,
       automaticPresenceSimulation: true, isUserVerified: true,
     },
   });
+  // A ceremony nobody answers. Turning presence off is the closest a virtual authenticator
+  // comes to the states that produced the bug below, and it is a faithful one: the request
+  // is issued, no dialog is answered, and the promise simply never settles.
+  const answers = (enabled) =>
+    cdp.send("WebAuthn.setAutomaticPresenceSimulation", { authenticatorId, enabled });
 
   const ready = () => page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
   const signedIn = () =>
@@ -698,6 +706,39 @@ const browser = await chromium.launch({
   await ready();
   check("passkey: a wiped browser starts signed out",
         (await page.textContent("#me")) === "Not signed in");
+  // A ceremony the reader never gets to answer is not an edge case: the platform dialog
+  // that opens behind the browser window, the OS sheet the OS itself dismissed, the hybrid
+  // flow whose phone never joined. None of those rejects the promise — it just never
+  // settles, and WebAuthn allows one outstanding request per document. So the page used to
+  // wedge: the second click was refused with the browser's own "A request is already
+  // pending.", a sentence about bookkeeping the reader cannot see, and it went on being
+  // refused until someone thought to reload. Clicking again has to mean "try that again".
+  await answers(false);
+  await page.click("#keypass");
+  await page.waitForTimeout(600);
+  check("passkey: a ceremony in flight says what it is waiting for",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  await page.click("#keypass");
+  await page.waitForTimeout(600);
+  check("passkey: clicking again replaces the parked ceremony instead of refusing it",
+        !(await page.textContent("#status")).includes("already pending"),
+        await page.textContent("#status"));
+
+  // The badge is shared with the pump, which stamps `seq N` on it every time a poll lands —
+  // about once a second in a room that is not idle. The line telling a reader what their
+  // click is waiting for, and the error when it fails, both have to outlive that; when they
+  // did not, a ceremony that never surfaced looked exactly like a button doing nothing.
+  await fetch(`${BASE}/r/lobby/say/probe/passkey%20heartbeat`);
+  await page.waitForTimeout(2000);
+  check("passkey: and the room's heartbeat does not wipe the answer",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  // The whole point of replacing it rather than refusing it: the reader gets in on the next
+  // click, from the same document, having reloaded nothing.
+  await answers(true);
   await page.click("#keypass");
   await signedIn();
   check("passkey: the same passkey recovers the same DID from empty storage",

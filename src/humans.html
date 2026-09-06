@@ -825,8 +825,27 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   // Roughly 8% of men cannot separate red from green, so the failure state is carried by the
   // word "error" as well as by Error Red (DESIGN.md: red is never the only signal).
-  function say(msg) { status.textContent = msg; status.className = 'badge live'; }
-  function fail(msg) { status.textContent = 'error — ' + msg; status.className = 'badge err'; }
+  //
+  // One badge, two writers that want different things from it. The pump stamps `seq N` on
+  // it every time a poll lands — a heartbeat, and the right cadence for a live log. Every
+  // other caller writes to it because the reader did something and is owed an answer. Until
+  // these were told apart the heartbeat won every race in a room that was not idle: the one
+  // line explaining what a click was waiting for, and the error when it failed, were both
+  // gone inside a second. That is most of why a passkey ceremony the platform never
+  // surfaced looked like a button that did nothing at all.
+  //
+  // So an answer is held: long enough to read, short enough that the seq is not stranded on
+  // a page the reader has moved on from.
+  var HOLD_MS = 8000;
+  var holdUntil = 0;
+  function badge(msg, cls) { status.textContent = msg; status.className = cls; }
+  function say(msg) { holdUntil = Date.now() + HOLD_MS; badge(msg, 'badge live'); }
+  function fail(msg) {
+    holdUntil = Date.now() + HOLD_MS;
+    badge('error — ' + msg, 'badge err');
+  }
+  // The pump's own line, which never talks over an answer the reader is still reading.
+  function beat(msg) { if (Date.now() >= holdUntil) badge(msg, 'badge live'); }
 
   // Opening a room from the list has to actually take you there. The list is a screenful on
   // its own — more so on a phone, and it holds up to 200 rows — so filling a log several
@@ -1141,7 +1160,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           }
         }
         restamp();
-        say('seq ' + since);
+        beat('seq ' + since);
         live(true);
         // A parked read that comes back instantly with nothing is the server declining to
         // park — every waiter slot is taken, and MAX_WAITERS_* degrades to an immediate
@@ -1345,14 +1364,39 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
               && typeof navigator.credentials.create === 'function');
   }
 
+  // One ceremony at a time, and the reader's newest click is the one that counts. WebAuthn
+  // allows a single outstanding request per document: a second get() while one is parked is
+  // rejected outright, with "A request is already pending." — a sentence about the page's
+  // own bookkeeping, handed to a reader who cannot see the thing it says is pending.
+  //
+  // And parked is where a request stays. The platform dialog is not always a dialog the
+  // reader gets to answer: on several of them it opens behind the browser window, or it is
+  // an OS sheet dismissed by the OS rather than by the page, or the ceremony is a hybrid
+  // one waiting on a phone that never joins. The promise does not reject in any of those —
+  // it simply never settles. Without the abort below that wedged the page for the life of
+  // the document: every later click reported the pending request, the reload nobody thinks
+  // to try was the only way out, and the button looked broken because for that reader it
+  // was. Aborting the outstanding request is what the signal is for, so clicking again
+  // means "try that again" — which is what the reader meant by it.
+  var ceremony = null;
+
+  // A backstop for the reader who clicks once and looks away: a ceremony nobody answers
+  // ends by saying so, rather than leaving `waiting for your passkey…` on screen forever.
+  // Generous, because the hybrid flow legitimately takes a while — scan a QR code, unlock a
+  // phone, approve there. Browsers clamp this to their own range; it is a hint, not a
+  // deadline, which is why the abort above is the mechanism and this is only the backstop.
+  var CEREMONY_MS = 120000;
+
   // The PRF output is read from a get(), never from the create(). Returning it at creation
   // time is optional in the spec and absent in several shipping browsers, so asking for it
   // there and trusting the answer is how this works on one engine and silently fails on the
   // next. One extra prompt on first setup, none afterwards.
-  function passkeyEnroll() {
+  function passkeyEnroll(signal) {
     return navigator.credentials.create({
+      signal: signal,
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
+        timeout: CEREMONY_MS,
         rp: { name: 'technocore.chat' },   // no id: it defaults to this origin, which is right
         user: {
           // Random, not derived from anything: an authenticator overwrites a credential that
@@ -1378,7 +1422,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // Unconstrained here, a reader who already has a passkey for this origin could press
       // "New passkey", get a credential created, and then be signed in as the older one —
       // a new key made and silently discarded, under a DID they did not just mint.
-      return passkeySeed([cred.rawId]);
+      return passkeySeed([cred.rawId], signal);
     });
   }
 
@@ -1386,10 +1430,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // allowCredentials is the same as none per spec, so the discovery path stays exactly what
   // it was: the authenticator offers what it holds for this origin, which is what lets a
   // browser with nothing in localStorage get the identity back.
-  function passkeySeed(allow) {
+  function passkeySeed(allow, signal) {
     return navigator.credentials.get({
+      signal: signal,
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
+        timeout: CEREMONY_MS,
         userVerification: 'required',
         allowCredentials: (allow || []).map(function (id) {
           return { type: 'public-key', id: id };
@@ -1476,24 +1522,38 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // identity they came back for still sitting in the authenticator. So discovery is a thing
   // they ask for, and enrolment is a thing they ask for, and neither happens by inference.
   function usePasskey(derive, working) {
+    // Replace whatever is outstanding before asking for anything new. Abort first and in
+    // its own statement: the browser refuses the second request while the first is still
+    // registered, so the order here is the whole point of it.
+    if (ceremony) { try { ceremony.abort(); } catch (e) { /* already settled */ } }
+    var ctl = new AbortController();
+    ceremony = ctl;
     say(working);
-    derive()
+    derive(ctl.signal)
       .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
       .catch(function (e) {
-        // NotAllowedError covers both a cancelled prompt and "this authenticator has nothing
-        // for this site", which WebAuthn deliberately does not distinguish — so the message
-        // has to name both and point at the other button.
+        // The reader clicked again and this is the ceremony they replaced. Its successor is
+        // on screen saying what it is waiting for; reporting this one would talk over it.
+        if (e && e.name === 'AbortError') return;
+        // NotAllowedError covers a cancelled prompt, a ceremony that ran out its timeout,
+        // and "this authenticator has nothing for this site" — which WebAuthn deliberately
+        // does not distinguish — so the message has to name them and point at the other
+        // button.
         if (e && e.name === 'NotAllowedError') {
-          return fail('no passkey used — cancelled, or none saved for this site yet '
-                      + '(then: New passkey)');
+          return fail('no passkey used — cancelled, timed out, or none saved for this site '
+                      + 'yet (then: New passkey)');
         }
         fail(String(e.message || e));
-      });
+      })
+      // Settled either way: stop holding a controller whose request is over, so the next
+      // click starts clean instead of aborting a ghost.
+      .then(function () { if (ceremony === ctl) ceremony = null; });
   }
 
   keyPassEl.addEventListener('click', function () {
-    // No argument: discovery, across every passkey this origin holds.
-    usePasskey(function () { return passkeySeed(); }, 'waiting for your passkey…');
+    // No credential argument: discovery, across every passkey this origin holds.
+    usePasskey(function (signal) { return passkeySeed(null, signal); },
+               'waiting for your passkey…');
   });
 
   keyPassNewEl.addEventListener('click', function () {
