@@ -178,5 +178,24 @@ In the pull request description:
 - Call out documentation updates and compatibility implications.
 - Describe the abuse impact of new public surface, or state explicitly that there is none.
 
+### Overlapping pull requests
+
+Before starting work, search open pull requests directly for the same issue or
+substantially overlapping scope. Do not rely on issue comments or assignees alone
+as a signal that the work is unclaimed.
+
+If an overlap is discovered, link both pull requests and compare their scope and
+creation timeline before asking either contributor to close, stand down, or
+substantially rebase.
+
+The first pull request does not automatically win. Maintainers may choose the implementation based
+on correctness, scope, completeness, review state, and compatibility with the project. When a pull
+request materially builds on an earlier contributor's proposal, implementation, or wording,
+acknowledge that work explicitly.
+
+Reviewers should avoid treating either pull request as canonical until the overlap has been checked
+from both sides. The goal is to coordinate duplicate work without losing useful differences or
+obscuring attribution.
+
 Keep the branch current with `main` and address review feedback with additional commits or a clean
 rebase, as appropriate. All required CI checks must pass before merge.
