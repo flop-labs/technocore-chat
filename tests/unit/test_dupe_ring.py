@@ -62,6 +62,17 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     )
 
 
+def test_normalisation_only_removes_explicit_duplicate_ref_syntax() -> None:
+    """A bare token-shaped substring is caller content, not proof of a server ref."""
+    token = "422-deadbeef-abcd"
+    assert limit.normalize_text(f"incident {token} alpha") != limit.normalize_text(
+        "incident alpha"
+    )
+    assert limit.normalize_text(f"incident &ref={token} alpha") == limit.normalize_text(
+        "incident alpha"
+    )
+
+
 def test_the_length_floor_is_on_the_normalised_text() -> None:
     """The floor is the boundary: at or above it the filter applies, below it never
     does - the entire conversational-repeat class lives below it."""

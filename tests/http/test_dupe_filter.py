@@ -121,8 +121,8 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     body points at, and once (not twice) on a write that also creates a room — and the
     handler otherwise ignores it. Only the exact token shape is counted or logged: a
     forged value with a newline in it must not reach the operator's log at all. Pasted
-    into the text instead, glued to a word or not, the token is cut out before the copy
-    check — it must not be the thing that makes the sixth copy land."""
+    into the text with its documented `&ref=` marker, the token is cut out before the
+    copy check; a bare token-shaped substring remains caller content."""
     with _filter_on(DUPE_MAX_COPIES=1):
         assert _say(client, "lobby", "a", PHRASE).status_code == 200
         refused = _say(client, "lobby", "b", PHRASE)
@@ -144,8 +144,8 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     assert [ln for ln in lines if "ref=" + ref in ln] == lines and len(lines) == 3
     assert "path='/patterns.md'" in lines[1] and "forged" not in "".join(lines)
     with _filter_on(DUPE_MAX_COPIES=1):
-        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
-        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
+        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 200
+        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 200  # glued to a word
         assert _say(client, "lobby", "c", "&ref=" + ref + " " + PHRASE).status_code == 422
 
 
