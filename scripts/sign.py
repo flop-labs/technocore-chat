@@ -140,7 +140,7 @@ def swept(text: str, limit: int) -> str:
     over the cap), so a caller learns it here rather than from a 4xx.
     """
     cleaned = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in ("\u200c", "\u200d") else c for c in text
     ).strip()
     if not cleaned:
         raise SystemExit(

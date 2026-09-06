@@ -1302,7 +1302,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // U+0085, JavaScript takes U+FEFF — and it does not matter, because the sweep has turned
   // every one of those into a space before either one runs.
   var INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
-  function swept(s) { return s.replace(INVISIBLE, ' ').trim(); }
+  function swept(s) { return s.replace(INVISIBLE, function(m) { return m === '\u200c' || m === '\u200d' ? m : ' '; }).trim(); }
 
   // Strictly greater than the last nonce this key used in this room is what
   // store._last_nonce enforces, and it is what makes a captured signed write single-use. A
