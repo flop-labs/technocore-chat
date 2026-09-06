@@ -587,6 +587,14 @@ async def say_signed(
     # satisfies that, so nothing is read before the write.
     minted = signing.next_nonce()
     swept = signing.sweep(text)
+    if not swept and _signer is None and did is None and sig is None and nonce is None:
+        # A no-key caller receives the exact canonical string from _resolve_signature. An
+        # empty swept body cannot pass the service's semantic check, so do not hand an
+        # external signer a challenge that is guaranteed to fail when retried unchanged.
+        raise ToolError(
+            "empty text: nothing visible was left after the single-line sweep. "
+            "Send at least one visible character."
+        )
     did, sig, nonce = _resolve_signature(f"{room}|{minted}|{swept}", did, sig, nonce, minted)
     return await _post(
         f"/r/{_segment(room)}", {"did": did, "sig": sig, "nonce": str(nonce), "text": text}
