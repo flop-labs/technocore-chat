@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-06, 121 checks, all passing — expected shape:
+ * Checked 2026-09-06, 125 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -53,6 +53,9 @@
  *                   a ceremony nobody answers is replaced by the next click rather than
  *                   wedging the page, and holds the badge against the room's own heartbeat
  *                   for as long as it runs — then hands it back when it settles
+ *   deadline        an engine that ignores `publicKey.timeout` still ends the ceremony: the
+ *                   page's own deadline aborts it and says so, on a stubbed get() that never
+ *                   settles, with the clock skipping the two minutes
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
  *                   ONE line a note can hold; re-issuing replaces rather than appends; four
@@ -931,6 +934,56 @@ const browser = await chromium.launch({
 
   check("passkey + delegation: no page errors throughout",
         errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+
+// ------------------------------------------------------------- a deadline the page owns
+// `publicKey.timeout` is a hint: the spec lets a user agent clamp or ignore it, so it cannot
+// be what bounds a ceremony. This is the engine that ignores it — a get() that never settles
+// and honours only the AbortSignal, which is every real implementation's floor. Without a
+// deadline of the page's own the request stays pending for the life of the document, and the
+// open-ended hold keeps the badge on "waiting for your passkey…" for a ceremony that is
+// never coming back (#747 review).
+//
+// The clock skips the two minutes rather than spending them. The tab is reported hidden for
+// the same reason the pump checks it: with the poll parked, the only timer this section can
+// be measuring is the one under test.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.clock.install();
+  await page.addInitScript(() => {
+    Object.defineProperty(document, "hidden", { get: () => true });
+    navigator.credentials.get = (opts) => new Promise((_, reject) => {
+      if (opts && opts.signal) {
+        opts.signal.addEventListener("abort", () => {
+          const e = new Error("signal aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      }
+    });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+
+  await page.click("#keypass");
+  await page.waitForTimeout(300);
+  check("deadline: the ceremony starts and says what it is waiting for",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  await page.clock.fastForward("02:10");
+  await page.waitForTimeout(500);
+  check("deadline: an engine that ignores the timeout hint still gets an answer",
+        (await page.textContent("#status")).includes("timed out with no answer"),
+        await page.textContent("#status"));
+  check("deadline: and the way back in is on screen with it",
+        await page.locator("#keypassnew").isVisible());
+  check("deadline: no page errors throughout", errors.length === 0, errors.join("; "));
   await context.close();
 }
 

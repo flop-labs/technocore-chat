@@ -1385,12 +1385,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // means "try that again" — which is what the reader meant by it.
   var ceremony = null;
 
-  // A backstop for the reader who clicks once and looks away: a ceremony nobody answers
-  // ends by saying so, rather than leaving `waiting for your passkey…` on screen forever.
-  // Generous, because the hybrid flow legitimately takes a while — scan a QR code, unlock a
-  // phone, approve there. Browsers clamp this to their own range; it is a hint, not a
-  // deadline, which is why the abort above is the mechanism and this is only the backstop.
+  // How long a ceremony nobody answers may run before it is ended and said so, rather than
+  // leaving `waiting for your passkey…` on screen forever. Generous, because the hybrid flow
+  // legitimately takes a while — scan a QR code, unlock a phone, approve there.
+  //
+  // Asked of the browser as `publicKey.timeout`, which is a *hint*: the spec lets a user
+  // agent clamp or ignore it, so it can request this bound and cannot be it. On an engine
+  // that ignores it the request stays pending for the life of the document, and with it the
+  // open-ended hold this ceremony takes on the badge — leaving "waiting for your passkey…"
+  // up for something that is never coming back, which is this page's original bug wearing
+  // the fix's own clothes. So the guarantee is the page's own deadline in usePasskey, and
+  // the grace below is how far behind the hint it sits: late enough that a browser honouring
+  // the hint gets to refuse in its own better words first (#747 review).
   var CEREMONY_MS = 120000;
+  var CEREMONY_GRACE_MS = 5000;
 
   // The PRF output is read from a get(), never from the create(). Returning it at creation
   // time is optional in the spec and absent in several shipping browsers, so asking for it
@@ -1540,12 +1548,31 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // `seq N` back over the one line explaining the wait. That is the bug this whole change
     // is about, with a delay in front of it. The settle below hands the badge back.
     hold(Infinity);
+    // What makes that hold safe to leave open: the deadline above, enforced here rather than
+    // asked of the browser, so something ends this ceremony even when nothing else does.
+    // `timedOut` is a local the closure owns rather than a property on the controller — the
+    // two aborts below have to stay told apart, and not by writing to a platform object.
+    var timedOut = false;
+    var deadline = setTimeout(function () {
+      timedOut = true;
+      try { ctl.abort(); } catch (e) { /* already settled */ }
+    }, CEREMONY_MS + CEREMONY_GRACE_MS);
     derive(ctl.signal)
       .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
       .catch(function (e) {
-        // The reader clicked again and this is the ceremony they replaced. Its successor is
-        // on screen saying what it is waiting for; reporting this one would talk over it.
-        if (e && e.name === 'AbortError') return;
+        // Two aborts arrive here and they are not the same event. The reader clicking again
+        // is a ceremony replaced: its successor is already on screen saying what it is
+        // waiting for, and reporting this one would talk over it. The deadline expiring is
+        // an outcome, and the one nobody else is left to report — returning silently there
+        // would hand the badge back to the heartbeat and call that an answer.
+        if (e && e.name === 'AbortError') {
+          if (timedOut) {
+            keyMoreEl.open = true;
+            return fail('the passkey prompt timed out with no answer — try again, or use '
+                        + 'Create a passkey, a key, or a seed');
+          }
+          return;
+        }
         // NotAllowedError covers a cancelled prompt, a ceremony that ran out its timeout,
         // and "this authenticator has nothing for this site" — which WebAuthn deliberately
         // does not distinguish — so the message has to name them and point at the other
@@ -1573,6 +1600,10 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // heartbeat. Skipped when this ceremony was replaced rather than finished — the
       // successor owns both, and its own hold is the one that should stand.
       .then(function () {
+        // Unconditionally, and before the early return: a deadline left armed on a ceremony
+        // that is over fires into nothing at best, and the point of it is that it is the one
+        // thing here not depending on the request settling.
+        clearTimeout(deadline);
         if (ceremony !== ctl) return;
         ceremony = null;
         hold(HOLD_MS);
