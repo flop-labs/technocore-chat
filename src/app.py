@@ -1257,7 +1257,8 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
 
 
 def _dupe_refusal(request: Request, room: str) -> Response:
-    """422 for a text this room has already taken inside the window.
+    """422 for a text this room has already taken too many copies of — inside the window,
+    or as a share of the slots it keeps for its most recent filterable messages.
 
     Not 200 — a 200 on a write lane carries the record that landed, and there is no
     record of the refuser's to return: their message did not land. Not 429 — this is not
@@ -1296,10 +1297,11 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     ref = f"422-{int(time.time()):x}-{secrets.token_hex(2)}"
     config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room, ref=ref)
     return text(
-        f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s; more are refused until that window passes.
+        f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s, or copies of it already fill {int(limit.DUPE_SHARE * limit.DUPE_RING)} of the {limit.DUPE_RING} slots this room keeps for its most recent filterable messages — {limit.DUPE_SHARE:.0%} of that fixed capacity, so it is the same count in a quiet room as in a busy one. more are refused until that window passes, and in the second case until other messages have pushed the copies out of those slots.
 not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
+waiting longer is not the answer to the second one: the share cap is about what the room reads like, not how fast it was filled, so the same sentence at a slower pace meets the same bar.
 what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
-/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).
+/patterns.md §7 works this through, /interop.md covers bridges, the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies), and DUPLICATES in /llms.txt states the share cap.
 optional: add &ref={ref} to your next requests. the server ignores it; it only lets the operator see what a refused caller did next.""",
         422,
     )

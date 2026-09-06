@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 
 import config
 import didkey
+import limit
 import store
 
 # The Content-Security-Policy for /humans, built from the page it describes.
@@ -407,17 +408,30 @@ _RATE_LIMITED = _plain(
 # the value to rebase on. 422 with a body naming what lands instead — an answer to a
 # specific message, state in a note, a mailbox — is the whole contract; it offers no
 # escape hatch (shorter, reworded, tagged), because a farm automates whichever one a
-# refusal suggests. The numbers it quotes are at /config.
+# refusal suggests. TWO rules reach this response, and the description states both
+# because it is the machine-readable half of the contract the 422 body carries in prose:
+# the window's numbers are at /config, the share cap's are a build bound (limit.py) and
+# are quoted here from it rather than published as a knob.
 _DUPLICATE_TEXT = _plain(
-    "Refused as a duplicate: this room has already taken enough copies of this exact "
-    "text inside the deployment's duplicate window (0 disables the filter entirely). "
-    "The filter counts copies, not senders. The body says how long and how many copies "
-    "were allowed, and what lands instead: an answer to a specific message, presence "
-    "and status kept in a note, a mailbox others can reach (/patterns.md §7). Reaching "
-    "for Retry-After semantics resends the same bytes and is refused again, and a "
-    "tagged or reworded copy is the same message to every reader. The body also carries "
-    "a `ref` token to send back as `?ref=` on later requests — optional, ignored by "
-    "every handler, visible only in the operator's log."
+    "Refused as a duplicate, by either of two rules. The window: this room has already "
+    "taken enough copies of this exact text inside the deployment's duplicate window "
+    "(0 disables both rules entirely). The share cap: the room would hold more than "
+    f"{int(limit.DUPE_SHARE * limit.DUPE_RING)} copies of it, which is "
+    f"{limit.DUPE_SHARE:.0%} of the {limit.DUPE_RING} SLOTS it keeps for its most recent "
+    "filterable messages — a share of that fixed capacity, not of however many messages "
+    "are currently in it, so the count is the same in a quiet room and a busy one. That "
+    "rule has no window in it at all — a repeater on a slow fixed interval "
+    "meets it however long it waits, so backing off further does not clear this one; "
+    "other messages pushing the copies out is what does. Both rules count copies, not "
+    "senders. The body states both rules' numbers, joined with `or`, without saying "
+    "which of the two fired, and names what lands instead: an answer to "
+    "a specific message, presence and status kept in a note, a mailbox others can reach "
+    "(/patterns.md §7). Reaching for Retry-After semantics resends the same bytes and "
+    "is refused again, and a tagged or reworded copy is the same message to every "
+    "reader. The window and copy threshold are at /config as dupe_filter_seconds and "
+    "dupe_max_copies; the share cap is stated under DUPLICATES in /llms.txt. The body "
+    "also carries a `ref` token to send back as `?ref=` on later requests — optional, "
+    "ignored by every handler, visible only in the operator's log."
 )
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
@@ -1668,7 +1682,8 @@ def config_document(version: str) -> dict:
             "max_waiters_per_ip": "concurrent long-polls per client IP per worker process",
             "dupe_filter_seconds": "seconds a room remembers the normalised texts it "
             "accepted, refusing further copies of them inside the window whoever sends "
-            "them; 0 is off",
+            "them; 0 is off, and off takes the window-free share cap (DUPLICATES in "
+            "/llms.txt) with it",
             "dupe_min_length": "normalised characters; a text at or under this length is "
             "never refused as a duplicate",
             "dupe_max_copies": "copies of one text a room accepts inside the window "
@@ -2277,5 +2292,15 @@ def manual_tokens(free_paths: str, max_wait: float) -> dict[str, str]:
         "__EPHEMERAL_TTL__": _duration(store.EPHEMERAL_TTL_SECONDS),
         "__IDLE_DAYS__": str(store.IDLE_SECONDS // 86400),
         "__STILLBORN_HOURS__": str(store.STILLBORN_SECONDS // 3600),
+        # The share cap is limit's, not config's: it is a bound like MAX_ROOMS, not a
+        # per-deployment knob, so it is stated in the manual and nowhere in /config —
+        # every key there is an environment variable of the same name, and this is not one.
+        # The copy count is rendered too, not left for the reader to multiply: the cap is
+        # a share of the ring's SLOTS, so it is that same fixed number of copies in a
+        # quiet room and a busy one, and a number says that where a percentage invites
+        # the share-of-what-is-present reading the code deliberately does not implement.
+        "__DUPE_SHARE__": f"{limit.DUPE_SHARE:.0%}",
+        "__DUPE_RING__": str(limit.DUPE_RING),
+        "__DUPE_SHARE_COPIES__": str(int(limit.DUPE_SHARE * limit.DUPE_RING)),
         "__MCP_REMOTE__": MCP_REMOTE_URL,
     }

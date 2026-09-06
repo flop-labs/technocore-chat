@@ -66,6 +66,7 @@ def test_the_length_floor_is_on_the_normalised_text() -> None:
     """The floor is the boundary: at or above it the filter applies, below it never
     does - the entire conversational-repeat class lives below it."""
     limit._dupes.clear()
+    limit._rings.clear()
     assert refused("x" * (FLOOR - 1), now=0.0) is False
     assert not limit._dupes, "a short text must not even be recorded"
     for i in range(COPIES + 3):
@@ -77,6 +78,7 @@ def test_a_refusal_never_extends_the_window() -> None:
     expiry out: the phrase opens again exactly 'window' after the last copy that
     landed, which is what makes the filter survivable to run at all."""
     limit._dupes.clear()
+    limit._rings.clear()
     for i in range(COPIES):
         assert refused(LONG, now=100.0 + i) is False
     for t in range(100 + COPIES, 160):
@@ -90,6 +92,7 @@ def test_the_threshold_decides_which_copy_is_the_refused_one() -> None:
     """COPIES is arithmetic, not a constant of nature: at 2 the third copy is refused.
     Pinned so a retune of the default cannot silently re-tune what this file means."""
     limit._dupes.clear()
+    limit._rings.clear()
     assert refused(LONG, now=0.0, max_copies=2) is False
     assert refused(LONG, now=1.0, max_copies=2) is False
     assert refused(LONG, now=2.0, max_copies=2) is True
@@ -99,38 +102,47 @@ def test_the_ring_stays_bounded_under_a_flood() -> None:
     """The bound that matters under load. Every key here is live - nothing has expired,
     so only the hard cap holds the line, and what survives is the newest."""
     limit._dupes.clear()
+    limit._rings.clear()
     cap = 128
     for i in range(20_000):
         refused("phrase number " + str(i), now=1000.0, window=300.0, cap=cap)
     assert len(limit._dupes) == cap
     assert refused("phrase number 19999", now=1000.0, window=300.0, cap=cap) is False
     limit._dupes.clear()
+    limit._rings.clear()
 
 
 def test_one_write_never_pays_for_the_whole_backlog() -> None:
     """The sweep is capped per call: a burst of expiry cannot turn one accepted write
     into a pause that holds the very lock-free path this filter protects."""
     limit._dupes.clear()
+    limit._rings.clear()
     for i in range(1000):
         refused("an old phrase number " + str(i), now=0.0, window=1.0, cap=10_000)
     before = len(limit._dupes)
     refused("a fresh phrase indeed", now=500.0, window=1.0, cap=10_000)
     assert len(limit._dupes) == before - 8 + 1
     limit._dupes.clear()
+    limit._rings.clear()
 
 
 def test_off_is_one_comparison_and_touches_nothing() -> None:
     """window=0 is the opt-out, so it must cost nothing and record nothing - an operator
     setting CHAT_DUPE_FILTER_SECONDS=0 buys back the pre-filter hot path exactly."""
     limit._dupes.clear()
+    limit._rings.clear()
     assert refused(LONG, now=0.0, window=0) is False
     assert not limit._dupes
+    # The window's 0 is the ONE opt-out: it short-circuits before the key is built, so it
+    # takes the share cap's ring with it - config.py says so, and this is what says it.
+    assert not limit._rings
 
 
 def test_rooms_are_isolated_and_copies_count_not_senders() -> None:
     """The key has no sender in it - that is the whole point of a cross-sender filter -
     and it has a room in it, so two rooms can hold the same conversation independently."""
     limit._dupes.clear()
+    limit._rings.clear()
     for i in range(COPIES):
         for room in ("lobby", "meta"):
             assert refused(LONG, now=float(i), room=room) is False
@@ -138,6 +150,7 @@ def test_rooms_are_isolated_and_copies_count_not_senders() -> None:
     assert refused(LONG, now=float(COPIES), room="meta") is True
     assert refused(LONG, now=float(COPIES), room="elsewhere") is False
     limit._dupes.clear()
+    limit._rings.clear()
 
 
 def test_releasing_a_reserved_copy_gives_exactly_that_slot_back() -> None:
@@ -146,6 +159,7 @@ def test_releasing_a_reserved_copy_gives_exactly_that_slot_back() -> None:
     whole window - or a write the store rejected either spends a slot forever or wipes
     copies that did land."""
     limit._dupes.clear()
+    limit._rings.clear()
     for i in range(COPIES):
         assert refused(LONG, now=float(i)) is False
     limit.dupe_release("r", LONG, 4.0, WINDOW, FLOOR)
@@ -163,6 +177,7 @@ def test_releasing_what_was_never_reserved_is_silent() -> None:
     swept, evicted, or never taken at all (an off filter, a text under the floor). None
     of those may raise: the caller is already returning an error the store chose."""
     limit._dupes.clear()
+    limit._rings.clear()
     limit.dupe_release("r", LONG, 1.0, WINDOW, FLOOR)  # never reserved
     limit.dupe_release("r", "x" * (FLOOR - 1), 1.0, WINDOW, FLOOR)  # under the floor
     limit.dupe_release("r", LONG, 1.0, 0, FLOOR)  # filter off
@@ -183,6 +198,7 @@ def test_concurrent_writers_never_corrupt_the_ring() -> None:
     than lucky.
     """
     limit._dupes.clear()
+    limit._rings.clear()
     cap, errors, counter = 64, [], itertools.count()
 
     def flood() -> None:
@@ -206,6 +222,7 @@ def test_concurrent_writers_never_corrupt_the_ring() -> None:
     assert not errors, [repr(exc) for exc in errors[:3]]
     assert len(limit._dupes) <= cap, "the bound has to hold under concurrency too"
     limit._dupes.clear()
+    limit._rings.clear()
 
 
 # --------------------------------------------------------- the sweep rung, exhaustively
@@ -297,3 +314,216 @@ def test_nfkc_moves_no_character_across_the_swept_boundary() -> None:
         f"U+{crossings[0]:04X} ({unicodedata.category(chr(crossings[0]))}): normalize_text "
         f"sweeps after folding and clean_text sweeps before, so the two now disagree"
     )
+
+
+# ----------------------------------------------------------------- the share cap
+#
+# The window's own rules are above. These are the second signal's: a room's ring of
+# recently accepted keys, and the share of it one text may hold. Its bounds matter for
+# the same reason the window ring's do - it is per-room state on a world-writable
+# service - and its release matters for the same reason dupe_release does.
+
+
+def test_one_text_may_hold_only_its_share_of_a_rooms_ring() -> None:
+    """The window-free half, as arithmetic. Every copy here lands a full window after the
+    one before it, so the timestamp rule can never be what refuses - and the cap still
+    arrives, at DUPE_SHARE of DUPE_RING slots, because it counts composition rather than
+    rate. This is the shape of issue #697: a repeater that sleeps past the window."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    for i in range(allowed):
+        assert refused(LONG, now=float(i) * (WINDOW + 1)) is False, i
+    assert refused(LONG, now=float(allowed) * (WINDOW + 1)) is True
+    # Per text, not a room-wide gate: the room is still open to everything else.
+    assert refused(LONG + " with a real answer bolted on", now=float(allowed)) is False
+    # And per room, like every other key here.
+    assert refused(LONG, now=float(allowed) * (WINDOW + 1), room="elsewhere") is False
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_a_share_cap_refusal_never_extends_the_ring() -> None:
+    """The ring's half of "only accepts are recorded", pinned separately because the
+    share cap refuses on its own path, above the window's. A copy the cap turns away must
+    leave the room's slots exactly as it found them: the way back from this rule is other
+    messages pushing the copies out, and a refusal that took a slot of its own would keep
+    the repeater's own share topped up for as long as it kept hammering."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    for i in range(allowed):
+        assert refused(LONG, now=float(i) * (WINDOW + 1)) is False, i
+    before = limit._rings["r"]
+    assert len(before) == allowed
+    # Every one of these is refused by the SHARE CAP and not by the window: a full window
+    # has passed since the copy before it, so no timestamp of this text is live.
+    for i in range(20):
+        assert refused(LONG, now=float(allowed + i) * (WINDOW + 1)) is True, i
+    assert limit._rings["r"] == before, "a share-cap refusal records no slot"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_the_share_ring_is_bounded_per_room_and_across_rooms() -> None:
+    """A second structure needs the second bound: DUPE_RING entries per room, and
+    MAX_RING_ROOMS rooms LRU-evicted, so the whole thing is a fixed 32k digests whatever a
+    caller posting one long text to every room it can name does to it.
+
+    LRU and not insertion order, which is why one room is deliberately re-touched in the
+    middle: filling in creation order alone makes the two indistinguishable, and the
+    refresh-on-write is exactly the thing that keeps a busy old room from being evicted
+    out from under a repeater it is still holding."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    for i in range(limit.MAX_RING_ROOMS):
+        assert (
+            refused("a phrase long enough to be filtered", now=1000.0, room="r" + str(i)) is False
+        )
+    assert len(limit._rings) == limit.MAX_RING_ROOMS
+    # r0 and r1 are the same age. This write is the only difference between them, and it
+    # has to be enough: use, not creation, is what the eviction order means.
+    assert refused("another phrase long enough to be filtered", now=1000.0, room="r0") is False
+    for i in range(100):
+        assert (
+            refused("a phrase long enough to be filtered", now=1000.0, room="new" + str(i)) is False
+        )
+    assert len(limit._rings) == limit.MAX_RING_ROOMS
+    assert "r0" in limit._rings, "the re-touched room is the young one now"
+    assert "r1" not in limit._rings, "and the idlest room, its exact contemporary, is evicted"
+    assert "new99" in limit._rings, "and the newest survives"
+
+    limit._rings.clear()
+    for i in range(limit.DUPE_RING * 3):
+        refused("a distinct phrase number " + str(i), now=1000.0, room="one")
+    assert len(limit._rings["one"]) == limit.DUPE_RING
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_releasing_a_reserved_copy_gives_back_its_ring_slot_too() -> None:
+    """The share ring is reserved before the append exactly as the window's timestamp is,
+    and the append refuses writes of its own. A slot that no write ever used has to come
+    back, or DUPE_SHARE * DUPE_RING malformed requests would leave the next well-formed
+    caller of that phrase refused against copies that do not exist - and the share cap,
+    like everything else keyed here, has no sender in it, so that caller is anyone."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    for i in range(allowed + 3):
+        stamp = float(i) * (WINDOW + 1)
+        assert refused(LONG, now=stamp) is False
+        limit.dupe_release("r", LONG, stamp, WINDOW, FLOOR)
+    # Dropped, not left as an empty tuple: release re-inserts only what it has something
+    # to put back, so dupe_refused stays the only path that grows either map - which is
+    # what makes its in-lock trim the whole story about their bounds.
+    assert not limit._rings.get("r"), "every slot reserved was handed back"
+    assert "r" not in limit._rings, "and an emptied room leaves no key behind"
+    assert refused(LONG, now=1e6) is False, "and the phrase is still free to land"
+    # Exactly the slot reserved, not the room's ring: another text's slot survives it.
+    other = LONG + " and a different tail"
+    assert refused(other, now=1e6 + 1) is False
+    limit.dupe_release("r", LONG, 1e6, WINDOW, FLOOR)
+    key = limit._dupe_key("r", other, FLOOR)
+    assert key is not None and limit._rings["r"] == (key[1],)
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_releasing_one_of_two_copies_reserved_at_the_same_instant_frees_one_slot() -> None:
+    """Two threads reserving the same text can be handed the same time.monotonic() float -
+    rare, and reachable, because the clock's resolution is not the lock's.
+
+    An earlier draft stored the ring as (instant, digest) pairs and released by removing
+    every entry equal to the pair, which in exactly this case removed BOTH slots: one
+    failed write gave back a slot the other reservation was still holding, and the text
+    got a free extra share of the room. Bare digests cannot have that bug - each is one
+    interchangeable entry, and giving one back is `remove`, which removes one.
+
+    Asserted on both structures, since the window's tuple has the same collision.
+    """
+    limit._dupes.clear()
+    limit._rings.clear()
+    key = limit._dupe_key("r", LONG, FLOOR)
+    assert key is not None
+    assert refused(LONG, now=7.0) is False
+    assert refused(LONG, now=7.0) is False, "two reservations, one instant"
+    assert limit._rings["r"] == (key[1], key[1])
+    limit.dupe_release("r", LONG, 7.0, WINDOW, FLOOR)  # only one of the two failed
+    assert limit._rings["r"] == (key[1],), "one released slot, not both"
+    assert limit._dupes[key] == (7.0,), "and the window's copy count agrees"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_concurrent_writers_never_corrupt_the_share_ring() -> None:
+    """The ring is written in the same critical section as the window's map, so it
+    inherits that lock - but nothing asserted its bounds actually survive contention.
+
+    Both bounds are load-bearing and both are trimmed inside the lock: DUPE_RING entries
+    per room (a tuple rebuilt and re-sliced on every accepted write, which is a
+    read-modify-write a lost update would silently overgrow) and MAX_RING_ROOMS rooms
+    LRU-evicted from the front while other threads insert - the same
+    `OrderedDict mutated during iteration`/KeyError shape the window's map has. Distinct
+    texts across many more rooms than the cap, so every call reaches both trims; the
+    switch interval makes the interleaving reliable rather than lucky.
+    """
+    limit._dupes.clear()
+    limit._rings.clear()
+    rooms, errors, counter = limit.MAX_RING_ROOMS + 200, [], itertools.count()
+
+    def flood() -> None:
+        try:
+            for _ in range(2_000):
+                n = next(counter)
+                refused(
+                    "a distinct phrase number " + str(n % 97),
+                    now=1000.0,
+                    room="r" + str(n % rooms),
+                    window=300.0,
+                )
+        except BaseException as exc:  # noqa: BLE001 - the exception IS what this asserts on
+            errors.append(exc)
+
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=flood) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(switch)
+    assert not errors, [repr(exc) for exc in errors[:3]]
+    assert len(limit._rings) <= limit.MAX_RING_ROOMS, "the room bound holds under contention"
+    assert all(len(ring) <= limit.DUPE_RING for ring in limit._rings.values()), (
+        "and so does the per-room bound, which is a rebuild every writer races on"
+    )
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_the_sweep_survives_an_entry_a_direct_caller_can_leave_empty() -> None:
+    """`max_copies` is a plain parameter, and the sweep's predicate has to be total over
+    whatever a caller can put in the map - not just over what the shipped config produces.
+
+    config.py floors CHAT_DUPE_MAX_COPIES at 1, so nothing in the service stores an empty
+    tuple. A direct caller passing 0 does: the refusal returns before a timestamp is
+    added, and `live[-0:]` is the whole (empty) tuple. The sweep then meets it as the
+    oldest key. `max(())` RAISES there where `all(())` did not, which would turn a
+    parameter this function accepts into a 500 on the write path - so the predicate is
+    written to be total, and this pins that rather than the reachability argument, which
+    is one config edit away from being wrong.
+    """
+    limit._dupes.clear()
+    limit._rings.clear()
+    key = limit._dupe_key("r", LONG, FLOOR)
+    assert key is not None
+    assert refused(LONG, now=0.0, max_copies=0) is True, "0 refuses the first copy"
+    assert limit._dupes[key] == (), "and leaves the empty entry the sweep has to survive"
+    # A later write whose sweep walks from the front and meets it: no raise, and it goes.
+    assert refused("a different phrase entirely here", now=1000.0, window=1.0) is False
+    assert key not in limit._dupes, "an entry with nothing live in it is swept, not raised on"
+    limit._dupes.clear()
+    limit._rings.clear()

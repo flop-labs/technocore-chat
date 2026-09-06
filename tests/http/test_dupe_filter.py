@@ -167,6 +167,7 @@ def test_zero_is_the_opt_out_and_costs_the_old_behaviour_exactly(client) -> None
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
     assert len(_view(client)) == 10
     assert not limit._dupes, "an off filter must not record anything"
+    assert not limit._rings, "and the window's 0 turns the share cap's ring off with it"
 
 
 def test_the_signed_lane_refuses_cross_sender_duplicates(client) -> None:
@@ -495,3 +496,85 @@ def test_one_text_takes_one_slot_however_many_lanes_it_arrives_on(client) -> Non
     assert set(_view(client)) == {"one more copy of this sentence than allowed is refused, swept"}
     # The lanes that got in are not all one lane, or the rotation proved nothing.
     assert len({name for name, _ in accepted}) > 1, "the rotation did not actually rotate"
+
+
+def test_a_fixed_interval_repeater_is_capped_by_its_share_of_the_room(client, monkeypatch) -> None:
+    """The window's blind spot, at the numbers it was measured at (issue #697).
+
+    One signed key posted one 83-character sentence to `mb-jinken` every 137s against a
+    120s window: only 21 of the 67 gaps were inside the window, so the copy count almost
+    never reached the threshold, and 67 of the room's 117 records were that one sentence.
+    `mb-` rooms cannot be owned, so there was no allow-list, mute or delete to fall back
+    on - the window was the only remedy, and a repeater that sleeps past it is the one
+    shape it cannot see.
+
+    The share cap is what refuses it: one text may hold DUPE_SHARE of the room's last
+    DUPE_RING filterable messages, and the copy that would take more than that is refused
+    however long ago the last one landed. The second half is the old behaviour, reached by
+    lifting only the share so the window is the only rule left - every copy lands, which
+    is exactly what the export showed.
+    """
+    clock = {"now": 5000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    did, sign = _keypair(41)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    with _filter_on(DUPE_FILTER_SECONDS=120):
+        for i in range(allowed):
+            r = _say_signed(client, "mb-jinken", did, sign, PHRASE, nonce=i + 1)
+            assert r.status_code == 200, "copy " + str(i + 1) + " refused: " + r.text[:120]
+            clock["now"] += 137.0  # the measured median gap: always outside the window
+        refused = _say_signed(client, "mb-jinken", did, sign, PHRASE, nonce=allowed + 1)
+    assert refused.status_code == 422, "a repeater below the window is still a repeater"
+    assert str(limit.DUPE_RING) in refused.text and f"{limit.DUPE_SHARE:.0%}" in refused.text
+    assert len(_view(client, "mb-jinken")) == allowed
+
+    # Same key, same interval, same room class, share cap lifted out of reach: this is the
+    # filter as it shipped, and it refuses nothing.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 10.0)
+    with _filter_on(DUPE_FILTER_SECONDS=120):
+        for i in range(allowed + 1):
+            assert (
+                _say_signed(client, "mb-other", did, sign, PHRASE, nonce=i + 1).status_code == 200
+            )
+            clock["now"] += 137.0
+    assert len(_view(client, "mb-other")) == allowed + 1
+
+
+def test_the_share_cap_leaves_ordinary_traffic_to_the_window(client, monkeypatch) -> None:
+    """A busy room whose ring is full must behave exactly as it did for a phrase nobody is
+    repeating at scale: the window refuses the sixth copy and hands the phrase back once
+    the window passes. The share cap is live throughout - DUPE_RING distinct messages
+    landed first - and the arithmetic, not an off switch, is what keeps it quiet."""
+    clock = {"now": 9000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    with _filter_on():
+        for i in range(limit.DUPE_RING):
+            other = "a distinct message number " + str(i) + " from a real conversation"
+            assert _say(client, "lobby", "n" + str(i), other).status_code == 200
+        for i in range(COPIES):
+            assert _say(client, "lobby", "m" + str(i), PHRASE).status_code == 200
+        assert _say(client, "lobby", "m9", PHRASE).status_code == 422, "the window, as before"
+        clock["now"] += WINDOW + 1
+        assert _say(client, "lobby", "m8", PHRASE).status_code == 200, "and it still expires"
+
+
+def test_a_write_the_store_refuses_never_spends_a_share_slot(client) -> None:
+    """The ring slot is reserved before the append exactly as the window's timestamp is,
+    so it has to be handed back the same way. Without that, a caller sending malformed
+    writes of one phrase would leave a stranger's identical phrase refused against copies
+    nothing ever stored - the leak test_a_write_the_store_refuses_never_spends_a_copy
+    covers for the window, one signal over, and cross-sender for the same reason."""
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    opening = "a first message, so the room exists before the malformed writes arrive"
+    with _filter_on():
+        # The room is created first, deliberately: the write gate charges a room-creation
+        # token per write to a room it cannot see, and that budget is measured in days, so
+        # dozens of failed writes to an absent room meet a 429 long before this assertion.
+        assert _say(client, "lobby", "nick", opening).status_code == 200
+        for _ in range(allowed + 3):
+            # Uppercase, which store.valid_name refuses - a 400 raised INSIDE the append,
+            # after the slot for this text was already reserved.
+            assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
+        assert _say(client, "lobby", "nick", PHRASE).status_code == 200
+    assert _view(client) == [opening, PHRASE]
+    assert len(limit._rings["lobby"]) == 2, "only the two writes that landed hold slots"
