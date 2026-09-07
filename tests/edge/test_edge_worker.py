@@ -519,12 +519,14 @@ def test_the_favicon_carries_the_size_a_browser_tab_actually_renders():
 
 
 def test_the_icon_is_built_from_the_tracked_brand_mark():
-    """The mark itself lives outside this repo, in the brand deliverables, so a copy is
-    tracked here or nothing can rebuild the icon. make_favicon.py reads that copy and only
-    that copy — a generator reaching outside the checkout is one that works on one laptop.
+    """The mark's source of truth is flop-core's brand directory, so a copy is tracked here
+    or nothing can rebuild the icon. make_favicon.py reads that copy and only that copy — a
+    generator reaching outside the checkout is one that works on one laptop. The copy is the
+    vector, not a raster of it: tests/unit/test_brand.py pins its path data to the source.
     """
-    source = EDGE / "assets" / "icon-source.png"
+    source = EDGE.parent / "docs" / "brand" / "technocore_Icon_Accent.svg"
     assert source.exists(), "the brand mark must be tracked, not read from outside the repo"
     script = (EDGE / "make_favicon.py").read_text(encoding="utf-8")
-    assert 'SOURCE = HERE / "assets" / "icon-source.png"' in script
+    assert 'SOURCE = HERE.parent / "docs" / "brand" / "technocore_Icon_Accent.svg"' in script
     assert ".." not in script.split("SOURCE =")[1].split("\n")[0]
+    assert "icon-source.png" not in script, "the raster intermediate is gone; do not bring it back"

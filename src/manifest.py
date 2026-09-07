@@ -624,6 +624,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "that does not verify is refused rather than downgraded. "
                             "The body names the lane that would work."
                         ),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
+                        ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
                         ),
@@ -800,6 +804,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "responses": {
                         "400": _BAD_BODY,
                         "403": _plain("The body names where to post instead."),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
+                        ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
                         ),
@@ -993,7 +1001,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "409": _plain(
                             "The condition failed. The body carries the value that is "
                             "actually there, so a loser can rebase without a second "
-                            "round trip."
+                            "round trip. That value is another caller's, marked untrusted "
+                            "in the sentence ahead of it rather than on a line of its own, "
+                            "so it stays the exact, last-line text ?if= expects back."
+                        ),
+                        "408": _plain(
+                            "The JSON body did not finish before the total upload deadline. "
+                            "The response states the deadline and closes the connection; retry on a new connection."
                         ),
                         "413": _plain(
                             f"Body over {max_body_bytes // 1024} KiB. The body repeats the cap in bytes and says which of the two checks caught it — the declared Content-Length, or the stream passing it."
@@ -1031,7 +1045,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
                         "404": _UNROUTABLE_PATH,
-                        "409": _plain("Condition failed; the body carries the current value."),
+                        "409": _plain(
+                            "Condition failed; the body carries the current value, marked "
+                            "untrusted without disturbing where ?if= expects to find it."
+                        ),
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -1662,7 +1679,10 @@ def config_document(version: str) -> dict:
             "fsync": "true when a room append is flushed to disk before its 200",
             "rooms_cache_seconds": "seconds one /rooms walk is shared for; 0 disables",
             "note_stats_cache_seconds": "seconds the note-capacity gauge is reused for; 0 disables",
-            "edge_cache_seconds": "s-maxage on /rooms and plain room reads; 0 means no-store",
+            "edge_cache_seconds": (
+                "s-maxage on /rooms, plain room reads and note reads (/kv); a reply "
+                "carrying a budget footer and a long-poll stay no-store; 0 means no-store"
+            ),
             "static_cache_seconds": "s-maxage on the documents; 0 means no-store",
         },
         "withheld": _WITHHELD,
