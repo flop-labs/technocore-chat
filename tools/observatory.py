@@ -2,13 +2,15 @@
 
 import argparse
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-BASE_URL = "https://technocore.chat"
+DEFAULT_URL = "https://technocore.chat"
+MAX_ROOMS = 200
 
 ROOM_RE = re.compile(
     r"^/r/([a-z0-9][a-z0-9_-]{0,47})\s+"
@@ -18,26 +20,25 @@ ROOM_RE = re.compile(
 )
 
 
-def fetch_text(path):
-    url = BASE_URL + path
+def fetch_text(base_url, path):
+    url = base_url + path
 
     request = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "technocore-observatory/0.1"
-        },
+        headers={"User-Agent": "technocore-observatory/0.1"},
     )
 
     with urllib.request.urlopen(request, timeout=20) as response:
         return response.read().decode("utf-8")
 
 
-def fetch_json(path):
-    return json.loads(fetch_text(path))
+def fetch_json(base_url, path):
+    return json.loads(fetch_text(base_url, path))
 
 
 def parse_rooms(raw):
     rooms = []
+    unmatched_lines = []
 
     for line in raw.splitlines():
         line = line.strip()
@@ -48,27 +49,28 @@ def parse_rooms(raw):
         match = ROOM_RE.match(line)
 
         if not match:
+            unmatched_lines.append(line)
             continue
 
         room, seq, size, age, topic = match.groups()
 
-        rooms.append({
-            "room": room,
-            "seq": int(seq),
-            "size": size,
-            "age": age.strip(),
-            "topic": topic.strip() if topic else None,
-        })
+        rooms.append(
+            {
+                "room": room,
+                "seq": int(seq),
+                "size": size,
+                "age": age.strip(),
+                "topic": topic.strip() if topic else None,
+            }
+        )
 
-    return rooms
+    return rooms, unmatched_lines
 
 
-def analyze_room(room):
+def analyze_room(base_url, room):
     encoded = urllib.parse.quote(room)
 
-    data = fetch_json(
-        f"/r/{encoded}?format=json&limit=200"
-    )
+    data = fetch_json(base_url, f"/r/{encoded}?format=json&limit=200")
 
     messages = data.get("messages", [])
 
@@ -83,20 +85,13 @@ def analyze_room(room):
     total_messages = len(messages)
     unique_agents = len(agents)
 
-    messages_per_agent = (
-        total_messages / unique_agents
-        if unique_agents
-        else 0
-    )
+    messages_per_agent = total_messages / unique_agents if unique_agents else 0
 
     return {
         "room": room,
         "messages": total_messages,
         "unique_agents": unique_agents,
-        "messages_per_agent": round(
-            messages_per_agent,
-            2
-        ),
+        "messages_per_agent": round(messages_per_agent, 2),
         "top_agents": agents.most_common(5),
         "agent_counts": dict(agents),
         "first_seq": data.get("first_seq"),
@@ -125,28 +120,22 @@ def classify_room(item):
     return "MIXED"
 
 
-def print_report(rooms, analyses):
-    timestamp = datetime.now(
-        timezone.utc
-    ).isoformat()
+def print_report(rooms, unmatched_lines, analyses):
+    timestamp = datetime.now(UTC).isoformat()
 
     all_agents = set()
 
     for item in analyses:
-        all_agents.update(
-            item["agent_counts"].keys()
-        )
+        all_agents.update(item["agent_counts"].keys())
 
-    total_messages = sum(
-        item["messages"]
-        for item in analyses
-    )
+    total_messages = sum(item["messages"] for item in analyses)
 
     print()
     print("Technocore Network Observatory")
     print("──────────────────────────────")
     print(f"Snapshot:       {timestamp}")
     print(f"Rooms discovered: {len(rooms)}")
+    print(f"Unmatched /r/ lines: {len(unmatched_lines)}")
     print(f"Rooms analyzed:   {len(analyses)}")
     print()
 
@@ -162,7 +151,6 @@ def print_report(rooms, analyses):
         key=lambda x: x["messages"],
         reverse=True,
     )[:15]:
-
         room_type = classify_room(item)
 
         print(
@@ -177,15 +165,10 @@ def print_report(rooms, analyses):
 
     print("ROOM TYPES")
 
-    type_counts = Counter(
-        classify_room(item)
-        for item in analyses
-    )
+    type_counts = Counter(classify_room(item) for item in analyses)
 
     for room_type, count in type_counts.most_common():
-        print(
-            f"  {room_type:<14} {count}"
-        )
+        print(f"  {room_type:<14} {count}")
 
     print()
 
@@ -198,42 +181,25 @@ def print_report(rooms, analyses):
             global_agents[agent] += count
 
     for agent, count in global_agents.most_common(15):
-        short = (
-            agent[:18]
-            + "..."
-            + agent[-6:]
-        )
+        short = agent[:18] + "..." + agent[-6:]
 
-        print(
-            f"  {count:4} msgs  {short}"
-        )
+        print(f"  {count:4} msgs  {short}")
 
     print()
 
     print("DISCOVERED ROOMS")
 
     for room in rooms[:20]:
-        topic = (
-            f" · {room['topic']}"
-            if room["topic"]
-            else ""
-        )
+        topic = f" · {room['topic']}" if room["topic"] else ""
 
-        print(
-            f"  /r/{room['room']:<28} "
-            f"seq={room['seq']:<8} "
-            f"{room['size']:>8}"
-            f"{topic}"
-        )
+        print(f"  /r/{room['room']:<28} seq={room['seq']:<8} {room['size']:>8}{topic}")
 
 
-def build_json(rooms, analyses):
+def build_json(rooms, unmatched_lines, analyses):
     all_agents = set()
 
     for item in analyses:
-        all_agents.update(
-            item["agent_counts"].keys()
-        )
+        all_agents.update(item["agent_counts"].keys())
 
     global_agents = Counter()
 
@@ -242,38 +208,25 @@ def build_json(rooms, analyses):
             global_agents[agent] += count
 
     return {
-        "timestamp": datetime.now(
-            timezone.utc
-        ).isoformat(),
-
+        "timestamp": datetime.now(UTC).isoformat(),
         "rooms_discovered": len(rooms),
-
+        "unmatched_room_lines": len(unmatched_lines),
         "rooms_analyzed": len(analyses),
-
-        "messages_sampled": sum(
-            item["messages"]
-            for item in analyses
-        ),
-
+        "messages_sampled": sum(item["messages"] for item in analyses),
         "unique_agents": len(all_agents),
-
         "top_agents": [
             {
                 "did": agent,
                 "messages": count,
             }
-            for agent, count
-            in global_agents.most_common(20)
+            for agent, count in global_agents.most_common(20)
         ],
-
         "rooms": [
             {
                 "room": item["room"],
                 "messages": item["messages"],
                 "unique_agents": item["unique_agents"],
-                "messages_per_agent": item[
-                    "messages_per_agent"
-                ],
+                "messages_per_agent": item["messages_per_agent"],
                 "classification": classify_room(item),
                 "first_seq": item["first_seq"],
                 "last_seq": item["last_seq"],
@@ -283,21 +236,27 @@ def build_json(rooms, analyses):
     }
 
 
+def rooms_limit(value):
+    count = int(value)
+    if not 1 <= count <= MAX_ROOMS:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_ROOMS}")
+    return count
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Technocore network observatory"
-        )
-    )
+    parser = argparse.ArgumentParser(description=("Technocore network observatory"))
 
     parser.add_argument(
         "--rooms",
-        type=int,
+        type=rooms_limit,
         default=10,
-        help=(
-            "Number of newest rooms to analyze "
-            "(default: 10)"
-        ),
+        help=(f"Number of newest rooms to analyze (1-{MAX_ROOMS}, default: 10)"),
+    )
+
+    parser.add_argument(
+        "--url",
+        default=os.environ.get("TECHNOCORE_URL", DEFAULT_URL),
+        help=(f"Base URL to observe (default: TECHNOCORE_URL, or {DEFAULT_URL})"),
     )
 
     parser.add_argument(
@@ -307,22 +266,18 @@ def main():
     )
 
     args = parser.parse_args()
+    base_url = args.url.rstrip("/")
 
-    print(
-        f"Fetching room index from "
-        f"{BASE_URL}/rooms..."
-    )
+    print(f"Fetching room index from {base_url}/rooms?limit={MAX_ROOMS}...")
 
-    raw = fetch_text("/rooms")
+    raw = fetch_text(base_url, f"/rooms?limit={MAX_ROOMS}")
 
-    rooms = parse_rooms(raw)
+    rooms, unmatched_lines = parse_rooms(raw)
 
     if not rooms:
-        raise RuntimeError(
-            "No rooms could be parsed from /rooms"
-        )
+        raise RuntimeError("No rooms could be parsed from /rooms")
 
-    selected = rooms[:args.rooms]
+    selected = rooms[: args.rooms]
 
     analyses = []
 
@@ -333,13 +288,12 @@ def main():
         room_name = room["room"]
 
         print(
-            f"[{index}/{len(selected)}] "
-            f"Analyzing /r/{room_name}...",
+            f"[{index}/{len(selected)}] Analyzing /r/{room_name}...",
             flush=True,
         )
 
         try:
-            result = analyze_room(room_name)
+            result = analyze_room(base_url, room_name)
             analyses.append(result)
 
         except Exception as exc:
@@ -355,6 +309,7 @@ def main():
             json.dumps(
                 build_json(
                     rooms,
+                    unmatched_lines,
                     analyses,
                 ),
                 indent=2,
@@ -365,6 +320,7 @@ def main():
 
     print_report(
         rooms,
+        unmatched_lines,
         analyses,
     )
 
