@@ -476,6 +476,21 @@ def test_the_reference_bridge_recovers_a_retained_cursor_gap_before_advancing(cl
     assert "continues above the old high-water mark" in bridge
 
 
+def test_the_reference_bridge_does_not_mistake_a_response_window_for_the_retained_floor(client):
+    """The API's first_seq is a response boundary, not retained-ring metadata.
+
+    Until a distinct retained-floor contract exists, the guide must require an export and
+    continuity check rather than claiming a bounded read can prove how much history remains.
+    """
+    bridge = client.get("/interop.md").text.split("## ActivityPub", 1)[0]
+    prose = " ".join(bridge.split())
+    assert "`first_seq` describes only the first message in this bounded response" in prose
+    assert "It is not the room's retained floor" in prose
+    assert "does not publish that floor" in prose
+    assert "Until the service exposes a distinct retained-floor contract" in prose
+    assert "`/export` plus the continuity check" in prose
+
+
 def test_the_reference_bridge_stops_before_crossing_a_room_generation(client):
     """Execute the published loop against the reviewer's recreated-room example.
 

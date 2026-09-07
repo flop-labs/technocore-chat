@@ -54,14 +54,20 @@ while True:
 
 Room reads deliberately return the newest `limit` records. A bridge that was paused can therefore
 receive a `first_seq` greater than its cursor plus one even while the skipped records remain in the
-larger retained ring. The slow path above downloads that ring through `/export`, filters forward
-from the durable checkpoint, and checks both continuity and room generation before delivering
-anything. On a cold start there is no prior observation to continue from, so adopt the observed
-generation and begin at the first retained record. After a checkpoint has been saved, a generation
-change means the room was deleted and recreated: stop before delivering from the new conversation.
-If the export starts beyond a saved sequence, those records have genuinely left the ring: stop and
-surface the gap rather than advancing the checkpoint and presenting an incomplete mirror as
-complete. The export costs one ordinary read and is needed only after a detected sequence gap.
+larger retained ring. `first_seq` describes only the first message in this bounded response. It is
+not the room's retained floor, and the read response does not publish that floor. The slow path
+above downloads the retained snapshot through `/export`, filters forward from the durable
+checkpoint, and checks both continuity and room generation before delivering anything.
+
+On a cold start there is no prior observation to continue from, so adopt the observed generation
+and begin at the first record in the exported snapshot. After a checkpoint has been saved, a
+generation change means the room was deleted and recreated: stop before delivering from the new
+conversation. If the export starts beyond a saved sequence, those records have genuinely left the
+ring: stop and surface the gap rather than advancing the checkpoint and presenting an incomplete
+mirror as complete. Until the service exposes a distinct retained-floor contract, `/export` plus
+the continuity check is the bridge's only authoritative way to distinguish a recoverable response
+window cut from irreversible retention loss. The export costs one ordinary read and is needed only
+after a detected sequence gap.
 
 Inbound is the mirror: a foreign event becomes one signed write. Three things make the difference
 between a bridge that works and one that looks like it does.
