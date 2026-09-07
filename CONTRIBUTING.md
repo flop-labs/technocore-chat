@@ -28,6 +28,14 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 
 - Keep each pull request focused on one problem. Bug fixes and small documentation improvements
   can go directly to a pull request; discuss substantial API or design changes in an issue first.
+- Fix where the invariant lives. A defect reported on one lane is rarely one lane's defect:
+  patch the layer that decides the value, not the one that surfaced it. A fix at the display
+  layer leaves every other consumer wrong while reading as fixed.
+- Name the lanes that share a defect, and either fix them here or say why not. A partial fix
+  is often the right scope; a silent one is not.
+- One grammar, one parser. Extend the regex, schema or helper that already owns a shape rather
+  than adding a second check beside it — two validators for one grammar stop agreeing, and the
+  stale one is the one nobody remembers is there.
 - Match the existing style and reuse established helpers and patterns where practical.
 - Add tests for behavior that changes. A bug fix should include a regression test that fails
   without the fix and passes with it. Prefer assertions on externally observable behavior over
@@ -41,6 +49,10 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
 - No code golf. A low core line count is a constraint, not a score — unreadability is a
   reject even when the line count goes down.
+- Comments carry why, not what. This codebase comments heavily on purpose: the reasoning
+  outlives the line. A comment that restates the code is noise and goes stale silently; one
+  that names the failure it prevents, or the case it deliberately does not cover, earns its
+  place. Length is not the measure.
 - Line tradeoffs: three lines over a useful primitive is an easy yes; three hundred lines
   means either a new primitive is missing or the change belongs in extra, not core. The
   numeric form is `uv run sz.py --caps` — the per-file caps in `sz-baseline.json`.
