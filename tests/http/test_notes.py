@@ -253,6 +253,43 @@ def test_a_replayed_signed_url_is_refused_while_the_message_is_still_there(clien
     assert client.get("/r/lobby?format=json").json()["count"] == 2
 
 
+def test_a_replay_is_accepted_once_traffic_buries_the_record_past_the_scan_tail(client, tmp_path):
+    """The far side of test_a_replayed_signed_url_is_refused_while_the_message_is_still_there.
+
+    `_last_nonce` scans the newest READ_BUDGET bytes of tail for the DID, and its
+    docstring is explicit that the bound is the retention model working as designed:
+    once newer traffic buries the record past that tail, the same signed URL is
+    accepted again, even while the record remains in the room ring. That boundary was
+    stated in prose only - pin it, so a change that moves it (record-size growth such
+    as the `sig` field, a budget change) fails here instead of shipping silently.
+    """
+    import orjson
+
+    import store
+
+    did, sign = _keypair()
+    url = f"/r/lobby/say-signed/{did}/{sign('lobby|7|once')}/7/once"
+    assert client.get(url).status_code == 200
+    path = store.room_path(tmp_path, "lobby")
+    original = path.read_bytes()
+    seq = 2
+    with path.open("ab") as f:
+        written = 0
+        while written < store.READ_BUDGET + 65536:
+            line = (
+                orjson.dumps({"seq": seq, "ts": store._now(), "from": "~bury", "text": "x" * 200})
+                + b"\n"
+            )
+            f.write(line)
+            written += len(line)
+            seq += 1
+    assert path.stat().st_size > store.READ_BUDGET
+    r = client.get(url)
+    assert r.status_code == 200
+    # buried past the scan tail, not reaped: the original record is still in the ring
+    assert path.read_bytes().startswith(original)
+
+
 def test_a_did_quoted_in_another_agents_text_is_not_that_agents_nonce(client):
     """`_last_nonce` rejects lines on bytes before parsing them, and a DID may legally
     appear in a *message* — an agent addressing another by name. Only `from` is that
@@ -424,3 +461,37 @@ def test_signed_writes_pay_the_write_budget_like_any_other(client, monkeypatch):
             _say_signed(client, "lobby", did, sign, f"m{i}", nonce=i).status_code for i in (1, 2, 3)
         ]
         assert codes == [200, 200, 429]
+
+
+def test_note_reads_are_edge_cacheable_like_room_reads(client):
+    """The CDN's cache rule has always covered /kv/, but the handlers never marked a note
+    read shareable, so every one went to the origin — the rule matched a reply that never
+    said it could be held. A note's bytes are the same for every caller that can name it.
+
+    An unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly
+    the callers who could already read it, which is why it is cacheable on the same terms
+    rather than excluded.
+    """
+    client.get("/kv/e-tc-cache/k/set/value")
+    for path in ("/kv/e-tc-cache/k", "/kv/e-tc-cache"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc and "max-age=0" in cc, f"{path} is not shareable: {cc}"
+
+    # A p- key is unlisted, not unshareable: same header, and the URL is the credential.
+    client.get("/kv/p-tc-cache/k/set/secret")
+    assert "s-maxage=" in client.get("/kv/p-tc-cache/k").headers["cache-control"]
+
+
+def test_a_note_read_carrying_a_budget_footer_is_not_shared(client):
+    """The footer is one caller's pacing, so the reply stops being the CDN's to hand out.
+    This is the half that keeps the line above from leaking one caller's numbers to another.
+    """
+    import config
+
+    client.get("/kv/e-tc-cache/k/set/value")
+    with config.override(RATE_READ=8):
+        for _ in range(7):
+            client.get("/kv/e-tc-cache/k")
+        warned = client.get("/kv/e-tc-cache/k")
+        assert "# budget:" in warned.text
+        assert warned.headers["cache-control"] == "no-store"

@@ -5,3 +5,25 @@
 !SKILL.md
 !pyproject.toml
 !uv.lock
+# mcp/ is here for mcp/Dockerfile, which installs the wrapper from this checkout rather
+# than from PyPI (#475) and shares the repo root as its context. docker/Dockerfile does
+# not COPY it, so the only cost to the service image is a context hash that also moves
+# when the wrapper changes.
+!mcp/
+# ...but not what building the Worker leaves inside it. `pywrangler dev|deploy` writes a
+# CPython venv, a Pyodide venv, the vendored wheel set it bundles (884 files, ~20 MB of
+# emscripten wheels including wasm32 `.so` binaries) and miniflare's local state; the
+# `$schema` in wrangler.jsonc also invites a `node_modules/`. Together that is well over
+# 100 MB. `!mcp/` is a directory re-include, so without these the whole lot joins the
+# build context for BOTH Dockerfiles at the repo root — and `mcp/Dockerfile`'s `COPY mcp/`
+# would bake it into a layer that the later `rm -rf` cannot shrink. Gitignored too, but
+# these are separate lists and only this one governs what Docker uploads.
+mcp/worker/.venv
+mcp/worker/.venv-workers
+mcp/worker/python_modules
+mcp/worker/.wrangler
+mcp/worker/node_modules
+mcp/worker/pylock.toml
+mcp/worker/bundle.log
+mcp/dist
+mcp/worker/.dev.vars
