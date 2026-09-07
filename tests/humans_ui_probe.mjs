@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-06, 125 checks, all passing — expected shape:
+ * Checked 2026-09-07, 138 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -56,6 +56,10 @@
  *   deadline        an engine that ignores `publicKey.timeout` still ends the ceremony: the
  *                   page's own deadline aborts it and says so, on a stubbed get() that never
  *                   settles, with the clock skipping the two minutes
+ *   no PRF          an authenticator without it is told apart from one that works, and nobody
+ *                   is signed in on a seed that never arrived
+ *   no WebAuthn     both passkey controls and the prose naming them are gone, and the seed
+ *                   lane still derives the DID scripts/sign.py does
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
  *                   ONE line a note can hold; re-issuing replaces rather than appends; four
@@ -984,6 +988,102 @@ const browser = await chromium.launch({
   check("deadline: and the way back in is on screen with it",
         await page.locator("#keypassnew").isVisible());
   check("deadline: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+
+// ------------------------------------------------------ an authenticator without PRF
+// The PRF extension is what makes any of this work: its output *is* the seed. Plenty of
+// authenticators do not have it — security keys without `hmac-secret`, older platform ones —
+// and the page has a branch saying so, which until now had never run in a test. What it must
+// not do is leave a reader holding a credential that cannot derive a key without telling
+// them, or sign anybody in on a seed it never got.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable", { enableUI: false });
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+      hasResidentKey: true, hasUserVerification: true, hasPrf: false,
+      automaticPresenceSimulation: true, isUserVerified: true,
+    },
+  });
+  // localhost, not the IP: WebAuthn refuses a bare address as a relying party, and this
+  // section really does reach the authenticator.
+  await page.goto(`${BASE.replace("127.0.0.1", "localhost")}/humans`,
+                  { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  await page.click("#keymore summary");
+  await page.click("#keypassnew");
+  await page.waitForTimeout(3000);
+
+  check("no PRF: the reader is told the authenticator cannot derive a key",
+        (await page.textContent("#status")).includes("no PRF support"),
+        await page.textContent("#status"));
+  check("no PRF: and is pointed at the lanes that do work",
+        (await page.textContent("#status")).includes("key or a seed"),
+        await page.textContent("#status"));
+  check("no PRF: nobody was signed in on a seed that never arrived",
+        (await page.textContent("#me")) === "Not signed in");
+  check("no PRF: and nothing was written to storage",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+  check("no PRF: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// -------------------------------------------------------------- a browser without WebAuthn
+// §5.2 makes signing an upgrade and never a gate, and the same has to hold one level down:
+// no WebAuthn is not no identity, it is the seed lane. So the passkey controls go — *both*
+// of them, since a "Create a passkey" that can only throw is worse than no button — and the
+// prose naming them goes with them, while a pasted seed still yields the DID the command
+// line derives.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.addInitScript(() => {
+    // `delete` alone will not do it for credentials: it is an accessor on Navigator.prototype,
+    // so shadow it with an own property instead.
+    delete window.PublicKeyCredential;
+    Object.defineProperty(navigator, "credentials", { value: undefined, configurable: true });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+
+  check("no WebAuthn: the identity row still appears — Ed25519 is what it needs",
+        !(await page.locator("#identity").isHidden()));
+  check("no WebAuthn: the way in by passkey is gone",
+        !(await page.locator("#keypass").isVisible()));
+  await page.click("#keymore summary");
+  check("no WebAuthn: and so is enrolling one",
+        !(await page.locator("#keypassnew").isVisible()));
+  check("no WebAuthn: the prose no longer names a button that is not there",
+        !(await page.textContent("#keyhint")).includes("Other ways in"),
+        await page.textContent("#keyhint"));
+  check("no WebAuthn: nor promises an identity this browser cannot carry",
+        !(await page.textContent("#keyhint")).includes("passkey"),
+        await page.textContent("#keyhint"));
+
+  // The lanes that do not need WebAuthn are untouched, and the seed one still agrees with
+  // scripts/sign.py — the whole point of keeping it.
+  check("no WebAuthn: creating a key in the browser is still offered",
+        await page.locator("#keynew").isVisible());
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  await page.fill("#seed", SEED);
+  await page.click("#keyuse");
+  await page.waitForFunction(
+    () => document.getElementById("me").textContent !== "Not signed in",
+    null, { timeout: 8000 });
+  check("no WebAuthn: and a pasted seed still yields the DID the signer derives",
+        (await page.getAttribute("#me", "title")) === EXPECTED,
+        await page.getAttribute("#me", "title"));
+  check("no WebAuthn: no page errors throughout", errors.length === 0, errors.join("; "));
   await context.close();
 }
 

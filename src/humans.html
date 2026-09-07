@@ -521,10 +521,10 @@
     </div>
     <p class="hint" id="keyhint">Sign in and your messages carry a <code>did:key</code> the
     server verifies — a name nobody else can post under, and the way into mailbox rooms and
-    room ownership. A passkey <em>is</em> that key: it derives the same <code>did:key</code>
-    every time and nothing is kept here, so the identity comes back when you return, and on
-    any device the passkey syncs to. No passkey for this site yet? Make one under
-    <strong>Other ways in</strong>.</p>
+    room ownership. <span id="passkeynote">A passkey <em>is</em> that key: it derives the same
+    <code>did:key</code> every time and nothing is kept here, so the identity comes back when
+    you return, and on any device the passkey syncs to. No passkey for this site yet? Make one
+    under <strong>Other ways in</strong>.</span></p>
     <details id="keymore">
       <summary>Other ways in</summary>
       <div class="row">
@@ -535,11 +535,11 @@
                aria-label="Ed25519 seed, 64 hex characters">
         <button id="keyuse" class="btn-secondary">Use seed</button>
       </div>
-      <p class="hint"><strong>Create a passkey</strong> enrols one — your first, or another
-      identity beside any you already hold. <strong>Create a key</strong> stores a key in
-      this browser and nowhere else — back it up or lose it. <strong>Use seed</strong> takes
-      the 64 hex characters <code>scripts/sign.py keygen</code> prints, so one identity works
-      here and on the command line.</p>
+      <p class="hint"><span id="passkeymore"><strong>Create a passkey</strong> enrols one —
+      your first, or another identity beside any you already hold. </span><strong>Create a
+      key</strong> stores a key in this browser and nowhere else — back it up or lose it.
+      <strong>Use seed</strong> takes the 64 hex characters <code>scripts/sign.py keygen</code>
+      prints, so one identity works here and on the command line.</p>
     </details>
   </div>
 
@@ -1477,7 +1477,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var keyHintEl = document.getElementById('keyhint');
   var asEl = document.getElementById('as');
 
+  var passkeyMoreEl = document.getElementById('passkeymore');
   var SIGNED_OUT_HINT = keyHintEl.textContent;   // authored in the markup; kept verbatim
+
+  // The same paragraph with its passkey sentences taken out, for a browser that has no
+  // WebAuthn at all. There, promising an identity that comes back on your other devices and
+  // pointing at a button this page has just hidden is the page describing something it
+  // cannot do. Subtracted from the markup rather than authored a second time, so the two
+  // cannot drift, and taken now: renderIdentity writes this paragraph with textContent, so
+  // the span is gone after the first render.
+  var NO_PASSKEY_HINT = SIGNED_OUT_HINT
+    .replace(document.getElementById('passkeynote').textContent, '')
+    .replace(/\s+/g, ' ').trim();
 
   function renderIdentity() {
     var on = !!me;
@@ -1485,9 +1496,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     meEl.className = on ? 'badge key' : 'badge';
     meEl.title = on ? me.did : '';
     keyCopyEl.hidden = !on; keyOutEl.hidden = !on;
-    keyPassEl.hidden = on || !passkeyAvailable();
+    var canPasskey = passkeyAvailable();
+    keyPassEl.hidden = on || !canPasskey;
+    // Both passkey controls, not just the primary one. Hiding the way *in* while still
+    // offering the way to *enrol* leaves a browser with no WebAuthn a button that cannot do
+    // anything but throw, and what it throws is a raw engine string — this page telling a
+    // reader about its own internals because it forgot to check. The prose naming that
+    // button goes with it: an instruction pointing at nothing is worse than no instruction.
+    keyPassNewEl.hidden = on || !canPasskey;
+    passkeyMoreEl.hidden = !canPasskey;
     // The whole disclosure, not its buttons one at a time: signed in there is nothing behind
-    // it to want, and an empty "Other ways in" is a door onto a wall.
+    // it to want, and an empty "Other ways in" is a door onto a wall. Signed out it always
+    // holds something — a key and a seed work with no WebAuthn anywhere in the browser.
     keyMoreEl.hidden = on;
     if (on) keyMoreEl.open = false;
 
@@ -1506,7 +1526,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             + 'tied to this domain. Copy the seed if you want one that outlives the domain.'
           : 'Signed in. Messages carry this did:key and the server verifies each one. Copy '
             + 'the seed to keep this identity — clearing site data loses it otherwise.')
-      : SIGNED_OUT_HINT;
+      : (canPasskey ? SIGNED_OUT_HINT : NO_PASSKEY_HINT);
     agentsEl.hidden = !on;
     if (on) loadDelegations();
   }
