@@ -344,9 +344,23 @@ def _settle_room_budget(request, record, rooms_per_day, *, ip_header="") -> None
     `seq == 1` is the store's own answer to "did this call create the room": the record is
     the first line in the file. A room reaped and recreated starts at 1 again, which is
     correct — that really is a creation.
+
+    `record` is None when the append never happened at all — the room-count or byte cap
+    was already full, or the write itself was malformed (a bad nonce on a brand-new room).
+    Either way nothing was created, so this is the same refund as losing the create race,
+    reached from `on_bad_input` instead of a write route.
     """
-    if request.scope.pop(CHARGED_CREATION, False) and record.get("seq") != 1:
+    if request.scope.pop(CHARGED_CREATION, False) and (record is None or record.get("seq") != 1):
         refund(request, "create", rooms_per_day / 1440.0, burst=rooms_per_day, ip_header=ip_header)
+
+
+def on_bad_input(request, exc, text, per_day, hdr="") -> Response:
+    """app's StoreError handler, moved here: it is the one place all three write routes'
+    capacity refusals and malformed-write StoreErrors funnel through, so it is also the one
+    place to settle a charge that never became a room (see _settle_room_budget's `record is
+    None` case). `text` is app's plain-text response builder, passed in rather than
+    imported for the reason noted where this is called."""
+    return _settle_room_budget(request, None, per_day, ip_header=hdr) or text(f"400 {exc}", 400)
 
 
 def refill_rate(per_min: int) -> str:
