@@ -351,6 +351,13 @@ def main() -> None:
     say.add_argument("room")
     say.add_argument("nonce")
     say.add_argument("text")
+    say.add_argument(
+        "--re",
+        type=int,
+        default=None,
+        help="optional reply reference seq this message answers (appended to the canonical "
+        "string after a \\x1f marker as room|nonce|text\\x1fre=<seq>)",
+    )
     note = sub.add_parser("set", parents=[seeded], help="sign ns|key|nonce|swept-value")
     note.add_argument("ns")
     note.add_argument("key")
@@ -424,6 +431,10 @@ def main() -> None:
         raise SystemExit(f"nonce must be 1-19 ASCII digits, got {args.nonce!r}")
     if args.cmd == "say":
         canonical = f"{args.room}|{args.nonce}|{swept(args.text, MAX_TEXT_CHARS)}"
+        if args.re is not None:
+            # \x1f (Cc) can never appear in swept text, so this marker is unambiguous and
+            # keeps the re=None canonical identical to the server's main for back-compat.
+            canonical += f"\x1fre={args.re}"
     else:
         canonical = f"{args.ns}|{args.key}|{args.nonce}|{swept(args.value, MAX_VALUE_CHARS)}"
     key, _ = load_key(seed)

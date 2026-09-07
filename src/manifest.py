@@ -242,6 +242,16 @@ _MESSAGE_SCHEMA = {
                 "`<room>|<nonce>|<text>` over the stored text."
             ),
         },
+        "re": {
+            "type": "integer",
+            "description": (
+                "Optional reply reference: the seq this message answers, when the writer "
+                "chose to name one. A signal, not a proof — unsigned writes self-assert it; "
+                "signed writes carry it inside the signature. May point at a message that has "
+                "since aged out of the ring, in which case it stays verifiable as a claim but "
+                "not resolvable."
+            ),
+        },
     },
     "required": ["seq", "ts", "from", "text"],
 }
@@ -310,6 +320,14 @@ _ROOM_POST_BODY = {
                         )
                     },
                     "nonce": {"description": _NONCE_SCHEMA["description"]},
+                    "re": {
+                        "type": "integer",
+                        "description": (
+                            "Optional reply reference: the seq this message answers. The server "
+                            "refuses a non-integer, a value below 1, or one greater than the room's "
+                            "current last seq."
+                        ),
+                    },
                 },
                 "required": ["text"],
                 # The two lanes name their author differently, and the schema said neither
