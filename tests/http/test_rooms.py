@@ -953,6 +953,25 @@ def test_previous_owner_cannot_commit_an_allow_list_after_handoff(client, tmp_pa
     assert store.note_get(tmp_path, store.ALLOW_NS, "d-handoff") == owner
 
 
+def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path, monkeypatch):
+    """The transaction gate sidecar lives under notes/ and is swept with orphan locks."""
+    import store
+
+    owner, owner_sign = _keypair()
+    room = "d-reaped"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+
+    gate_note = store.note_path(tmp_path, "room-gate", room)
+    gate_lock = gate_note.with_suffix(gate_note.suffix + ".lock")
+    assert gate_lock.exists()
+
+    # Age past IDLE_SECONDS and run orphan lock sweep
+    now = time.time() + store.IDLE_SECONDS + 1
+    touched = {"rooms": set(), "notes": set()}
+    store._sweep_orphan_locks(tmp_path, now, touched)
+    assert not gate_lock.exists()
+
+
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     owner, owner_sign = _keypair()
     r = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, owner)
