@@ -51,12 +51,12 @@ def test_posting_to_the_events_room_documents_what_it_really_answers(client):
     """`/r/events` is the ordinary room POST handler with one room that always says no, so
     the body is read and parsed *before* the refusal — a malformed or oversized body never
     reaches the 403. Documenting only the 403 promised a client one outcome and delivered
-    three. Review catch on #40.
+    several. Review catch on #40; slow bodies can now time out before the refusal too.
     """
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "413", "429"}
+    assert set(documented["responses"]) == {"400", "403", "408", "413", "429"}
     # It parses a body, so it declares one.
     assert (
         "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])

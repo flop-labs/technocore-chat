@@ -1,24 +1,31 @@
 /**
  * Drive /humans in a real browser and report what it actually does.
  *
- * Not a pytest module and not in CI: it needs Chromium, and adding a browser to a service
- * whose test suite is pure-Python with three pinned dependencies is a bigger decision than
- * this page warrants. The Python tests assert what the *served bytes* contain — that the
- * script never builds an anchor, never assigns innerHTML, that the copy label and the icon
- * templates are there. Those are the security invariants and they belong in CI. What they
- * cannot tell you is whether the page works: every one of them passes with the JavaScript
- * completely broken. That is what this is for.
+ * Not a pytest module: it needs Chromium. The Python tests assert what the *served bytes*
+ * contain — that the script never builds an anchor, never assigns innerHTML, that the copy
+ * label and the icon templates are there. Those are the security invariants and they belong
+ * in the Python suite. What they cannot tell you is whether the page works: every one of
+ * them passes with the JavaScript completely broken. That is what this is for.
  *
- *     npm i playwright && npx playwright install chromium
+ * This ran as a manual gate for as long as /humans was a read-only window, on the reasoning
+ * that adding a browser to a service whose suite is pure Python with three pinned
+ * dependencies was a bigger decision than the page warranted. The page now holds a signing
+ * key, derives one from an authenticator, and mints delegation records — and two P1s on
+ * PR #719 were both browser-side and both invisible to 684 passing Python tests. So it runs
+ * in CI now, in .github/workflows/humans.yml, on changes to the page and to the four things
+ * that can break it from underneath. The Python line is untouched: the dependency is
+ * tests/package.json and its lockfile, and `uv sync` never sees it.
+ *
+ *     cd tests && npm ci && npx playwright install chromium && cd ..
  *     CHAT_ROOT=/tmp/ui-store uv run uvicorn app:app --app-dir src --port 8099
  *     node tests/humans_ui_probe.mjs 8099
  *
  * Set CHROMIUM_PATH to reuse a Chromium you already have instead of downloading one.
  *
- * Exits non-zero on the first failed check, so it is usable as a manual gate before
- * shipping a change to the page.
+ * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
+ * as by the workflow.
  *
- * Checked 2026-08-21, 56 checks, all passing — expected shape:
+ * Checked 2026-09-05, 109 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -30,9 +37,29 @@
  *                   in the launch args; a stub stands in where the flag does nothing),
  *                   hints are right, and every tool actually reaches the server
  *   webmcp absent   the page is unchanged with no modelContext, and with one that throws
+ *   live            the log and composer are above the fold and the directory below them,
+ *                   a message posted elsewhere arrives in well under the old 5s timer, rows
+ *                   carry an age, and a reader up in the history is offered the new messages
+ *                   rather than being scrolled away from what they were reading
+ *   signing         a pasted seed yields the did:key scripts/sign.py derives for it, the
+ *                   server accepts the signature, the nonce steps on a second write, the
+ *                   invisible-character sweep matches the server's, the identity survives
+ *                   a reload, and signing out lands back on the nickname lane
+ *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
+ *                   seed, and hands the SAME did:key back to a browser whose storage has
+ *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
+ *   delegation      two `delegate:` records are signed, published to the DID note path
+ *                   beside an existing `mailbox:`, and both read back verified out of the
+ *                   ONE line a note can hold; re-issuing replaces rather than appends; four
+ *                   malformed ones are refused before a fetch
  *
- * The webmcp section posts a message, which reorders /rooms — it runs last, after every
- * check that reads the seeded list.
+ * The webmcp and signing sections both post messages, which reorders /rooms — they run
+ * last, after every check that reads the seeded list.
+ *
+ * The signing section needs a *secure context* for crypto.subtle, so it works against
+ * 127.0.0.1 (which browsers treat as trustworthy) and would report a page with no identity
+ * row at all against a LAN address over plain HTTP — correctly, and not because anything
+ * is broken.
  */
 
 import { chromium } from "playwright";
@@ -81,7 +108,7 @@ const browser = await chromium.launch({
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   console.log("desktop 900px");
@@ -149,7 +176,7 @@ const browser = await chromium.launch({
     hasTouch: true,
   });
   const page = await context.newPage();
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   console.log("mobile 390px");
@@ -170,7 +197,7 @@ const browser = await chromium.launch({
   for (const width of [320, 390, 560, 700, 900, 1280]) {
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     const page = await context.newPage();
-    await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(500);
     const r = await page.evaluate(() => ({
       body: document.body.scrollWidth,
@@ -230,7 +257,7 @@ const browser = await chromium.launch({
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
   await page.addInitScript(STUB);
-  await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(800);
 
   const native = !(await page.evaluate(() => window.__stubbedModelContext === true));
@@ -393,7 +420,7 @@ const browser = await chromium.launch({
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
     if (init) await page.addInitScript(init);
-    await page.goto(`${BASE}/humans`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(800);
     check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
     check(`${label}: the room list still renders`,
@@ -401,6 +428,401 @@ const browser = await chromium.launch({
     check(`${label}: the log still renders`, (await page.locator("#log .msg").count()) >= 1);
     await context.close();
   }
+}
+
+// ------------------------------------------------------------------- the live conversation
+// What a person actually came for: a room that is already talking, visible without
+// scrolling, updating without waiting. All three used to be false — the rooms directory came
+// first and could be 200 rows tall, and the log was refreshed on a five-second timer.
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#log .msg", { timeout: 8000 });
+
+  // The whole conversation above the fold, and the directory below it.
+  const box = await page.evaluate(() => ({
+    logBottom: Math.round(document.getElementById("log").getBoundingClientRect().bottom),
+    composer: Math.round(document.getElementById("composer").getBoundingClientRect().bottom),
+    rooms: Math.round([...document.querySelectorAll("h2")]
+      .find((h) => h.textContent === "All rooms").getBoundingClientRect().top),
+    fold: innerHeight,
+  }));
+  check("live: the log is above the fold", box.logBottom < box.fold, JSON.stringify(box));
+  check("live: so is the composer", box.composer < box.fold, JSON.stringify(box));
+  check("live: the directory is below it", box.rooms > box.logBottom, JSON.stringify(box));
+
+  // Long poll. Posted from outside the browser, so this measures the page's own latency and
+  // not its own optimism about a message it just sent.
+  //
+  // The body is unique per run. A fixed one matches a message left in the store by the last
+  // run — this file is meant to be re-run against the same CHAT_ROOT by hand — and the wait
+  // then returns in 19ms against a row that was already on screen, which reads as a
+  // spectacular latency result and tests nothing at all.
+  const token = `live-probe-${Date.now().toString(36)}`;
+  const started = Date.now();
+  await fetch(`${BASE}/r/lobby/say/outsider/${token}`);
+  const arrived = page.locator(`#log .msg:has(.body:text-is("${token}"))`);
+  await arrived.waitFor({ timeout: 15000 });
+  const latency = Date.now() - started;
+  // The old timer was 5s and could be 5s late; anything under 3s can only be the long poll.
+  check("live: a message arrives without waiting out a timer", latency < 3000, `${latency}ms`);
+
+  const age = (await arrived.locator(".when").textContent()).trim();
+  check("live: rows carry an age", /^\d+[smhd]$/.test(age), age);
+  check("live: an arriving row is marked for the entrance animation",
+        (await arrived.getAttribute("class")).includes("fresh"),
+        await arrived.getAttribute("class"));
+  check("live: the live dot is showing", await page.locator("#live").isVisible());
+
+  // Scroll anchoring. A reader up in the history must not be dragged to the bottom by
+  // somebody else's message — they get a count and a way down instead.
+  //
+  // The log is shrunk here rather than filled with twenty messages, for two reasons: twenty
+  // writes is most of a 30/min budget this probe runs under on purpose, and the behaviour
+  // under test reads scrollHeight, scrollTop and clientHeight and nothing else. A short log
+  // with four messages in it is the same scrollable condition as a tall one with forty.
+  await page.evaluate(() => {
+    const log = document.getElementById("log");
+    // Sized from the content, not to a number. A fixed 60px box looked scrollable on a
+    // machine whose font fallback gave taller rows and was 24px short of the threshold on
+    // the CI runner, where a fresh store leaves lobby holding three short messages — a
+    // pixel assumption about text this file does not control. Leaving ~120px of overflow
+    // is true whatever a row happens to measure.
+    //
+    // min-height goes first and matters: the log carries `min-height: 12rem` so the page
+    // lands once instead of growing under the reader, and min-height beats max-height, so
+    // setting only the max leaves clientHeight at 192px and the log unscrollable.
+    log.style.minHeight = "0";
+    log.style.maxHeight = Math.max(20, log.scrollHeight - 120) + "px";
+    log.scrollTop = 0;
+  });
+  const before = await page.evaluate(() => document.getElementById("log").scrollTop);
+  check("live: the log is scrollable for the anchoring checks",
+        await page.evaluate(() => {
+          const l = document.getElementById("log");
+          return l.scrollHeight - l.clientHeight > 40;
+        }));
+  await fetch(`${BASE}/r/lobby/say/outsider/${token}-two`);
+  await page.waitForSelector("#jump:not([hidden])", { timeout: 15000 });
+  check("live: reading history is not interrupted by an arrival",
+        (await page.evaluate(() => document.getElementById("log").scrollTop)) === before);
+  check("live: and the arrival is offered rather than forced",
+        (await page.textContent("#jump")).includes("new message"),
+        await page.textContent("#jump"));
+  await page.click("#jump");
+  check("live: the pill takes the reader down and clears itself",
+        await page.locator("#jump").isHidden());
+
+  check("live: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// ---------------------------------------------------------------------------- signing
+// The did:key lane, which is the one part of this page a Python test can only half-check.
+// tests/unit/test_humans_identity.py pins the constants the page restates; it cannot tell
+// you whether WebCrypto accepts the PKCS#8 wrapper, whether the browser's Unicode tables
+// agree with Python's, or whether a signature this page produces verifies on the server.
+// Those are the three ways the signed lane breaks, and all three are invisible until
+// somebody signed in presses Send.
+//
+// Runs against 127.0.0.1, which is a secure context — crypto.subtle does not exist over
+// plain HTTP to any other host, so a probe against a LAN address would fail here for a
+// reason that is not a bug.
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
+  check("signing: the identity row appears once Ed25519 imports", true);
+  check("signing: it starts pseudonymous", (await page.textContent("#me")) === "Not signed in");
+
+  // The one seed this repo's own signer has an answer for. `uv run scripts/sign.py did
+  // --seed <this>` prints the DID asserted below, so a mismatch here means the browser and
+  // the command line have stopped agreeing on what a seed means — which is exactly the
+  // promise that makes pasting a seed into the composer worth offering.
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  // The seed entry lives behind "Other ways in" now: one primary way to sign in, the other
+  // three folded away. `<details>` needs no script, so this is a click and nothing else.
+  await page.click("#keymore summary");
+  await page.fill("#seed", SEED);
+  await page.click("#keyuse");
+  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
+  const did = await page.getAttribute("#me", "title");
+  check("signing: the seed yields the DID scripts/sign.py derives", did === EXPECTED, did);
+
+  const room = `sigprobe${Date.now().toString(36)}`;
+  const readRoom = async () =>
+    (await fetch(`${BASE}/r/${room}?format=json`)).json();
+
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#text", "hello from a browser-held key");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  let view = await readRoom();
+  check("signing: the server accepted the signature", view.messages.length === 1,
+        await page.textContent("#status"));
+  check("signing: stored under the DID, not a nickname",
+        view.messages[0]?.from === EXPECTED, view.messages[0]?.from);
+  check("signing: the nonce is in the record, so the write re-verifies later",
+        Number.isInteger(view.messages[0]?.nonce));
+
+  // Two writes from one key into one room is where store._last_nonce bites: the second is
+  // refused unless the page stepped the nonce past the first.
+  await page.fill("#text", "second message");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: a second write is accepted", view.messages.length === 2,
+        await page.textContent("#status"));
+  if (view.messages.length === 2)
+    check("signing: the nonce strictly increased",
+          view.messages[1].nonce > view.messages[0].nonce,
+          `${view.messages[0].nonce} -> ${view.messages[1].nonce}`);
+
+  // The sweep. One character from three of the six categories store.clean_text replaces:
+  // U+200B (Cf), U+0007 (Cc), U+2028 (Zl). If the page's regex and Python's
+  // unicodedata.category disagree on any of them, the signature covers different bytes
+  // than the server stores and this comes back 403.
+  const messy = `zero${String.fromCharCode(0x200b)}width${String.fromCharCode(0x07)}`
+              + `and${String.fromCharCode(0x2028)}sep`;
+  await page.evaluate((t) => { document.getElementById("text").value = t; }, messy);
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: invisibles swept the same way the server sweeps them",
+        view.messages[2]?.text === "zero width and sep",
+        JSON.stringify(view.messages[2]?.text));
+
+  // domcontentloaded, not networkidle — and this is now the only option rather than the
+  // better one. The page reads its room by long poll, so it deliberately holds a request
+  // open for up to ten seconds at all times and the network never goes quiet. Every
+  // navigation in this file waits for the thing it is about to assert instead.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in",
+                             null, { timeout: 8000 });
+  check("signing: the identity survives a reload",
+        (await page.getAttribute("#me", "title")) === EXPECTED);
+
+  // Signing out has to land back on the lane the whole page is built around, not on a
+  // half-state that can no longer post at all.
+  await page.click("#keyout");
+  check("signing: sign-out clears the badge",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#nick", "plain");
+  await page.fill("#text", "unsigned again");
+  await page.click("#send");
+  await page.waitForTimeout(1200);
+  view = await readRoom();
+  check("signing: the pseudonymous lane still works after sign-out",
+        view.messages[3]?.from === "plain", view.messages[3]?.from);
+
+  check("signing: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// -------------------------------------------------------------------- passkey + delegation
+// Two things a Python test cannot reach at all: whether an authenticator's PRF output can
+// actually stand in as an Ed25519 seed, and whether the identity comes back on a browser
+// with nothing in it — which is the entire reason the passkey path exists.
+//
+// Driven with Chrome's virtual authenticator over CDP, `hasPrf: true`. Note the RP ID
+// constraint: WebAuthn refuses a bare IP address as a relying party, so this section (alone
+// among all of them) talks to `localhost` rather than 127.0.0.1. Same origin to the server,
+// a valid registrable domain to WebAuthn.
+{
+  const HOST = BASE.replace("127.0.0.1", "localhost");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable", { enableUI: false });
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+      hasResidentKey: true, hasUserVerification: true, hasPrf: true,
+      automaticPresenceSimulation: true, isUserVerified: true,
+    },
+  });
+
+  const ready = () => page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  const signedIn = () =>
+    page.waitForFunction(
+      () => document.getElementById("me").textContent !== "Not signed in",
+      null, { timeout: 15000 });
+
+  await page.goto(`${HOST}/humans`, { waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: the primary way in is on the surface",
+        await page.locator("#keypass").isVisible());
+  check("passkey: enrolling another is folded away until asked for",
+        !(await page.locator("#keypassnew").isVisible()));
+  await page.click("#keymore summary");
+  check("passkey: and the disclosure reveals it",
+        await page.locator("#keypassnew").isVisible());
+
+  // Discovery with nothing enrolled must explain itself and must not quietly enrol. This is
+  // the branch that used to be reached by inference from stored state, and got it backwards.
+  await page.click("#keypass");
+  await page.waitForTimeout(2500);
+  check("passkey: discovery with none enrolled points at the other button",
+        (await page.textContent("#status")).includes("no passkey used"),
+        await page.textContent("#status"));
+  check("passkey: and signed nobody in",
+        (await page.textContent("#me")) === "Not signed in");
+
+  await page.click("#keypassnew");
+  await signedIn();
+  const did = await page.getAttribute("#me", "title");
+  check("passkey: enrolment derives a did:key",
+        /^did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}$/.test(did), did);
+  check("passkey: the seed is never written to storage",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+
+  // The whole point, in one check: wipe every byte of local state and get the same identity
+  // back from the authenticator alone.
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: a wiped browser starts signed out",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: the same passkey recovers the same DID from empty storage",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // ---- delegation ----
+  check("delegation: the agents panel appears once signed in",
+        !(await page.locator("#agents").isHidden()));
+  check("delegation: and stays folded until asked for",
+        !(await page.locator("#agent-did").isVisible()));
+  await page.click("#agents summary");
+
+  const fp = await page.evaluate(async (d) => {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(d));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0"))
+      .join("").slice(0, 16);
+  }, did);
+  const notePath = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+
+  // Seed the note with the thing a real DID note already holds. A note is ONE line — the
+  // server's sweep turns every newline into a space — so this is what makes the delegations
+  // below land in a note that is not empty, which is the case that a line-oriented parser
+  // silently loses (PR #719 review).
+  await fetch(`${HOST}${notePath}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: "mailbox: mb-probe" }),
+  });
+
+  const AGENT = "did:key:z6MkqGC3nWZhYieEVTVDKW5v588CiGfsDSmRVG9ZwwWTvLSK";
+  const AGENT2 = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const delegate = async (agent, scope, days) => {
+    await page.fill("#agent-did", agent);
+    await page.fill("#agent-scope", scope);
+    await page.fill("#agent-days", days);
+    await page.click("#delegate");
+    await page.waitForTimeout(2000);
+  };
+
+  await delegate(AGENT, "r:lobby", "30");
+  check("delegation: it verifies against the issuing key and lists as live",
+        (await page.locator(".deleg.ok .state").count()) === 1,
+        await page.textContent("#status"));
+  check("delegation: the row names the scope",
+        (await page.textContent(".deleg")).includes("r:lobby"),
+        await page.textContent(".deleg"));
+
+  // The regression. Two records plus a mailbox, all in one line, all still findable.
+  await delegate(AGENT2, "kv:plans", "10");
+  check("delegation: a second one is found beside the first in a one-line note",
+        (await page.locator(".deleg.ok .state").count()) === 2,
+        await page.textContent("#status"));
+
+  // Re-issuing is the documented way to keep a grant alive, so it must replace rather than
+  // pile up: a record a week per agent against a cap of about forty fills the note in under
+  // a year. Same agent, new scope and expiry — the row count must not move.
+  await delegate(AGENT, "kv:plans", "45");
+  check("delegation: re-issuing replaces the grant instead of appending",
+        (await page.locator(".deleg").count()) === 2,
+        `${await page.locator(".deleg").count()} rows`);
+  // Named explicitly rather than by row position: the replaced record is appended at the end,
+  // so `.deleg` is the *other* agent — which in this run also carries kv:plans, and the loose
+  // version of this check passed on that coincidence rather than on the re-issue.
+  // The last four characters, not the first four: the page abbreviates a DID as
+  // `z6Mk…vLSK`, and `z6Mk` is the prefix every ed25519 did:key shares, so matching on it
+  // selects every row.
+  const reissued = page.locator(`.deleg:has-text("${AGENT.slice(-4)}")`);
+  check("delegation: and the re-issue is the one that counts",
+        (await reissued.textContent()).includes("kv:plans"),
+        await reissued.textContent());
+
+  const note = await (await fetch(`${HOST}${notePath}`)).text();
+  check("delegation: the note carries the re-issued scope for that agent",
+        note.includes(`delegate: ${AGENT} kv:plans`),
+        note.slice(note.indexOf("delegate:"), note.indexOf("delegate:") + 90));
+  check("delegation: published to the DID note path",
+        note.includes(`delegate: ${AGENT}`) && note.includes(`delegate: ${AGENT2}`), notePath);
+  check("delegation: one record per agent survives in the note",
+        (note.match(/delegate:/g) || []).length === 2,
+        `${(note.match(/delegate:/g) || []).length} records`);
+  check("delegation: the note's existing content survived the append",
+        note.includes("mailbox: mb-probe"), note.slice(0, 120));
+  check("delegation: and the note really is a single line",
+        note.trimEnd().split("\n").filter((l) => l.includes("delegate:")).length === 1);
+
+  // Every refusal is client-side; none of these may reach the network. Asserted on the
+  // delegation count rather than on the status badge: the room poll writes "seq N" over that
+  // badge about once a second, so reading it after a fixed wait is a race the probe loses
+  // roughly whenever the two line up.
+  for (const [label, agent, scope, days] of [
+    ["a non-DID agent", "not-a-did", "*", "30"],
+    ["a scope outside the grammar", AGENT, "room:lobby", "30"],
+    ["a zero-day expiry", AGENT, "*", "0"],
+    ["delegating to itself", did, "*", "30"],
+  ]) {
+    await page.fill("#agent-did", agent);
+    await page.fill("#agent-scope", scope);
+    await page.fill("#agent-days", days);
+    await page.click("#delegate");
+    await page.waitForTimeout(800);
+    check(`delegation: refuses ${label}`,
+          (await page.locator(".deleg").count()) === 2,
+          `${await page.locator(".deleg").count()} rows`);
+  }
+  const after = await (await fetch(`${HOST}${notePath}`)).text();
+  check("delegation: no refusal reached the note",
+        (after.match(/delegate:/g) || []).length === 2);
+
+  // Enrolling a SECOND passkey while one already exists has to sign the reader in as the
+  // credential just created. Deriving from an unconstrained get() here would hand back
+  // whichever credential the authenticator picked — a new key made and silently discarded,
+  // under a DID the reader did not just mint (PR #719 review). Runs last: it leaves two
+  // discoverable credentials behind, which makes any later unconstrained discovery ambiguous.
+  await page.click("#keyout");
+  await page.click("#keymore summary");
+  await page.click("#keypassnew");
+  await signedIn();
+  check("passkey: enrolling a second one derives from the new credential, not an old one",
+        (await page.getAttribute("#me", "title")) !== did,
+        await page.getAttribute("#me", "title"));
+
+  check("passkey + delegation: no page errors throughout",
+        errors.length === 0, errors.join("; "));
+  await context.close();
 }
 
 
