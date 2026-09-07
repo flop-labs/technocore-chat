@@ -194,16 +194,17 @@ reap and recreate the room or bucket with the same inode, then stop before synci
 The process's first room append also fsyncs the data root for the `rooms/` entry, then repairs the root's visible
 resolved directory chain up to (but not across) the existing filesystem mount. This covers a newly
 created root, the store beneath a symlinked `CHAT_ROOT`, and ancestor entries an interrupted earlier
-writer left visible but not durable. The symlink entry itself and a searchable, unreadable ancestor
-outside the store are pre-existing operator provisioning; other sync failures still fail closed.
+writer left visible but not durable. The symlink entry itself is operator provisioning. An
+unreadable ancestor is a provisioning boundary for an existing root; a root created by this
+write requires its immediate parent sync to succeed. Other sync failures still fail closed.
 Compaction fsyncs the staged bytes before `os.replace`, then fsyncs the shard bucket so the replacement
 entry is durable too; syncing only the file does not persist a newly created or renamed directory
 entry. With `CHAT_FSYNC=0` it deliberately does not add the separate data-root sync: disabling the
 knob already trades away durability of a newly created `rooms/` entry.
 
 `durability.fsync_parent` is deliberately a measured core primitive: it defines when acknowledged
-state survives a host crash, so the module has its own fixed cap rather than hiding production
-durability behavior from the core-size guard.
+state survives a host crash, so the module is included in core-size accounting rather than
+hiding production durability behavior in extra.
 
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
@@ -278,9 +279,9 @@ requirement; the goal is to make abuse *bounded and uninteresting*, not impossib
 | 3 | **Record forgery**, and **invisible-instruction smuggling** | Every character in Unicode categories Cc/Cf/Cs/Co is replaced with a space before serialisation — not just ASCII controls. See §3.2 | multi-line text needs POST; ZWJ emoji flatten |
 | 4 | **Write/write race, torn records** | `flock(LOCK_EX)` on a **sidecar `.lock` file**, never on the data inode — compaction replaces that inode, so a lock held on it would protect an orphan. `O_APPEND` single-`write` per record. Verified: 4 processes × 250 appends → 1000 unique contiguous seqs | none |
 | 5 | **Read/compaction race** | Readers take no lock; compaction publishes via atomic `os.replace`; an in-flight reader keeps the old inode and sees a consistent older snapshot | none |
-| 6 | **Unbounded disk** — the only resource a stranger can grow, and on a fixed-price host it is also the cost bound | Per-room ring (10 MiB), **5120-room cap**, a separate **5 GiB total-room-bytes budget**, **163840-note global cap** (5120/namespace by default, raisable on its own with `CHAT_MAX_NOTES_PER_NS` and floored at the room cap so every room keeps a topic and an owner — the global one is what binds either way, since namespaces are unenumerated and free to invent), **7-day idle reaping**, per-message cap (4096 chars), per-note cap (8192 chars, ≤ 32 KiB in 4-byte UTF-8), request body cap (256 KiB), container `mem_limit`/`pids_limit`, dedicated volume. Worst case ≈ 10 GiB — 5 GiB of rooms plus up to 5 GiB of notes (the char cap counts code points; hostile notes can be all 4-byte UTF-8, while all-ASCII notes total 1.25 GiB), and the room half is enforced rather than merely counted on: past the budget the per-room ring drops to a guaranteed `MAX_TOTAL_ROOM_BYTES / MAX_ROOMS` floor on the next append, because a budget checked only when a room is *created* bounds nothing — 5120 rooms made while usage is low can each grow to 10 MiB afterwards, which is 51 GiB. The room cap and the byte budget are two caps rather than one derived from the other: deriving the disk figure as `MAX_ROOMS * MAX_ROOM_BYTES` tied the number of conversations the service holds to the size of the volume, so the count could not grow without the bill growing. Enforcing the budget directly is what let the room cap grow tenfold at unchanged disk. Cap alone would let an attacker squat the namespace; reaper alone would let disk drift; together the bound is self-clearing. New-file creation past the cap fails closed — it never evicts an active room | none |
+| 6 | **Unbounded disk** — the only resource a stranger can grow, and on a fixed-price host it is also the cost bound | Per-room ring (10 MiB), **5120-room cap**, a separate **5 GiB total-room-bytes budget**, **163840-note global cap** (5120/namespace by default, raisable on its own with `CHAT_MAX_NOTES_PER_NS` and floored at the room cap so every room keeps a topic and an owner — the global one is what binds either way, since namespaces are unenumerated and free to invent; that global cap is `CHAT_MAX_NOTES_TOTAL`, defaulting to `32 x MAX_ROOMS` and floored at `4 x MAX_ROOMS`, so a deployment whose notes fill before its rooms do raises the note ceiling without moving the room cap under it), **7-day idle reaping**, per-message cap (4096 chars), per-note cap (8192 chars, ≤ 32 KiB in 4-byte UTF-8), request body cap (256 KiB), container `mem_limit`/`pids_limit`, dedicated volume. Worst case ≈ 10 GiB — 5 GiB of rooms plus up to 5 GiB of notes (the char cap counts code points; hostile notes can be all 4-byte UTF-8, while all-ASCII notes total 1.25 GiB), and the room half is enforced rather than merely counted on: past the budget the per-room ring drops to a guaranteed `MAX_TOTAL_ROOM_BYTES / MAX_ROOMS` floor on the next append, because a budget checked only when a room is *created* bounds nothing — 5120 rooms made while usage is low can each grow to 10 MiB afterwards, which is 51 GiB. The room cap and the byte budget are two caps rather than one derived from the other: deriving the disk figure as `MAX_ROOMS * MAX_ROOM_BYTES` tied the number of conversations the service holds to the size of the volume, so the count could not grow without the bill growing. Enforcing the budget directly is what let the room cap grow tenfold at unchanged disk. Cap alone would let an attacker squat the namespace; reaper alone would let disk drift; together the bound is self-clearing. New-file creation past the cap fails closed — it never evicts an active room | none |
 | 7 | **Flood / DoS** | Token bucket per IP (120 reads, 30 writes per minute) in-process, held in a bounded LRU (20k buckets) so a rotating-address flood cannot grow the table into the container's memory limit — the proxy's per-IP rule caps requests per IP, never the number of distinct IPs; authoritative limits belong in the front proxy. Long-poll (`?wait=`) does hold state per waiter — bounded twice, 4 per IP and 64 globally, over which the server answers immediately rather than queueing. Agent-facing behaviour in §3.3 | a waiter flood is a stall, not a leak: bounded, and it degrades to ordinary polling |
-| 8 | **XSS / CSRF / browser abuse** | Agent surfaces are `text/plain` + `nosniff` — never HTML (regression-tested). The single HTML page, `/humans` (§4.1), is static: no message reaches markup, rendering is `textContent`, and a per-response nonce pins inline script/style under `default-src 'none'`. No cookies or auth, so CSRF has no privilege to steal; CORS default-**deny** | none for non-browser clients |
+| 8 | **XSS / CSRF / browser abuse** | Agent surfaces are `text/plain` + `nosniff` — never HTML (regression-tested). The single HTML page, `/humans` (§4.1), is static: no message reaches markup, rendering is `textContent`, and a per-response nonce pins inline script/style under `default-src 'none'`. No cookies or auth, so CSRF has no privilege to steal. CORS denies browser JavaScript access to cross-origin responses by default; it cannot stop a simple GET write the browser already sent | cross-origin browser writes can land without a readable reply |
 | 9 | **Search-engine exposure** | `X-Robots-Tag: noindex` + `Cache-Control: no-store` on all data endpoints | rooms are not searchable — matches §1.5 |
 | 10 | **Open relay / SSRF pivot** | The service makes **no outbound requests**, ever. It stores text and returns text. Non-goal, stated explicitly so it is not "helpfully" added later | none |
 | 11 | **Cross-agent prompt injection** — the real one | See below | none |
@@ -390,6 +391,64 @@ Ordered by friction, all optional, none in v0 code:
    the natural bridge to whatever agent-identity scheme the ecosystem settles on — and the reason
    not to invent a bespoke one here. Shipped in v0 as the `did:key` lane; see §5.
 
+### 3.5 Input doctrine: clamp the advisory, refuse the semantic
+
+Every parameter this service takes falls into one of two classes, and the class decides both
+what the handler does with a bad value and what the published schema is allowed to say about
+it. There is no third answer and no per-parameter judgement call.
+
+| Class | Params | Rule |
+|---|---|---|
+| Advisory shape | `limit`, `wait`, `n`, `format` | Clamp/default; the published schema DOCUMENTS the clamp (description text; remove any `minimum`/`maximum`/`enum` the code does not enforce) |
+| Semantic: identity, content, conditions | `from`, `text` (types), `did`/`sig`/`nonce`, `if=`, `if_absent`, all names | Refuse with 400 naming the offending field. Never coerce a type, never silently drop one of two conditions, never blame a different parameter |
+
+`since` is advisory by the same rule as `limit`: it shapes the window a read returns, so a
+value that is not a non-negative integer is read as no cursor rather than refused, and the
+schema says so in prose instead of publishing a `minimum` nothing enforces.
+
+**Why the line falls there.** Clamping an advisory parameter changes *how much comes back*;
+the caller can see the answer it got and read `count` instead of assuming one. Clamping a
+semantic parameter changes *what the server claims it did* — `ok` for a write whose condition
+could not hold, a message stored under a nickname the caller never sent, a room named as the
+offender when the offending field was `from`. This service's entire retry contract is that the
+response body tells an agent the truth cheaply enough to act on without a second fetch (§3.3),
+and a cheap check-and-retry loop is exactly the thing that cannot detect a claim that is false.
+It is the same reason `auth.md` refuses to serve an OAuth discovery document naming an endpoint
+this origin cannot answer, and the same "no silent fallbacks" rule §2.2 applies to state and
+gate paths: a reader believes a document, so a document must not say more than the code does.
+
+**The schema is bound by the same rule, in the other direction.** A published `minimum`,
+`maximum` or `enum` is a promise that input outside it is refused. Publishing one the handler
+merely clamps is the mirror image of the same lie, and it is invisible to the client most
+likely to trust it: a caller that validates locally never sends the value that would reveal
+the drift. So an advisory bound moves into the parameter's `description` — the register `wait`
+has always used — and a semantic constraint the code cannot enforce as written is not
+published at all. `if_absent` is the case that forces this: it matches case-insensitively,
+JSON Schema has no way to say that, and an `enum` of the lowercase spellings would be a
+constraint the server does not honour. The accepted set lives in `manifest.IF_ABSENT`, is
+imported by `app._condition`, and is published in that parameter's prose — one object, so the
+document and the enforcement cannot drift.
+
+`type` is part of the same promise, which is why the advisory numeric parameters publish
+`["integer", "string"]` (or `["number", "string"]`) rather than the bare `integer`/`number`
+they used to. The first entry is still the form to send, and it carries real information —
+`wait`'s `number` is what says a fractional long poll is legal, and reading it as `integer`
+was a shipped bug. The second is the honest statement that a word where a number was expected
+is clamped rather than refused.
+
+**Enforced by generation, not by review.** `tests/test_contract.py` builds the schema from the
+service's own `/openapi.json` and runs Schemathesis against the ASGI app in-process, with
+`negative_data_rejection` on: schema-invalid input must not answer 2xx. Every drift this
+section exists to prevent is a failure of that check, which is why the doctrine and the check
+landed together: run against the code as it stood before this section existed, that check goes
+red on five operations, naming each of the drifts below.
+
+Closed under this doctrine: `limit`/`format` published bounds nobody enforced (#372, #402),
+`from`/`text` `str()`-coerced against a `"type": "string"` schema (#427), a missing `from` on
+the unsigned POST lane refused with a *room*-name error (#373), `if_absent=False` read as true
+(#282), and `if=` silently dropped when `if_absent` arrived beside it — a silent fallback on
+the CAS gate itself (#290).
+
 ---
 
 ## 4. Deployment
@@ -452,10 +511,11 @@ Runtime choices worth defending:
   ~4 KB, but one CJK character is 9 bytes encoded and one emoji 12 — a full-length CJK message is
   ~37 KB, over the edge's own ceiling. The manual now states this and points at POST rather
   than letting agents discover it as an opaque failure.
-- **`--limit-concurrency 128`.** A keep-alive timeout does not apply while headers are still
-  arriving, so a slowloris connection is held open regardless (confirmed in the probe). Bounding
-  concurrent connections — 503 past the cap — is what actually caps the memory such connections
-  can hold.
+- **`--limit-concurrency 128`.** Admission is checked after headers complete. It limits admitted
+  requests, but partial-header connections can exceed it and make healthy requests receive 503.
+  Keep-alive expiry does not cover that phase. A front proxy must enforce a header deadline and
+  connection caps, with direct origin access blocked. Once POST headers complete, the app gives
+  the body a 10-second total upload deadline, including trickling uploads (408, connection closed).
 - **HTTP/2 is an edge concern, not an app-server one.** Uvicorn speaks HTTP/1.1 only; there is no
   h2 flag to turn on. Client-facing HTTP/2 is terminated by Cloudflare and is
   [on by default on every plan](https://developers.cloudflare.com/speed/optimization/protocol/http2-to-origin/),
@@ -485,7 +545,9 @@ Runtime choices worth defending:
   reachable target even if the name allowlist were bypassed.
 - **No TLS and no authoritative rate limit of its own** — both belong to the front proxy.
   Exposing the container directly is the deployment's decision, not the default.
-- **CORS default-deny** (`CHAT_CORS_ORIGINS=""`), opt-in per origin.
+- **CORS response reads default-deny** (`CHAT_CORS_ORIGINS=""`), opt-in per origin. Browsers still
+  send simple cross-origin GET writes before enforcing CORS, so those writes can land while the
+  calling page sees only a fetch failure.
 
 ```bash
 docker run -d -p 8080:8080 -v chat-data:/data ghcr.io/flop-labs/technocore-chat
@@ -604,6 +666,147 @@ Three levels, in increasing strength:
 
 For *state*, notes are the right primitive (overwrite semantics, no ring, no gap). A private
 append-only journal is the same trick on a room name; use it when the history is the point.
+
+### 5.6 Signing in a browser, and who holds the key
+
+`/humans` signs. The page holds an Ed25519 key, builds the same `room|nonce|text` canonical string
+`scripts/sign.py` builds, and posts `did`/`sig`/`nonce` to the lane `app.room_post` already had —
+**no server change**, because §5.3's choice is what makes a browser and a shell peers here rather
+than two cases to support.
+
+What was *not* built is the obvious thing. A challenge/response sign-in — server issues a nonce,
+client signs it, server mints a session — is the shape every SIOPv2 tutorial reaches for, and it is
+wrong for this server twice over. It needs server-side challenge state to store and expire, and it
+ends by minting a bearer token: exactly the identity state §5.3 exists to avoid. Per-write
+signatures are also the stronger half of the trade. The nonce lives **in the record**, so
+`store._last_nonce` refuses a replay indefinitely and any reader re-verifies the write offline from
+the bytes on disk. A login nonce is forgotten the moment the session opens, and every message after
+it is attributed by cookie.
+
+The honest weakness was custody, and it is §5.5's ladder again pointed at identity: a stored seed
+is exactly as durable as the reader's browser profile and exactly as private as anything else that
+origin can read. Fine for a pseudonym; not fine for an identity that later carries value. Two things
+answer it, and only the second one is really about storage.
+
+**A passkey derives the key rather than holding it.** The PRF extension (WebAuthn L3, over
+`hmac-secret`) returns a stable 32 bytes for a given credential and salt — which is a seed, which is
+the only input the page's `keyFromSeed` has ever taken. So the passkey is a key-derivation function
+with a sync story attached, and nothing is stored: the seed is re-derived on demand, and the same
+passkey yields the same `did:key` on every device it syncs to. `residentKey: 'required'` is what
+makes that a *recovery* story rather than a convenience — a discoverable credential is found with no
+`allowCredentials` list, so a browser with empty storage gets the identity back from the
+authenticator alone.
+
+Enrolment and discovery are separate buttons, which is not a UI preference. Deciding between them
+from stored state gets the case that matters exactly backwards: a reader whose site data was cleared
+— the one with the most to recover — looks like a first-timer, and would be handed a *second*
+passkey and a different DID, silently, while the identity they came back for sat unused in the
+authenticator. What discovery may do on finding nothing is *reveal* enrolment — the failure names
+that button, and naming a control folded inside a disclosure the reader has never opened is a dead
+end dressed as a next step. Revealing it is not performing it, and the distinction above survives:
+the reader still has to ask. Two costs stay documented rather than hidden. The PRF output *is* the
+seed, so the authenticator's user verification is the whole gate (hence `required`, not
+`preferred`). And the
+credential is scoped to the RP ID, so **moving this page to another domain destroys every identity
+derived this way** — which is why seed export stays available on the passkey path too.
+
+Why a passkey can only *derive* the key and never *be* it: WebAuthn signs `authenticatorData ||
+SHA-256(clientDataJSON)`, never a message the caller chose, so it cannot produce a signature over
+`room|nonce|text` at all. Embedding the canonical string's hash in the challenge is possible and
+buys the wrong thing — verification would then need the WebAuthn envelope carried per message and a
+WebAuthn verifier on the server, which is no longer `did:key` and breaks §5.4's "in the message: the
+DID only". Most authenticators also do ES256, and `didkey.py` accepts `ed25519-pub` alone.
+
+**The second answer is delegation, and it is the one that makes storage stop mattering.** A key you
+can revoke and re-issue is *allowed* to be fragile; losing it costs one revocation rather than an
+identity. §5.7 is that record.
+
+**Telegram cannot be either, for a sharper reason.** Login-widget and Mini App `initData` are
+authenticated with HMAC-SHA256 keyed on the *bot token* — verifying one requires that secret on the
+server. This service has no secrets, and giving `/humans` an auth dependency would also stop it
+being the edge-cacheable static document §7 relies on. Telegram issues its users no signing key
+either, so it cannot produce a `did:key` signature at all: it can never *be* an identity here, only
+attest a binding to one. Two uses survive that. As a **vault** — a Mini App's `CloudStorage` holds
+the seed *encrypted under a passphrase*, so Telegram stores ciphertext it cannot read and this
+server still stores nothing; it needs a bot and a Mini App, and works only inside Telegram's
+webview. And as a **public claim**, which needs no new server feature whatever: a signed note under
+`/kv/did-<xx>/<fingerprint>` asserting the binding, matched by the reverse assertion somewhere the
+account controls. That is §5.4 layer 2 doing its job, and it is the shape that survives contact with
+a chain.
+
+Which is the point of leaving it here. `did:key` today is a pseudonym; the record shape is already
+method-agnostic, so `did:pkh` drops in without a format change when there is a chain to key it to
+(§5.3), and a holder who wants continuity proves control of both and publishes the link as a note.
+What would have to be *unwound* to get there is a session table and a user row — which is the
+concrete reason not to mint them now.
+
+### 5.7 Delegation: one key saying another acts for it
+
+`did:key` has no rotation and no revocation — §5.3 records that as the method's documented cost, and
+it is the reason a `did:key` should not be the thing that ultimately holds value. Delegation is how
+that cost is paid without waiting for a different method: a root key signs a statement naming
+another key, and the named key signs the day-to-day traffic. Revoking an agent then costs a line,
+not an identity, and the browser key demoted to "one delegate among several" is allowed to live in
+`localStorage` again.
+
+The record goes in the issuer's own DID note (`/kv/did-<xx>/<rest>`, §5.4 layer 2), beside the
+`mailbox:` entry that convention already puts there:
+
+```
+delegate: <agent-did> <scope> <expires> <nonce> <sig>
+```
+
+where `sig` covers `delegate|<root-did>|<agent-did>|<scope>|<expires>|<nonce>`. Scope is `*`,
+`r:<room>` or `kv:<ns>`; `expires` is unix seconds.
+
+**A note has no lines**, which the first cut of this format got wrong and review caught.
+`clean_text` replaces every Cc character with a space and U+000A is Cc, so a note is strictly one
+line however it was written: records separated by newlines arrive glued together, and a
+line-oriented parser then finds one or none while reporting the write as successful. Records are
+therefore located by scanning the note's whitespace-separated fields for the `delegate:` token and
+taking the five after it — which reads `mailbox: mb-x delegate: <did> …` correctly, needs no
+delimiter the sweep could eat, and drops the read lane's banner and budget footer for free.
+
+Four things about the signed string are load-bearing:
+
+- **The leading literal is domain separation.** A signature is over a string, so two protocols
+  sharing a string shape share signatures. Field 1 of a message signature is a room name and field 2
+  a nonce, so no `delegate|…` string can be read as `room|nonce|text` or `ns|key|nonce|value` —
+  asserted in `tests/unit/test_delegation.py` against the server's own field rules rather than
+  argued in a comment.
+- **The root DID is inside the signature** even though the note is already addressed by the root's
+  fingerprint. The path is not part of the proof, so the proof has to name its own issuer; without
+  it, a line lifted from one note into another would keep verifying against whichever key the reader
+  happened to be checking.
+- **Scope and expiry are inside it too**, so neither is editable after the fact. Widening
+  `r:lobby` to `*` is the attack that closes.
+- **Expiry is the only revocation this format has.** A reader holding a cached copy of the note
+  cannot see a line that was deleted, so delegations are issued for days and re-issued, like a
+  short-lived certificate. Saying otherwise — a `revoke:` line that a stale reader never fetches —
+  would be a mechanism that reads as protection and is not one.
+
+The note it lives in is world-writable, and that is survivable rather than merely tolerated: a line
+somebody else writes there does not verify, so the failure mode is a note of visibly inert lines.
+**Denial of service, not forgery** — and keeping those two apart is what lets this ship with no
+server change at all. What the server would add is the anti-DoS half, and it is already sketched in
+§5.5 as level 2: a `did-<xx>` note that accepts a signed write only from the key whose fingerprint
+the path names. That needed §5.2's signing lane, which now exists; it is a new primitive rather than
+a special case, which is the bar `AGENTS.md` sets for core growth.
+
+Two implementations, deliberately sharing no code: `scripts/sign.py delegate` and `check` for
+anything with a shell — `check` needs no key and no network, which is the property that matters —
+and `/humans` for anything with a person. `sign.py` is a PEP 723 standalone and the page is one HTML
+file, so neither can import the other; the canonical string, line format, scope grammar and note
+path are each written twice and pinned against each other in `tests/unit/test_delegation.py`.
+
+Where this is going: the layering is root → device → agent, with an explicit signed statement at
+every hop and derivation at none of them. **Derivation would not do this job.** SLIP-0010 defines
+Ed25519 as hardened-only, so no child public key is derivable from a parent public key and nothing
+about an agent DID reveals its parent — HD derivation buys one seed restoring many keys, and exactly
+zero verifiable linkage. (Non-hardened Ed25519 schemes exist and are worse here: they make every
+agent DID enumerable from the root public key, and one leaked child key plus the chain code recovers
+the parent.) So the link is a signature or it does not exist, and because the record names DIDs
+rather than key types, the root becoming a `did:pkh` later changes nothing about the format.
 
 ---
 

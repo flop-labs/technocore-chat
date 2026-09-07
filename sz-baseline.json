@@ -1,56 +1,49 @@
 {
-  "core_total": 2168,
+  "core_total": 2317,
   "caps": {
-    "core/app.py": 998,
-    "core/config.py": 61,
-    "core/didkey.py": 57,
-    "core/durability.py": 36,
-    "core/limit.py": 171,
-    "core/store.py": 846,
-    "core_total": 2169
+    "core/app.py": 1030,
+    "core/config.py": 73,
+    "core/didkey.py": 67,
+    "core/limit.py": 193,
+    "core/store.py": 1010,
+    "core_total": 3010
   },
   "files": {
     "core/app.py": {
-      "raw_lines": 1897,
-      "code_lines": 998,
-      "comment_lines": 267,
-      "tokens_per_line": 7.78
+      "raw_lines": 2177,
+      "code_lines": 1020,
+      "comment_lines": 319,
+      "tokens_per_line": 8.0
     },
     "core/config.py": {
-      "raw_lines": 312,
-      "code_lines": 61,
-      "comment_lines": 195,
-      "tokens_per_line": 12.56
+      "raw_lines": 367,
+      "code_lines": 63,
+      "comment_lines": 248,
+      "tokens_per_line": 12.86
     },
     "core/didkey.py": {
-      "raw_lines": 135,
-      "code_lines": 57,
-      "comment_lines": 31,
-      "tokens_per_line": 7.96
-    },
-    "core/durability.py": {
-      "raw_lines": 53,
-      "code_lines": 36,
-      "comment_lines": 1,
-      "tokens_per_line": 6.86
+      "raw_lines": 148,
+      "code_lines": 59,
+      "comment_lines": 42,
+      "tokens_per_line": 8.14
     },
     "core/limit.py": {
-      "raw_lines": 423,
-      "code_lines": 171,
-      "comment_lines": 81,
-      "tokens_per_line": 8.48
+      "raw_lines": 498,
+      "code_lines": 183,
+      "comment_lines": 98,
+      "tokens_per_line": 8.51
     },
     "core/store.py": {
-      "raw_lines": 2017,
-      "code_lines": 845,
-      "comment_lines": 443,
-      "tokens_per_line": 7.36
+      "raw_lines": 2764,
+      "code_lines": 992,
+      "comment_lines": 636,
+      "tokens_per_line": 8.1
     },
     "extra/manifest.py": {
-      "raw_lines": 1818,
-      "code_lines": 1320,
-      "comment_lines": 152,
-      "tokens_per_line": 3.83
+      "raw_lines": 2281,
+      "code_lines": 1576,
+      "comment_lines": 266,
+      "tokens_per_line": 3.87
     }
   }
 }
