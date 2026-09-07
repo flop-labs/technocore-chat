@@ -295,14 +295,26 @@ def check_note(root: str, body: str) -> int:
     """
     key, live, now = public_key(root), 0, int(time.time())
     records = delegations(body)
-    current = newest(records)
+    # Verify all signatures once, so newest() ranks only records that actually
+    # verify. Without this, a forged record with a high nonce in a world-writable
+    # note suppresses a real grant as SUPERSEDED. The note is writable by anyone,
+    # so a forged line is the ordinary case, and it must not compete with real ones.
+    ok = []
     for i, (agent, scope, expires, nonce, sig) in enumerate(records):
         try:
             key.verify(
                 base64.urlsafe_b64decode(sig + "=="),
                 delegation(root, agent, scope, expires, nonce).encode(),
             )
+            ok.append(i)
         except (InvalidSignature, ValueError, TypeError):
+            ok.append(-1)
+    verified = [i for i in ok if i >= 0]
+    current = newest([records[i] for i in verified])
+    # newest() returns indices into the verified sublist; map back to the original.
+    current = {verified[j] for j in current}
+    for i, (agent, scope, expires, nonce, _sig) in enumerate(records):
+        if ok[i] < 0:
             # Not "invalid": *forged, or for somebody else*. A record that fails here was
             # signed by a key that is not this root, which in a note anyone can write to is
             # the ordinary case and not an error.
