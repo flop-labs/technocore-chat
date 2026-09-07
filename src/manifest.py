@@ -28,6 +28,8 @@ import config
 import didkey
 import store
 
+ROOM_KINDS = ("discussion", "mailbox", "all")
+
 # The Content-Security-Policy for /humans, built from the page it describes.
 #
 # The inline <script> and <style> are pinned by a `sha256-` of their own bytes, computed here
@@ -842,7 +844,23 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "How many rooms to detail. Advisory: a value that is not "
                                 "a non-negative integer falls back to 50, and what "
                                 f"survives is clamped to 1..{store.MAX_LIMIT}. `total` "
-                                "counts every listed room either way."
+                                "counts every listed room in the selected `kind` either way."
+                            ),
+                        },
+                        {
+                            "in": "query",
+                            "name": "kind",
+                            "schema": {
+                                "type": "string",
+                                "enum": list(ROOM_KINDS),
+                                "default": "all",
+                            },
+                            "description": (
+                                "Filter before applying `limit`: `discussion` keeps public "
+                                "non-mailbox rooms (including the server `events` room), "
+                                "`mailbox` keeps public signed-write-only mailboxes, and "
+                                "`all` preserves the unfiltered listing. Unlisted composed "
+                                "classes such as `mb-p-*` never appear in any view."
                             ),
                         },
                         _FORMAT_PARAM,
@@ -889,6 +907,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 },
                             },
                         ),
+                        "400": _plain("Unknown `kind`; the response names the accepted values."),
                         "429": _RATE_LIMITED,
                     },
                 }

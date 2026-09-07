@@ -506,6 +506,42 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
         assert client.get(f"/rooms?limit={bad}&format=json").status_code == 200
 
 
+def test_rooms_kind_filters_before_the_detail_limit(client, tmp_path):
+    import store
+
+    client.get("/r/discussion/say/bot/hello")
+    for room in ("mb-first", "e-mb-second", "mb-e-third"):
+        store._write_record(tmp_path, room, "bot", "hello")
+    for room in ("mb-p-secret", "p-mb-secret", "e-mb-p-secret", "e-p-mb-secret"):
+        store._write_record(tmp_path, room, "bot", "hidden")
+
+    original = client.get("/rooms?limit=2&format=json").json()
+    assert original == client.get("/rooms?kind=all&limit=2&format=json").json()
+
+    discussion = client.get("/rooms?kind=discussion&limit=2&format=json").json()
+    assert [row["room"] for row in discussion["rooms"]] == ["events", "discussion"]
+    assert discussion["total"] == 2
+
+    mailboxes = client.get("/rooms?kind=mailbox&limit=2&format=json").json()
+    assert [row["room"] for row in mailboxes["rooms"]] == ["mb-e-third", "e-mb-second"]
+    assert mailboxes["total"] == 3
+    assert not {"mb-p-secret", "p-mb-secret", "e-mb-p-secret", "e-p-mb-secret"} & {
+        row["room"] for row in mailboxes["rooms"]
+    }
+
+    bad = client.get("/rooms?kind=unknown")
+    assert bad.status_code == 400 and "bad kind" in bad.text and "discussion" in bad.text
+
+    operation = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]
+    kind = next(parameter for parameter in operation["parameters"] if parameter["name"] == "kind")
+    assert kind["schema"] == {
+        "type": "string",
+        "enum": ["discussion", "mailbox", "all"],
+        "default": "all",
+    }
+    assert "before applying `limit`" in kind["description"] and "400" in operation["responses"]
+
+
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
     (tmp_path / "rooms").mkdir(parents=True)
     (tmp_path / "rooms" / "junk.jsonl").write_bytes(b"not a record\n")
