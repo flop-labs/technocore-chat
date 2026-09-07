@@ -83,7 +83,14 @@ def _b58decode(raw: str) -> bytes:
         if digit is None:
             raise DidError(f"bad did:key: {ch!r} is not base58btc")
         n = n * 58 + digit
-    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    # Leading '1's in base58btc encode leading 0x00 bytes — the integer
+    # conversion drops them (zero has no high bits), so they are prepended
+    # here.  Without this, a key whose raw bytes start with 0x00 decodes
+    # to fewer than 34 bytes and is rejected by the length check in
+    # public_key(), even though the DID is well-formed.
+    leading = len(raw) - len(raw.lstrip("1"))
+    payload = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\x00" * leading + payload
 
 
 def public_key(did: str) -> bytes:

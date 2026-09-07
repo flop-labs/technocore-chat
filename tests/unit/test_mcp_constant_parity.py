@@ -124,3 +124,39 @@ def test_the_wait_ceiling_matches_the_services_default():
     import config
 
     assert wrapper.WAIT_CEILING == config.MAX_WAIT
+
+
+def test_the_card_advertises_the_versions_the_wrapper_actually_negotiates():
+    """The service's server card names the wrapper's protocol versions, and could not.
+
+    This is the parity in the opposite direction from the rest of this file: elsewhere the
+    *wrapper* restates a constant the *service* enforces, here the service's
+    `/.well-known/mcp/server-card.json` restates one the wrapper owns. Same problem, same
+    reason — the card is served by a process that cannot import `technocore_mcp` — so the
+    same answer.
+
+    It had already drifted. The card said `("2025-06-18",)`, written when the wrapper spoke
+    a hand-rolled protocol; #539 moved it onto the official SDK, whose handshake versions
+    run to `2025-11-25`, and the card went on naming a revision two behind for all of
+    0.11.x. Nothing caught it because the only assertion on the field was that it was
+    non-empty, which a stale list satisfies perfectly.
+
+    Handshake versions specifically. `KNOWN_PROTOCOL_VERSIONS` also carries `2026-07-28`,
+    which removed `initialize` — the SDK calls those *modern* and this server does not
+    serve them, answering `2025-11-25` to a client that asks. A card naming `2026-07-28`
+    would be promising a version every connection then downgrades, which is worse than
+    naming none: the client picks it, and the downgrade is silent.
+    """
+    from mcp.types.version import HANDSHAKE_PROTOCOL_VERSIONS, MODERN_PROTOCOL_VERSIONS
+
+    import manifest
+
+    assert manifest.MCP_PROTOCOL_VERSIONS == tuple(HANDSHAKE_PROTOCOL_VERSIONS), (
+        "the server card advertises protocol versions the wrapper does not negotiate"
+    )
+    # The half that keeps the reasoning honest rather than the value current: a modern
+    # version must not appear here while the wrapper still answers `initialize`.
+    for modern in MODERN_PROTOCOL_VERSIONS:
+        assert modern not in manifest.MCP_PROTOCOL_VERSIONS, (
+            f"{modern} removed the handshake; advertising it promises a silent downgrade"
+        )

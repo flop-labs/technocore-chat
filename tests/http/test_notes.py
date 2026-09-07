@@ -54,6 +54,34 @@ def test_a_lost_conditional_write_carries_the_value_after_the_first_line(client)
     assert lines[-1] == "world"
 
 
+def test_409_marks_the_stranger_value_untrusted_without_moving_it(client):
+    """#291: the 409 body handed another caller's note value straight to the reader with
+    no warning at all, directly beneath a server-authored imperative ("merge your change
+    into the value below") — exactly what design.md §3.1's "refuse to be an authority"
+    principle rules out. The read lane marks the same kind of content with BANNER, but
+    gluing BANNER's own line above the value here would move it off the anchor CAS callers
+    already depend on: the announced length, and being the body's last line (pinned by
+    test_a_lost_conditional_write_carries_the_value_after_the_first_line above). So the
+    fix folds the warning into the instruction sentence instead of prepending a line, and
+    this test pins both halves: the warning exists, and the value's position does not move.
+    """
+    client.get("/kv/plans/next/set/world")
+    lost = client.get("/kv/plans/next/set/nope?if=stale")
+    assert lost.status_code == 409
+    lines = lost.text.rstrip("\n").split("\n")
+
+    # Unmoved: still the exact last line, still preceded by the length announcement and
+    # nothing else — a caller counting past that line lands on the value, same as before.
+    assert lines[-1] == "world"
+    assert lines[-2].startswith("current value follows (")
+
+    # Marked: the instruction ahead of the value now says it is untrusted, and that
+    # sentence does not itself leak the value it is warning about.
+    instruction = "\n".join(lines[:-2])
+    assert "untrusted" in instruction.lower()
+    assert "world" not in instruction
+
+
 def test_webmcp_tool_results_carry_the_whole_server_reply(client):
     """A one-line squeeze used to live in the tool lane, and it dropped the value a 409
     carries. The status badge above still takes a first line — it has one line to render —
@@ -454,3 +482,37 @@ def test_a_missing_reserved_note_names_the_lane_that_can_create_it(client):
     assert client.get("/kv/room-nonce/d-unclaimed/set/1").status_code == 403
     # Every other namespace keeps the create URL the manual promises.
     assert "/kv/plans/absent/set/" in client.get("/kv/plans/absent").text
+
+
+def test_note_reads_are_edge_cacheable_like_room_reads(client):
+    """The CDN's cache rule has always covered /kv/, but the handlers never marked a note
+    read shareable, so every one went to the origin — the rule matched a reply that never
+    said it could be held. A note's bytes are the same for every caller that can name it.
+
+    An unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly
+    the callers who could already read it, which is why it is cacheable on the same terms
+    rather than excluded.
+    """
+    client.get("/kv/e-tc-cache/k/set/value")
+    for path in ("/kv/e-tc-cache/k", "/kv/e-tc-cache"):
+        cc = client.get(path).headers["cache-control"]
+        assert "s-maxage=" in cc and "max-age=0" in cc, f"{path} is not shareable: {cc}"
+
+    # A p- key is unlisted, not unshareable: same header, and the URL is the credential.
+    client.get("/kv/p-tc-cache/k/set/secret")
+    assert "s-maxage=" in client.get("/kv/p-tc-cache/k").headers["cache-control"]
+
+
+def test_a_note_read_carrying_a_budget_footer_is_not_shared(client):
+    """The footer is one caller's pacing, so the reply stops being the CDN's to hand out.
+    This is the half that keeps the line above from leaking one caller's numbers to another.
+    """
+    import config
+
+    client.get("/kv/e-tc-cache/k/set/value")
+    with config.override(RATE_READ=8):
+        for _ in range(7):
+            client.get("/kv/e-tc-cache/k")
+        warned = client.get("/kv/e-tc-cache/k")
+        assert "# budget:" in warned.text
+        assert warned.headers["cache-control"] == "no-store"
