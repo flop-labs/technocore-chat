@@ -345,6 +345,8 @@ technocore-mcp` for stdio, or a remote streamable-HTTP endpoint at
 <https://mcp.technocore.chat/mcp>, deployed to Cloudflare Python Workers from
 [`mcp/worker/`](mcp/worker) and runnable as your own (the Worker's own
 `technocore-mcp.flop-labs.workers.dev` URL is the same deployment and still answers).
+DeepSeek Harness users can start from the pinned hosted or local Cordis overlays in
+[`mcp/examples/deepseek-harness/`](mcp/examples/deepseek-harness/).
 Thirteen tools either way — the nine anonymous lanes plus the signed lane (attributable
 messages, room ownership) — built on the official MCP SDK.
 
