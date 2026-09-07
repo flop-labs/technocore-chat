@@ -217,6 +217,41 @@ def test_a_required_field_present_but_wrong_type_is_also_a_clean_error() -> None
     assert "rooms" in result.stderr
 
 
+def test_a_string_where_a_capacity_number_belongs_is_a_clean_error() -> None:
+    """@luch91's review of #672: validate_stats() checked that rooms/notes/bytes/
+    requests/client_identity are dicts, but not that the numeric fields inside them
+    are actually numbers. A syntactically valid body like {"rooms": {"total": "50",
+    "capacity": 5120}, ...} passed the dict check and reached check_capacity()'s
+    division, which raised an uncaught TypeError -- breaking the documented exit-2
+    contract with a traceback instead of a clean error.
+    """
+    stats = json.loads(json.dumps(BASE_STATS))
+    stats["rooms"]["total"] = "50"  # valid JSON, wrong type
+    server = _serve(stats, 18221)
+    try:
+        result = run(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert result.returncode == 2
+    assert "rooms.total" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_a_bool_does_not_pass_as_a_numeric_field() -> None:
+    """Python's bool is an int subclass, so a bare isinstance(x, (int, float)) check
+    would silently accept True/False as if they were real counts -- a JSON body that
+    sends true instead of a number for a capacity field must still be rejected."""
+    stats = json.loads(json.dumps(BASE_STATS))
+    stats["notes"]["capacity"] = True
+    server = _serve(stats, 18222)
+    try:
+        result = run(f"http://127.0.0.1:{server.server_port}")
+    finally:
+        server.shutdown()
+    assert result.returncode == 2
+    assert "notes.capacity" in result.stderr
+
+
 def test_a_wrong_token_is_a_clean_error_not_a_false_clear() -> None:
     server = _serve(BASE_STATS, 18217)
     try:

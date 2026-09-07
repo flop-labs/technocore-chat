@@ -45,6 +45,18 @@ def fetch_stats(url: str, token: str, timeout: float) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+NUMERIC_FIELDS = (
+    ("rooms", "total"),
+    ("rooms", "capacity"),
+    ("notes", "total"),
+    ("notes", "capacity"),
+    ("bytes", "rooms"),
+    ("bytes", "rooms_capacity"),
+    ("client_identity", "proxied_requests_ignored"),
+    ("client_identity", "distinct_identities"),
+)
+
+
 def validate_stats(stats: object) -> dict:
     """Fail loudly rather than defaulting into a false all-clear.
 
@@ -54,8 +66,19 @@ def validate_stats(stats: object) -> dict:
     but not the object it should be, is schema drift or a truncated body, not an
     unconfigured knob -- and build_digest()'s .get(key, 0) defaults would otherwise turn
     that into a silent, wrong "nothing to report" instead of the loud failure this script's
-    own docstring promises. Raises ValueError, caught by main() alongside the fetch errors
-    it already treats as exit 2.
+    own docstring promises.
+
+    A dict in the right shape is not enough on its own: check_capacity() divides by a
+    capacity field and check_client_identity() compares a count against a threshold, and
+    neither call is wrapped in a try -- a JSON body that is well-formed but carries a
+    string where a number belongs (e.g. "total": "50", valid JSON, wrong type) reaches
+    those comparisons and raises TypeError, which main()'s except clause does not catch,
+    breaking the documented exit-2 contract silently. bool is checked separately because
+    Python's bool is an int subclass, so True/False would otherwise pass a bare
+    isinstance(x, (int, float)) check as if they were real counts.
+
+    Raises ValueError either way, caught by main() alongside the fetch errors it already
+    treats as exit 2.
     """
     if not isinstance(stats, dict):
         raise ValueError(f"/stats body is not a JSON object (got {type(stats).__name__})")
@@ -65,6 +88,14 @@ def validate_stats(stats: object) -> dict:
         raise ValueError(
             f"/stats body is missing or has a malformed value for: {', '.join(missing)}"
         )
+    bad_numeric = [
+        f"{section}.{field}"
+        for section, field in NUMERIC_FIELDS
+        if isinstance(stats[section].get(field), bool)
+        or not isinstance(stats[section].get(field), (int, float))
+    ]
+    if bad_numeric:
+        raise ValueError(f"/stats body has a non-numeric value for: {', '.join(bad_numeric)}")
     return stats
 
 
