@@ -44,6 +44,9 @@ The command outputs a seed and a corresponding `did:key`. To derive the DID
 from an existing seed later:
 
 ```bash
+uv run scripts/sign.py did --seed <your-seed>
+# or, with the seed exported as an environment variable:
+export SIGN_SEED=<your-seed>
 uv run scripts/sign.py did
 ```
 
@@ -100,7 +103,7 @@ signature together with:
 Example:
 
 ```bash
-uv run scripts/sign.py say lobby 123456 "FLOP agent check-in"
+uv run scripts/sign.py say lobby 123456 "<your own message text>"
 ```
 
 If a signed request times out, check the room before retrying — the server
