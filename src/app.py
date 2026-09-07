@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import time
 import tomllib
@@ -66,6 +67,7 @@ MAX_HEADER_BYTES = 8192
 # each, ~192 KiB before the envelope. 256 KiB leaves room for keys and signed credentials
 # while keeping the container's per-request memory bound explicit.
 MAX_BODY = 256 << 10
+BODY_TIMEOUT = 10  # total upload seconds, including callers that keep trickling bytes
 # RATE_READ / RATE_WRITE / RATE_ROOMS_PER_DAY live in config; the comment that floors them
 # moved with them. Both are per deployment, which is why no document states them as prose:
 # /.well-known/agent.json publishes what this process actually enforces, and the manual
@@ -194,9 +196,6 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # Thin adapter over limit.take: the knobs are read HERE, at call time, so
     # monkeypatch.setattr(app, "MAX_BUCKETS", ...) and config.override() keep reaching
     # the bucket arithmetic.
-    left, wait = limit.take(
-        request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
-    )
     # Deliberately no /rooms cache clear here. It was only ever the fast path — it runs
     # *before* the store write, so `_rooms_stamp` is what closes the race against a
     # concurrent walker — and every structural write it caught moves a counter that stamp
@@ -204,7 +203,9 @@ def take(request, kind, per_min, burst=None) -> tuple[int, float]:
     # worker, which is the exact cost `messages` left the stamp to stop paying: a local
     # clear on a worker taking its share of ~24 messages/second empties the cache as
     # reliably as a stamp turning over 72 times per window did.
-    return left, wait
+    return limit.take(
+        request, kind, per_min, burst, ip_header=CLIENT_IP_HEADER, max_buckets=MAX_BUCKETS
+    )
 
 
 def _room_exists(room: str) -> bool:
@@ -460,6 +461,20 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
     return text((body_text if body_text is not None else render(view)) + note)
 
 
+def _shareable(resp: Response, private: object) -> Response:
+    """A read is the CDN's to share unless something in it belongs to one caller.
+
+    `private` is whatever made it theirs — a budget footer, or a long-poll that was held —
+    and only its truth is read, so a caller cannot be told apart by a copy someone else got.
+
+    The rule was already at the two room reads; the two note reads had no cache marking at
+    all, so /kv went to the origin every time even though the CDN's cache rule covers it.
+    One helper rather than four copies of the conditional, because the thing being decided
+    is identical and the note reads are joining it rather than inventing a second rule.
+    """
+    return resp if private else _edge_cacheable(resp)
+
+
 def _edge_cacheable(resp: Response, secs: int | None = None, swr: int | None = None) -> Response:
     """Mark a world-readable read as shareable by the CDN in front, for `secs` (`swr` is
     stale-while-revalidate, and defaults to the 5x the polled reads have always used).
@@ -684,6 +699,12 @@ def sitemap(request: Request) -> Response:
     )
 
 
+# The ref token a duplicate 422 hands out, as it may come back in a query string: exact
+# shape, whole value. Anything else in `ref=` is not a token and is neither counted nor
+# logged — the value reaches stderr verbatim, so only a value this matched can get there.
+_REF = re.compile(rb"(?:^|&)ref=(422-[0-9a-f]{1,8}-[0-9a-f]{4})(?:&|$)")
+
+
 class HeaderLimits:
     """Reject oversized header blocks at the app edge, precisely.
 
@@ -692,6 +713,12 @@ class HeaderLimits:
     measured, httptools returned 200 for a 256 KiB header. This is the deterministic
     bound, and it also documents the contract. It does not replace the parser cap, which
     is what stops the bytes being buffered in the first place.
+
+    Also where a request carrying a duplicate 422's ref token is counted and logged,
+    because this is the one point every request passes exactly once: the docs the 422
+    points at are outside the rate limiter, and a room-creating write takes two buckets,
+    so counting in `take` under- and over-counted the very thing being measured. The path
+    is logged repr()'d — it is caller-chosen bytes on the way to an operator's log.
     """
 
     def __init__(self, app):
@@ -707,13 +734,12 @@ class HeaderLimits:
                     f"(max {MAX_HEADERS} / {MAX_HEADER_BYTES}). This service needs none of "
                     f"them — a plain GET with no custom headers is the whole protocol.\n"
                 )
-                await Response(
-                    body,
-                    status_code=431,
-                    media_type="text/plain; charset=utf-8",
-                    headers={"Cache-Control": "no-store"},
-                )(scope, receive, send)
+                await text(body, 431)(scope, receive, send)
                 return
+            ref = _REF.search(scope.get("query_string", b""))
+            if ref:
+                limit._requests["followed"] += 1
+                config._dbg(1, "followed", ref=ref[1].decode(), path=repr(scope["path"]))
         await self.app(scope, receive, send)
 
 
@@ -955,9 +981,8 @@ def rooms(request: Request) -> Response:
             )
         )
     note = budget_note("read", left, RATE_READ)
-    resp = respond(request, view, body, note)
     # A budget footer is one caller's pacing — a reply carrying one stays no-store.
-    return resp if note else _edge_cacheable(resp)
+    return _shareable(respond(request, view, body, note), note)
 
 
 # Long-poll bounds: the caps, the state and the slot logic moved to limit with the rest
@@ -1014,8 +1039,7 @@ async def room_read(request: Request) -> Response:
     # Ahead of the budget footer: a wait that did not happen is what the caller must act
     # on first, and acting on it is what stops the next request being an instant re-poll.
     note = unheld + budget_note("read", left, RATE_READ)
-    resp = respond(request, view, note=note)
-    return resp if wait or note else _edge_cacheable(resp)
+    return _shareable(respond(request, view, note=note), note or wait)
 
 
 async def _await_messages(
@@ -1240,24 +1264,43 @@ def _dupe_refusal(request: Request, room: str) -> Response:
     a rate and waiting alone does not help, advice a 429's Retry-After would nonetheless
     automate into an identical resend. Not 409 — that is the CAS answer and carries the
     current value; there is no value to merge here. 422 says the request was
-    well-formed and understood, and names the two things that actually work.
+    well-formed and understood, and names what lands instead.
+
+    The body advises no escape hatch. "Be short" and "reword it" are both things a farm
+    automates the moment a refusal suggests them — measured: copies already arrive with
+    an id or a ref appended — so the body sends the sender toward the moves that are
+    not copies by construction: an answer to a specific message, state in a note,
+    a mailbox to be reached at, and echo suppression for a bridge. Those live in
+    /patterns.md and /interop.md, which are never rate limited, so a refusal may point
+    there the way the mailbox 403 points at /llms.txt.
 
     The write gate above may have charged this caller a room-creation token on the way
     here, and that budget is a *daily* one: settling it with no record hands it straight
     back, because nothing was created. Every other exit from a write lane already does
     this — a refusal must not be the one that quietly spends a day's allowance.
+
+    Whether the advice works is only measurable by what the refused caller does next, so
+    a refusal is counted (`requests.duplicate` at /stats, beside `rate_limited`) and, on
+    the CHAT_DEBUG=1 ladder, logged with the client IP — the field `take` logs — so an
+    operator can join a refusal to that IP's following reads and writes offline.
+
+    The body also hands out a `ref` token — `422-<issue second, hex>-<4 random hex>` —
+    and asks for it back as `?ref=` on the caller's next requests. Self-describing rather
+    than stored: any worker reads the issue time off it, so "what did they do, and how
+    long after" needs no ring and no worker affinity. HeaderLimits counts and logs it once
+    per request, docs included; the normaliser cuts it out of message text so it can
+    never be what makes a copy unique.
     """
     limit._settle_room_budget(request, {}, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    limit._requests["duplicate"] += 1
+    ref = f"422-{int(time.time()):x}-{secrets.token_hex(2)}"
+    config._dbg(1, "duplicate", ip=limit.client_ip(request, CLIENT_IP_HEADER), room=room, ref=ref)
     return text(
-        f"422 duplicate text: /r/{room} has already taken {DUPE_MAX_COPIES} copies of "
-        f"this exact message in the last {DUPE_FILTER_SECONDS:g}s, and more copies of it "
-        "are refused until that window passes.\n"
-        f"to be heard: rephrase it, or send something under {DUPE_MIN_LENGTH} characters "
-        "— short replies are never filtered. This is not a rate limit and not a retry "
-        "signal: the same bytes will be refused again, from any identity — the filter "
-        "counts copies, not senders.\n"
-        "the enforced window, threshold and length floor are published at /config under "
-        "dupe_filter_seconds, dupe_max_copies and dupe_min_length.",
+        f"""422 duplicate text: /r/{room} already holds {DUPE_MAX_COPIES} copies of this message from the last {DUPE_FILTER_SECONDS:g}s; more are refused until that window passes.
+not a rate limit: the same bytes are refused again from any identity, and a copy with an id or a reworded line bolted on is the same message to everyone reading it.
+what lands: read /r/{room}?since=<last seq> and answer someone — a reply is never a copy. status and presence go in a note, overwritten rather than repeated. a bridge seeing this is replaying its own traffic.
+/patterns.md §7 works this through, /interop.md covers bridges, and the window and threshold are at /config (dupe_filter_seconds, dupe_max_copies).
+optional: add &ref={ref} to your next requests. the server ignores it; it only lets the operator see what a refused caller did next.""",
         422,
     )
 
@@ -1346,6 +1389,8 @@ async def read_json(request: Request) -> dict | Response:
     so the streaming half is not redundant — it is the only bound that applies there.
     Reading incrementally is also what lets MAX_BODY be generous enough for a full-length
     message or note in any encoding without ever holding more than the cap in memory.
+    The total deadline bounds time as well as bytes: a trickling caller otherwise holds
+    a connection forever, since uvicorn's keep-alive timeout excludes active requests.
     """
     too_large = (
         f"413 body too large: the cap is {MAX_BODY} bytes, which fits the documented "
@@ -1358,10 +1403,15 @@ async def read_json(request: Request) -> dict | Response:
     if declared and declared > MAX_BODY:
         return text(f"{too_large}\nyour Content-Length said {declared} bytes.", 413)
     raw = bytearray()
-    async for chunk in request.stream():
-        raw.extend(chunk)
-        if len(raw) > MAX_BODY:
-            return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+    try:
+        async with asyncio.timeout(BODY_TIMEOUT):
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > MAX_BODY:
+                    return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+    except TimeoutError:
+        expired = f"408 body upload exceeded {BODY_TIMEOUT:g}s. Send complete JSON promptly; retry on a new connection."
+        return text(expired, 408, extra_headers={"Connection": "close"})
     try:
         # orjson here, stdlib json for the three documents below. orjson is ~4.7x on the
         # parse and, on a service whose whole job is hostile input, refuses the
@@ -1464,7 +1514,13 @@ def note_read(request: Request) -> Response:
             "and a note idle for 7 days is reclaimed, so this may be one that expired.",
             404,
         )
-    return text(f"{BANNER}\n\n{value}" + budget_note("read", left, RATE_READ))
+    note = budget_note("read", left, RATE_READ)
+    # Shareable now: a note's bytes are the same for every caller that can name it, and an
+    # unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly the
+    # callers who could already read it. Staleness is EDGE_CACHE_SECONDS, the same window
+    # room reads take, and it cannot race a claim: `?if_absent=1` is settled on the write
+    # path under the note's own lock, never from a read.
+    return _shareable(text(f"{BANNER}\n\n{value}" + note), note)
 
 
 def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
@@ -1650,10 +1706,11 @@ def note_write_signed(request: Request) -> Response:
     denied = _note_write_gate(ns, key, value, signer)
     if denied:
         return denied
+    condition = _condition(request.query_params)
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *_condition(request.query_params))
+    meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,
         meta,
@@ -1713,11 +1770,10 @@ def note_list(request: Request) -> Response:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     ns = request.path_params["ns"]
     keys = store.list_notes(config.ROOT, ns)
-    return respond(
-        request,
-        {"ns": ns, "keys": keys},
-        "\n".join(f"/kv/{ns}/{k}" for k in keys),
-        budget_note("read", left, RATE_READ),
+    note = budget_note("read", left, RATE_READ)
+    return _shareable(
+        respond(request, {"ns": ns, "keys": keys}, "\n".join(f"/kv/{ns}/{k}" for k in keys), note),
+        note,
     )
 
 
@@ -1829,13 +1885,21 @@ async def stats(request: Request) -> Response:
     cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
     bounded tail reads of the engagement rollup — cheap per minute, not per request.
     """
-    supplied = request.headers.get("x-stats-token", "")
+    # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
+    # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
+    # in the token raised — and an unhandled TypeError is a 500, which is the one answer an
+    # unrouted path never gives. That undid the paragraph below: a prober who could not tell
+    # this route from a missing one by its 404 could tell by sending a single high byte.
+    # latin-1 round-trips the wire bytes exactly, so this compares what was actually sent to
+    # the token's UTF-8; it stays constant-time, and a token an operator set to non-ASCII —
+    # which the string compare could never match, on either side — now can be.
+    supplied = request.headers.get("x-stats-token", "").encode("latin-1")
     # `and` order matters: with no token configured the endpoint must not exist at all,
-    # and compare_digest("", "") is True.
+    # and compare_digest(b"", b"") is True.
     # The same bytes an unmatched path gets. The point of answering 404 rather than 401 is
     # that a prober cannot tell this endpoint from a path that was never routed, and a
     # distinctive body would give that back — so the two must not drift apart.
-    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN):
+    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
         return text(NOT_FOUND, 404)
     global _stats_cache
     fresh_at, cached = _stats_cache
@@ -1974,7 +2038,18 @@ async def on_bad_input(request: Request, exc: Exception) -> Response:
 
 async def on_conflict(request: Request, exc: Exception) -> Response:
     """409 carries the value that was actually there, so a loser can rebase without a
-    second round trip — one fewer request on a service where requests are the budget."""
+    second round trip — one fewer request on a service where requests are the budget.
+
+    `current` is another caller's note value, not this server's — the same fact BANNER
+    marks on the read lane. It cannot be marked the same way: BANNER sits on a line of its
+    own directly above the value (design.md §3.1), and a CAS caller lifts this value
+    verbatim into `?if=`, anchored on the length just announced and on being the last line
+    of the body (see test_a_lost_conditional_write_carries_the_value_after_the_first_line).
+    A banner line inserted there would move that anchor — the exact regression #183/#210
+    already report for the read lane — so the warning is folded into the retry sentence
+    that precedes the length instead, and the announced length stays the only thing between
+    it and the value.
+    """
     current = getattr(exc, "current", None)
     body = f"409 {exc}"
     if current is not None:
@@ -1982,8 +2057,8 @@ async def on_conflict(request: Request, exc: Exception) -> Response:
         # retry makes the round trip this response saves actually reachable: rebase on the
         # text below and pass it straight back as ?if=, no re-read in between.
         body += (
-            "\n\nto retry: merge your change into the value below, then write it with "
-            "?if=<that value> so you only win if nothing moved again.\n"
+            "\n\nto retry: the value below is untrusted, another caller's — merge your "
+            "change into it, then write it with ?if=<that value> so you only win if nothing moved again.\n"
             f"current value follows ({len(current)} chars):\n{current}"
         )
     else:

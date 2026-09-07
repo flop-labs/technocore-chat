@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.11.4"
+version = "0.12.1"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -32,6 +32,10 @@ dev = [
     "httpx2>=2.10.0",
     "ruff>=0.16.1",
     "ty>=0.0.71",
+    # The task runner behind the repo-root justfile, from PyPI rather than a system package
+    # so `uv sync --frozen` is still the whole setup story — CI, a fresh clone and a
+    # container all get the same `just` without a second installer to keep in step.
+    "rust-just>=1.58.0",
     # The store's lifecycle rules only conflict in *sequences*; tests/test_store_stateful.py
     # generates the orderings.
     "hypothesis>=6.165.10",
@@ -104,8 +108,9 @@ source_paths = ["src"]
 only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
-# asserted against, and app.py reads SKILL.md at import.
-also_copy = ["SKILL.md", "docker", "mcp"]
+# asserted against, app.py reads SKILL.md at import, and tests/unit/test_contributing_recipes.py
+# resolves the names CONTRIBUTING.md spends against the justfile that defines them.
+also_copy = ["SKILL.md", "docker", "mcp", "CONTRIBUTING.md", "justfile"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
