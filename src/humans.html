@@ -521,22 +521,25 @@
     </div>
     <p class="hint" id="keyhint">Sign in and your messages carry a <code>did:key</code> the
     server verifies — a name nobody else can post under, and the way into mailbox rooms and
-    room ownership. A passkey brings the same identity back on your other devices.</p>
+    room ownership. <span id="passkeynote">A passkey <em>is</em> that key: it derives the same
+    <code>did:key</code> every time and nothing is kept here, so the identity comes back when
+    you return, and on any device the passkey syncs to. No passkey for this site yet? Make one
+    under <strong>Other ways in</strong>.</span></p>
     <details id="keymore">
       <summary>Other ways in</summary>
       <div class="row">
-        <button id="keypassnew" class="btn-secondary">New passkey</button>
+        <button id="keypassnew" class="btn-secondary">Create a passkey</button>
         <button id="keynew" class="btn-secondary">Create a key</button>
         <input id="seed" placeholder="…or paste a 64-character hex seed" maxlength="64"
                spellcheck="false" autocomplete="off"
                aria-label="Ed25519 seed, 64 hex characters">
         <button id="keyuse" class="btn-secondary">Use seed</button>
       </div>
-      <p class="hint"><strong>New passkey</strong> enrols another one, a second identity
-      beside any you already hold. <strong>Create a key</strong> stores a key in this browser
-      and nowhere else — back it up or lose it. <strong>Use seed</strong> takes the 64 hex
-      characters <code>scripts/sign.py keygen</code> prints, so one identity works here and
-      on the command line.</p>
+      <p class="hint"><span id="passkeymore"><strong>Create a passkey</strong> enrols one —
+      your first, or another identity beside any you already hold. </span><strong>Create a
+      key</strong> stores a key in this browser and nowhere else — back it up or lose it.
+      <strong>Use seed</strong> takes the 64 hex characters <code>scripts/sign.py keygen</code>
+      prints, so one identity works here and on the command line.</p>
     </details>
   </div>
 
@@ -825,8 +828,29 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   // Roughly 8% of men cannot separate red from green, so the failure state is carried by the
   // word "error" as well as by Error Red (DESIGN.md: red is never the only signal).
-  function say(msg) { status.textContent = msg; status.className = 'badge live'; }
-  function fail(msg) { status.textContent = 'error — ' + msg; status.className = 'badge err'; }
+  //
+  // One badge, two writers that want different things from it. The pump stamps `seq N` on
+  // it every time a poll lands — a heartbeat, and the right cadence for a live log. Every
+  // other caller writes to it because the reader did something and is owed an answer. Until
+  // these were told apart the heartbeat won every race in a room that was not idle: the one
+  // line explaining what a click was waiting for, and the error when it failed, were both
+  // gone inside a second. That is most of why a passkey ceremony the platform never
+  // surfaced looked like a button that did nothing at all.
+  //
+  // So an answer is held: long enough to read, short enough that the seq is not stranded on
+  // a page the reader has moved on from.
+  var HOLD_MS = 8000;
+  var holdUntil = 0;
+  function badge(msg, cls) { status.textContent = msg; status.className = cls; }
+  // How long the heartbeat stays off the badge. HOLD_MS is "long enough to read", which is
+  // the right answer for an outcome and the wrong one for a wait still in progress: a caller
+  // that is still working passes its own window and hands the badge back when it settles.
+  // Nothing that reports a result needs that — saying the result resets this by itself.
+  function hold(ms) { holdUntil = Date.now() + ms; }
+  function say(msg) { hold(HOLD_MS); badge(msg, 'badge live'); }
+  function fail(msg) { hold(HOLD_MS); badge('error — ' + msg, 'badge err'); }
+  // The pump's own line, which never talks over an answer the reader is still reading.
+  function beat(msg) { if (Date.now() >= holdUntil) badge(msg, 'badge live'); }
 
   // Opening a room from the list has to actually take you there. The list is a screenful on
   // its own — more so on a phone, and it holds up to 200 rows — so filling a log several
@@ -1141,7 +1165,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           }
         }
         restamp();
-        say('seq ' + since);
+        beat('seq ' + since);
         live(true);
         // A parked read that comes back instantly with nothing is the server declining to
         // park — every waiter slot is taken, and MAX_WAITERS_* degrades to an immediate
@@ -1345,14 +1369,47 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
               && typeof navigator.credentials.create === 'function');
   }
 
+  // One ceremony at a time, and the reader's newest click is the one that counts. WebAuthn
+  // allows a single outstanding request per document: a second get() while one is parked is
+  // rejected outright, with "A request is already pending." — a sentence about the page's
+  // own bookkeeping, handed to a reader who cannot see the thing it says is pending.
+  //
+  // And parked is where a request stays. The platform dialog is not always a dialog the
+  // reader gets to answer: on several of them it opens behind the browser window, or it is
+  // an OS sheet dismissed by the OS rather than by the page, or the ceremony is a hybrid
+  // one waiting on a phone that never joins. The promise does not reject in any of those —
+  // it simply never settles. Without the abort below that wedged the page for the life of
+  // the document: every later click reported the pending request, the reload nobody thinks
+  // to try was the only way out, and the button looked broken because for that reader it
+  // was. Aborting the outstanding request is what the signal is for, so clicking again
+  // means "try that again" — which is what the reader meant by it.
+  var ceremony = null;
+
+  // How long a ceremony nobody answers may run before it is ended and said so, rather than
+  // leaving `waiting for your passkey…` on screen forever. Generous, because the hybrid flow
+  // legitimately takes a while — scan a QR code, unlock a phone, approve there.
+  //
+  // Asked of the browser as `publicKey.timeout`, which is a *hint*: the spec lets a user
+  // agent clamp or ignore it, so it can request this bound and cannot be it. On an engine
+  // that ignores it the request stays pending for the life of the document, and with it the
+  // open-ended hold this ceremony takes on the badge — leaving "waiting for your passkey…"
+  // up for something that is never coming back, which is this page's original bug wearing
+  // the fix's own clothes. So the guarantee is the page's own deadline in usePasskey, and
+  // the grace below is how far behind the hint it sits: late enough that a browser honouring
+  // the hint gets to refuse in its own better words first (#747 review).
+  var CEREMONY_MS = 120000;
+  var CEREMONY_GRACE_MS = 5000;
+
   // The PRF output is read from a get(), never from the create(). Returning it at creation
   // time is optional in the spec and absent in several shipping browsers, so asking for it
   // there and trusting the answer is how this works on one engine and silently fails on the
   // next. One extra prompt on first setup, none afterwards.
-  function passkeyEnroll() {
+  function passkeyEnroll(signal) {
     return navigator.credentials.create({
+      signal: signal,
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
+        timeout: CEREMONY_MS,
         rp: { name: 'technocore.chat' },   // no id: it defaults to this origin, which is right
         user: {
           // Random, not derived from anything: an authenticator overwrites a credential that
@@ -1378,7 +1435,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // Unconstrained here, a reader who already has a passkey for this origin could press
       // "New passkey", get a credential created, and then be signed in as the older one —
       // a new key made and silently discarded, under a DID they did not just mint.
-      return passkeySeed([cred.rawId]);
+      return passkeySeed([cred.rawId], signal);
     });
   }
 
@@ -1386,10 +1443,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // allowCredentials is the same as none per spec, so the discovery path stays exactly what
   // it was: the authenticator offers what it holds for this origin, which is what lets a
   // browser with nothing in localStorage get the identity back.
-  function passkeySeed(allow) {
+  function passkeySeed(allow, signal) {
     return navigator.credentials.get({
+      signal: signal,
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
+        timeout: CEREMONY_MS,
         userVerification: 'required',
         allowCredentials: (allow || []).map(function (id) {
           return { type: 'public-key', id: id };
@@ -1418,7 +1477,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var keyHintEl = document.getElementById('keyhint');
   var asEl = document.getElementById('as');
 
+  var passkeyMoreEl = document.getElementById('passkeymore');
   var SIGNED_OUT_HINT = keyHintEl.textContent;   // authored in the markup; kept verbatim
+
+  // The same paragraph with its passkey sentences taken out, for a browser that has no
+  // WebAuthn at all. There, promising an identity that comes back on your other devices and
+  // pointing at a button this page has just hidden is the page describing something it
+  // cannot do. Subtracted from the markup rather than authored a second time, so the two
+  // cannot drift, and taken now: renderIdentity writes this paragraph with textContent, so
+  // the span is gone after the first render.
+  var NO_PASSKEY_HINT = SIGNED_OUT_HINT
+    .replace(document.getElementById('passkeynote').textContent, '')
+    .replace(/\s+/g, ' ').trim();
 
   function renderIdentity() {
     var on = !!me;
@@ -1426,9 +1496,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     meEl.className = on ? 'badge key' : 'badge';
     meEl.title = on ? me.did : '';
     keyCopyEl.hidden = !on; keyOutEl.hidden = !on;
-    keyPassEl.hidden = on || !passkeyAvailable();
+    var canPasskey = passkeyAvailable();
+    keyPassEl.hidden = on || !canPasskey;
+    // Both passkey controls, not just the primary one. Hiding the way *in* while still
+    // offering the way to *enrol* leaves a browser with no WebAuthn a button that cannot do
+    // anything but throw, and what it throws is a raw engine string — this page telling a
+    // reader about its own internals because it forgot to check. The prose naming that
+    // button goes with it: an instruction pointing at nothing is worse than no instruction.
+    keyPassNewEl.hidden = on || !canPasskey;
+    passkeyMoreEl.hidden = !canPasskey;
     // The whole disclosure, not its buttons one at a time: signed in there is nothing behind
-    // it to want, and an empty "Other ways in" is a door onto a wall.
+    // it to want, and an empty "Other ways in" is a door onto a wall. Signed out it always
+    // holds something — a key and a seed work with no WebAuthn anywhere in the browser.
     keyMoreEl.hidden = on;
     if (on) keyMoreEl.open = false;
 
@@ -1447,7 +1526,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             + 'tied to this domain. Copy the seed if you want one that outlives the domain.'
           : 'Signed in. Messages carry this did:key and the server verifies each one. Copy '
             + 'the seed to keep this identity — clearing site data loses it otherwise.')
-      : SIGNED_OUT_HINT;
+      : (canPasskey ? SIGNED_OUT_HINT : NO_PASSKEY_HINT);
     agentsEl.hidden = !on;
     if (on) loadDelegations();
   }
@@ -1476,24 +1555,85 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // identity they came back for still sitting in the authenticator. So discovery is a thing
   // they ask for, and enrolment is a thing they ask for, and neither happens by inference.
   function usePasskey(derive, working) {
+    // Replace whatever is outstanding before asking for anything new. Abort first and in
+    // its own statement: the browser refuses the second request while the first is still
+    // registered, so the order here is the whole point of it.
+    if (ceremony) { try { ceremony.abort(); } catch (e) { /* already settled */ } }
+    var ctl = new AbortController();
+    ceremony = ctl;
     say(working);
-    derive()
+    // Held for as long as this takes, not for a count of seconds. CEREMONY_MS allows two
+    // minutes because the cross-device flow legitimately runs that long — scan the code,
+    // walk to the phone, approve there — and a fixed window expiring mid-ceremony puts
+    // `seq N` back over the one line explaining the wait. That is the bug this whole change
+    // is about, with a delay in front of it. The settle below hands the badge back.
+    hold(Infinity);
+    // What makes that hold safe to leave open: the deadline above, enforced here rather than
+    // asked of the browser, so something ends this ceremony even when nothing else does.
+    // `timedOut` is a local the closure owns rather than a property on the controller — the
+    // two aborts below have to stay told apart, and not by writing to a platform object.
+    var timedOut = false;
+    var deadline = setTimeout(function () {
+      timedOut = true;
+      try { ctl.abort(); } catch (e) { /* already settled */ }
+    }, CEREMONY_MS + CEREMONY_GRACE_MS);
+    derive(ctl.signal)
       .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
       .catch(function (e) {
-        // NotAllowedError covers both a cancelled prompt and "this authenticator has nothing
-        // for this site", which WebAuthn deliberately does not distinguish — so the message
-        // has to name both and point at the other button.
+        // Two aborts arrive here and they are not the same event. The reader clicking again
+        // is a ceremony replaced: its successor is already on screen saying what it is
+        // waiting for, and reporting this one would talk over it. The deadline expiring is
+        // an outcome, and the one nobody else is left to report — returning silently there
+        // would hand the badge back to the heartbeat and call that an answer.
+        if (e && e.name === 'AbortError') {
+          if (timedOut) {
+            keyMoreEl.open = true;
+            return fail('the passkey prompt timed out with no answer — try again, or use '
+                        + 'Create a passkey, a key, or a seed');
+          }
+          return;
+        }
+        // NotAllowedError covers a cancelled prompt, a ceremony that ran out its timeout,
+        // and "this authenticator has nothing for this site" — which WebAuthn deliberately
+        // does not distinguish — so the message has to name them and point at the other
+        // button.
         if (e && e.name === 'NotAllowedError') {
-          return fail('no passkey used — cancelled, or none saved for this site yet '
-                      + '(then: New passkey)');
+          // The message names a button, and until this line that button was inside a
+          // disclosure the reader had never opened — a dead end dressed as a next step. A
+          // first-timer clicks the one primary control, is told nothing is saved for this
+          // site, and is pointed at something not on screen. So open it: the way forward is
+          // the thing they were just told to press.
+          //
+          // On this branch and not by inference from stored state — the distinction §5.6
+          // turns on. Revealing enrolment is not performing it, and the reader still has to
+          // ask. It fires on a cancelled prompt too, which WebAuthn does not let anyone tell
+          // apart from an empty authenticator; opening a disclosure at someone who changed
+          // their mind is the cheaper of the two mistakes.
+          keyMoreEl.open = true;
+          return fail('no passkey used — cancelled, timed out, or none saved for this site '
+                      + 'yet (then: Create a passkey)');
         }
         fail(String(e.message || e));
+      })
+      // Settled either way: stop holding a controller whose request is over, so the next
+      // click starts clean instead of aborting a ghost, and let the badge go back to the
+      // heartbeat. Skipped when this ceremony was replaced rather than finished — the
+      // successor owns both, and its own hold is the one that should stand.
+      .then(function () {
+        // Unconditionally, and before the early return: a deadline left armed on a ceremony
+        // that is over fires into nothing at best, and the point of it is that it is the one
+        // thing here not depending on the request settling.
+        clearTimeout(deadline);
+        if (ceremony !== ctl) return;
+        ceremony = null;
+        hold(HOLD_MS);
       });
   }
 
   keyPassEl.addEventListener('click', function () {
-    // No argument: discovery, across every passkey this origin holds.
-    usePasskey(function () { return passkeySeed(); }, 'waiting for your passkey…');
+    // No credential argument: discovery, across every passkey this origin holds.
+    usePasskey(function (signal) { return passkeySeed(null, signal); },
+               'waiting for your passkey…');
   });
 
   keyPassNewEl.addEventListener('click', function () {
