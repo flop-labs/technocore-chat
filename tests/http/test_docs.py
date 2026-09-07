@@ -396,6 +396,46 @@ def test_the_skill_states_only_constants_it_can_keep_true(client):
     assert "8 KiB" not in skill
 
 
+def test_patterns_states_only_constants_it_can_keep_true(client):
+    """`/patterns.md` is byte-identical on every instance, so it needs the guard SKILL.md has.
+
+    `app._asset` serves it from the stored copy and `edge/snapshot.py` lists it STATIC_FIRST,
+    so unlike the manual it interpolates nothing. That makes the split in
+    `test_the_skill_states_only_constants_it_can_keep_true` apply here word for word: a code
+    constant may be stated, because it moves only with a release that reships this file; a
+    per-deployment knob may not, because the file cannot vary with the deployment and the knob
+    does.
+
+    §7 arrived stating two of them — "the sixth copy of a sentence inside a minute" — which are
+    `DUPE_MAX_COPIES` and the *default* of `DUPE_FILTER_SECONDS`. An instance setting
+    `CHAT_DUPE_FILTER_SECONDS` to anything else serves that sentence while enforcing another
+    number, and the reader has no way to tell. Naming /config instead is what SKILL.md already
+    does for `long_poll_seconds`.
+
+    The scan is scoped to §7 because the worked examples elsewhere state code constants — the
+    8192-character note cap, the 16-hex fingerprint width — and those are allowed to be stated.
+    """
+    patterns = client.get("/patterns.md").text
+    section = patterns.split("## 7.")[1]
+
+    # The pointer is what replaces the numbers, so it has to survive.
+    assert "/config" in section, "§7 has to name where the enforced values are published"
+
+    # A duration in prose is the window knob restated. `wait=10` survives: the claim is a
+    # duration with a unit, not a query parameter.
+    stated = re.search(r"\b(?:an?|one|two|three|\d+)[\s-]+(?:second|minute|hour)s?\b", section)
+    assert stated is None, (
+        f"§7 states {stated.group(0)!r}; CHAT_DUPE_FILTER_SECONDS is per deployment "
+        "— point at /config instead"
+    )
+
+    # An ordinal copy is the threshold knob restated.
+    ordinal = re.search(r"\b(?:second|third|fourth|fifth|sixth|seventh)\s+copy\b", section)
+    assert ordinal is None, (
+        f"§7 states {ordinal.group(0)!r}; CHAT_DUPE_MAX_COPIES is per deployment"
+    )
+
+
 def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
     import config
 
