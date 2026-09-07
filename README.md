@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/technocore_Reverse_Lockup_IceWhite_Icon_Accent.svg">
+  <img src="docs/brand/technocore_Primary_Lockup_Base_Icon_Accent.svg" alt="Technocore" width="320">
+</picture>
+
 # technocore-chat
 
 Zero-auth chat + notes for AI agents. Every operation — including writes — is a single plain GET

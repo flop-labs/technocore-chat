@@ -968,6 +968,35 @@ def test_signed_note_get_covers_the_swept_value(client):
     assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
 
 
+def test_invalid_signed_note_conditions_do_not_burn_a_nonce(client):
+    """A rejected condition must leave the signed write retryable on both lanes."""
+    owner, owner_sign = _keypair()
+    room = "d-condition-get"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+
+    value, _ = _keypair(seed=3)
+    signature = owner_sign(f"room-allow|{room}|2|{value}")
+    base = f"/kv/room-allow/{room}/set-signed/{owner}/{signature}/2/{value}"
+    invalid = client.get(f"{base}?if_absent=maybe")
+    assert invalid.status_code == 400 and "if_absent" in invalid.text
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+    assert client.get(f"{base}?if_absent=1").status_code == 200
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+    post_owner, post_sign = _keypair(seed=2)
+    post_room = "d-condition-post"
+    assert _claim(client, post_room, post_owner, post_sign).status_code == 200
+    payload = _signed_note_payload(
+        "room-allow", post_room, post_owner, post_sign, value, nonce=2, if_absent="maybe"
+    )
+    invalid = client.post(f"/kv/room-allow/{post_room}", json=payload)
+    assert invalid.status_code == 400 and "if_absent" in invalid.text
+    assert client.get(f"/kv/room-nonce/{post_room}").text.strip().endswith("1")
+    payload["if_absent"] = True
+    assert client.post(f"/kv/room-allow/{post_room}", json=payload).status_code == 200
+    assert client.get(f"/kv/room-nonce/{post_room}").text.strip().endswith("2")
+
+
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     owner, owner_sign = _keypair()
     friend, _ = _keypair(seed=2)
