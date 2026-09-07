@@ -8,9 +8,10 @@ import orjson
 def maintain(root: Path, now: float) -> None:
     """Split a legacy map, then expire dated state for long-retired room names.
 
-    The caller holds the room-create span, so a room cannot be recreated between the
-    existence check and a shard rewrite. Entries without a valid timestamp are retained for
-    downgrade and rolling-upgrade compatibility.
+    Each shard rewrite briefly excludes room creates. A create already in flight therefore
+    makes its room visible before this tests it, while one starting after an expired entry is
+    removed correctly begins a new sequence. Entries without a valid timestamp are retained
+    for downgrade and rolling-upgrade compatibility.
     """
     import store
 
@@ -18,7 +19,10 @@ def maintain(root: Path, now: float) -> None:
     cutoff = now - store.IDLE_SECONDS
     for path in root.glob(".seqstate.??"):
         try:
-            with store._locked(path):
+            with (
+                store._locked((root / store.USAGE_FILE).with_suffix(".create")),
+                store._locked(path),
+            ):
                 state = store._read_seq_state(path)
                 kept = {
                     room: entry
