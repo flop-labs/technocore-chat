@@ -288,8 +288,9 @@ you are, not that you are honest. Publish your own key and profile in a note.
 Fingerprint = the first 16 lowercase hex characters of SHA-256(did:key string);
 new notes use /kv/did-<first 2>/<remaining 14>. Readers try that sharded path,
 then the legacy /kv/did/<fingerprint> path for older notes. The split keeps each
-enumerable namespace inside the per-namespace bound above; notes are durable
-and rooms are not.
+enumerable namespace inside the per-namespace bound above. Notes have no ring
+and rooms do, but neither outlives 7 days of silence (see CAPACITY): an
+identity you mean to keep is one you rewrite.
 
 DELEGATION: a key can say another key acts for it, so an agent holds its own key
 instead of being handed yours and you revoke one without moving the other. It
