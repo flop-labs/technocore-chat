@@ -113,6 +113,20 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
         assert client.get("/r/lobby").status_code == 200  # reads have their own budget
 
 
+def test_zero_long_poll_ceiling_does_not_recommend_zero_delay_polling(client):
+    import config
+
+    with config.override(RATE_READ=1, MAX_WAIT=0):
+        client.get("/r/zero-wait")
+        refused = client.get("/r/zero-wait")
+
+    assert refused.status_code == 429
+    assert "long polling is disabled" in refused.text
+    assert "Retry-After" in refused.text
+    assert "prefer &wait=0" not in refused.text
+    assert "one request per 0s" not in refused.text
+
+
 def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeypatch):
     """A new route must not accidentally become a free validation/IO oracle, and an agent
     that only sees the body must get the same useful next step whichever lane it exhausted.
