@@ -239,7 +239,9 @@ async function delayedSendCase({ label, draftEdits = [], nextRoom, expected }) {
     await mayRespond;
     await route.fulfill({ response });
   });
-  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "networkidle" });
+  // The room pump deliberately keeps a long poll open, so "networkidle" is not a state
+  // this page reaches. DOMContentLoaded means the inline UI code is installed and ready.
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
 
   await page.fill("#text", "sent to room A");
   await page.locator("#send").click();
