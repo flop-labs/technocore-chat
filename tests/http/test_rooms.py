@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 import _client
 from _client import (
     _age,
@@ -954,22 +955,35 @@ def test_previous_owner_cannot_commit_an_allow_list_after_handoff(client, tmp_pa
 
 
 def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path, monkeypatch):
-    """The transaction gate sidecar lives under notes/ and is swept with orphan locks."""
+    """The transaction gate lock is tied to room_path, and stays held across orphan sweeps while live."""
     import store
 
     owner, owner_sign = _keypair()
     room = "d-reaped"
     assert _claim(client, room, owner, owner_sign).status_code == 200
 
-    gate_note = store.note_path(tmp_path, "room-gate", room)
-    gate_lock = gate_note.with_suffix(gate_note.suffix + ".lock")
-    assert gate_lock.exists()
+    r_path = store.room_path(tmp_path, room)
+    r_lock = r_path.with_suffix(r_path.suffix + ".lock")
+    assert r_lock.exists()
 
-    # Age past IDLE_SECONDS and run orphan lock sweep
-    now = time.time() + store.IDLE_SECONDS + 1
+    # While live (room guard notes exist), a lock sweep does not unlink the active transaction domain lock
+    now = time.time()
     touched = {"rooms": set(), "notes": set()}
-    store._sweep_orphan_locks(tmp_path, now, touched)
-    assert not gate_lock.exists()
+    with store._locked(r_path):
+        store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+        # The room guards exist so lock is preserved
+        assert r_lock.exists()
+        # Verify a second locked attempt is blocked (single transaction domain)
+        with pytest.raises(BlockingIOError):
+            with store._locked(r_path, nb=True):
+                pass
+
+    # Once reaped (all guard notes unlinked) and aged past IDLE_SECONDS, the sidecar is cleanly swept
+    for ns in store.ROOM_GUARD_NS:
+        store.note_path(tmp_path, ns, room).unlink(missing_ok=True)
+    r_path.unlink(missing_ok=True)
+    store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+    assert not r_lock.exists()
 
 
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
