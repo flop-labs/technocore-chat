@@ -73,10 +73,12 @@ def test_a_new_note_reads_the_same_number_of_directories_at_any_store_size(
 
 
 def test_the_per_namespace_count_is_rebuilt_once_and_then_stays_free(tmp_path, monkeypatch):
-    """The count file is not durable state: `_reap` drops every one of them, because a
-    deletion pass is the only thing that can make one wrong. So the shape a flood actually
-    sees is one rebuild scan per namespace per reap interval, then nothing — not one scan
-    per create, and never a count that outlived the notes it counted.
+    """The count file is not durable state: `_reap` drops every one of them, because more
+    than one thing can leave one wrong and none of them announces itself — a reap deleting
+    the notes it counted, a create that crashed between its reservation and its write, an
+    increment lost to an unclean shutdown. So the shape a flood actually sees is one rebuild
+    scan per namespace per reap interval, then nothing — not one scan per create, and never a
+    count that outlived the notes it counted.
     """
     import store
 
@@ -725,3 +727,429 @@ def test_the_byte_gauge_tracks_creates_and_a_reap_settles_overwrites(tmp_path, m
     monkeypatch.setattr(store, "REAP_EVERY", 0)
     store._reap(tmp_path)
     assert store.note_stats(tmp_path)["bytes"] == 17, "and a reap settles it"
+
+
+# ------------------------------------------------------------------ the reaper's lock spans
+
+
+def _due(root: Path) -> None:
+    """Make the next pass due without setting REAP_EVERY to 0. The distinction matters here:
+    these tests drive writes from inside a pass, and with the interval at 0 every one of those
+    writes would start a nested pass of its own and the thing being measured would be two."""
+    (root / ".reaped").unlink(missing_ok=True)
+
+
+def _span(root: Path, name: str):
+    return (root / name).with_suffix(".create")
+
+
+def test_a_reap_never_holds_a_create_span_across_its_walk(tmp_path, monkeypatch) -> None:
+    """The contention this pass was profiled for. `_reconcile_note_count` held
+    `.notes-count.create` exclusively around a walk of every note — 29 s at production size —
+    and the tail block held `.usage.create` around a sized scan of every room. Every create in
+    the service takes those spans shared, so once per REAP_EVERY every writer in the store
+    queued behind a walk of the whole store: 72.5% of all CPU samples were threads parked in
+    `fcntl.flock`.
+
+    Asked as a property rather than a timing. From inside the walk, try both spans shared and
+    non-blocking: a `BlockingIOError` means somebody holds one exclusively, and the only
+    candidate is the pass that is walking. A regression here does not fail a functional test —
+    it just makes the service slow at scale — which is why it is pinned.
+    """
+    import store
+
+    _seed(tmp_path, 4)
+    store.append(tmp_path, "room", "bot", "hi")
+    real_walk = store._walk
+    held = []
+
+    def walk_but_probe_both_spans_first(d, suffix):
+        for name in (store.NOTES_FILE, store.USAGE_FILE):
+            try:
+                with store._locked(_span(tmp_path, name), shared=True, nb=True):
+                    pass
+            except BlockingIOError:
+                held.append(f"{name} during {suffix}")
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_probe_both_spans_first)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert not held, f"the pass walked while holding a create span: {held}"
+
+
+def test_a_reap_counts_from_the_walk_it_already_makes(tmp_path, monkeypatch) -> None:
+    """The walk the reaper does to find idle files and the walk it did to count them were the
+    same walk, made twice — the second one under the span. It stats every entry either way, so
+    the count and the byte total are already in hand.
+
+    `_count_notes` and `_count_rooms` stay, because a counter file that cannot be parsed still
+    has to be rebuilt from somewhere; they are simply not on this path any more. Both halves
+    are asserted against the disk afterwards, so "cheaper" cannot mean "wrong".
+    """
+    import store
+
+    _seed(tmp_path, 3)
+    store.append(tmp_path, "room", "bot", "hi")
+    store.note_set(tmp_path, "ns0", "second", "value")
+    walked = []
+    monkeypatch.setattr(store, "_count_notes", lambda root: walked.append("notes") or (0, 0))
+    monkeypatch.setattr(store, "_count_rooms", lambda root: walked.append("rooms") or (0, 0))
+    _due(tmp_path)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    assert walked == [], f"the pass walked the store a second time for {walked}"
+    assert store._read_counts(tmp_path, store.NOTES_FILE) == store._count_notes(tmp_path)
+    assert store._read_counts(tmp_path, store.USAGE_FILE) == store._count_rooms(tmp_path)
+
+
+def test_a_create_the_walk_could_not_see_leaves_the_count_at_or_above_the_disk(
+    tmp_path, monkeypatch
+) -> None:
+    """The bound that replaces exactness, held to in the direction that matters.
+
+    Counting from an unlocked walk means a create can land after the walk has passed the
+    place it would have appeared. Writing what the walk saw would then put the count *below*
+    the disk, and a low count admits a note the cap should refuse — the same breach the old
+    exclusive hold existed to prevent. So the pass reads the counter with the creates waited
+    out at both ends and adds back what it grew by in between.
+
+    Driven from the orphan-lock sweep, which runs after both walks and before either count is
+    installed, so the create really is invisible to the walk rather than timed to be.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "first", "v")
+    real_walk = store._walk
+    creator = []
+
+    def walk_but_let_a_create_land_after_the_walks(d, suffix):
+        if suffix == ".txt.lock" and not creator:
+            creator.append(
+                threading.Thread(target=store.note_set, args=(tmp_path, "ns", "unseen", "v"))
+            )
+            creator[0].start()
+            creator[0].join(10)  # the pass holds no span here, so this cannot deadlock
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_let_a_create_land_after_the_walks)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert creator and not creator[0].is_alive(), "premise: the create finished inside the pass"
+    on_disk = store._count_notes(tmp_path)
+    assert on_disk[0] == 2, "premise: the walk had already passed the namespace"
+    assert store._note_count(tmp_path) >= on_disk[0], "a count below the disk breaches the cap"
+    assert store._note_totals(tmp_path) == on_disk, "and the create is counted exactly once"
+
+
+def _exclusive_takes(monkeypatch, name: str, work) -> int:
+    """How many times `work` takes `<name>.create` exclusively. The unit that matters for this
+    lock: shared holders coexist, so it is the exclusive acquisitions that every create in the
+    store queues behind, and the old shape took one per namespace on every pass."""
+    import store
+
+    taken = 0
+    real = store._locked
+
+    def counting(target, shared=False, nb=False):
+        nonlocal taken
+        if not shared and target.name == f"{name}.create":
+            taken += 1
+        return real(target, shared, nb)
+
+    monkeypatch.setattr(store, "_locked", counting)
+    work()
+    monkeypatch.setattr(store, "_locked", real)
+    return taken
+
+
+@pytest.mark.parametrize("namespaces", [4, 30])
+def test_a_pass_takes_the_note_span_a_constant_number_of_times(tmp_path, monkeypatch, namespaces):
+    """`_drop_emptied_namespaces` took `.notes-count.create` exclusively once per namespace,
+    every pass, and dropped a count file that nothing had deleted from. At 10,114 namespaces
+    that is 10,114 exclusive acquisitions of the one lock every note create holds shared —
+    the single largest holder of blocked time in the production profile.
+
+    Two per pass now, whatever the store holds: one to read the counter with the creates
+    waited out, one to install what the walk measured. Every namespace here holds exactly the
+    note its own count file claims, and a file that agrees with the walk is carrying no drift,
+    so the drop visits none of them. That predicate is what keeps this number constant; the
+    test below spends the one acquisition it does allow. Parametrised rather than looped so a
+    failure names the size it failed at; both sizes must give the same number, the whole claim.
+    """
+    import store
+
+    root = tmp_path / f"store{namespaces}"
+    _seed(root, namespaces)
+    _due(root)
+    taken = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(root))
+
+    assert taken == 2, f"{namespaces} namespaces cost {taken} exclusive acquisitions, not 2"
+
+
+def test_only_a_namespace_the_pass_emptied_costs_an_acquisition(tmp_path, monkeypatch) -> None:
+    """The other half: cheap must not mean nothing gets cleaned up. A namespace this pass
+    deleted in holds a count file the walk disagrees with and a directory that may now be
+    empty, so it costs the one acquisition that drops both — and the rest of the store, whose
+    files match what was walked, costs nothing. A pass with nothing to heal is back to the two
+    the counters take.
+    """
+    import store
+
+    _seed(tmp_path, 8)
+    drained = tmp_path / "notes" / "ns3"
+    aged = time.time() - store.IDLE_SECONDS - 60
+    for path in drained.rglob("*"):  # its note and the sidecar lock the sweep then reclaims
+        os.utime(path, (aged, aged))
+
+    _due(tmp_path)
+    emptying = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(tmp_path))
+    assert emptying == 3, "the two counter acquisitions, plus the one namespace it emptied"
+    assert not drained.exists(), "…and the emptied namespace really was dropped"
+    assert store.note_get(tmp_path, "ns4", "seed") == "v", "while the rest is untouched"
+
+    _due(tmp_path)
+    settled = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(tmp_path))
+    assert settled == 2, "and a pass with nothing to drop is back to the constant"
+
+
+def test_a_pass_cannot_drop_a_count_a_create_has_reserved_against(tmp_path, monkeypatch) -> None:
+    """Unlinking a per-namespace count outside the span puts that count *below* its notes.
+
+    Two creates and one pass, in the order that breaks it. Create 1 has reserved — the
+    namespace file says K+1 — and is still writing its note when the pass unlinks that file.
+    Create 2 then finds nothing to read, rebuilds by walking a namespace whose K+1'th note is
+    not on disk yet, persists K and reserves K+1 against it. Two notes were made, the file
+    moved by one, and the namespace over-admits against MAX_NOTES_PER_NS until something
+    rewrites the figure. Both creates hold the span shared, so only an exclusive holder is
+    waited out for: the unlink has to take it, exactly as the rmdir beside it does.
+
+    Built rather than timed. The pass is parked where it has just given the span back —
+    `_settle_count` done, the drop next — create 1 is parked between its reservation and its
+    note write, and create 2 runs in that window. Bounded waits throughout: with the unlink
+    under the span the pass cannot finish until create 1 does, so an unconditional wait on it
+    would hang instead of failing.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "first", "v")  # what the pass's walk will see: one note
+    ns_dir = tmp_path / "notes" / "ns"
+    reserving = str(store.note_path(tmp_path, "ns", "second"))
+    at_the_drop, drop_on = threading.Event(), threading.Event()
+    reserved, create_done, pass_done = threading.Event(), threading.Event(), threading.Event()
+    real_settle, real_replace = store._settle_count, store._replace
+
+    def settle_then_park_where_the_span_is_free(root, name, before, kept):
+        real_settle(root, name, before, kept)
+        if name == store.NOTES_FILE:  # the count is installed and the span given back
+            at_the_drop.set()
+            drop_on.wait(5)
+
+    def replace_the_note_but_park_on_the_reservation(path, data, fsync=False):
+        if str(path) == reserving:  # create 1 only: every other write here passes through
+            reserved.set()
+            create_done.wait(5)
+        return real_replace(path, data, fsync)
+
+    def run_the_pass():
+        store._reap(tmp_path)
+        pass_done.set()
+
+    monkeypatch.setattr(store, "_settle_count", settle_then_park_where_the_span_is_free)
+    monkeypatch.setattr(store, "_replace", replace_the_note_but_park_on_the_reservation)
+    _due(tmp_path)
+    reaper = threading.Thread(target=run_the_pass)
+    reaper.start()
+    assert at_the_drop.wait(5), "premise: the pass reached the drop with no span held"
+    creator = threading.Thread(target=store.note_set, args=(tmp_path, "ns", "second", "v"))
+    creator.start()
+    assert reserved.wait(5), "premise: create 1 has counted and not yet written"
+
+    drop_on.set()
+    pass_done.wait(1.0)  # unfixed the unlink lands here; fixed the pass waits for the span
+    store.note_set(tmp_path, "ns", "third", "v")  # create 2, on whatever the file now says
+    create_done.set()
+    creator.join(10)
+    assert pass_done.wait(10), "the pass never completed"
+    monkeypatch.undo()
+
+    assert store._ns_totals(ns_dir)[0] == 3, "premise: three notes on disk"
+    assert store._note_totals(ns_dir, store._ns_totals)[0] == 3, (
+        "a namespace count below its notes over-admits against the per-namespace cap"
+    )
+    store.note_set(tmp_path, "ns", "fourth", "v")  # a dropped count is rebuilt by the next create
+    rebuilt = store._read_counts(ns_dir)
+    assert rebuilt and rebuilt[0] == store._ns_totals(ns_dir)[0] == 4, "and the file agrees"
+
+
+def test_a_drifted_namespace_count_is_healed_by_one_pass(tmp_path, monkeypatch) -> None:
+    """The other half of visiting only the namespaces a pass emptied: a count can be wrong
+    about something no deletion explains. A create reserves before it writes, so a crash in
+    between leaves the figure one high with no give-back coming, and under CHAT_FSYNC=0 an
+    unclean shutdown can lose an increment and leave it low. Neither is reachable from the
+    pass's deletions, and both are permanent against MAX_NOTES_PER_NS if nothing drops the
+    file — so the predicate is the walk, not the deletions: a file that disagrees with what
+    this pass walked is dropped, and its next reader rebuilds from the disk.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "a", "v")
+    store.note_set(tmp_path, "ns", "b", "v")
+    ns_dir = tmp_path / "notes" / "ns"
+    (ns_dir / store.NOTES_FILE).write_text("5 0")  # a reservation whose create never landed
+
+    _due(tmp_path)
+    taken = _exclusive_takes(monkeypatch, store.NOTES_FILE, lambda: store._reap(tmp_path))
+    assert taken == 3, "the two counter acquisitions, plus the one namespace that drifted"
+    assert store._read_counts(ns_dir) is None, "a drifted count is dropped, not rewritten"
+
+    store.note_set(tmp_path, "ns", "c", "v")  # which rebuilds the file it found missing
+    healed = store._read_counts(ns_dir)
+    assert healed and healed[0] == store._ns_totals(ns_dir)[0] == 3, "healed in one pass"
+
+
+def test_a_count_that_was_already_low_before_the_walk_is_dropped(tmp_path, monkeypatch) -> None:
+    """Comparing the file to the walk alone lets a single create cancel a drift.
+
+    A namespace one low — an increment lost to an unclean shutdown under CHAT_FSYNC=0 — and
+    exactly one create landing after the walk has passed it: the walk totals K, the create
+    moves the file from K-1 to K and the disk to K+1, and a file read only afterwards agrees
+    with the walk. The pass looks right, the namespace stays low, and nothing about the
+    coincidence stops it repeating on the next pass — which is the cap being breached by the
+    thing that was supposed to heal it.
+
+    So the file is read before the walk as well, and kept only if it held still at what the
+    walk saw. Here that reading is K-1 against a walk of K, which no create landing later can
+    talk out of. Driven from the orphan-lock sweep, which runs after both walks and holds no
+    span, so the create really is invisible to the walk rather than timed to be.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "a", "v")
+    store.note_set(tmp_path, "ns", "b", "v")
+    ns_dir = tmp_path / "notes" / "ns"
+    (ns_dir / store.NOTES_FILE).write_text("1 0")  # the increment that never reached the disk
+    real_walk = store._walk
+    landed = []
+
+    def walk_but_land_a_create_once_the_notes_are_walked(d, suffix):
+        if suffix == ".txt.lock" and not landed:
+            landed.append(suffix)
+            store.note_set(tmp_path, "ns", "c", "v")  # +1 to the file, +1 to the disk
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_land_a_create_once_the_notes_are_walked)
+    _due(tmp_path)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    assert landed, "premise: the create landed after the walk had passed the namespace"
+    assert store._ns_totals(ns_dir)[0] == 3, "premise: three notes on disk"
+    assert store._read_counts(ns_dir) is None, "a count that was low before the walk is dropped"
+    store.note_set(tmp_path, "ns", "d", "v")
+    healed = store._read_counts(ns_dir)
+    assert healed and healed[0] == store._ns_totals(ns_dir)[0] == 4, "and the next create heals it"
+
+
+def test_a_reap_dropping_a_namespace_still_waits_for_a_create_entering_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The mkdir-to-open race, moved to where the pass now goes. Visiting only the namespaces
+    it emptied does not make the rmdir safe: those are precisely the directories a create can
+    be halfway into, and `_locked` makes a namespace and its bucket one `mkdir` before the
+    `open` that creates the sidecar lock inside them. Removing them in that gap fails the
+    create outright — ENOENT, or EINVAL on APFS — on a path it had just made.
+
+    The window is built rather than waited for: the create is started where the pass is about
+    to take the span, and parked between the mkdir and the open until the pass is done. Unfixed
+    the rmdir sweeps the bucket the create just made and the create dies on the open; fixed the
+    pass blocks on the span the create holds shared, the park times out, and the create
+    completes. The bounded wait is what keeps that from being a deadlock.
+    """
+    import store
+
+    store.note_set(tmp_path, "doomed", "old", "v")
+    aged = time.time() - store.IDLE_SECONDS - 60
+    for path in (tmp_path / "notes" / "doomed").rglob("*"):
+        os.utime(path, (aged, aged))
+
+    at_the_window, reap_done = threading.Event(), threading.Event()
+    creator, died, visited = [], [], []
+    real_open, real_drop = open, store._drop_emptied_namespaces
+    sidecar = f"{store.note_path(tmp_path, 'doomed', 'fresh')}.lock"
+
+    def open_the_sidecar_lock_but_park_in_the_window(path, *a, **kw):
+        if str(path) == sidecar:
+            at_the_window.set()
+            reap_done.wait(1.0)  # unfixed the pass gets past here; fixed it is stuck on the span
+        return real_open(path, *a, **kw)
+
+    def create():
+        try:
+            store.note_set(tmp_path, "doomed", "fresh", "v")
+        except BaseException as exc:  # noqa: BLE001 — recorded for the assertion, not hidden
+            died.append(exc)
+
+    def drop_but_let_a_create_into_the_window_first(root, before_ns, per_ns, dirs):
+        visited.extend(dirs)
+        creator.append(threading.Thread(target=create))
+        creator[0].start()
+        at_the_window.wait(5)
+        return real_drop(root, before_ns, per_ns, dirs)
+
+    monkeypatch.setattr(store, "open", open_the_sidecar_lock_but_park_in_the_window, raising=False)
+    monkeypatch.setattr(
+        store, "_drop_emptied_namespaces", drop_but_let_a_create_into_the_window_first
+    )
+    _due(tmp_path)
+    store._reap(tmp_path)
+    reap_done.set()
+
+    assert visited == [str(tmp_path / "notes" / "doomed")], "premise: the pass visits it"
+    assert at_the_window.is_set(), "premise: the create reached the mkdir/open window"
+    creator[0].join(10)
+    assert not died, f"the reap killed a create it raced: {died!r}"
+    assert store.note_get(tmp_path, "doomed", "fresh") == "v", "the create it raced must survive"
+
+
+def test_a_second_reap_pass_gives_up_rather_than_overlapping_the_first(tmp_path, monkeypatch):
+    """Two passes running at once write a count *below* the disk, which is the one direction
+    that breaches a cap.
+
+    Reading the marker and touching it are two unserialised operations, and a pass can outlast
+    REAP_EVERY on its own, so at an interval boundary two of the ~230 workers really do both
+    start one. Interleaved, they lose creates: the first reads `before` as C, the second
+    deletes D notes and settles C-D, the first's walk then runs against the smaller store and
+    keeps C-D, N creates land past its cursor, and the first writes
+    (C-D) + max(0, (C-D+N) - C) = C-D against a disk holding C-D+N.
+
+    The marker carries a non-blocking lock around the whole pass, so the second caller returns
+    instead. Asserted on the walks themselves rather than on a timing, and joined with a bound
+    so a pass that queues for the lock fails here rather than hanging the suite.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns", "k", "v")
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # the throttle refuses nobody: only the lock can
+    real_walk = store._walk
+    walked, second = [], []
+
+    def walk_but_run_a_second_pass_from_inside_the_first(d, suffix):
+        walked.append(threading.current_thread().name)
+        if not second:
+            second.append(threading.Thread(target=store._reap, args=(tmp_path,), name="second"))
+            second[0].start()
+            second[0].join(10)  # it has to give up on its own: this thread holds the marker
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_run_a_second_pass_from_inside_the_first)
+    _due(tmp_path)
+    store._reap(tmp_path)
+
+    assert second and not second[0].is_alive(), "the second pass queued instead of giving up"
+    assert walked, "premise: the first pass walked"
+    assert "second" not in walked, f"two passes walked the store at once: {walked}"
+    assert store._note_totals(tmp_path) == store._count_notes(tmp_path), "and the count holds"
