@@ -952,6 +952,11 @@ def test_concurrent_writers_cannot_put_an_expired_record_after_a_fresh_one(tmp_p
     stamps = iter((stamp(expired), stamp(now)))
     monkeypatch.setattr(store, "_now", lambda: next(stamps))
     monkeypatch.setattr(store.time, "time", lambda: now)
+    # Match the reaper's filesystem clock to the frozen clock. Otherwise the nested
+    # append reaps while the outer create holds the shared create-span lock.
+    marker = tmp_path / ".reaped"
+    marker.touch()
+    os.utime(marker, (now, now))
     room = "e-p-order"
     path = store.room_path(tmp_path, room)
     fired = _race_before_lock(

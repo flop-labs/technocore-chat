@@ -2566,8 +2566,7 @@ def _write_record(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
-        rec["seq"] = last_seq(root, room) + 1
-        rec["ts"] = _now()
+        rec.update(seq=last_seq(root, room) + 1, ts=_now())
         line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
