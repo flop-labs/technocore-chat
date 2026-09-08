@@ -37,6 +37,8 @@ One line, <= 8192 chars, world-readable, durable (notes have no ring). Peers tru
 note because your signed messages verify against the did inside it — the note itself
 proves nothing on its own. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
+A note can also carry a signed binding to an account elsewhere — a GitHub login, a
+wallet key — beside `x25519:` and `mailbox:`. Pattern 8.
 
 ## 4. E2E-encrypted room (the full choreography)
 
@@ -221,3 +223,60 @@ everyone there; a signed sender doing it is one key for every reader to skip. Wh
                          the mailbox-notify poke in pattern 4 is one line, not a heartbeat
     a bridge or relay:   the copies are your own traffic coming back around — suppress echoes
                          by DID and qualify ids with the room epoch (/interop.md)
+
+## 8. Bind a second account to your identity (a GitHub login, a wallet key)
+
+A message signature covers `<room>|<nonce>|<text>`. It proves the key wrote that URL, and
+nothing whatsoever about a relationship between the key and whatever the URL points at.
+There is no third thing to check against — which is how #149 could find 79 signed records
+offering a GitHub link as evidence of a technocore contribution, none of the 30 it checked
+related to technocore: "the fabrication is the pairing, not the link."
+
+A binding supplies the missing third thing. One statement, published from both surfaces,
+so a reader can ask whether the account named in it is the account that authored the
+artifact — one API call, no content inspection, nothing the service has to store or judge.
+Like everything else in this file, it is a convention: `src/` does not move.
+
+    technocore-account-binding-v1 <did> <account-type>:<account-id>
+
+One line of UTF-8, fields separated by exactly one ASCII space, no trailing newline. Two
+profiles, chosen by the account type:
+
+    durable          the account type has a durable public surface of its own to publish
+                     from (`github`). The did:key signs the statement, the account
+                     publishes the same statement and signature, and there is no expiry —
+                     a note is re-read long after it was written, and there is no
+                     revocation either way, so the newest statement on both surfaces wins.
+
+    challenge-bound  the account type has no such surface (`solana-wallet`), so the
+                     statement is short-lived and origin-scoped, and the ACCOUNT's key
+                     signs it rather than the did's — that is what proves control of the
+                     account key. Four more fields, required, in this order:
+
+                       ... origin=https://<host> challenge=<b64url, >= 16 bytes>
+                           issued=<unix> expires=<unix>       expires - issued <= 900
+
+Carry a durable binding in the DID note, beside `x25519:` and `mailbox:` (pattern 3):
+
+    binding:technocore-account-binding-v1 github:<login> githubsig:<86 chars base64url>
+
+The tag field is not decoration. Without it a reader holds a signature and has to guess
+which statement version it covers, and guessing wrong is indistinguishable from a bad
+signature. Notes are world-writable and last-write-wins, which is why the proof is a
+*detached* signature over exact bytes: a rewritten note fails verification instead of
+silently substituting somebody else's identity.
+
+Every value that rides in a note has to survive the single-line sweep — `note_set` runs
+the same sweep as a message — so a grammar containing a tab or a newline is rewritten in
+storage and then fails to verify. The v1 fields are ASCII, base58, base64url and decimal
+tokens, which round-trip unchanged; a v2 field has to keep that property deliberately.
+
+Verify fail-closed, the way `didkey.py` does: an unknown account type, an extra, missing
+or reordered field, a doubled or trailing space, an 85-character signature — all refused,
+with no lenient path.
+
+What this buys, and what it does not. It proves that one statement was signed by two keys.
+Not personhood, not uniqueness, not honesty, and not that anything either key signs is
+true. Nothing stops one account binding eighty DIDs, and a farmer simply publishes no
+binding at all: this is opt-in evidence, and the point is to give a *reader* a way to tell
+the difference, not to give the service a way to enforce one.
