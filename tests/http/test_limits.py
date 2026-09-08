@@ -6,7 +6,11 @@ import time
 from pathlib import Path
 
 import _client
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from starlette.testclient import TestClient
+
+import limit
 
 client = _client.client  # the shared TestClient fixture
 
@@ -246,6 +250,77 @@ def test_budget_warning_appears_before_the_wall(client, monkeypatch):
         for _ in range(5):
             client.get("/r/lobby")
         assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
+
+
+def test_the_warning_thins_out_so_the_reply_stays_shareable(client):
+    """The footer makes a reply `no-store`, so emitting it on every reply switches the CDN
+    off for exactly the callers polling hardest — measured in production at 47.7% of room
+    reads `bypass` against a 7.2% hit rate. It now lands on a stride of the remaining budget.
+
+    Asserted at a production-sized budget, because the stride scales with it: below 24/min
+    it is 1 and every in-band reply still warns, which is what the test above depends on.
+    """
+    import limit
+
+    band = [n for n in range(601) if n * 4 <= 600]
+    warned = [n for n in band if limit.budget_note("read", n, 600)]
+    assert warned, "a caller in the warning band must still be told"
+    assert len(warned) < len(band) // 10, (
+        f"{len(warned)} of {len(band)} in-band replies warn — too many to be cacheable"
+    )
+    # Never at zero left: a caller pinned at its ceiling is granted a token the moment one
+    # refills, so warning there would warn on every one of its replies — the case this
+    # exists to remove.
+    assert not limit.budget_note("read", 0, 600)
+    # A stride cannot be stepped over: consecutive values cannot both skip it.
+    gaps = [b - a for a, b in zip(warned, warned[1:], strict=False)]
+    assert gaps and max(gaps) == min(gaps), f"uneven stride {gaps}"
+
+
+# Derandomized and deadline-free, matching tests/unit/test_parse_properties.py: a property
+# whose failures cannot be reproduced is worse than no property.
+_BUDGETS = settings(derandomize=True, deadline=None, max_examples=75)
+
+
+@given(per_min=st.integers(min_value=1, max_value=1200))
+@_BUDGETS
+def test_the_footer_contract_holds_at_every_budget(per_min):
+    """The footer's rules stated over the whole range of budgets, not the one the tests set.
+
+    This exists because of how the write regression got in. Every rate-knob test in this
+    suite picks a tiny budget so it can exhaust it in a few requests — RATE_READ=1, =8,
+    RATE_WRITE=2, =4, =8 — which is right for testing exhaustion and blind to anything that
+    scales with the budget. The read stride is `per_min // 24`, so at every budget any test
+    had ever used it was 1, the thinning never engaged, and applying it to writes as well
+    passed the whole suite. It showed up only at the production 300/min.
+
+    So the claims are asserted for all budgets rather than at a chosen one:
+
+      - a write footer is never thinned — its presence is exactly the threshold, whatever
+        the budget, because a write reply is `no-store` and has no sharing to buy;
+      - neither kind warns outside the threshold band;
+      - a read is never *silent* through the whole band, however the stride divides it.
+    """
+    band = [n for n in range(per_min + 1) if n * 4 <= per_min]
+    above = [n for n in range(per_min + 1) if n * 4 > per_min]
+
+    assert [n for n in band if limit.budget_note("write", n, per_min)] == band, (
+        f"write warnings thinned at {per_min}/min"
+    )
+    assert not any(limit.budget_note("write", n, per_min) for n in above)
+    assert not any(limit.budget_note("read", n, per_min) for n in above)
+    assert [n for n in band if limit.budget_note("read", n, per_min)], (
+        f"a read caller at {per_min}/min is never warned at all"
+    )
+
+
+def test_a_small_budget_still_warns_on_every_reply(client):
+    """The stride is `per_min // 24`, so a deployment with no requests to spare gets 1 —
+    the every-reply behaviour, because thinning a warning nobody has room to miss is worse
+    than the cacheability it would buy."""
+    import limit
+
+    assert all(limit.budget_note("read", n, 8) for n in range(3))
 
 
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
