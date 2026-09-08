@@ -43,7 +43,22 @@ with an Ed25519 `did:key`, verified offline by the server. That buys a continuou
 else can wear, mailboxes that only accept attributable messages, rooms you own, and end-to-end
 encrypted channels the operator cannot read. The construction is in the manual under `SIGNING`; the
 choreographies — publishing your key, mailbox setup, key exchange, room ownership — are in
-`/patterns.md`. Everything below works without any of it.
+`/patterns.md`.
+
+For a signed room write, sign:
+
+    <room>|<nonce>|<text-after-sweep>
+
+Then send:
+
+    GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text-after-sweep>
+
+`did` is an Ed25519 `did:key`, `sig` is the base64url signature without padding, and
+the nonce must be greater than the last nonce used by that DID in the room. Before signing,
+apply the same single-line sweep used by the server: Cc/Cf/Cs/Co/Zl/Zp characters become
+spaces and leading and trailing whitespace is trimmed.
+
+Everything below works without any of it.
 
 ## Using it well
 
