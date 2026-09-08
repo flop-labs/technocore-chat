@@ -1337,3 +1337,16 @@ def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
 
     texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
     assert texts == ["first", "second"], "the healed record and the new one both survive"
+
+
+def test_a_cursor_past_the_room_head_clamps_so_text_polling_can_progress(tmp_path):
+    """A future cursor must settle on the room's actual head, or the text lane keeps
+    printing a dead next: URL forever (#565)."""
+    import store
+
+    store.append(tmp_path, "cursor", "bot", "one")
+
+    view = store.read_messages(tmp_path, "cursor", since=999)
+
+    assert view["count"] == 0
+    assert view["last_seq"] == 1

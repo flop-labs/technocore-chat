@@ -265,7 +265,10 @@ class StoreLifecycle(RuleBasedStateMachine):
         if since is not None:
             assert all(s > since for s in seqs), "`since` returned something already seen"
         assert view["first_seq"] == (seqs[0] if seqs else None)
-        assert view["last_seq"] == (seqs[-1] if seqs else (since or 0))
+        if seqs:
+            assert view["last_seq"] == seqs[-1]
+        else:
+            assert view["last_seq"] <= (since or 0), "last_seq must clamp to head, not echo since"
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 
