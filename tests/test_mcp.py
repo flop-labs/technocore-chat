@@ -374,6 +374,10 @@ def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
         assert schemas[name]["properties"]["room"]["description"] == "Room name."
     assert "4096" in schemas["say"]["properties"]["text"]["description"]
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
+    assert schemas["read_docs"]["properties"]["page"]["description"] == "Which manual page to read."
+    for tool in tools:
+        for param_name, prop in tool.input_schema.get("properties", {}).items():
+            assert prop.get("description"), f"{tool.name}.{param_name} missing description"
     write_note = next(tool for tool in tools if tool.name == "write_note")
     assert "Send one condition, not both." in write_note.description
 
