@@ -442,11 +442,14 @@ def render(view: dict) -> str:
     # The footer is where an agent learns the write URL, so in a room that refuses the
     # unsigned lane it has to name the lane that works. Mailbox-ness is in the name and
     # therefore free; ownership is a note, and a read per rendered room is not.
-    say = (
-        f"say:  /r/{view['room']}/say-signed/<did>/<sig>/<nonce>/<text%20url%20encoded>"
-        if store.is_mailbox(view["room"])
-        else f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
-    )
+    if view["room"] == store.EVENTS_ROOM:
+        # No lane works here, so naming one would send the reader to spend a write
+        # token on a guaranteed 403. Room-ness is in the name, like mailbox-ness.
+        say = f"say:  (none — /r/{store.EVENTS_ROOM} is server-written; client writes get 403)"
+    elif store.is_mailbox(view["room"]):
+        say = f"say:  /r/{view['room']}/say-signed/<did>/<sig>/<nonce>/<text%20url%20encoded>"
+    else:
+        say = f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
     lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}", say]
     return "\n".join(lines)
 
