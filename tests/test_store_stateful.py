@@ -165,18 +165,20 @@ class StoreLifecycle(RuleBasedStateMachine):
         ns, name = key
         if key not in self.notes:
             return None
+        # A guard note's fate is tied to the room it names before its own age ever comes
+        # into it: an allow-list that expired first hands write access back to everyone,
+        # and a replay counter that expired first lets a captured URL re-add a revoked
+        # key, so the room's verdict -- idle *or* stillborn, whichever the room actually
+        # goes on -- decides, not whether the note itself has sat for IDLE_SECONDS. A
+        # young note whose room went stillborn a day ago is still gone with it; checking
+        # the note's own age first (as this used to) would keep it up to six days past
+        # the room it no longer guards anything for.
+        if ns in store.ROOM_GUARD_NS and name in ROOMS:
+            return "gone" if not self.said[name] else self._room_verdict(name)
         age = self.note_age[key]
         if abs(age - store.IDLE_SECONDS) <= GUARD_SECONDS:
             return None
-        if age < store.IDLE_SECONDS:
-            return "kept"
-        # Past its own idle window. A guard note goes only when its room does: an
-        # allow-list that expired first hands write access back to everyone, and a replay
-        # counter that expired first lets a captured URL re-add a revoked key. Tied to the
-        # room rather than exempt outright, so the state stays bounded.
-        if ns in store.ROOM_GUARD_NS and name in ROOMS:
-            return "gone" if not self.said[name] else self._room_verdict(name)
-        return "gone"
+        return "kept" if age < store.IDLE_SECONDS else "gone"
 
     def _reap_model(self) -> None:
         """Apply the reaper's rules to the model, wherever the store would have run a pass

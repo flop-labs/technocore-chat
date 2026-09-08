@@ -39,7 +39,8 @@ SCOPE: dict[str, tuple[str, ...]] = {
         "store.x__expired__*",  # …and the per-record comparison behind it
         "store.x__reapable__*",  # the idle and stillborn thresholds
         "store.x__stillborn__*",  # "one message and nobody answered"
-        "store.x__guards_a_live_room__*",  # a guard note outlives the idle rule
+        "store.x__guard_note_room__*",  # which notes gate a room rather than carry content
+        "store.x__guard_orphaned__*",  # a guard note outlives the room it guards
         "store.x__reap__*",  # the pass itself, including the recheck under the lock
         "store.x__compact__*",  # the ring, and the expiry that rides it
     ),
