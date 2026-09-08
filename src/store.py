@@ -1667,10 +1667,7 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                     # As long as any guard note (owners/allow/nonce) exists for this room,
                     # the room's lock domain must never be swept.
                     r_name = entry.name[: -len(suffix)]
-                    if any(
-                        os.access(note_path(root, ns, r_name), os.F_OK)
-                        for ns in ROOM_GUARD_NS
-                    ):
+                    if any(os.access(note_path(root, ns, r_name), os.F_OK) for ns in ROOM_GUARD_NS):
                         continue
                 os.unlink(entry.path)
                 touched[sub].add(_emptied(base, entry.path, sub == "notes"))
