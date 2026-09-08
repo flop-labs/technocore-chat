@@ -41,6 +41,12 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # What the service's clean_text removes. Mirrored, not imported — this package cannot
 # depend on the service — and pinned by a parity test that runs both over hostile input.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The two joiners the service holds out of the sweep (store.py SWEEP_EXEMPT): ZWNJ and ZWJ,
+# orthographic in Brahmic scripts and in ZWJ emoji sequences, and carrying at most 1 bit. They
+# must be exempt here too: this module signs the swept text, so a copy that still replaces
+# them signs a respelling the service never stores, and the write is refused — or worse, is
+# accepted having silently respelled the caller's word.
+SWEEP_EXEMPT = frozenset("\u200c\u200d")  # U+200C ZWNJ, U+200D ZWJ
 
 _last_nonce = 0
 
@@ -53,7 +59,8 @@ def sweep(text: str) -> str:
     instead of a local paraphrase.
     """
     return "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT else c
+        for c in text
     ).strip()
 
 

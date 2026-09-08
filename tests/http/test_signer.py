@@ -109,3 +109,31 @@ def test_both_signed_lanes_store_the_signature(client) -> None:
 
     rec = client.get("/r/sigroom2?format=json").json()["messages"][-1]
     didkey.verify(did, rec["sig"], f"sigroom2|{rec['nonce']}|{rec['text']}")
+
+
+def test_the_scripts_joiner_exemption_matches_the_server_end_to_end(client) -> None:
+    """The script keeps its own copy of SWEEP_EXEMPT, and a category-shaped parity check
+    cannot require a case for the two codepoints in it (issue #71's probe holds a Cf member
+    that is not a joiner). So gate the copy end to end instead.
+
+    The script signs the swept form. With the joiners held out, the swept form of a word whose
+    only invisible is an exempt joiner is the word itself, so a signature over what the caller
+    typed must verify and the word must store byte-identical. Drop either codepoint from the
+    script's set and it signs the respelled word while the server stores the word as sent, so
+    this 403s, while every ASCII signer test above stays green because ASCII sweeps to itself.
+    """
+    import urllib.parse
+
+    conjunct = "क्‍ष"  # ka + virama + U+200D ZWJ + ssa; its only invisible is an exempt joiner
+    out = run("say", "--seed", SEED, "joinerroom", "5", conjunct)
+    assert out.returncode == 0, out.stderr
+    did, sig = out.stdout.splitlines()
+
+    r = client.get(
+        f"/r/joinerroom/say-signed/{did}/{sig}/5/{urllib.parse.quote(conjunct, safe='')}"
+    )
+    assert r.status_code == 200, (
+        r.text
+    )  # signature verifies over the word as sent, not a respelling
+    stored = client.get("/r/joinerroom?format=json").json()["messages"][-1]["text"]
+    assert stored == conjunct and "‍" in stored  # byte-identical, the joiner survives

@@ -30,9 +30,11 @@ above, and a signature over one is never a valid signature over the other.
 
 "after-sweep" is the single-line sweep every write passes through before
 storage (src/store.py clean_text): each character whose Unicode category is
-Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. Sign the
-raw text and the server answers 403 — by design, so that a stored record can
-be re-verified later against the bytes on disk.
+Cc, Cf, Cs, Co, Zl or Zp becomes a space, then the ends are trimmed. The two
+joiners U+200C and U+200D are the exception the server holds out (they spell
+Brahmic conjuncts and carry a far weaker channel), so they survive here too. Sign the raw
+text and the server answers 403 — by design, so that a stored record can be
+re-verified later against the bytes on disk.
 
 Key material comes from --seed or $SIGN_SEED:
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
@@ -105,6 +107,10 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # replaces with a space. Kept in step with the server, not imported from it —
 # this script must run with only 'cryptography' beside it.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The two joiners the server holds out of the sweep (store.py SWEEP_EXEMPT): ZWNJ and
+# ZWJ, orthographic in Brahmic scripts and carrying at most 1 bit each. They must be exempt here
+# too or a signature over a word containing one covers text the server never stored.
+SWEEP_EXEMPT = frozenset("\u200c\u200d")  # U+200C ZWNJ, U+200D ZWJ
 
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
@@ -140,7 +146,8 @@ def swept(text: str, limit: int) -> str:
     over the cap), so a caller learns it here rather than from a 4xx.
     """
     cleaned = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT) else c
+        for c in text
     ).strip()
     if not cleaned:
         raise SystemExit(
