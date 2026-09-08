@@ -262,6 +262,31 @@ def test_a_capacity_refusal_says_the_listing_omits_what_the_cap_counts(tmp_path,
     assert "unlisted rooms count against this cap and are not listed" in str(room.value)
 
 
+def test_the_room_byte_budget_refusal_says_the_listing_omits_it_too(tmp_path, monkeypatch):
+    """The room byte-budget refusal is a separate literal from the count refusal above, and
+    `room_stats` under-reports `bytes` the same way it under-reports `total`: it sums the size
+    of the `_listable` rooms only, while the budget counts every `.jsonl`. So a byte-budget
+    caller sent to `/rooms` sees a byte figure smaller than the one that is full, for the same
+    reason and in the same direction. The finding, the `room_stats["bytes"]` half and the
+    production incident (#688) are @WIZARDspace's on #84.
+    """
+    import store
+
+    # One unlisted room, then a reap so the usage file carries its bytes: `append` tracks the
+    # room count synchronously but the byte total is reconciled by the reaper's walk, which is
+    # what `_check_room_capacity` reads.
+    store.append(tmp_path, "p-" + "c" * 30, "bot", "hi")
+    _reap_now(tmp_path)
+    assert store.room_stats(tmp_path)["bytes"] == 0  # counted against the budget, never summed
+
+    # Now the budget is full of a room the listing cannot show.
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 1)
+    with pytest.raises(store.StoreError) as full:
+        store.append(tmp_path, "second", "bot", "hi")
+    assert "room storage is full" in str(full.value)
+    assert "unlisted rooms count against this budget and are not listed" in str(full.value)
+
+
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
     """A write cut short leaves the file there and empty. Reading that as *some* pressure
     would throttle every room to its floor on the strength of a truncated write; the
@@ -680,6 +705,41 @@ def test_stillborn_room_survives_its_first_day(tmp_path):
     _age(store.room_path(tmp_path, "waiting"), 3600)
     _reap_now(tmp_path)
     assert store.room_path(tmp_path, "waiting").exists()
+
+
+def test_the_stillborn_window_is_a_knob_the_reaper_actually_reads(tmp_path):
+    """CHAT_STILLBORN_SECONDS moves the reaper, not just the published number.
+
+    Both rooms are 12 hours idle and on one message, which is inside the 24h default and
+    outside a shortened window — so the same room survives or goes on the knob alone. This
+    is the assertion the knob exists for: a deployment at its room cap shortens this to free
+    slots, and a setting that only changed what /config prints would be worse than none.
+    """
+    import config
+    import store
+
+    store.append(tmp_path, "monologue", "bot", "anyone here?")
+    _age(store.room_path(tmp_path, "monologue"), 12 * 3600 + 60)
+    _reap_now(tmp_path)
+    assert store.room_path(tmp_path, "monologue").exists()  # inside the 86400 default
+
+    with config.override(STILLBORN_SECONDS=12 * 3600):
+        _reap_now(tmp_path)
+        assert not store.room_path(tmp_path, "monologue").exists()
+
+
+def test_the_capacity_refusal_quotes_the_window_this_deployment_reaps_at(tmp_path):
+    """The refusal tells a blocked agent when a slot frees. It stated 24 hours as prose for
+    as long as that was the only value; now that an operator can move it, prose that cannot
+    move with it is a wrong answer to the one question the message exists to answer."""
+    import config
+    import store
+
+    with config.override(STILLBORN_SECONDS=12 * 3600, MAX_ROOMS=1):
+        store.append(tmp_path, "first", "bot", "hi")
+        with pytest.raises(store.StoreError) as refused:
+            store.append(tmp_path, "second", "bot", "hi")
+    assert "goes after 12 hours" in str(refused.value)
 
 
 def test_stillborn_rule_does_not_touch_notes(tmp_path):
