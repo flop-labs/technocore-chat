@@ -1061,7 +1061,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
             # the ceiling — 10**19 - 1 being the largest the published pattern allows, and
             # an int64 fits it.
             (
-                '{"pattern": "^[0-9]{1,19}$"}',
+                '{"pattern": "^(?:0|[1-9][0-9]{0,18})$"}',
                 lambda: _ok(
                     client, _say_signed(client, "big-nonce", did, sign, "hi", nonce=10**19 - 1)
                 ),
