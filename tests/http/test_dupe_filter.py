@@ -577,4 +577,76 @@ def test_a_write_the_store_refuses_never_spends_a_share_slot(client) -> None:
             assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
         assert _say(client, "lobby", "nick", PHRASE).status_code == 200
     assert _view(client) == [opening, PHRASE]
-    assert len(limit._rings["lobby"]) == 2, "only the two writes that landed hold slots"
+    # The ring is keyed by (room, incarnation) now; lobby has had exactly one, so sum its
+    # slots across whatever generation it landed in rather than pinning the number here.
+    held = sum(len(v) for (r, _), v in limit._rings.items() if r == "lobby")
+    assert held == 2, "only the two writes that landed hold slots"
+
+
+def test_a_reaped_and_recreated_room_starts_with_an_empty_share_ring(client, monkeypatch) -> None:
+    """A room the store reaps and a caller later recreates under the same name must start
+    with a clean share ring - the recreated room holds zero copies of any phrase, so its
+    first copy of one is legitimate and must land.
+
+    store._reap deletes the room file and preserves only its seq floor and generation; it
+    never imports limit and cannot touch limit._rings. Before #734 the ring was keyed by
+    BARE room name with no expiry, so the in-memory share count survived the reap and the
+    recreated room inherited it: once that stale count was at the cap, a first, legitimate
+    copy in the new room met a 422 nothing in the new room justified. Reviewers (yukkie3276,
+    luch91) flagged it from the source, not a run. The fix keys the ring by room INCARNATION
+    (store.room_generation), so the recreated room is a different key and the dead one is
+    consulted by nothing. This test drives the REAL reaper end to end.
+    """
+    import store
+
+    root = config.ROOT
+
+    def _ring_of(name):  # the ring entries for a room across whatever generations it has had
+        return {gen: slots for (r, gen), slots in limit._rings.items() if r == name}
+
+    # A share cap of three copies, so the ring fills without spending a whole DUPE_RING and
+    # the whole lifecycle stays inside one window and one budget.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 3 / limit.DUPE_RING)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    assert allowed == 3
+    with _filter_on():
+        for i in range(allowed):
+            assert _say(client, "room-x", "n" + str(i), PHRASE).status_code == 200
+    # The ring now holds `allowed` copies of PHRASE for room-x's first incarnation; one more
+    # would 422 - which is what a fresh room must NOT inherit.
+    old_gen = store.room_generation(root, "room-x")
+    assert _ring_of("room-x") == {old_gen: limit._rings[("room-x", old_gen)]}
+    assert len(limit._rings[("room-x", old_gen)]) == allowed
+
+    # Reap room-x for real: age its file past the idle threshold and run one pass.
+    files = list(root.rglob("room-x.jsonl"))
+    assert files, "room-x was never written to disk"
+    for f in files:
+        _client._age(f, store.IDLE_SECONDS + 60)
+    (root / ".reaped").unlink(missing_ok=True)
+    store._reap(root)
+    assert not list(root.rglob("room-x.jsonl")), "the reaper did not delete room-x"
+    # The reap deleted the room from disk but, as documented, did NOT touch the in-memory
+    # ring - the stale slots are still there. The fix does not depend on clearing them; it
+    # depends on the recreated room keying under a NEW generation, leaving these to LRU.
+    assert len(limit._rings[("room-x", old_gen)]) == allowed, "reap must not touch the ring"
+
+    # Recreate room-x under the same name: a fresh conversation, so the generation bumps.
+    with _filter_on():
+        assert (
+            _say(client, "room-x", "fresh", "a brand new opening line for this room").status_code
+            == 200
+        )
+        new_gen = store.room_generation(root, "room-x")
+        assert new_gen > old_gen, "recreation must bump the generation"
+        # The first copy of PHRASE in the recreated room. Nothing THIS room retains justifies
+        # a refusal - the stale count sits under the dead incarnation, not this one.
+        first_copy = _say(client, "room-x", "someone", PHRASE)
+    assert first_copy.status_code == 200, (
+        "a recreated room refused a first, legitimate copy against a stale share ring the "
+        "reap left behind: " + first_copy.text[:200]
+    )
+    # The new incarnation counts PHRASE from zero (its own slot for this one copy), and the
+    # dead incarnation's slots are untouched, sitting idle until MAX_RING_ROOMS evicts them.
+    assert len(limit._rings[("room-x", new_gen)]) == 2, "the recreated room's own two writes"
+    assert old_gen in _ring_of("room-x"), "the dead incarnation's ring is orphaned, not read"

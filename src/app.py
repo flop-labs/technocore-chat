@@ -1322,14 +1322,27 @@ def _dupe_slot(room: str, body: str):
     200 path) releases nothing; only an exception does.
     """
     now = time.monotonic()
+    # The incarnation this write lands in, so the ring is keyed per room INCARNATION rather
+    # than per name: a room reaped and recreated under the same name gets a clean ring (#734).
+    # `room_generation` is preserved across a reap and bumped on (re)create, and the bump
+    # happens inside the append that FOLLOWS this reservation — so a write to an absent room
+    # is recreating it and lands in generation+1, which is the value store.append will settle
+    # on. Computed only when the filter is on: an opted-out deployment (window <= 0) must keep
+    # the pre-filter hot path exactly, paying no store read here, and dupe_refused ignores the
+    # value in that case anyway.
+    gen = 0
+    if DUPE_FILTER_SECONDS > 0:
+        gen = store.room_generation(config.ROOT, room) + (0 if _room_exists(room) else 1)
     refused = limit.dupe_refused(
-        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES
+        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES, generation=gen
     )
     try:
         yield refused
     except BaseException:
         if not refused:
-            limit.dupe_release(room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH)
+            limit.dupe_release(
+                room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, generation=gen
+            )
         raise
 
 

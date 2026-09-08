@@ -198,7 +198,7 @@ def test_a_stale_release_cannot_wipe_a_later_successful_copy() -> None:
     digest = key[1]
 
     def ring_count() -> int:
-        return sum(d == digest for _, d in limit._rings.get(room, ()))
+        return sum(d == digest for _, d in limit._rings.get((room, 0), ()))
 
     assert refused(LONG, now=0.0) is False  # reserve X at now=0
     for i in range(limit.DUPE_RING):  # a full ring of distinct texts evicts X's slot
@@ -382,13 +382,13 @@ def test_a_share_cap_refusal_never_extends_the_ring() -> None:
     allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
     for i in range(allowed):
         assert refused(LONG, now=float(i) * (WINDOW + 1)) is False, i
-    before = limit._rings["r"]
+    before = limit._rings[("r", 0)]
     assert len(before) == allowed
     # Every one of these is refused by the SHARE CAP and not by the window: a full window
     # has passed since the copy before it, so no timestamp of this text is live.
     for i in range(20):
         assert refused(LONG, now=float(allowed + i) * (WINDOW + 1)) is True, i
-    assert limit._rings["r"] == before, "a share-cap refusal records no slot"
+    assert limit._rings[("r", 0)] == before, "a share-cap refusal records no slot"
     limit._dupes.clear()
     limit._rings.clear()
 
@@ -417,14 +417,14 @@ def test_the_share_ring_is_bounded_per_room_and_across_rooms() -> None:
             refused("a phrase long enough to be filtered", now=1000.0, room="new" + str(i)) is False
         )
     assert len(limit._rings) == limit.MAX_RING_ROOMS
-    assert "r0" in limit._rings, "the re-touched room is the young one now"
-    assert "r1" not in limit._rings, "and the idlest room, its exact contemporary, is evicted"
-    assert "new99" in limit._rings, "and the newest survives"
+    assert ("r0", 0) in limit._rings, "the re-touched room is the young one now"
+    assert ("r1", 0) not in limit._rings, "and the idlest room, its exact contemporary, is evicted"
+    assert ("new99", 0) in limit._rings, "and the newest survives"
 
     limit._rings.clear()
     for i in range(limit.DUPE_RING * 3):
         refused("a distinct phrase number " + str(i), now=1000.0, room="one")
-    assert len(limit._rings["one"]) == limit.DUPE_RING
+    assert len(limit._rings[("one", 0)]) == limit.DUPE_RING
     limit._dupes.clear()
     limit._rings.clear()
 
@@ -445,15 +445,15 @@ def test_releasing_a_reserved_copy_gives_back_its_ring_slot_too() -> None:
     # Dropped, not left as an empty tuple: release re-inserts only what it has something
     # to put back, so dupe_refused stays the only path that grows either map - which is
     # what makes its in-lock trim the whole story about their bounds.
-    assert not limit._rings.get("r"), "every slot reserved was handed back"
-    assert "r" not in limit._rings, "and an emptied room leaves no key behind"
+    assert not limit._rings.get(("r", 0)), "every slot reserved was handed back"
+    assert ("r", 0) not in limit._rings, "and an emptied room leaves no key behind"
     assert refused(LONG, now=1e6) is False, "and the phrase is still free to land"
     # Exactly the slot reserved, not the room's ring: another text's slot survives it.
     other = LONG + " and a different tail"
     assert refused(other, now=1e6 + 1) is False
     limit.dupe_release("r", LONG, 1e6, WINDOW, FLOOR)
     key = limit._dupe_key("r", other, FLOOR)
-    assert key is not None and limit._rings["r"] == ((1e6 + 1, key[1]),)
+    assert key is not None and limit._rings[("r", 0)] == ((1e6 + 1, key[1]),)
     limit._dupes.clear()
     limit._rings.clear()
 
@@ -477,9 +477,9 @@ def test_releasing_one_of_two_copies_reserved_at_the_same_instant_frees_one_slot
     assert key is not None
     assert refused(LONG, now=7.0) is False
     assert refused(LONG, now=7.0) is False, "two reservations, one instant"
-    assert limit._rings["r"] == ((7.0, key[1]), (7.0, key[1]))
+    assert limit._rings[("r", 0)] == ((7.0, key[1]), (7.0, key[1]))
     limit.dupe_release("r", LONG, 7.0, WINDOW, FLOOR)  # only one of the two failed
-    assert limit._rings["r"] == ((7.0, key[1]),), "one released slot, not both"
+    assert limit._rings[("r", 0)] == ((7.0, key[1]),), "one released slot, not both"
     assert limit._dupes[key] == (7.0,), "and the window's copy count agrees"
     limit._dupes.clear()
     limit._rings.clear()
