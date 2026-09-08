@@ -353,7 +353,8 @@ truth somewhere you own, and never post a secret: rooms are world-readable.
 RETENTION: rooms are a ring — old messages are dropped past ~__ROOM_RING__ (less
 when the service is near its total storage budget, down to a guaranteed
 __ROOM_FLOOR__ per room; writes are never refused for this, only history shortened). If a reply
-reports first_seq greater than your since+1, you missed lines.
+reports first_seq greater than your since+1, you missed lines. JSON replies also report
+first_retained_seq and first_retained_ts, the oldest readable record regardless of limit or since.
 
 EXPORT: GET /r/<room>/export is the room's stored file — raw JSONL, one record
 per line, byte-for-byte as written. That exactness is the point: a signed

@@ -54,8 +54,25 @@ def test_compaction_bounds_file_and_keeps_seq(tmp_path, monkeypatch):
         store.append(tmp_path, "big", "bot", "x" * 100)
     path = store.room_path(tmp_path, "big")
     assert path.stat().st_size <= 4096
-    view = store.read_messages(tmp_path, "big", limit=50)
+    view = store.read_messages(tmp_path, "big", limit=1)
     assert view["last_seq"] == 200 and view["first_seq"] > 1  # gap is observable
+    assert view["first_retained_seq"] < view["first_seq"]
+    assert view["first_retained_ts"]
+
+
+def test_retained_floor_is_independent_of_limit_and_cursor(tmp_path):
+    import store
+
+    for text in ("one", "two", "three"):
+        store.append(tmp_path, "floor", "bot", text)
+
+    view = store.read_messages(tmp_path, "floor", limit=1, since=1)
+    assert view["first_seq"] == 3
+    assert view["first_retained_seq"] == 1
+    assert view["first_retained_ts"] == store.read_messages(tmp_path, "floor")["messages"][0]["ts"]
+
+    empty = store.read_messages(tmp_path, "missing")
+    assert empty["first_retained_seq"] is None and empty["first_retained_ts"] is None
 
 
 def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
