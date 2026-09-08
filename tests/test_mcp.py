@@ -257,7 +257,7 @@ ADVERTISED = {
         },
         ["namespace", "key", "value"],
     ),
-    "list_notes": ({"namespace": "string"}, ["namespace"]),
+    "list_notes": ({"namespace": "string", "limit": "integer?"}, ["namespace"]),
     "read_docs": ({"page": "string"}, []),
     "say_signed": (
         {
@@ -432,6 +432,70 @@ def test_say_without_a_nick_falls_back_to_the_session_anon_name(mcp):
     # …and both overrides still win over the fallback: the env default, then the argument.
     mcp.call("say", {"room": "lobby", "text": "named", "nick": "alice"})
     assert "<~alice> named" in text_of(mcp.call("read_room", {"room": "lobby"}))
+
+
+def test_list_notes_bounds_a_large_namespace_and_says_what_it_dropped(mcp, tmp_path):
+    """#698: /kv/<ns> has no limit of its own, so an unbounded listing put the whole
+    namespace in one tool result — 3.2 MB for `did` at its cap. The bound is the
+    wrapper's, and a truncated answer has to name the total it truncated.
+
+    Seeded through the store rather than the write tool: 60 writes is past the write
+    lane's per-minute budget, and what is under test is the size of the answer.
+    """
+    import store
+
+    for i in range(60):
+        store.note_set(tmp_path, "many", f"k{i:03d}", "v")
+
+    default = text_of(mcp.call("list_notes", {"namespace": "many"}))
+    assert default.count("/kv/many/") == mcp.module.NOTES_LIMIT_DEFAULT
+    assert "50 of 60 keys shown" in default
+
+    asked = text_of(mcp.call("list_notes", {"namespace": "many", "limit": 10}))
+    assert asked.count("/kv/many/") == 10 and "10 of 60 keys shown" in asked
+
+    # Advisory, so out of range is clamped rather than refused — the doctrine the other
+    # listing tools follow, and the reason `limit` carries no JSON-Schema bound. The
+    # clamp is the service's own (`app._rooms`): negative is the default, 0 is 1.
+    def keys_for(limit):
+        return text_of(mcp.call("list_notes", {"namespace": "many", "limit": limit})).count(
+            "/kv/many/"
+        )
+
+    assert keys_for(9999) == min(mcp.module.NOTES_LIMIT_MAX, 60)
+    assert keys_for(0) == 1
+    assert keys_for(-5) == mcp.module.NOTES_LIMIT_DEFAULT
+
+
+def test_clamp_notes_keeps_a_non_key_line_where_the_service_put_it(mcp):
+    """`budget_note` appends a `#` line once the read budget is nearly spent (limit.py:396).
+    It is not a key, so it must neither be counted as one nor dropped by the truncation —
+    and it must keep its *position*, not merely survive.
+
+    Position rather than presence, because the two come apart: a clamp built as
+    `keys[:n] + [non-keys]` passes a presence check while moving every non-key line to the
+    end. `/kv/<ns>` carries no prefix today — `note_list` (app.py:1746) hands `respond` a
+    body of keys and a trailing note, and BANNER is prepended only by `note_read`
+    (app.py:1503) and `render` (app.py:436) — so the leading case below is a guard on a
+    listing that does not have one yet, not a description of one that does.
+    """
+    budget = "# budget: 4 of 60 reads left this minute"
+    keys = [f"/kv/many/k{i:03d}" for i in range(60)]
+
+    out = mcp.module._clamp_notes("\n".join(keys) + "\n" + budget, 10).splitlines()
+    assert out.count("/kv/many/k000") == 1 and len([x for x in out if x.startswith("/kv/")]) == 10
+    assert "10 of 60 keys shown" in "\n".join(out)
+    assert out.index(budget) > max(i for i, x in enumerate(out) if x.startswith("/kv/"))
+
+    framed = mcp.module._clamp_notes("\n".join(["!! FRAMING", ""] + keys), 10).splitlines()
+    assert framed.index("!! FRAMING") < min(i for i, x in enumerate(framed) if x.startswith("/kv/"))
+
+
+def test_list_notes_leaves_a_listing_under_the_bound_untouched(mcp):
+    """The count line is what a truncation costs, so a listing that fits does not pay it."""
+    mcp.call("write_note", {"namespace": "few", "key": "only", "value": "v"})
+    body = text_of(mcp.call("list_notes", {"namespace": "few"}))
+    assert "/kv/few/only" in body and "keys shown" not in body
 
 
 def test_notes_round_trip_and_a_failed_condition_returns_the_current_value(mcp):
@@ -973,6 +1037,36 @@ def test_with_no_key_and_no_signature_the_error_is_the_challenge(mcp):
         },
     )
     assert retried.is_error is False, text_of(retried)
+
+
+def test_no_key_does_not_issue_an_unusable_empty_text_challenge(mcp, monkeypatch):
+    """Whitespace/control-only input is rejected before challenge generation.
+
+    The service refuses the swept-empty body. Returning a challenge ending in an empty
+    text field would ask an external signer to sign a request that cannot succeed when
+    retried unchanged.
+    """
+    monkeypatch.setattr(mcp.module, "_signer", None)
+
+    reply = mcp.call("say_signed", {"room": "mb-inbox", "text": " \n\t "})
+
+    assert reply.is_error is True
+    message = text_of(reply)
+    assert "empty text" in message
+    assert "nothing visible was left" in message
+    assert "mb-inbox|" not in message
+
+
+def test_configured_key_leaves_empty_text_refusal_to_the_service(mcp, monkeypatch):
+    """Only challenge mode rejects swept-empty input locally; a configured signer still
+    sends the request so the service remains the authority for its semantic refusal."""
+    with_key(mcp, monkeypatch)
+
+    reply = mcp.call("say_signed", {"room": "mb-inbox", "text": " \n\t "})
+
+    assert reply.is_error is True
+    assert "empty text" in text_of(reply)
+    assert mcp.sent, "configured-signing mode must reach the service"
 
 
 def test_whoami_reports_the_identity_without_touching_the_network(mcp, monkeypatch):
