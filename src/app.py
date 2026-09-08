@@ -1450,10 +1450,10 @@ async def room_post(request: Request) -> Response:
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
     # were `str()`-coerced here for the same reason `from`/`text` were (#427).
-    did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    did, sent = _field(payload, "did"), _field(payload, "text")
     signer = None
     if did:
-        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
+        sig, nonce = _field(payload, "sig"), _field(payload, "nonce")
         body = store.clean_text(sent)
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
@@ -1733,10 +1733,10 @@ async def note_post(request: Request) -> Response:
     p = request.path_params
     ns, key = p["ns"], p["key"]
     value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
-    did = _field(payload, "did").strip()
+    did = _field(payload, "did")
     signer = None
     if did:
-        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
+        sig, nonce = _field(payload, "sig"), _field(payload, "nonce")
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
         if isinstance(signer, Response):
             return signer
