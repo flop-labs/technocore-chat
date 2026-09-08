@@ -655,13 +655,16 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
-    with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
-        config._dbg(2, "flock", path=target.name)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    while True:
+        with open(lock, "a+b") as lf:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+            try:
+                if os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino:
+                    config._dbg(2, "flock", path=target.name)
+                    yield
+                    return
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -1662,15 +1665,13 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                 data = entry.path[: -len(".lock")]
                 if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
-                if sub == "rooms":
-                    # A room lock also serves as the transaction gate for its ownership notes.
-                    # As long as any guard note (owners/allow/nonce) exists for this room,
-                    # the room's lock domain must never be swept.
-                    r_name = entry.name[: -len(suffix)]
-                    if any(os.access(note_path(root, ns, r_name), os.F_OK) for ns in ROOM_GUARD_NS):
+                with open(entry.path, "a+b") as s_lf:
+                    try:
+                        fcntl.flock(s_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
                         continue
-                os.unlink(entry.path)
-                touched[sub].add(_emptied(base, entry.path, sub == "notes"))
+                    os.unlink(entry.path)
+                    touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue
 
