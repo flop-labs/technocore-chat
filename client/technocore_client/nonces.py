@@ -8,10 +8,16 @@ cause is a file it wrote three restarts ago.
 Two properties, and the second is the whole reason this file exists rather than a counter
 in memory:
 
-**Monotonic across processes, not just within one.** The floor is the wall clock in
-milliseconds. A fresh process with no state still allocates above anything a previous
-process could plausibly have used, so losing the file degrades to "probably fine" rather
-than "silently reuses from 1".
+**Monotonic across concurrent processes, not merely across restarts.** The first version of
+this claimed the former and delivered the latter: the wall clock plus a process-local
+high-water mark keeps a *restart* safe, and does nothing for two processes that load the same
+persisted value in the same millisecond — they compute the same number and one signed write is
+refused. Raised by @yukkie3276 in review, and correct. Reload, allocate and flush now happen
+under an exclusive `flock` on a sidecar lock file, so the read-modify-write is serialized
+across processes and each one sees the previous one's number.
+
+Losing the file still degrades to "probably fine" rather than "reuses from 1", because the
+clock remains a floor.
 
 **Persisted before it is returned, never after.** The caller may crash, or the network may
 swallow the write, between being handed a nonce and the server seeing it. If the record
@@ -21,12 +27,21 @@ nonces cost nothing, while a repeat is a rejected write the caller cannot explai
 
 The file is rewritten whole under `os.replace`, which is atomic on POSIX and on Windows for
 the same path: a reader either sees the old file or the new one, never a truncated one. The
-containing directory is fsynced too, because on ext4 the rename can otherwise outlive the
+temporary it is renamed from carries the pid, because a fixed `.tmp` name is a second way two
+processes collide — one writing it while the other renames it — which is the same defect as
+the nonce race wearing different clothes.
+
+The containing directory is fsynced too, because on ext4 the rename can otherwise outlive the
 data it points at across a power cut.
+
+**POSIX.** `fcntl.flock` and fsyncing a directory handle are both POSIX; this module does not
+run on Windows and says so here rather than failing at import with a message about a missing
+attribute. That was already true of the directory fsync before the lock was added.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import time
@@ -69,9 +84,21 @@ class NonceStore:
                 out[did] = {r: n for r, n in rooms.items() if isinstance(n, int) and n >= 0}
         return out
 
+    def _lock(self):
+        """Exclusive lock over the whole read-modify-write.
+
+        A sidecar file rather than the state file itself: the state file is replaced by
+        `os.replace`, so a lock held on it would follow the old inode and stop excluding
+        anyone the moment the first writer finished.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self._path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
     def _flush(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp = self._path.with_suffix(f"{self._path.suffix}.{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(self._state, handle, indent=2, sort_keys=True)
             handle.flush()
@@ -91,6 +118,19 @@ class NonceStore:
     def allocate(self, did: str, room: str) -> int:
         """Reserve and persist the next nonce for `did` in `room`, then return it."""
         global _process_floor
+        fd = self._lock()
+        try:
+            return self._allocate_locked(did, room)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _allocate_locked(self, did: str, room: str) -> int:
+        global _process_floor
+        # Re-read inside the lock. The copy loaded at construction is stale the moment another
+        # process allocates, and allocating from it is exactly the duplicate this lock exists to
+        # prevent — taking the lock and then trusting memory would be a lock that guards nothing.
+        self._state = self._load()
         known = self._state.get(did, {}).get(room)
         # With no record, the floor is the clock PLUS ONE, not the clock. A nonce equal to
         # the current millisecond may already have been used and forgotten — that is exactly

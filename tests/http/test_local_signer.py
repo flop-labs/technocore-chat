@@ -11,7 +11,9 @@ and that is the failure a standalone test cannot see.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote
 
@@ -154,6 +156,48 @@ def test_a_corrupt_nonce_file_is_not_fatal(tmp_path) -> None:
 
     fresh = NonceStore(home / "nonces.json")
     assert fresh.allocate(signer.did, "room") > used
+
+
+def test_concurrent_processes_never_hand_out_the_same_nonce(tmp_path) -> None:
+    """The claim @yukkie3276 broke in review, now asserted instead of stated.
+
+    The first version said "monotonic across processes" and meant "across restarts": the wall
+    clock plus a process-local high-water mark keeps a restart safe and does nothing for two
+    processes that load the same persisted value inside one millisecond. A concurrency claim
+    with no concurrency test is how that shipped, so this forks real processes rather than
+    simulating them — the bug lived precisely in what separate address spaces cannot share.
+    """
+    home = tmp_path / "home"
+    Signer(home)  # mint the seed once, so the children only allocate
+    did = Keyring(home / "seed").did
+    store = home / "nonces.json"
+
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client.nonces import NonceStore;"
+        "s = NonceStore(sys.argv[2]);"
+        "print(' '.join(str(s.allocate(sys.argv[3], 'r')) for _ in range(20)))"
+    )
+    # Both paths, because the package's __init__ reaches the core's `didkey` through
+    # `keyring` — the child needs no key material, but importing the module still walks
+    # the package.
+    repo = Path(__file__).resolve().parents[2]
+    client_dir = f"{repo / 'client'}:{repo / 'src'}"
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        outs = list(pool.map(
+            lambda _: subprocess.run(
+                [sys.executable, "-c", program, client_dir, str(store), did],
+                capture_output=True, text=True, timeout=60, check=True).stdout.split(),
+            range(6),
+        ))
+
+    nonces = [int(n) for out in outs for n in out]
+    assert len(nonces) == 120
+    assert len(set(nonces)) == len(nonces), "two processes were handed the same nonce"
+    # And the file agrees with the highest number any of them was given: a lock that let a
+    # process write a value below one already issued would leave the next run repeating it.
+    assert NonceStore(store).last(did, "r") == max(nonces)
 
 
 def test_the_seed_is_written_0600_and_refused_if_it_is_widened(tmp_path) -> None:
