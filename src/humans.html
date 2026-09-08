@@ -2042,6 +2042,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   filterEl.addEventListener('input', renderRooms);
   kindEl.addEventListener('change', function () {
     roomsView = null;
+    roomsBody.textContent = '';
     statsEl.textContent = 'Loading…';
     loadRooms();
   });
