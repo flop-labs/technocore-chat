@@ -74,6 +74,24 @@ def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     assert _wrangler_routes() - accounted == set()
 
 
+def test_every_edge_served_path_is_routed_to_the_worker():
+    """The third direction: a path in EDGE_CACHED, EDGE_REVALIDATE, or EDGE_ONLY that the
+    Worker never sees is a dead lane. The path was declared edge-served, but no wrangler
+    route delivers it, so every request falls through to the origin — the one thing the
+    lane exists to avoid.
+
+    The two tests above cover PATHS <= routes and routes <= accounted, but neither checks
+    that the three edge lanes are themselves routed. EDGE_REVALIDATE paths are not in PATHS
+    (they are live reads, not snapshots), so the PATHS <= routes test does not cover them.
+    """
+    snapshot = _snapshot_module()
+    edge_served = (
+        set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE) | set(snapshot.EDGE_ONLY)
+    )
+    unrouted = edge_served - _wrangler_routes()
+    assert not unrouted, f"edge paths not routed to the Worker: {sorted(unrouted)}"
+
+
 def test_a_liveness_path_is_never_snapshotted():
     """The invariant the third lane exists to hold.
 
