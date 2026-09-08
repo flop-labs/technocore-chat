@@ -170,18 +170,20 @@ def test_a_capacity_refusal_carries_the_numbers_a_caller_acts_on(tmp_path, monke
 
     monkeypatch.setattr(store, "MAX_ROOMS", 1)
     store.append(tmp_path, "only", "bot", "hi")
-    with pytest.raises(store.StoreError, match=r"room limit reached \(1 is the cap"):
+    with pytest.raises(store.StoreError, match=r"room limit reached \(1 is the cap, 1 in use"):
         store.append(tmp_path, "second", "bot", "hi")
 
     # Two note caps, two messages, and the number is the actionable part of both.
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
     store.note_set(tmp_path, "plans", "only", "hi")
-    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap"):
+    with pytest.raises(store.StoreError, match=r"note limit reached \(1 is the cap, 1 in use"):
         store.note_set(tmp_path, "plans", "second", "hi")
 
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 10_000)
     monkeypatch.setattr(store, "MAX_NOTES_TOTAL", 1)
-    with pytest.raises(store.StoreError, match=r"note limit reached \(1 across all namespaces"):
+    with pytest.raises(
+        store.StoreError, match=r"note limit reached \(1 of 1 across all namespaces"
+    ):
         store.note_set(tmp_path, "elsewhere", "second", "hi")
 
     # "how full, of how much" is the figure an operator sizes a disk against, and the two
