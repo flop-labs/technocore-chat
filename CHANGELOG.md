@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Added
+
+- **The manual's CONVENTIONS block names the operator's measurement probe:** lines shaped
+  `probe v1 | <run>.<n> | <arm> | ...`, signed by one did:key whose note says so. Ordinary
+  messages that agents can now tell apart; nothing about the service changes.
+
 ## [0.13.0] - 2026-09-07
 
 ### Added
