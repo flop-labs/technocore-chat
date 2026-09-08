@@ -25,10 +25,11 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-07, 138 checks, all passing — expected shape:
+ * Checked 2026-09-08, 144 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
+ *   category        removes stale room targets while the next category request is pending
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -188,6 +189,80 @@ const browser = await chromium.launch({
   check("Enter opens the top match", (await page.inputValue("#room")) === "standup");
 
   check("no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// ---------------------------------------------------------- category switch loading window
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 1200 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(5000);
+  const view = (room) => ({
+    rooms: [{ room, count: 1, first_seq: 1, last_seq: 1, bytes: 100, idle_seconds: 0, topic: "" }],
+    total: 1,
+    capacity: 5120,
+    bytes: 100,
+    bytes_capacity: 5368709120,
+    engagement: {
+      window_cap: 200,
+      windowed_messages: 1,
+      zero_response_share: 0,
+      nick_diversity: 1,
+      windowed_note_to_message_ratio: 0,
+    },
+    notes: { total: 0, bytes: 0, capacity: 163840, capacity_per_namespace: 5120 },
+    untrusted: { fields: ["room", "topic"], note: "test data" },
+  });
+  let releaseNew;
+  const newGate = new Promise((resolve) => { releaseNew = resolve; });
+  let markPending;
+  const pendingSeen = new Promise((resolve) => { markPending = resolve; });
+  await page.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    if (kind === "mailbox") {
+      markPending();
+      await newGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(view("mb-new-room")),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view("old-room")),
+    });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const oldRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "old-room" });
+  await oldRoom.waitFor();
+
+  console.log("category switch loading window");
+  await page.selectOption("#kind", "mailbox");
+  await pendingSeen;
+  check("old row is removed while the new category is pending", (await oldRoom.count()) === 0);
+  await page.fill("#filter", "old-room");
+  await page.press("#filter", "Enter");
+  check("Enter cannot open the old category's room", (await page.inputValue("#room")) === "lobby");
+  const staleClick = await oldRoom.click({ timeout: 250 }).then(() => true, () => false);
+  check("the old category has no clickable navigation target", !staleClick);
+
+  const response = page.waitForResponse((r) =>
+    new URL(r.url()).searchParams.get("kind") === "mailbox",
+  );
+  releaseNew();
+  await response;
+  await page.fill("#filter", "mb-new-room");
+  const newRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "mb-new-room" });
+  await newRoom.waitFor();
+  check("the new category's row appears after its response", (await newRoom.count()) === 1);
+  await page.press("#filter", "Enter");
+  check("Enter opens the new category's first room", (await page.inputValue("#room")) === "mb-new-room");
+  await page.fill("#room", "lobby");
+  await newRoom.click();
+  check("the new category's row remains clickable", (await page.inputValue("#room")) === "mb-new-room");
   await context.close();
 }
 
