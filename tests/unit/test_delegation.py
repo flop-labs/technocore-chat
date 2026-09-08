@@ -288,6 +288,29 @@ def test_putting_a_superseded_grant_back_does_not_restore_it(sign, capsys):
     assert "SUPERSEDED " + agent_did + " *" in out
 
 
+def test_a_forged_record_cannot_supersede_a_valid_one(sign, capsys):
+    """The note is world-writable, so anyone can append a record with a higher nonce and a
+    bad signature. newest() ranks by nonce across ALL records, including forged ones, so
+    without a signature filter the forged record's higher nonce suppresses the real grant
+    as SUPERSEDED — and check_note reports 0 live delegations instead of 1.
+
+    The fix: only records whose signatures verify may compete in newest().
+    """
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    agent_did = sign.did_of(agent)
+    real = _line(sign, root, agent_did, scope="*", nonce="5")
+    forged = (
+        f"{sign.DELEGATE_TOKEN} {agent_did} r:lobby 9999999999 999 "
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    )
+
+    assert sign.check_note(sign.did_of(root), f"{real} {forged}") == 1
+    out = capsys.readouterr().out
+    assert "OK         " + agent_did + " *" in out
+    assert "FORGED" in out
+    assert "SUPERSEDED" not in out
+
+
 def test_superseding_is_per_agent_and_never_across_them(sign, capsys):
     """A high nonce for one agent must not retire another agent's grant. Two agents, two
     live delegations, whatever the nonces look like beside each other."""
@@ -316,6 +339,10 @@ def test_the_page_supersedes_and_replaces_the_same_way(page, sign):
     assert "rank >= best[agent][0]" in _signer_source()
     # And the publish path drops the agent's previous grant rather than appending to it.
     assert "withoutAgent(previous, agent)" in page
+    # Both sides verify before ranking, so a forged record with a high nonce cannot
+    # suppress a real grant. See test_a_forged_record_cannot_supersede_a_valid_one.
+    assert "verifiedRecords" in page
+    assert "verified = [i for i in ok if i >= 0]" in _signer_source()
 
 
 def _signer_source() -> str:
