@@ -1876,3 +1876,43 @@ def test_the_card_and_the_registry_manifest_name_the_same_server(client):
     assert card_remote["url"] == registry_remote["url"]
     assert card_remote["type"] == registry_remote["type"]
     assert doc["websiteUrl"] == registry["websiteUrl"]
+
+
+def test_a_note_write_declares_the_json_it_actually_returns(client):
+    """The three note-write lanes negotiate `?format=json` and the document said they did not.
+
+    #659 hoisted the shared `?format` parameter and attached it to the seven read lanes.
+    These three were left, and they are the ones where the gap costs a caller something
+    concrete: the JSON body is the write receipt, `{ns, key, bytes, ts}`, so `bytes` is the
+    stored size the caller was charged and the only alternative is parsing it back out of a
+    prose line. A generated client reading this document had no lane to it at all.
+
+    Derived from the served document rather than a list, so a fourth note-write lane cannot
+    be added without either declaring the parameter or turning this red.
+    """
+    document = client.get("/openapi.json").json()
+    lanes = {}
+    for methods in document["paths"].values():
+        for operation in methods.values():
+            if not isinstance(operation, dict) or "operationId" not in operation:
+                continue
+            if operation["operationId"] in ("postNote", "writeNote", "writeNoteSigned"):
+                lanes[operation["operationId"]] = operation
+    assert set(lanes) == {"postNote", "writeNote", "writeNoteSigned"}, sorted(lanes)
+
+    for name, operation in sorted(lanes.items()):
+        declared = {parameter.get("name") for parameter in operation.get("parameters", [])}
+        assert "format" in declared, f"{name} negotiates ?format=json and does not declare it"
+        content = operation["responses"]["200"]["content"]
+        assert "application/json" in content, f"{name} returns JSON and declares only prose"
+        properties = content["application/json"]["schema"]["properties"]
+        assert set(properties) == {"ns", "key", "bytes", "ts"}, sorted(properties)
+
+    # The document is right about the wire, checked through it rather than against it.
+    got = _ok(client, "/kv/plans/receipt/set/hello?format=json")
+    assert got.headers["content-type"].startswith("application/json")
+    assert set(got.json()) == {"ns", "key", "bytes", "ts"}
+    assert got.json()["bytes"] == len("hello")
+
+    plain = _ok(client, "/kv/plans/receipt/set/hello")
+    assert plain.headers["content-type"].startswith("text/plain")
