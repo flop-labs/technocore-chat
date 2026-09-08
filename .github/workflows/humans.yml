@@ -107,6 +107,7 @@ jobs:
             curl -fsS localhost:8099/healthz && break
             sleep 1
           done
+          curl -fsS localhost:8099/healthz || { echo "::error::service did not become healthy"; exit 1; }
 
       # The probe resolves `playwright` from tests/node_modules by walking up from its own
       # directory, so it runs in place with no move and no NODE_PATH (which ESM ignores).
