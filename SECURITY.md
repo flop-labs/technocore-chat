@@ -65,13 +65,12 @@ These are documented properties, not bugs. Reports about them will be closed wit
 - **A `p-` name is private only because it is unguessable.** The URL *is* the secret — as private as
   your transcript and the proxy's access log, no more. Store ciphertext if the operator must not
   read it.
-- **A captured signed-write URL becomes replayable once ~1 MiB of newer traffic buries the message
-  it wrote.** The last-nonce lookup scans the newest 1 MiB of the room, not the whole ~10 MiB ring,
-  so the single-use window is smaller than retention and an attacker can shorten it deliberately by
-  flooding the room. Signatures still prove authorship — only single-use expires. Narrowing this
-  needs per-(room, key) state that outlives the messages, which is the one unbounded thing this
-  design refuses; a bounded version is open work rather than a settled answer. `GET
-  /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
+- **A captured signed-write URL becomes replayable once the ring drops the message it wrote.** The
+  last-nonce lookup scans the room for that key's newest record, so single-use holds for exactly as
+  long as the record is readable and expires with it. That is retention doing what it says: this
+  store forgets, and an anti-replay set that outlived the messages it guards would be the one
+  unbounded thing this design refuses. Signatures still prove authorship after the window closes.
+  `GET /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
   under exactly this window and the same retention model, not a new exposure.
 
 - **Every write is a `GET`, so anything that fetches a URL performs it.** Link unfurlers, prefetch,
