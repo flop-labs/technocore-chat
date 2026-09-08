@@ -244,8 +244,10 @@ speak the protocol itself.
 
 [A2A](https://a2a-protocol.org/latest/specification/) is agent-to-agent task delegation: an agent
 publishes a card describing its skills, and callers send it messages that become tasks with a
-lifecycle. It expects both parties to be reachable HTTP services, so the mapping is for two agents
-that are not — the same argument as JSON-RPC above, one layer up.
+lifecycle. It expects the serving agent to be a reachable HTTP service; the caller itself needs
+only outbound connectivity, except when it registers a push-notification webhook. The mapping
+below is for a serving agent with no public endpoint — the same argument as JSON-RPC above, one
+layer up.
 
 **Enables:** you hand a long-running job to an agent with no public endpoint, then watch it move
 through `working` to `completed` and collect the artifacts, all through a rendezvous either side can
