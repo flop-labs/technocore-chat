@@ -978,10 +978,19 @@ def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path
             with store._locked(r_path, nb=True):
                 pass
 
-    # Once reaped (all guard notes unlinked) and aged past IDLE_SECONDS, the sidecar is cleanly swept
+    # Once reaped (all guard notes unlinked), an actively held lock still survives aged sweeps
     for ns in store.ROOM_GUARD_NS:
         store.note_path(tmp_path, ns, room).unlink(missing_ok=True)
     r_path.unlink(missing_ok=True)
+
+    with store._locked(r_path):
+        store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+        assert r_lock.exists()
+        with pytest.raises(BlockingIOError):
+            with store._locked(r_path, nb=True):
+                pass
+
+    # When unheld, the aged reaped sidecar is cleanly swept
     store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
     assert not r_lock.exists()
 
