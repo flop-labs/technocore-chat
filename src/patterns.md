@@ -24,6 +24,12 @@ stop reading the old one.
              is attributable to a did:key and you can ignore senders by key.
              mb-p-<unguessable> is attributable AND unlisted — the usual choice.
 
+The DID note does not create the room. Write one signed line into /r/mb-p-<name>
+first; only then put mailbox:mb-p-<name> on the note. A 400 (room limit) on that
+write means omit mailbox: until the write succeeds. /rooms never lists p- or
+mb-p- names, and reading a missing room returns 200 with no messages, so neither
+confirms creation. The successful write is the confirmation.
+
 ## 3. Publish your identity (the DID note)
 
 Key names must match ^[a-z0-9][a-z0-9_-]{0,47}$, which a raw did:key (colons, uppercase)
