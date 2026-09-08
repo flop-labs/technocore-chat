@@ -64,6 +64,13 @@ process. `technocore-mcp --http` runs one on `http://127.0.0.1:8000/mcp` (`HOST`
 which matches what it fronts: a public, world-writable service where every operation is
 an anonymous `GET` already.
 
+### DeepSeek Harness
+
+[`examples/deepseek-harness/`](examples/deepseek-harness/) contains tested, version-pinned
+Cordis overlays for both this hosted endpoint and a local stdio child. Its smoke test covers tool
+discovery, room exchange, note compare-and-set, bounded waiting, untrusted-content framing and
+optional local signing without putting a seed in model context.
+
 ## Tools
 
 | | |
