@@ -29,6 +29,7 @@ import orjson
 
 import config
 import didkey
+from seqstate import maintain as _maintain_seq_state
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -1052,7 +1053,7 @@ def _seq_field(root: Path, room: str, key: str) -> int:
     """`room`'s `floor` or `gen`, always as a non-negative int.
 
     Its shard first; the pre-shard map only when the shard has no entry, which after
-    `_split_seq_state` has run is one failed `open` and no parse. That fallback is what makes
+    seq-state maintenance has run is one failed `open` and no parse. That fallback is what makes
     the migration invisible rather than a flag day — a name whose state has not been split yet
     still answers correctly — and it stays safe afterwards because the split renames the old
     file away rather than leaving a second copy to read.
@@ -1577,56 +1578,6 @@ def _settle_count(root: Path, name: str, before: tuple[int, int] | None, kept: l
         pass
 
 
-def _split_seq_state(root: Path) -> None:
-    """Partition the pre-shard map into its 256 shards, once, and retire it.
-
-    Grouped before any shard is opened, so this costs one pass over the map and one lock per
-    *shard* rather than one per room.
-
-    Which side of the merge wins is decided by whether the backup already exists, and the two
-    cases are opposite for the same reason — the later write is the true one:
-
-      - **The first split.** No backup yet, so every entry in the map predates this pass, and
-        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
-        wins.
-      - **A map that came back.** The backup exists, so this map was written *after* a split
-        had already consumed and renamed the original — which only an old worker still running
-        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
-        the shard's is stale, so the map wins. Getting this backwards silently drops that
-        worker's reap or create: the room's floor regresses and cursors past it miss messages,
-        or a generation bump is lost and a stateful reader is told nothing changed.
-
-    The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
-    pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
-    would leave a downgrade reading a map that had lost almost every room it once knew.
-
-    The old file is renamed, never deleted — `.seqstate.pre-shard`, which the `??` glob the
-    sweep below uses cannot match. A downgrade puts the old code back in front of a map it
-    still understands, so this is the one step of the change that is not self-reversing and
-    it costs a rename to keep it that way. An operator who has finished with it can remove it.
-
-    Best effort and idempotent: a failure leaves the map in place, `_seq_entry` keeps reading
-    it as the fallback, and the next reap tries again. Runs once in the life of a store — and
-    the reap it rides is throttled, so the window where reads still pay the old parse is at
-    most one REAP_EVERY after the first write.
-    """
-    legacy = _seq_state_path(root)
-    shards: dict[Path, dict] = {}
-    try:
-        with _locked(legacy):
-            first = not (backup := legacy.with_suffix(".pre-shard")).exists()
-            for room, entry in _read_seq_state(legacy).items():
-                shards.setdefault(_seq_state_path(root, room), {})[room] = entry
-            for path, entries in shards.items():
-                with _locked(path):
-                    shard = _read_seq_state(path)
-                    merged = {**entries, **shard} if first else {**shard, **entries}
-                    _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
-            legacy.replace(backup) if first else legacy.unlink()
-    except OSError:
-        pass
-
-
 def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) -> None:
     """Unlink sidecar locks whose data file is gone and that have been idle as long as any
     reaped room. `now` is the caller's, so every reapability decision in one pass is made
@@ -1900,7 +1851,7 @@ def _reap_pass(root: Path, now: float) -> None:
     _settle_count(root, NOTES_FILE, before[NOTES_FILE], kept["notes"])
     _settle_count(root, USAGE_FILE, before[USAGE_FILE], kept["rooms"])
     _drop_emptied_namespaces(root, before_ns, per_ns, touched["notes"])
-    _split_seq_state(root)  # once in the life of a store; a no-op every pass after
+    _maintain_seq_state(root, now)
     # The buckets the pass emptied, one span acquisition each, for the mkdir-to-open reason
     # `_drop_emptied_namespaces` gives: `_locked` makes a bucket one `mkdir` before opening
     # the sidecar lock inside it, and removing it in that gap fails the create outright. This
