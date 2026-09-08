@@ -1824,7 +1824,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function newest(records) {
     var best = {};
     records.forEach(function (d, i) {
-      var rank = DIGITS_RE.test(d.nonce) ? Number(d.nonce) : -1;
+      var rank = DIGITS_RE.test(d.nonce) ? BigInt(d.nonce) : -1n;
       if (!(d.agent in best) || rank >= best[d.agent][0]) best[d.agent] = [rank, i];
     });
     var winners = {};
