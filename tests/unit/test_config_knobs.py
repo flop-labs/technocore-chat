@@ -254,6 +254,21 @@ def test_junk_refuses_to_boot() -> None:
     assert "ValueError" in run.stderr
 
 
+def test_oversized_rate_knob_refuses_to_boot() -> None:
+    """`int()` accepts arbitrary-size integers, but `take()`/`refund()` later convert the
+    knob to `float()`, which raises OverflowError past ~1.8e308. Without this check that
+    boots cleanly and only 500s the first rate-limited request that reaches it (#744)."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_RATE_READ": "9" * 400},
+    )
+    assert run.returncode != 0, "app booted with a CHAT_RATE_READ too large for float()"
+    assert "OverflowError" in run.stderr
+
+
 def test_the_poll_interval_is_a_knob_and_defaults_where_it_was_hardcoded() -> None:
     """CHAT_WAIT_POLL was the literal 0.5 in app.py. It reaches `app`, which is the module
     the wait loop sleeps on — a knob that stopped at `config` would parse and change
