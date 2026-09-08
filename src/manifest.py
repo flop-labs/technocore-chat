@@ -258,6 +258,14 @@ _ROOM_VIEW_SCHEMA = {
                 "dropped messages you never read."
             ),
         },
+        "first_retained_seq": {
+            "type": ["integer", "null"],
+            "description": "Oldest seq still retained in the room, independent of `limit` and `since`.",
+        },
+        "first_retained_ts": {
+            "type": ["string", "null"],
+            "description": "Timestamp of `first_retained_seq`, or null when the room has no readable records.",
+        },
         "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
         "wait_held": {
@@ -271,7 +279,14 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
     },
-    "required": ["room", "count", "last_seq", "messages"],
+    "required": [
+        "room",
+        "count",
+        "first_retained_seq",
+        "first_retained_ts",
+        "last_seq",
+        "messages",
+    ],
 }
 
 
