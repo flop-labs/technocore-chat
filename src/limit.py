@@ -392,8 +392,39 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
 
 
 def budget_note(kind: str, left: int, per_min: int) -> str:
-    """Warn before the wall, not at it — only once the budget is nearly gone."""
-    if left * 4 > per_min:
+    """Warn before the wall, not at it — and on a stride, so the warning stays shareable.
+
+    The footer is one caller's pacing, so a reply carrying one is `no-store` and the CDN
+    bypasses it (see the read paths in app.py). That is fine for a warning nobody sees
+    twice, and it was not: a client polling at its ceiling sits permanently inside the
+    last quarter of its budget, so *every* reply it got carried a footer and *none* of them
+    could be cached. Measured on production, 47.7% of room reads were `bypass` at the edge
+    against a 7.2% hit rate — the cache switched itself off for exactly the callers
+    generating the most load.
+
+    Lowering the threshold does not fix that: a client pinned at its ceiling is permanently
+    inside whatever band is chosen. What fixes it is emitting on a *stride* of the remaining
+    budget — roughly every `per_min // 24` requests, so about six warnings across the warning
+    band and the rest of the replies shareable. At the production read budget of 600/min that
+    is one footer every 25 requests; the other 24 can be served from the edge.
+
+    The stride scales with the budget rather than being a constant, because a deployment with
+    a small budget has no requests to spare: at anything under 24/min it is 1, which is the
+    every-reply behaviour this replaces. A caller cannot step over a stride without landing
+    on it, so the warning is never skipped, only thinned.
+
+    `(left + 1) % stride` rather than `left % stride` so that the multiple is never *zero
+    left*: a caller pinned at its ceiling is granted a token the instant one refills and
+    would otherwise sit on the one value that always warns, which is the case this exists to
+    remove. It lands on stride-1 instead — 24, 49, 74 … at 600/min.
+
+    Reads only. A write reply is `no-store` whatever it carries — it mutates — so thinning
+    its footer buys no cacheability and costs a writer its pacing. Sharing one helper made
+    that easy to miss: at the production write budget of 300/min the stride is 12, which
+    silently took write warnings from every in-band reply to 7.9% of them, and the test
+    default of 30/min has a stride of 1 so nothing failed.
+    """
+    if left * 4 > per_min or (kind == "read" and (left + 1) % max(1, per_min // 24)):
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "
