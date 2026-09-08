@@ -115,7 +115,22 @@ FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # is the right answer for a bug in the software rather than in a deployment — an operator
 # who wants reports about their instance sets this to their own address.
 SECURITY_CONTACT = os.environ.get("CHAT_SECURITY_CONTACT", "security@flop.finance").strip()
-CLIENT_IP_HEADER = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
+_client_ip_raw = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
+if _client_ip_raw:
+    if not _client_ip_raw.isascii():
+        raise ValueError(
+            f"CHAT_CLIENT_IP_HEADER={_client_ip_raw!r} must be ASCII — "
+            f"an HTTP field name may only contain US-ASCII characters (RFC 9110 §5.1)"
+        )
+    # RFC 9110 §5.1: token = 1*tchar — tchar = "!#$%&'*+-.^_`|~" / DIGIT / ALPHA
+    if not _client_ip_raw.replace("-", "").replace("_", "").isalnum():
+        for c in _client_ip_raw:
+            if c not in "!#$%&'*+-.^_`|~" and not c.isalnum():
+                raise ValueError(
+                    f"CHAT_CLIENT_IP_HEADER={_client_ip_raw!r} is not a valid HTTP field name "
+                    f"(RFC 9110 §5.1): character {c!r} is not a token character"
+                )
+CLIENT_IP_HEADER = _client_ip_raw
 # The origin to print in /openapi.json and /.well-known/agent.json. Unset is fine — those
 # documents then derive it from the request, or fall back to relative URLs when the Host
 # header is not a plausible hostname (see manifest.public_base). Set it when the service
