@@ -2758,6 +2758,42 @@ def note_stats(root: Path) -> dict:
     return {"total": total, "bytes": size, **caps}
 
 
+def note_ns_stats(root: Path, ns: str) -> dict:
+    """Whether a namespace the caller already named is at capacity, and what that
+    capacity is. What #510 actually asked -- "will my next note write be refused?",
+    asked once before an irreversible announcement -- is a yes/no question, never a
+    request for an occupancy figure, so this answers exactly that and nothing wider.
+
+    A raw count was the first design (see PR #568 history) and was retracted: `total`
+    draws from the same physical count `_check_note_capacity` enforces, which counts
+    unlisted `p-` keys that `list_notes` never returns -- a namespace can show
+    `keys=[]` while `total` climbs, an oracle across the one boundary this service
+    otherwise guarantees. `at_capacity` still reflects that same physical count (it
+    has to: predicting whether the *next* write is refused requires exactly the
+    figure refusal itself checks, hidden keys included), but collapses it to one bit
+    that only changes at the cap boundary, rather than a number that changes on every
+    write anyone makes to the namespace. It reveals what a caller could already learn
+    by attempting one write and reading the refusal (`_at_capacity`'s message names
+    the same cap) -- the difference is only that this doesn't require attempting a
+    write to find out.
+    """
+    total, _ = _note_totals(_note_ns_dir(root, ns), _ns_totals)
+    return {"at_capacity": total >= MAX_NOTES_PER_NS, "capacity_per_namespace": MAX_NOTES_PER_NS}
+
+
+def note_ns_footer(stats: dict) -> str:
+    """`note_ns_stats`' answer as the text lane's one line, in `# budget:`'s shape.
+
+    Here rather than in the handler for `limit.budget_note`'s reason -- the module that owns
+    a fact owns how the text lane states it -- and because `core/app.py` has one code-line of
+    headroom against its cap while this file has five (#656).
+
+    `yes`/`no` rather than the JSON lane's `true`/`false`: this is prose addressed to a reader
+    of a `#` line, and it is the spelling #510's reporter named when asking for the footer.
+    """
+    return f"\n# at_capacity: {'yes' if stats['at_capacity'] else 'no'}"
+
+
 def list_notes(root: Path, ns: str) -> list[str]:
     keep = _listable.__wrapped__  # not the cache: see _listable
     names = (e.name[: -len(".txt")] for e in _walk(_note_ns_dir(root, ns), ".txt"))

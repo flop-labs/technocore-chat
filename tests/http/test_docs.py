@@ -1876,3 +1876,53 @@ def test_the_card_and_the_registry_manifest_name_the_same_server(client):
     assert card_remote["url"] == registry_remote["url"]
     assert card_remote["type"] == registry_remote["type"]
     assert doc["websiteUrl"] == registry["websiteUrl"]
+
+
+def test_the_occupancy_only_lane_is_published_where_a_generator_reads(client):
+    """yukkie3276 on #568: `?keys=0` was the only cheap way to read `at_capacity`, and the
+    contract did not mention it. A generated client — or an agent reading /openapi.json —
+    cannot call a parameter that is not published, so it keeps calling the default listing
+    and keeps hitting the walk this lane exists to avoid. The response schema was a bare
+    `{"type": "object"}` for the same reason: the two fields the lane is *for* were absent
+    from it.
+    """
+    import manifest
+
+    op = client.get("/openapi.json").json()["paths"]["/kv/{ns}"]["get"]
+    (param,) = [p for p in op.get("parameters", []) if p["in"] == "query" and p["name"] == "keys"]
+    assert "Default true" in param["description"], "the default is what a client assumes"
+
+    schema = op["responses"]["200"]["content"]["application/json"]["schema"]
+    assert set(schema["required"]) == {"ns", "keys", "at_capacity", "capacity_per_namespace"}
+    for field in ("at_capacity", "capacity_per_namespace"):
+        assert schema["properties"][field]["description"], f"{field} published without a rule"
+
+    # The description renders from manifest.KEYS, so every spelling it names is a spelling
+    # the table holds — the document cannot advertise a lane the server does not have.
+    for spelling in (k for k in manifest.KEYS if k):
+        assert f"`{spelling}`" in param["description"], f"{spelling!r} honoured but unpublished"
+
+
+def test_the_keys_parameter_honours_exactly_the_spellings_it_publishes(client):
+    """The other direction, and the one that actually bites: a spelling the contract calls
+    false must skip the listing. `?keys=off` and `?keys=FALSE` were both silently read as
+    "list everything" while `if_absent` next door accepted them — so a caller who opted out
+    of the walk got the walk, which is the #510 failure mode arriving through the very
+    parameter added to prevent it. Same class as #282, one parameter over.
+    """
+    import manifest
+
+    client.get("/kv/probe/a/set/1")
+    client.get("/kv/probe/b/set/2")
+
+    for spelling, lists_keys in manifest.KEYS.items():
+        body = client.get(f"/kv/probe?format=json&keys={spelling}").json()
+        assert (body["keys"] != []) is lists_keys, f"keys={spelling!r} disagrees with the table"
+        assert body["at_capacity"] is False, f"keys={spelling!r} lost the occupancy answer"
+        upper = client.get(f"/kv/probe?format=json&keys={spelling.upper()}").json()
+        assert upper["keys"] == body["keys"], f"keys={spelling!r} is case-sensitive"
+
+    # Omitted, and unrecognised, both leave the listing alone: advisory, so a misread
+    # spelling costs a walk rather than a wrong answer.
+    for query in ("", "&keys=banana"):
+        assert client.get(f"/kv/probe?format=json{query}").json()["keys"] != []

@@ -1769,12 +1769,32 @@ def note_list(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     ns = request.path_params["ns"]
-    keys = store.list_notes(config.ROOT, ns)
+    # ?keys=0 skips the full listing: list_notes() walks and returns every key
+    # name in the namespace, which is exactly the expensive, 503-prone shape
+    # #510 measured (131,072 names to answer one yes/no question). A caller who
+    # only wants at_capacity/capacity_per_namespace should never pay that cost.
+    # The accepted spellings are manifest.KEYS -- the same object _condition() reads for
+    # if_absent, and the same object the parameter's published description renders from, so
+    # the set the server honours cannot drift from the set the contract advertises (#282).
+    # The `"1"` stands in for an absent parameter: it is a true spelling, so omitting `keys`
+    # keeps today's default of listing. An unrecognised spelling reads as true and pays for
+    # the listing -- advisory, because the cost of misreading one is latency, not a wrong
+    # answer; `at_capacity` is correct either way.
+    skip = not manifest.KEYS.get(request.query_params.get("keys", "1").lower(), True)
+    keys = [] if skip else store.list_notes(config.ROOT, ns)
+    view = {"ns": ns, "keys": keys, **store.note_ns_stats(config.ROOT, ns)}
+    # The text lane carries the answer too. Without this, `keys=0` answered nothing at all
+    # there -- an empty body on the surface /llms.txt treats as primary, from the parameter
+    # added to make occupancy cheap to ask for. It does not make a skipped listing and an
+    # empty namespace distinguishable and is not trying to: the caller sent `keys`, so it
+    # already knows which it asked for. What it fixes is that the answer was missing.
+    body = "\n".join(f"/kv/{ns}/{k}" for k in keys) + store.note_ns_footer(view)
     note = budget_note("read", left, RATE_READ)
-    return _shareable(
-        respond(request, {"ns": ns, "keys": keys}, "\n".join(f"/kv/{ns}/{k}" for k in keys), note),
-        note,
-    )
+    # `keys` changes the body at one path, so a shared copy must not be keyed on the path
+    # alone: edge/src/worker.js keeps /kv off the CDN entirely today (worker.js:29, and
+    # cacheKey() returns null for an unlisted path), so this is inert until a /kv rule is
+    # added -- at which point `keys` has to be in that rule's allowlist (#730).
+    return _shareable(respond(request, view, body, note), note)
 
 
 def humans(request: Request) -> Response:
