@@ -1048,8 +1048,8 @@ def _read_seq_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
-def _seq_field(root: Path, room: str, key: str) -> int:
-    """`room`'s `floor` or `gen`, always as a non-negative int.
+def _seq_entry(root: Path, room: str) -> tuple[int, int]:
+    """`room`'s `(gen, floor)`, from one seq-state snapshot and as non-negative ints.
 
     Its shard first; the pre-shard map only when the shard has no entry, which after
     `_split_seq_state` has run is one failed `open` and no parse. That fallback is what makes
@@ -1057,14 +1057,14 @@ def _seq_field(root: Path, room: str, key: str) -> int:
     still answers correctly — and it stays safe afterwards because the split renames the old
     file away rather than leaving a second copy to read.
 
-    Coerces here rather than at each caller: both fields are read on the request path, so a
-    hand-edited or truncated map must degrade to 0 (never existed) and never raise.
+    Coerces here rather than at each caller: hand-edited or truncated state must degrade to
+    0 (never existed) and never raise.
     """
     entry = _read_seq_state(_seq_state_path(root, room)).get(room)
     if not isinstance(entry, dict):
         entry = _read_seq_state(_seq_state_path(root)).get(room)
-    value = entry.get(key) if isinstance(entry, dict) else None
-    return value if isinstance(value, int) and value >= 0 else 0
+    gen, floor = (entry.get("gen"), entry.get("floor")) if isinstance(entry, dict) else (None, None)
+    return (gen if isinstance(gen, int) and gen >= 0 else 0, floor if isinstance(floor, int) and floor >= 0 else 0)  # fmt: skip
 
 
 def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
@@ -1084,7 +1084,7 @@ def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
     path = _seq_state_path(root, room)
     try:
         with _locked(path):
-            gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
+            gen = _seq_entry(root, room)[0] + (1 if floor is None else 0)
             state = _read_seq_state(path)
             state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
             _replace(path, orjson.dumps(state), fsync=config.FSYNC)
@@ -1113,7 +1113,7 @@ def last_seq(root: Path, room: str) -> int:
     # reader's `since` stays below the new first_seq, so the new messages are not silently
     # invisible. Kept out of the room's bucket so it does not defeat the bucket-pruning
     # invariant — sharded 256 ways at the root instead (see `_seq_state_path`).
-    return _seq_field(root, room, "floor")
+    return _seq_entry(root, room)[1]
 
 
 def room_generation(root: Path, room: str) -> int:
@@ -1123,12 +1123,10 @@ def room_generation(root: Path, room: str) -> int:
     name now carries a different one. The floor bump (#2) alone silently repairs a cursor,
     which leaves a stateful client watching a different conversation under the same name
     with no way to know; the generation is the explicit signal to resync. 0 = never
-    existed. A reaped room keeps its last generation — `_reap` preserves it in the seq
-    state on purpose — until the name is recreated, which bumps it.
+    existed. A reaped room keeps its last generation until the name is recreated.
 
-    Read on every `read_messages`, which is why the map it consults is sharded: this was one
-    3.2 MB parse per request at a live deployment's history (#489)."""
-    return _seq_field(root, room, "gen")
+    Read on every `read_messages`, so generation and floor use the sharded seq state."""
+    return (state := _seq_entry(root, room))[0] + (int(state[1] > 0 and last_seq(root, room) > state[1]) if state[0] else int(room_path(root, room).exists()))  # fmt: skip
 
 
 # Engagement tripwires (docs/research/moltbook-adoption-analysis.md §II.2.2) are computed from
