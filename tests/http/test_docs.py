@@ -401,7 +401,7 @@ def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, mon
 
     # Same bytes as the installable SKILL.md — one artifact, so the skill an agent
     # installs and the skill it fetches can never drift.
-    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text()
+    skill = (Path(__file__).resolve().parents[2] / "SKILL.md").read_text(encoding="utf-8")
     assert client.get("/skill.md").text == skill
     assert client.get("/skill.md").headers["content-type"].startswith("text/plain")
     assert "/llms.txt" in client.get("/skill.md").text  # points at the full reference
@@ -1202,7 +1202,7 @@ def test_openapi_limits_are_the_limits_the_server_enforces(client):
     room = next(p for p in say["parameters"] if p["name"] == "room")
     assert room["schema"]["pattern"] == store.NAME_RE.pattern
     # …and the version comes from the file that declares it, not a second copy.
-    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
     assert doc["info"]["version"] in pyproject
 
 
@@ -1426,7 +1426,9 @@ def test_the_skill_the_image_and_the_wrapper_all_name_one_version(client):
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    service = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
+    service = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "version"
+    ]
 
     skill = client.get("/.well-known/agent-skills/index.json").json()["skills"][0]
     assert skill["version"] == service
@@ -1435,7 +1437,10 @@ def test_the_skill_the_image_and_the_wrapper_all_name_one_version(client):
     assert {"name", "type", "description", "url", "digest"} <= set(skill)
     assert client.get("/openapi.json").json()["info"]["version"] == service
     assert client.get("/.well-known/agent.json").json()["version"] == service
-    assert json_module.loads((root / "mcp" / "server.json").read_text())["version"] == service
+    assert (
+        json_module.loads((root / "mcp" / "server.json").read_text(encoding="utf-8"))["version"]
+        == service
+    )
 
 
 def test_the_api_catalog_only_links_paths_this_origin_answers(client):

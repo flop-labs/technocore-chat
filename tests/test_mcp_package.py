@@ -70,7 +70,7 @@ def test_distribution_verifier_rejects_nested_sdist_legal_files(tmp_path):
 
 
 def test_ci_verifies_the_mcp_artifacts_after_building_them():
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     build = workflow.index("uv build --project mcp")
     verify = workflow.index("uv run python tests/verify_mcp_dist.py")
     assert build < verify
