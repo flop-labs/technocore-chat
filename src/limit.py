@@ -158,9 +158,17 @@ def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None
     One function so reserving and releasing a copy can never disagree about what "the
     same text" is — a release that normalised differently would leak the reservation it
     was meant to hand back.
+
+    The floor is measured on both forms, and the shorter one decides. The promise is made
+    in the caller's units — the manual says a text shorter than the floor is never refused,
+    and a caller can only count what they typed — but NFKC can grow a text past the floor:
+    U+FDFA is one character as typed and eighteen after normalisation, so keying the floor
+    on the normalised length alone refused the shortest possible message. Measuring only
+    the typed length would open the other direction, a wide text collapsing to a short
+    key, so both have to clear the floor before a text is filterable.
     """
     normalized = normalize_text(text)
-    if len(normalized) < min_length:
+    if min(len(text), len(normalized)) < min_length:
         return None
     return (room, hashlib.blake2b(normalized.encode("utf-8"), digest_size=16).digest())
 
