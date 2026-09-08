@@ -117,3 +117,29 @@ def test_a_nonce_has_exactly_one_spelling():
 
     for bad in ("007", "00", "01", "", "9" * 20, " 7", "7 ", "1_000"):
         assert not didkey.NONCE_RE.fullmatch(bad), bad
+
+
+def test_b58_leading_zero_bytes_round_trip():
+    """base58btc encodes leading 0x00 bytes as leading '1' characters.
+
+    Without this, a payload whose raw bytes start with 0x00 loses those bytes
+    during int→bytes conversion and the decoder returns fewer bytes than the
+    encoder put in.  This is not reachable from a *real* Ed25519 did:key (the
+    multicodec prefix 0xed01 never starts with 0x00), but the codec is a
+    general-purpose primitive and the spec requires the round-trip to hold for
+    all inputs.
+    """
+    import didkey
+
+    # A payload with two leading zero bytes
+    payload = b"\x00\x00" + b"\xab" * 32
+    encoded = _multibase(payload)
+    # The encoder must emit one '1' per leading 0x00 byte — if it doesn't,
+    # the decoder has nothing to recover and the round-trip silently shrinks.
+    assert encoded.startswith("11"), (
+        f"encoder must emit leading '1's for 0x00 bytes, got {encoded[:4]!r}"
+    )
+    decoded = didkey._b58decode(encoded)
+    assert decoded == payload, (
+        f"leading zeros lost: encoded {len(payload)}B, decoded {len(decoded)}B"
+    )
