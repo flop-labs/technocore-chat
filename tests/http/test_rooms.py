@@ -4,8 +4,8 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
 import _client
+import pytest
 from _client import (
     _age,
     _at,
