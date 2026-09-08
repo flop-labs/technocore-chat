@@ -20,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import didkey
 
+from .durable import fsync_dir, mkdir_durable
+
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
@@ -71,7 +73,7 @@ class Keyring:
 
     def _create(self) -> bytes:
         seed = Ed25519PrivateKey.generate().private_bytes_raw()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_durable(self._path.parent)
         # Opened 0600 rather than written and then chmod'ed: between those two calls the
         # seed exists at the process umask, and that window is the whole exposure.
         fd = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -79,6 +81,10 @@ class Keyring:
             handle.write(base64.urlsafe_b64encode(seed).decode().rstrip("="))
             handle.flush()
             os.fsync(handle.fileno())
+        # The bytes are durable; the *name* is not until the directory holding it is synced.
+        # Without this the constructor can return a working identity and a power loss can leave
+        # the next process generating a different one (@yukkie3276, #803).
+        fsync_dir(self._path.parent)
         return seed
 
     def sign(self, message: str) -> str:

@@ -47,6 +47,8 @@ import os
 import time
 from pathlib import Path
 
+from .durable import fsync_dir, mkdir_durable
+
 # The highest nonce this *process* has issued, across every store object and every pair.
 # A store rebuilt from a deleted file knows nothing, and the clock alone cannot separate
 # two allocations landing in the same millisecond — so the one thing still available, the
@@ -91,13 +93,13 @@ class NonceStore:
         `os.replace`, so a lock held on it would follow the old inode and stop excluding
         anyone the moment the first writer finished.
         """
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_durable(self._path.parent)
         fd = os.open(str(self._path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         return fd
 
     def _flush(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_durable(self._path.parent)
         tmp = self._path.with_suffix(f"{self._path.suffix}.{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(self._state, handle, indent=2, sort_keys=True)
@@ -105,11 +107,7 @@ class NonceStore:
             os.fsync(handle.fileno())
         os.replace(tmp, self._path)
         # The rename itself needs to be durable, not just the bytes it points at.
-        directory = os.open(self._path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        fsync_dir(self._path.parent)
 
     def last(self, did: str, room: str) -> int | None:
         """The last nonce allocated for this pair, or None if there has never been one."""

@@ -11,6 +11,7 @@ and that is the failure a standalone test cannot see.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -156,6 +157,44 @@ def test_a_corrupt_nonce_file_is_not_fatal(tmp_path) -> None:
 
     fresh = NonceStore(home / "nonces.json")
     assert fresh.allocate(signer.did, "room") > used
+
+
+def test_a_new_seed_makes_its_directory_entry_durable(tmp_path, monkeypatch) -> None:
+    """@yukkie3276, #803: fsyncing the seed file does not make its *name* durable.
+
+    Power loss is not reproducible in a test, so this asserts the call rather than the outcome —
+    that a directory handle is fsynced after the seed is written, and that the directories the
+    keyring itself created are covered too. Asserting the mechanism is weaker than asserting the
+    property and is the strongest thing available here; the alternative is asserting nothing,
+    which is how the gap survived review-free for a day.
+    """
+    home = tmp_path / "deep" / "nested" / "home"
+    # Identify each fsynced handle by (device, inode) rather than by a path: /dev/fd does not
+    # resolve back to a name on macOS, and an inode pair is exact on every platform this runs on.
+    synced: set[tuple[int, int]] = set()
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            synced.add((info.st_dev, info.st_ino))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    signer = Signer(home)
+    assert (home / "seed").exists()
+
+    def ident(path: Path) -> tuple[int, int]:
+        info = path.stat()
+        return (info.st_dev, info.st_ino)
+
+    # The directory holding the seed, and every directory this call had to create beneath an
+    # existing one, must have had its own entries flushed.
+    assert ident(home) in synced, "the seed's own directory was never fsynced"
+    for created in (tmp_path / "deep", tmp_path / "deep" / "nested"):
+        assert ident(created) in synced, f"{created.name} was created but its entry never flushed"
+    # And the identity is stable across a reload, which is what the durability protects.
+    assert Keyring(home / "seed").did == signer.did
 
 
 def test_concurrent_processes_never_hand_out_the_same_nonce(tmp_path) -> None:
