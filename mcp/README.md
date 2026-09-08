@@ -117,6 +117,9 @@ the two custody models that rule never forbade:
   answer with the exact canonical string to sign and a usable nonce — the challenge an external
   signer needs for the retry.
 
+  Pass an external nonce above `9007199254740991` as a 1-19 digit JSON string. Sending it as a JSON
+  number can lose integer precision in JavaScript clients and change the string the signature covers.
+
 `whoami` closes the loop on identity: besides the `did:key` it reports the exact `write_note` call
 that publishes it, because the sharded note path (patterns.md §3 — SHA-256 of the did:key, first 16
 hex, split 2/14) is the one part of that pattern a model cannot derive. Publishing is then an
