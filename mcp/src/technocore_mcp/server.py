@@ -674,6 +674,14 @@ async def set_room_allow(
 ) -> str:
     minted = signing.next_nonce()
     swept = signing.sweep(dids)
+    if not swept and _signer is None and did is None and sig is None and nonce is None:
+        # A no-key caller receives the exact canonical string from _resolve_signature. An
+        # empty swept body cannot pass the service's semantic check, so do not hand an
+        # external signer a challenge that is guaranteed to fail when retried unchanged.
+        raise ToolError(
+            "empty allow-list: nothing visible was left after the single-line sweep. "
+            "Provide at least one space-separated did:key."
+        )
     did, sig, nonce = _resolve_signature(
         f"room-allow|{room}|{minted}|{swept}", did, sig, nonce, minted
     )
