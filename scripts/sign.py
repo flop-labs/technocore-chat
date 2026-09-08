@@ -105,6 +105,25 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # replaces with a space. Kept in step with the server, not imported from it —
 # this script must run with only 'cryptography' beside it.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The assigned default-ignorable codepoints the server also sweeps (store.py SWEEP_ALSO): they
+# render as nothing but sit in Mn/Lo, so INVISIBLE_CATEGORIES misses them. Mostly the variation
+# selectors.
+# Mirrored here so a signature covers the bytes the server stores, not the ones the caller typed.
+SWEEP_ALSO = frozenset(
+    chr(cp)
+    for start, end in (
+        (0x034F, 0x034F),  # combining grapheme joiner
+        (0x115F, 0x1160),  # Hangul choseong, jungseong fillers
+        (0x17B4, 0x17B5),  # Khmer vowel inherent AQ, AA
+        (0x180B, 0x180D),  # Mongolian free variation selectors 1-3
+        (0x180F, 0x180F),  # Mongolian free variation selector 4
+        (0x3164, 0x3164),  # Hangul filler
+        (0xFE00, 0xFE0F),  # variation selectors 1-16
+        (0xFFA0, 0xFFA0),  # halfwidth Hangul filler
+        (0xE0100, 0xE01EF),  # variation selectors supplement 17-256
+    )
+    for cp in range(start, end + 1)
+)
 
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
@@ -140,7 +159,8 @@ def swept(text: str, limit: int) -> str:
     over the cap), so a caller learns it here rather than from a 4xx.
     """
     cleaned = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES or c in SWEEP_ALSO) else c
+        for c in text
     ).strip()
     if not cleaned:
         raise SystemExit(

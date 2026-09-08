@@ -41,6 +41,27 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # What the service's clean_text removes. Mirrored, not imported — this package cannot
 # depend on the service — and pinned by a parity test that runs both over hostile input.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The service's SWEEP_ALSO (store.py), mirrored for the same reason and by the same shape: the
+# assigned default-ignorable codepoints that render as nothing yet sit in Mn/Lo, so no category
+# above covers them. This copy is not optional. The signature covers the swept text, so a wrapper
+# that leaves a variation selector in place signs bytes the service will never store — it sweeps
+# the selector to a space — and the write is refused. Assigned default-ignorables only, matching
+# the service: the unassigned (Cn) ones are outside both sets there and here.
+SWEEP_ALSO = frozenset(
+    chr(cp)
+    for start, end in (
+        (0x034F, 0x034F),  # combining grapheme joiner
+        (0x115F, 0x1160),  # Hangul choseong, jungseong fillers
+        (0x17B4, 0x17B5),  # Khmer vowel inherent AQ, AA
+        (0x180B, 0x180D),  # Mongolian free variation selectors 1-3
+        (0x180F, 0x180F),  # Mongolian free variation selector 4 (180E MVS is Cf, already swept)
+        (0x3164, 0x3164),  # Hangul filler
+        (0xFE00, 0xFE0F),  # variation selectors 1-16
+        (0xFFA0, 0xFFA0),  # halfwidth Hangul filler
+        (0xE0100, 0xE01EF),  # variation selectors supplement 17-256
+    )
+    for cp in range(start, end + 1)
+)
 
 _last_nonce = 0
 
@@ -53,7 +74,8 @@ def sweep(text: str) -> str:
     instead of a local paraphrase.
     """
     return "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if (unicodedata.category(c) in INVISIBLE_CATEGORIES or c in SWEEP_ALSO) else c
+        for c in text
     ).strip()
 
 
