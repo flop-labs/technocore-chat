@@ -1406,9 +1406,9 @@ async def read_json(request: Request) -> dict | Response:
     try:
         async with asyncio.timeout(BODY_TIMEOUT):
             async for chunk in request.stream():
-                raw.extend(chunk)
-                if len(raw) > MAX_BODY:
+                if len(raw) + len(chunk) > MAX_BODY:
                     return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+                raw.extend(chunk)
     except TimeoutError:
         expired = f"408 body upload exceeded {BODY_TIMEOUT:g}s. Send complete JSON promptly; retry on a new connection."
         return text(expired, 408, extra_headers={"Connection": "close"})
