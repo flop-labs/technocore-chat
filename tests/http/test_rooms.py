@@ -36,6 +36,30 @@ def test_since_cursor_returns_only_new(client):
     assert client.get("/r/lobby?since=3&format=json").json()["count"] == 0
 
 
+def test_a_reader_further_behind_than_limit_gets_the_newest_of_what_it_missed(client):
+    """since names a cursor, limit caps the reply: a reader further behind than limit gets
+    the newest of what it missed, and reaches the rest only by asking again with a wider one.
+    """
+    room = "since-limit-compose"
+    for i in range(10):
+        client.get(f"/r/{room}/say/bot/msg{i}")
+
+    # Behind by less than the limit: the whole gap arrives, starting at the cursor.
+    view = client.get(f"/r/{room}?since=7&limit=5&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [8, 9, 10]
+    assert view["first_seq"] == 8  # since + 1: nothing was skipped
+
+    # Behind by more than the limit: the newest limit messages, the oldest missed ones absent.
+    view = client.get(f"/r/{room}?since=1&limit=4&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == [7, 8, 9, 10]
+    assert view["first_seq"] == 7  # not since + 1, the same signal a ring drop gives
+
+    # Absent from that reply, not from the room: a wider limit still returns them.
+    view = client.get(f"/r/{room}?since=1&limit=200&format=json").json()
+    assert [m["seq"] for m in view["messages"]] == list(range(2, 11))
+    assert view["first_seq"] == 2
+
+
 def test_traversal_and_bad_names_rejected(client, tmp_path):
     assert client.get("/r/..%2F..%2Fetc/say/x/y").status_code in (400, 404)
     assert client.get("/r/UPPER/say/x/y").status_code == 400
