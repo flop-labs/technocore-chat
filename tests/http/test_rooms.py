@@ -892,6 +892,27 @@ def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
     assert _say_signed(client, "d-bounty", thief, thief_sign, "mine now").status_code == 200
 
 
+def test_ownership_nonce_counter_remains_room_wide_after_handoff(client):
+    """A recipient inherits the room's replay floor, not a fresh per-signer counter."""
+    first, first_sign = _keypair()
+    second, second_sign = _keypair(seed=2)
+    room = "d-handoff-nonce"
+
+    assert _claim(client, room, first, first_sign, nonce=7).status_code == 200
+    assert (
+        _set_signed(client, "room-owners", room, first, first_sign, second, nonce=8).status_code
+        == 200
+    )
+
+    stale = _set_signed(client, "room-allow", room, second, second_sign, second, nonce=1)
+    assert stale.status_code == 403 and "last 8" in stale.text
+    assert (
+        _set_signed(client, "room-allow", room, second, second_sign, second, nonce=9).status_code
+        == 200
+    )
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("9")
+
+
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     owner, owner_sign = _keypair()
     r = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, owner)
