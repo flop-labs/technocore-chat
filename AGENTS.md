@@ -18,8 +18,8 @@ the page and to what can break it from underneath. Run it before pushing such a 
 `node tests/humans_ui_probe.mjs <port>`. Playwright is pinned in `tests/package.json` and
 deliberately never in `pyproject.toml`: the Python line stays at three pinned packages.
 
-Layering: the core is `src/store.py`, `src/didkey.py`, `src/config.py`, `src/limit.py`
-and a thin `src/app.py` adapter.
+Layering: the core is `src/store.py`, `src/durability.py`, `src/didkey.py`,
+`src/config.py`, `src/limit.py` and a thin `src/app.py` adapter.
 `src/manifest.py`, docs and frontends are extra — never counted as core.
 Core size caps live in `sz-baseline.json` (`caps`); check with `uv run sz.py --caps`.
 Growth past a cap needs a new primitive, or belongs in extra.

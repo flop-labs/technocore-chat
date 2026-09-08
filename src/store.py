@@ -29,6 +29,7 @@ import orjson
 
 import config
 import didkey
+import durability
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -667,11 +668,11 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     """Put `data` at `path` atomically, staging through a name no other writer can hold.
 
-    `os.replace` is the atomic half, and it was always here; the staging name was the half
-    that was not. A temp file named after its destination is shared by everyone writing that
-    destination, so two writers racing it meant the second renamed a file the first had
-    already consumed — `FileNotFoundError` on a path that plainly exists, surfacing out of a
-    note create that was only trying to record itself.
+    `os.replace` is the atomic half, and it was always here; when `fsync` is requested,
+    syncing the parent after that rename is the durable half. The staging name was the half
+    that was not unique. A temp file named after its destination is shared by everyone
+    writing that destination, so two writers racing it meant the second renamed a file the
+    first had already consumed — `FileNotFoundError` on a path that plainly exists.
 
     Unique per *writer* rather than per process: sync handlers overlap in the thread pool, so
     a pid alone still collides inside one worker.
@@ -682,10 +683,10 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     in the store, on the read path the count file exists to keep cheap.
 
     Every non-append write in the core comes through here — counters, both note counts, the
-    usage gauge, the snapshot ring, a note's own value, and a compacted room. Only the last
-    needs `fsync`: a room that loses its compaction has lost its whole retained ring, which
-    is why CHAT_FSYNC trades away an append's fsync and never that one. Everything else is
-    a figure the next reap rewrites anyway.
+    usage gauge, the snapshot ring, a note's own value, sequence state, and a compacted room.
+    Compaction always requests `fsync`: losing that replacement loses the retained ring.
+    Sequence-state writes follow CHAT_FSYNC. Both sync the file before replacement and its
+    parent afterward; the other callers retain their existing non-syncing behavior.
 
     mkstemp opens 0600; the writes this replaces went through `write_text` and `open("wb")`
     and landed 0644 under the default umask, so the mode is restored explicitly rather than
@@ -698,13 +699,15 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
         with os.fdopen(fd, "wb") as f:
             os.fchmod(f.fileno(), 0o644)
             f.write(data)
-            if fsync:  # compaction only: see the knob, which never applied to this one
+            if fsync:  # compaction always; sequence-state writes follow CHAT_FSYNC
                 f.flush()
                 os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)  # never leave a stray: rmdir needs the dir empty
         raise
+    if fsync:
+        durability.fsync_parent(path)
 
 
 def _now() -> str:
@@ -2515,7 +2518,7 @@ def _write_record(
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
-    path = room_path(root, room)
+    path, root_existed = room_path(root, room), root.exists()
     # Validated here rather than trusted from the caller: `from` is the one field readers
     # treat as provenance, and the allowlist that protects it does not apply to a DID (it
     # rejects ':'). One place decides the shape, for both write lanes.
@@ -2583,6 +2586,10 @@ def _write_record(
             f.flush()
             if config.FSYNC:  # see the knob: the one durability trade an operator may make
                 os.fsync(f.fileno())
+        if config.FSYNC:
+            # The record is committed before these entry syncs. A failure stays loud even
+            # though a client retry can duplicate it; claiming durability would be worse.
+            durability.sync_room_entry(root, path, root_was_missing=not root_existed)
         limit = _ring_limit(root)
         # `size + len(line)` rather than another stat(): we hold the exclusive lock, we
         # just wrote `line`, and `size` was read after the torn-tail heal decided whether
