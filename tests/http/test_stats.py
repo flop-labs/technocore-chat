@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import _client
+import httpx2 as httpx  # the declared dependency; starlette.testclient aliases it the same way
 import pytest
 from starlette.testclient import TestClient
 
@@ -91,6 +92,101 @@ def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     assert stats_client.get("/stats").status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def _token_bytes(raw: bytes) -> httpx.Headers:
+    """`X-Stats-Token` as bytes, through the client stack. `headers=` is typed `Mapping[str, str]`
+    and httpx encodes a str value as ASCII, so neither can carry a byte above 0x7F — which is
+    why no existing test ever reached the compare. `httpx.Headers` built from byte pairs is a
+    Mapping for the checker; on the wire it keeps valid UTF-8 as sent but re-encodes a lone
+    high byte (0xF6 arrives as C3 B6). Either way the handler sees non-ASCII latin-1 text, which
+    is what raised. The exact malformed-byte round trip is pinned by the raw-ASGI test below."""
+    return httpx.Headers([(b"x-stats-token", raw)])
+
+
+def test_a_non_ascii_token_gets_the_same_404_as_an_unrouted_path(stats_client):
+    """`secrets.compare_digest` refuses non-ASCII *strings* with a TypeError, and Starlette
+    hands the handler the header as latin-1 text, so any byte above 0x7F in `X-Stats-Token`
+    raised — a 500. That is the one answer that tells a prober the route exists: a path
+    that was never routed does not 500 on a header. The 404 must stay byte-identical for
+    a high byte exactly as it does for a wrong ASCII token, and the right token must still
+    open the door."""
+    missing = stats_client.get("/definitely-not-a-route")
+    for raw in (b"t\xf6ken", b"\xe2\x9c\x93", b"\xff", b"s3cret\xc3\xa9"):
+        probe = stats_client.get("/stats", headers=_token_bytes(raw))
+        assert probe.status_code == missing.status_code, raw
+        assert probe.text == missing.text, raw
+    assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def _raw_asgi_get(app, path: str, token: bytes | None) -> tuple[int, bytes]:
+    """One GET straight into the ASGI app with the header bytes EXACTLY as given — no client
+    stack in between to re-encode them. This is the only way to put a lone high byte on the
+    wire, and a lone high byte is the malformed case the latin-1 round trip exists for."""
+    import asyncio
+
+    headers = [(b"host", b"t")] + ([(b"x-stats-token", token)] if token is not None else [])
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "server": ("t", 80),
+        "client": ("127.0.0.1", 1),
+        "headers": headers,
+    }
+    out: dict = {"body": b""}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            out["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            out["body"] += message.get("body", b"")
+
+    asyncio.run(app(scope, receive, send))
+    return out["status"], out["body"]
+
+
+def test_a_lone_high_byte_reaches_the_compare_as_latin_1_and_still_404s(stats_client):
+    """The client-stack tests above send bytes that arrive as valid UTF-8. A *malformed* header
+    — a single byte above 0x7F with no UTF-8 sequence around it — is the case the latin-1
+    round trip is for, and no client will send one, so it goes straight into the ASGI app.
+    Starlette decodes it as latin-1 (0xF6 -> U+00F6); encoding it back is the same byte; the
+    compare then runs on bytes and returns the byte-identical 404, where it used to raise."""
+    app = stats_client.app
+    missing_status, missing_body = _raw_asgi_get(app, "/definitely-not-a-route", None)
+    for raw in (bytes.fromhex("f6"), bytes.fromhex("ff"), b"s3cret" + bytes.fromhex("f6")):
+        status, body = _raw_asgi_get(app, "/stats", raw)
+        assert status == missing_status == 404, raw
+        assert body == missing_body, raw
+    assert _raw_asgi_get(app, "/stats", b"s3cret")[0] == 200
+
+
+def test_a_non_ascii_configured_token_can_be_presented(tmp_path, monkeypatch):
+    """The same TypeError fired on the *configured* side: a token an operator set to
+    non-ASCII made the endpoint a 500 for every caller, the right one included, because the
+    string compare could never run. Both sides are bytes now — UTF-8 on the wire, its
+    latin-1 round-trip in the header — so the operator's token is simply a token."""
+    import app as app_module
+    import config
+
+    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
+    app_module._buckets.clear()
+    app_module._rooms_walk.cache_clear()
+    with config.override(ROOT=tmp_path, STATS_TOKEN="t\u00f6k\u00e9n", STATS_CACHE_SECONDS=0):
+        client = TestClient(app_module.app)
+        right = "t\u00f6k\u00e9n".encode("utf-8")
+        assert client.get("/stats", headers=_token_bytes(right)).status_code == 200
+        assert client.get("/stats", headers=_token_bytes(b"t\xc3\xb6k\xc3\xa9x")).status_code == 404
+        assert client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
 
 
 def test_stats_counts_every_room_class_and_names_none_of_them(stats_client):
