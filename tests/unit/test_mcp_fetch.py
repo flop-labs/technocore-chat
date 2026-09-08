@@ -34,6 +34,14 @@ class _Handler(BaseHTTPRequestHandler):
     """Echoes the method, path, User-Agent and any body; takes its status from the path."""
 
     def _answer(self):
+        if self.path == "/truncated":
+            body = b"partial"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body) + 10))
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = True
+            return
         status = 429 if self.path.startswith("/slow-down") else 200
         length = int(self.headers.get("Content-Length") or 0)
         received = self.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -109,3 +117,9 @@ def test_no_answer_at_all_raises_oserror():
         closed = probe.getsockname()[1]
     with pytest.raises(OSError):
         fetch(f"http://127.0.0.1:{closed}/r/lobby")
+
+
+def test_an_answer_truncated_in_transit_raises_oserror(origin):
+    """A proxy closing mid-body is a transport failure, not an internal urllib exception."""
+    with pytest.raises(OSError):
+        fetch(f"{origin}/truncated")

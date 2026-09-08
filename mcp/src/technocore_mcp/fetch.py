@@ -13,14 +13,15 @@ answer differs per platform:
   `mcp/worker/src/worker.py` injects its own `Fetch` instead of using this one.
 
 The seam is deliberately the *whole* transport and nothing else: method, URL, headers
-and an optional body in; status and body text out. No exception translation, no URL
-building, no JSON encoding — everything a tool's answer depends on stays in `server.py`,
+and an optional body in; status and body text out. Transport failures become `OSError`;
+URL building, JSON encoding and every other part of a tool's answer stay in `server.py`,
 written once, identical on both platforms. A seam drawn any higher would be two copies
 of the part that matters.
 """
 
 from __future__ import annotations
 
+import http.client
 import urllib.error
 import urllib.request
 from collections.abc import Awaitable, Callable
@@ -31,9 +32,16 @@ import anyio.to_thread
 # send, already encoded (or None for a bodiless GET) — encoding happens above the seam so
 # both platforms put identical bytes on the wire. Returns `(status, body_text)` for every
 # HTTP answer, success or failure — a 429 is a value here, not an exception, because its
-# body is the part the model needs. Raise `OSError` (and only `OSError`) when there was
-# no HTTP answer at all.
+# body is the part the model needs. Raise `OSError` (and only `OSError`) when the transport
+# could not deliver a complete HTTP answer.
 Fetch = Callable[[str, str, dict[str, str], bytes | None, float], Awaitable[tuple[int, str]]]
+
+
+def _read(response) -> str:
+    try:
+        return response.read().decode("utf-8", "replace")
+    except http.client.IncompleteRead as exc:
+        raise OSError(str(exc)) from None
 
 
 def _blocking_request(
@@ -48,11 +56,11 @@ def _blocking_request(
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read().decode("utf-8", "replace")
+            return response.status, _read(response)
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
+        return exc.code, _read(exc)
     except urllib.error.URLError as exc:
-        # The one case with no HTTP answer: DNS, refused connection, TLS, timeout.
+        # The cases with no HTTP answer: DNS, refused connection, TLS, timeout.
         # `URLError` is already an `OSError`, but its `reason` is the readable half.
         raise OSError(exc.reason) from None
 
