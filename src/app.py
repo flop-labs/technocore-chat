@@ -1449,13 +1449,22 @@ async def room_post(request: Request) -> Response:
     room = request.path_params["room"]
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
-    # were `str()`-coerced here for the same reason `from`/`text` were (#427).
+    # were `str()`-coerced here for the same reason `from`/`text` were (#427). `re` is an
+    # optional reply reference: appended to the signed canonical so a signed reply is
+    # integrity-protected, and passed straight to store.append (which bounds-checks it).
     did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    re_body = payload.get("re")
     signer = None
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
         body = store.clean_text(sent)
-        signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
+        # \x1f is a Cc control char; clean_text replaces every Cc char with a space before
+        # storage, so it can never appear in swept `body`. Using it as the re marker keeps
+        # the canonical unambiguous (text="hello|5", re=None -> room|nonce|hello|5 ;
+        # text="hello", re=5 -> room|nonce|hello\x1fre=5) while leaving the re=None canonical
+        # byte-identical to main, so already-signed messages keep re-verifying.
+        canonical = f"{room}|{nonce}|{body}" + (f"\x1fre={re_body}" if re_body is not None else "")
+        signer = _signer(did, sig, nonce, canonical)
         if isinstance(signer, Response):
             return signer
 
@@ -1475,13 +1484,13 @@ async def room_post(request: Request) -> Response:
             with _dupe_slot(room, sent) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, nick, sent)
+                posted = store.append(config.ROOT, room, nick, sent, re=re_body)
         else:
             with _dupe_slot(room, body) as refused:
                 if refused:
                     return _dupe_refusal(request, room)
                 posted = store.append(
-                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
+                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig, re=re_body
                 )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
