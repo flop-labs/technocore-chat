@@ -258,6 +258,23 @@ def test_the_edge_cached_lane_shares_its_copy_only_with_the_edge():
     )
 
 
+def test_healthz_query_variants_use_one_worker_route_and_cache_key():
+    """`/healthz` has no query semantics, so variants must not bypass or multiply its cache."""
+    raw = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
+    patterns = {
+        r["pattern"] for r in json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))["routes"]
+    }
+    assert "technocore.chat/healthz*" in patterns
+    assert _snapshot_module().edge_key()["/healthz"] == {}
+
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = _between(worker, "async function edgeCached(", "/** Resolves")
+    assert "const key = cacheKey(new URL(request.url), pathname) ?? request;" in lane
+    assert "cache.match(key)" in lane
+    assert "fetch(key," in lane
+    assert "cache.put(key," in lane
+
+
 def test_the_revalidating_lane_never_makes_a_reader_wait_for_the_origin():
     """The property the lane exists for, asserted on the source for want of a JS harness —
     and the one a later edit would quietly remove. /rooms is an O(total-rooms) walk (#576)
