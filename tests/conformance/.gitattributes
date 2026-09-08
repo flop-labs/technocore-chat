@@ -1,0 +1,10 @@
+# A vendored fixture, so its bytes are what a client outside this repo receives. `-text` was the
+# wrong attribute for that: it only tells Git not to CONVERT line endings, so a checkout whose
+# editor writes CRLF commits CRLF verbatim and every byte-level copy of this file then diverges by
+# platform. `text eol=lf` normalises on the way INTO the index instead, which is the guarantee the
+# comment here always claimed. Measured on this fixture: a CRLF-authored copy commits byte-identical
+# to today's blob under `eol=lf` (26520 bytes, zero CR) and 739 bytes larger under `-text`.
+#
+# The tests in this directory parse the JSON, so none of them could ever have caught it — the
+# exposure is entirely in the vendoring copy, which is the whole reason the file exists.
+vectors.json text eol=lf
