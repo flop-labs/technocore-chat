@@ -583,8 +583,12 @@ const browser = await chromium.launch({
         await page.textContent("#status"));
   check("signing: stored under the DID, not a nickname",
         view.messages[0]?.from === EXPECTED, view.messages[0]?.from);
-  check("signing: the nonce is in the record, so the write re-verifies later",
-        Number.isInteger(view.messages[0]?.nonce));
+  // Canonical decimal TEXT, not a JSON number: nineteen digits do not survive Number, and
+  // a reader rebuilds `room|nonce|text` from exactly these characters (#711).
+  check("signing: the nonce is in the record as decimal text, so the write re-verifies later",
+        typeof view.messages[0]?.nonce === "string"
+          && /^(0|[1-9][0-9]{0,18})$/.test(view.messages[0].nonce),
+        view.messages[0]?.nonce);
 
   // Two writes from one key into one room is where store._last_nonce bites: the second is
   // refused unless the page stepped the nonce past the first.
@@ -596,7 +600,7 @@ const browser = await chromium.launch({
         await page.textContent("#status"));
   if (view.messages.length === 2)
     check("signing: the nonce strictly increased",
-          view.messages[1].nonce > view.messages[0].nonce,
+          BigInt(view.messages[1].nonce) > BigInt(view.messages[0].nonce), // text: no `>` on strings
           `${view.messages[0].nonce} -> ${view.messages[1].nonce}`);
 
   // The sweep. One character from three of the six categories store.clean_text replaces:
