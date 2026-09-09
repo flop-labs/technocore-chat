@@ -823,7 +823,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "summary": "Room overview, newest activity first, with topics and aggregates.",
                     "description": (
                         "Unlisted (`p-`) rooms never appear. `?format=json` additionally "
-                        "carries per-room engagement aggregates over a bounded window.\n\n"
+                        "carries per-room engagement aggregates over a bounded window and "
+                        "a name-free `whole_store` capacity aggregate aligned with the "
+                        "room creation gate.\n\n"
                         "**Two fields on every entry are caller-controlled.** A room "
                         "exists because someone wrote to it, so `room` is a string that "
                         "caller chose and this listing re-emits; `topic` is a "
@@ -875,6 +877,24 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
                                     "bytes": {"type": "integer"},
+                                    "bytes_capacity": {"type": "integer"},
+                                    "whole_store": {
+                                        "type": "object",
+                                        "description": (
+                                            "Whole-store room count and byte usage used by "
+                                            "capacity enforcement. Aggregate numbers only; "
+                                            "unlisted room identities remain undisclosed."
+                                        ),
+                                        "properties": {
+                                            key: {"type": "integer"}
+                                            for key in (
+                                                "total",
+                                                "capacity",
+                                                "bytes",
+                                                "bytes_capacity",
+                                            )
+                                        },
+                                    },
                                     "notes": {"type": "object"},
                                     "engagement": {"type": "object"},
                                     "untrusted": {
