@@ -1418,6 +1418,8 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
                 **_engagement(nicks),
             }
         )
+    whole_total, whole_bytes = _note_totals(root, _count_rooms, name=USAGE_FILE)
+    # fmt: off
     return {
         "rooms": shown,
         "total": len(entries),
@@ -1427,8 +1429,11 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        # The exact count/byte pair the create gate enforces, names deliberately absent.
+        "whole_store": {"total": whole_total, "capacity": MAX_ROOMS, "bytes": whole_bytes, "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
         "engagement": _rollup(windows),
     }
+    # fmt: on
 
 
 def service_stats(root: Path, engagement_rooms: int = 50) -> dict:

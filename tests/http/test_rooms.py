@@ -470,6 +470,12 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        "whole_store": {
+            "total": 0,
+            "capacity": store.MAX_ROOMS,
+            "bytes": 0,
+            "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        },
         "notes": {
             "total": 0,
             "bytes": 0,
@@ -540,6 +546,46 @@ def test_rooms_kind_filters_before_the_detail_limit(client, tmp_path):
         "default": "all",
     }
     assert "before applying `limit`" in kind["description"] and "400" in operation["responses"]
+
+
+def test_rooms_whole_store_capacity_counts_unlisted_without_naming_them(
+    client, tmp_path, monkeypatch
+):
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10)
+    assert client.get("/r/discussion/say/bot/hello").status_code == 200
+    for i in range(8):
+        assert client.get(f"/r/p-hidden-{i}/say/bot/hello").status_code == 200
+    store._reap_pass(tmp_path, store.time.time())
+    app_module._rooms_walk.cache_clear()
+
+    views = {
+        kind: client.get(f"/rooms?kind={kind}&format=json").json()
+        for kind in ("discussion", "mailbox", "all")
+    }
+    assert {kind: view["total"] for kind, view in views.items()} == {
+        "discussion": 2,  # the public room plus the server's events room
+        "mailbox": 0,
+        "all": 2,
+    }
+    whole = {
+        "total": 10,
+        "capacity": 10,
+        "bytes": store._count_rooms(tmp_path)[1],
+        "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+    }
+    assert all(view["whole_store"] == whole for view in views.values())
+    assert "p-hidden" not in client.get("/rooms?kind=all&format=json").text
+    refused = client.get("/r/eleventh/say/bot/no-room")
+    assert refused.status_code == 400 and "room limit reached" in refused.text
+
+    schema = client.get("/openapi.json").json()
+    whole = schema["paths"]["/rooms"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["whole_store"]
+    assert set(whole["properties"]) == {"total", "capacity", "bytes", "bytes_capacity"}
 
 
 def test_rooms_text_empty_state_names_the_selected_kind(client):
