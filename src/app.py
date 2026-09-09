@@ -1697,8 +1697,6 @@ def note_write(request: Request) -> Response:
     if denied:
         return denied
     meta = store.note_set(config.ROOT, p["ns"], p["key"], value, *_condition(request.query_params))
-    if p["ns"] == "did" or p["ns"].startswith("did-"):
-        nickname.invalidate_all_did_namespace()
     return respond(
         request,
         meta,
@@ -1808,8 +1806,6 @@ async def note_post(request: Request) -> Response:
             if burned:
                 return burned
         meta = store.note_set(config.ROOT, ns, key, value, *condition)
-        if ns == "did" or ns.startswith("did-"):
-            nickname.invalidate_all_did_namespace()
         return respond(
             request,
             meta,

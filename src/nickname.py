@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import time
+from typing import cast
 
 import didkey
 import store
@@ -35,86 +36,45 @@ def _note_ns_and_key(did: str) -> tuple[str, str]:
 
 
 class _NameCache:
-    """Bounded, expiring resolve of did:key -> verified display name (or None).
+    """Bounded, store-validated resolve of did:key -> verified display name (or None).
 
-    The store itself is the source of truth; this is only a bounded in-memory mirror so a
-    50-message room read does not re-read + re-verify the same DID every request. Entries
-    expire after a short TTL, and the note-write path calls :meth:`invalidate` so a just
-    overwritten DID note is reflected on the *next* resolve instead of on some later
-    eviction. A short-lived stale name is acceptable (the TTL is the generous /humans
-    cache window for a name that would be verified again on the next read); a permanently
-    stale one is not — which is exactly what expiry + write-path invalidation prevent.
+    The store itself is the source of truth, not this process's memory. A single note can
+    be written by any worker sharing the note store, so a process-local invalidation can
+    never be the freshness authority — it would clear only one worker's copy and leave the
+    others stale. Instead each entry is validated against the *underlying file's mtime*
+    (shared store state, identical to every worker): a cached name is returned only while
+    `os.stat(note_path).st_mtime_ns` still matches what was cached. Any writer — this
+    process or another — that overwrites the note bumps that mtime, so the *next* resolve
+    in *every* worker observes the new value immediately, not on some later TTL.
     """
 
-    __slots__ = ("_lock", "_cap", "_keys", "_map", "_ts", "_ttl", "_generation")
+    __slots__ = ("_lock", "_cap", "_keys", "_map", "_mtime")
 
-    def __init__(self, cap: int = 1024, ttl_ms: int = 30_000) -> None:
+    def __init__(self, cap: int = 1024) -> None:
         self._lock = threading.Lock()
         self._cap = cap
         self._keys: list[str] = []
         self._map: dict[str, str | None] = {}
-        self._ts: dict[str, float] = {}
-        self._ttl = ttl_ms / 1000.0
-        self._generation = 0
+        self._mtime: dict[str, int] = {}
 
-    def generation(self) -> int:
-        """A counter bumped by every invalidate; see :meth:`put_if_current`."""
+    def get(self, did: str) -> tuple[str | None | bool, int | None]:
+        """The cached (name, note_mtime) pair, or (False, None) when not cached."""
         with self._lock:
-            return self._generation
+            if did in self._map:
+                return self._map[did], self._mtime[did]
+            return False, None
 
-    def get(self, did: str) -> str | None | bool:
-        """The cached name, None when cached-unresolved, False when not cached/expired."""
-        now = _monotonic()
+    def put(self, did: str, name: str | None, mtime: int) -> None:
+        """Cache `name` as the note's verified name while the note keeps `mtime`."""
         with self._lock:
-            age = self._ts.get(did)
-            if did in self._map and age is not None and (now - age) < self._ttl:
-                return self._map[did]
-            return False
-
-    def put_if_current(self, did: str, name: str | None, generation: int) -> bool:
-        """Publish a resolved name only if no invalidation happened since `generation`.
-
-        Returns True when the entry was cached, False when a concurrent writer bumped the
-        generation between the caller's read and this call — in which case `name` was
-        derived from a pre-invalidation note and must NOT be cached, or an overwritten/lost
-        name would live on in the cache past its TTL. The read returned this name exactly
-        once; it just will not outlive this request.
-        """
-        with self._lock:
-            if self._generation != generation:
-                return False
             if did not in self._map:
                 self._keys.append(did)
                 if len(self._keys) > self._cap:
                     old = self._keys.pop(0)
                     self._map.pop(old, None)
-                    self._ts.pop(old, None)
+                    self._mtime.pop(old, None)
             self._map[did] = name
-            self._ts[did] = _monotonic()
-            return True
-
-    def invalidate(self, did: str) -> None:
-        """Drop any cached result for `did` so the next resolve re-reads the note."""
-        with self._lock:
-            self._map.pop(did, None)
-            self._ts.pop(did, None)
-            self._generation += 1
-
-    def invalidate_all(self) -> None:
-        """Drop every cached result (used when a DID-note namespace is rewritten).
-
-        DID-note keys are content fingerprints, not reverse-mappable to a did:key, so a
-        single overwrite cannot target one entry cheaply — but DID notes are written
-        rarely, so clearing the whole (small) DID cache on any such write is simpler than
-        a per-key scan and costs nothing in practice. Non-did namespaces are untouched.
-        Bumping the generation also invalidates any in-flight read/parse/put that began
-        before the write, closing the cache-reinsertion race (see put_if_current).
-        """
-        with self._lock:
-            self._map.clear()
-            self._ts.clear()
-            self._keys.clear()
-            self._generation += 1
+            self._mtime[did] = mtime
 
 
 def _monotonic() -> float:
@@ -124,41 +84,57 @@ def _monotonic() -> float:
 _CACHE = _NameCache()
 
 
-def invalidate(did: str) -> None:
-    """Drop the cached result for `did`; call after the DID note is rewritten."""
-    _CACHE.invalidate(did)
+def _note_mtime_ns(root, ns: str, key: str) -> int | None:
+    """The note file's mtime in nanoseconds, or None when the note does not exist.
 
-
-def invalidate_all_did_namespace() -> None:
-    """Clear the DID cache when a DID-note namespace is written (see _NameCache)."""
-    _CACHE.invalidate_all()
+    This is *shared-store state*: every worker resolving the same did:key stats the same
+    underlying file, so a writer in another process bumps this value and every worker's
+    cache sees it on the next resolve. It is the freshness authority the cache validates
+    against — deliberately not a process-local invalidation, which could not see writes
+    from another worker.
+    """
+    try:
+        return store.note_path(root, ns, key).stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def lookahead_nick(did: str, discover: bool = False) -> str | None:
     """The verified display name for `did`, or None (fail-closed on any doubt).
 
-    * discover=True  -> re-read the note (used by a fresh collector).
-    * discover=False -> consult the bounded cache first, resolve from disk on a miss.
+    * discover=True  -> re-read the note, ignoring the cache.
+    * discover=False -> validate the cache against the note's live mtime, resolve on a miss.
+
+    Cache validity is keyed on the note's on-disk mtime (shared store state), so an
+    overwrite by *any* worker is observed on the very next resolve — not just one whose
+    process-local cache happened to be invalidated.
     """
     if not didkey.is_did(did):
         return None
-    if not discover:
-        cached: str | None | bool = _CACHE.get(did)
-        if cached is not False:
-            # cached name or cached-as-None (bool True is impossible; None is valid)
-            return None if cached is True else cached
     ns, key = _note_ns_and_key(did)
-    # Capture the cache generation *before* the disk read: if a writer bumps it (via a
-    # DID-note overwrite + invalidate_all_did_namespace) while we are reading/parsing,
-    # the name we produce is derived from a pre-invalidation note and must not be cached,
-    # or an erased/overwritten name would live on past its TTL (cache-reinsertion race).
-    generation = _CACHE.generation()
-    note = store.note_get(store_config_root(), ns, key)
+    root = store_config_root()
+
+    # The mtime of whichever note actually backs this identity (sharded, then legacy).
+    def backing_mtime() -> int | None:
+        m = _note_mtime_ns(root, ns, key)
+        if m is None:
+            m = _note_mtime_ns(root, "did", _note_legacy_key(did))
+        return m
+
+    if not discover:
+        cached, cached_mtime = _CACHE.get(did)
+        if cached is not False and cached_mtime is not None:
+            # valid only while the shared note still has the mtime we cached under
+            if backing_mtime() == cached_mtime:
+                # cached name or cached-as-None (the None case is cached and current)
+                return cast("str | None", cached)
+            # note changed under us (this or another worker) -> fall through to re-read
+
+    note = store.note_get(root, ns, key)
     if note is None:
-        # also try legacy single `did` namespace for pre-sharding identities
-        note = store.note_get(store_config_root(), "did", _note_legacy_key(did))
+        note = store.note_get(root, "did", _note_legacy_key(did))
     name = _parse_verified(note, did) if note is not None else None
-    _CACHE.put_if_current(did, name, generation)
+    _CACHE.put(did, name, backing_mtime() or 0)
     return name
 
 

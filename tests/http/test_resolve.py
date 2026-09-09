@@ -131,58 +131,48 @@ def test_resolve_reflects_note_overwrite(client):
     assert r3.status_code == 404, f"expected 404 got {r3.status_code}: {r3.text}"
 
 
-def test_put_if_current_rejects_stale_after_invalidation():
-    """Unit: a resolved name derived from a pre-invalidation read is never cached.
+def test_resolve_cache_validated_against_shared_store_other_worker(client):
+    """Regression: worker B overwriting a note invalidates worker A's cache next resolve.
 
-    Deterministic stand-in for the writer interleaving in `lookahead_nick`: a resolver
-    captured a generation, read the (pre-write) note, and only now tries to publish — but
-    an overwrite already bumped the generation. `put_if_current` must refuse so the stale
-    name cannot outlive the TTL.
+    The cache must be validated against *shared-store state* (the note's mtime), not a
+    process-local invalidation — a second worker cannot know to clear another worker's
+    `_NameCache`. Two independent cache instances share the same store: A primes `alice`,
+    B overwrites the note to `bob`, and A's very next resolve must return `bob`, not the
+    pre-write `alice` it still holds in memory.
     """
     import nickname
-
-    c = nickname._NameCache()
-    did = "did:key:z6Mkdead0000000000000000000000000000000000000000000000"
-    gen = c.generation()  # what a resolver would capture before its read
-
-    # a concurrent writer overwrites the note and invalidates the cache
-    c.invalidate_all()
-
-    # the resolver's read/parse finished, but the generation has moved
-    ok = c.put_if_current(did, "alice", gen)
-    assert ok is False, "stale pre-invalidation name must not be cached"
-    assert c.get(did) is False, "no entry may exist after the rejected put"
-
-
-def test_resolve_interleaved_overwrite_is_not_cached(client):
-    """Integration: overwrite + invalidate between two resolves must not be re-cached old.
-
-    Exercises the same generation guard end-to-end: after the writer invalidates, a stale
-    `alice` cannot re-enter the cache, so a subsequent resolve reflects `bob` immediately.
-    """
-    import nickname
+    import store
+    import config
 
     did, sign = _keypair(11)
     ns, key = _did_note_path(client, did)
 
-    def set_note(value):
+    def write_note(value):
         r = client.get(f"/kv/{ns}/{key}/set/{value.replace(' ', '%20')}")
         assert r.status_code == 200, r.text
 
-    # publish alice and resolve (primes the cache)
-    set_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:alice sig:{sign(f'{did}|alice')}")
-    r1 = client.get(f"/kv/resolve/{did}")
-    assert r1.status_code == 200 and "alice" in r1.text
+    # cache A primes alice against the shared store
+    cache_a = nickname._NameCache()
+    orig = nickname._CACHE
+    nickname._CACHE = cache_a
+    try:
+        write_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:alice sig:{sign(f'{did}|alice')}")
+        assert nickname.lookahead_nick(did) == "alice"
 
-    # the writer overwrites to bob (this calls invalidate_all_did_namespace internally),
-    # then a straggler resolver that had read the OLD note tries to publish it.
-    gen_before_write = nickname._CACHE.generation()
-    set_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:bob sig:{sign(f'{did}|bob')}")
-    assert nickname._CACHE.generation() > gen_before_write
-    # the straggler's stale put is refused
-    assert nickname._CACHE.put_if_current(did, "alice", gen_before_write) is False
+        # worker B (a *different* cache instance, sharing the same store) overwrites to bob
+        cache_b = nickname._NameCache()
+        nickname._CACHE = cache_b
+        write_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:bob sig:{sign(f'{did}|bob')}")
 
-    # the cache is not polluted with the old name; resolve reflects bob
-    r2 = client.get(f"/kv/resolve/{did}")
-    assert r2.status_code == 200, f"got {r2.status_code}: {r2.text}"
-    assert "bob" in r2.text, f"expected bob, got {r2.text!r}"
+        # return to worker A: its cache still holds alice, but the shared note changed,
+        # so its next resolve re-reads and returns bob rather than the pre-write name.
+        nickname._CACHE = cache_a
+        got = nickname.lookahead_nick(did)
+        assert got == "bob", f"cache A must reflect the other worker's write, got {got!r}"
+
+        # and the cache was updated, not left stale
+        name, mt = cache_a.get(did)
+        assert name == "bob"
+        assert mt == nickname._note_mtime_ns(config.ROOT, ns, key)
+    finally:
+        nickname._CACHE = orig
