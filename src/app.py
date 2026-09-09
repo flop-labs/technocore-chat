@@ -1551,7 +1551,9 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     return expect, absent
 
 
-def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Response | None:
+def _note_write_gate(
+    ns: str, key: str, value: str, signer: str | None
+) -> tuple[Response | None, bool]:
     """Two reserved namespaces carry room ownership, and only those two take signed writes.
 
     Not a general signed-kv system: a note is world-writable by design and stays that way,
@@ -1559,13 +1561,18 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     exception exists because a room owner has to be able to publish an allow-list that a
     stranger cannot rewrite — without that, ownership is a note anyone can overwrite, which
     is not ownership.
+
+    Returns (denied, first_claim): first_claim is the gate's own snapshot (current is None
+    on OWNERS) so the write lane can force create-if-absent without re-reading. Re-reading
+    after the nonce burn reintroduces the #173 split-read: B completes between the two
+    reads, A sees present, passes first_claim=False and overwrites unconditionally.
     """
     if ns == store.NONCE_NS:
         return text(
             f"403 /kv/{store.NONCE_NS} is written by the server only — it is the replay "
             "counter for signed ownership writes. Read it freely.",
             403,
-        )
+        ), False
     if ns not in (store.OWNERS_NS, store.ALLOW_NS):
         if signer is not None:
             return text(
@@ -1573,8 +1580,8 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"{store.ALLOW_NS}. Every other namespace is world-writable — use "
                 f"/kv/{ns}/{key}/set/<value>.",
                 400,
-            )
-        return None
+            ), False
+        return None, False
     if ns == store.OWNERS_NS:
         if not store.ownable(key):
             return text(
@@ -1582,20 +1589,20 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"{' or '.join(store.UNOWNABLE_ROOMS)}: claiming a room that already has "
                 "people in it would lock them out of somewhere they were already talking.",
                 403,
-            )
+            ), False
         if not didkey.is_did(value):
             return text(
                 "400 a room owner is a did:key, not a nickname — a name nobody can prove "
                 "they hold cannot own anything. Claim with the key you sign with.",
                 400,
-            )
+            ), False
         current = store.note_get(config.ROOT, store.OWNERS_NS, key)
         if current is not None and signer != current:
             return text(
                 f"403 /r/{key} is already owned. Only the current owner can hand it over, "
                 f"with a signed write: /kv/{store.OWNERS_NS}/{key}/set-signed/...",
                 403,
-            )
+            ), False
         # A *first* claim must be signed by the key it stores. Checking that `value` parses
         # as a did:key only proves it is well-formed, so an unsigned claim let a stranger
         # lock a room to any key at all — including someone else's, handing them a room
@@ -1610,7 +1617,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"/kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>. "
                 "Anyone can type a did:key; only its holder can sign with it.",
                 403,
-            )
+            ), False
         # "Claiming a room people are already talking in would lock them out" was documented
         # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
         if current is None and store.last_seq(config.ROOT, key) > 0:
@@ -1619,8 +1626,8 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 "a room is ownable from birth or not at all, or claiming becomes a way to "
                 "take over a conversation already in progress.",
                 403,
-            )
-        return None
+            ), False
+        return None, current is None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
         return text(
@@ -1629,21 +1636,21 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             "/<sig>/<nonce>/<the same did:key>?if_absent=1 — then retry this write with a "
             f"higher nonce, because the claim burns /kv/{store.NONCE_NS}/{key}.",
             403,
-        )
+        ), False
     if signer != owner:
         return text(
             f"403 only the owner of /r/{key} may write its allow-list, with a signed "
             f"write: /kv/{store.ALLOW_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<keys>",
             403,
-        )
+        ), False
     bad = [token for token in value.split() if not didkey.is_did(token)]
     if bad or not value.split():
         return text(
             f"400 an allow-list is space-separated did:keys; {bad[0] if bad else value!r} "
             "is not one. Fail closed: a list with an unparseable entry lets nobody in.",
             400,
-        )
-    return None
+        ), False
+    return None, False
 
 
 def note_write(request: Request) -> Response:
@@ -1652,7 +1659,7 @@ def note_write(request: Request) -> Response:
         return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
-    denied = _note_write_gate(p["ns"], p["key"], value, None)
+    denied, _ = _note_write_gate(p["ns"], p["key"], value, None)
     if denied:
         return denied
     meta = store.note_set(config.ROOT, p["ns"], p["key"], value, *_condition(request.query_params))
@@ -1703,14 +1710,16 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
+    denied, first = _note_write_gate(ns, key, value, signer)
     if denied:
         return denied
-    condition = _condition(request.query_params)
+    expect, expect_absent = _condition(request.query_params)
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    if first and expect is None and not expect_absent:
+        expect_absent = True
+    meta = store.note_set(config.ROOT, ns, key, value, expect, expect_absent)
     return respond(
         request,
         meta,
@@ -1746,14 +1755,17 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
+        denied, first = _note_write_gate(ns, key, value, signer)
         if denied:
             return denied
         if signer is not None:
             burned = _burn_nonce(key, nonce)
             if burned:
                 return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        expect, expect_absent = condition
+        if first and expect is None and not expect_absent:
+            expect_absent = True
+        meta = store.note_set(config.ROOT, ns, key, value, expect, expect_absent)
         return respond(
             request,
             meta,
