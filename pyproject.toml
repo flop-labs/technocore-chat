@@ -72,23 +72,27 @@ ignore = ["E501"]  # Line length is the formatter's job.
 # app.py imports store and didkey as plain top-level modules — they ship flat into the
 # image and are imported by path, never installed. Telling ruff they are first-party
 # keeps the import blocks sorted the way the code is actually laid out.
-known-first-party = ["app", "didkey", "store"]
+known-first-party = ["app", "didkey", "store", "technocore_client"]
 
 [tool.ty.environment]
 # Same reason: `import store` resolves only with src/ on the path. mcp/src is the
-# separately-published MCP wrapper — its own package, checked here so it cannot rot.
-extra-paths = ["./src", "./mcp/src"]
+# separately-published MCP wrapper and client/ the local signer — each its own package
+# beside the server, both checked here so neither can rot unnoticed.
+extra-paths = ["./src", "./mcp/src", "./client"]
 
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The single source of path bootstrap for the suite — src for import app/store/didkey,
 # tests for _client — so no test file needs its own sys.path.insert.
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "client"]
 
 [tool.coverage.run]
 branch = true
-source = ["src", "mcp/src"]
+# client/ is measured for the same reason src/ is: its interesting lines are refusals and
+# recovery paths — a lost create race, a widened seed mode, a corrupt nonce file — and an
+# unmeasured package is the hole #638 describes one directory over.
+source = ["src", "mcp/src", "client"]
 
 [tool.coverage.report]
 # Combined statement + branch coverage. A branch-aware floor keeps a PR from improving the

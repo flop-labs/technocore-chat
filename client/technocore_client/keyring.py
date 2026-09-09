@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import os
 import stat
+import tempfile
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -90,16 +91,25 @@ class Keyring:
           either no file or a complete one, so it can read the winner's identity immediately
           instead of waiting for bytes that may still be arriving.
 
-        The temporary is opened 0600 rather than written and then chmod'ed: between those two
-        calls the seed would exist at the process umask, and that window is the whole exposure.
-        The link preserves the mode, so the final file is 0600 without a second syscall.
+        The temporary is created 0600 by `mkstemp` rather than written and then chmod'ed:
+        between those two calls the seed would exist at the process umask, and that window is
+        the whole exposure. The link preserves the mode, so the final file is 0600 without a
+        second syscall. `mkstemp` also makes the staging name unique per *attempt* rather than
+        per process, which a pid was not: two threads share a pid.
         """
         seed = Ed25519PrivateKey.generate().private_bytes_raw()
         mkdir_durable(self._path.parent)
-        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # `mkstemp`, not a pid-derived name. A pid is unique per process and two *threads* in one
+        # process share it, so both would build the same staging path and the loser would raise
+        # at the temporary's own O_EXCL — before ever reaching the link that handles the race
+        # (@yukkie3276, #803). mkstemp is the stdlib primitive for exactly this: a name nobody
+        # else has, created O_CREAT|O_EXCL at 0600, which is the mode this file needs anyway.
+        handle_fd, tmp_name = tempfile.mkstemp(
+            dir=self._path.parent, prefix=f"{self._path.name}.", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
                 handle.write(base64.urlsafe_b64encode(seed).decode().rstrip("="))
                 handle.flush()
                 os.fsync(handle.fileno())

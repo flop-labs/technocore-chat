@@ -10,24 +10,23 @@ and that is the failure a standalone test cannot see.
 
 from __future__ import annotations
 
+import base64
 import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
 
+import _client  # noqa: F401 (imported for the fixture alias below)
 import pytest
 
-import _client  # noqa: F401 (imported for the fixture alias below)
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "client"))
-
-import didkey  # noqa: E402
-from technocore_client import Keyring, NonceStore, Signer  # noqa: E402
+import didkey
+from technocore_client import Keyring, NonceStore, Signer, did_from_seed
 
 client = _client.client
 
@@ -84,8 +83,7 @@ def test_a_signed_note_write_is_accepted(client, tmp_path) -> None:
     signer = Signer(tmp_path / "home")
     did, sig, nonce, swept = signer.note("room-owners", "d-localsigner", signer.did)
     r = client.get(
-        f"/kv/room-owners/d-localsigner/set-signed/{did}/{sig}/{nonce}/{quote(swept)}"
-        "?if_absent=1"
+        f"/kv/room-owners/d-localsigner/set-signed/{did}/{sig}/{nonce}/{quote(swept)}?if_absent=1"
     )
     assert r.status_code == 200, r.text
     # And the claim is real: the unsigned lane is now refused on that room.
@@ -229,14 +227,20 @@ def test_concurrent_first_starts_converge_on_one_identity(tmp_path) -> None:
     repo = Path(__file__).resolve().parents[2]
     paths = f"{repo / 'client'}:{repo / 'src'}"
     procs = [
-        subprocess.Popen([sys.executable, "-c", program, paths, str(home / "seed"), str(gate)],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.Popen(
+            [sys.executable, "-c", program, paths, str(home / "seed"), str(gate)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
         for _ in range(6)
     ]
     time.sleep(0.5)  # let every child get past its imports and onto the gate
     gate.write_text("go")
-    results = [SimpleNamespace(returncode=p.wait(timeout=60), **dict(zip(("stdout", "stderr"), p.communicate())))
-               for p in procs]
+    results = []
+    for proc in procs:
+        stdout, stderr = proc.communicate(timeout=60)
+        results.append(SimpleNamespace(returncode=proc.returncode, stdout=stdout, stderr=stderr))
 
     failed = [r.stderr.strip().splitlines()[-1] for r in results if r.returncode != 0]
     assert not failed, f"a concurrent first start failed: {failed}"
@@ -246,6 +250,80 @@ def test_concurrent_first_starts_converge_on_one_identity(tmp_path) -> None:
     # No temporary survived the race, and the winner's file carries the mode the loser skipped.
     assert list(home.glob("seed.*.tmp")) == []
     assert (home / "seed").stat().st_mode & 0o777 == 0o600
+
+
+def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
+    """The two length checks, which are the only thing standing between a truncated file and a
+    signer that runs happily under an identity nobody else can verify.
+
+    Covered explicitly because the repository's coverage floor is branch-aware for exactly this
+    reason: a refusal that is never exercised is a refusal nobody has checked works.
+    """
+    with pytest.raises(ValueError, match="32 bytes"):
+        did_from_seed(b"\x01" * 31)
+
+    seed_path = tmp_path / "home" / "seed"
+    seed_path.parent.mkdir(parents=True)
+    seed_path.write_text(base64.urlsafe_b64encode(b"\x02" * 16).decode().rstrip("="))
+    seed_path.chmod(0o600)
+    with pytest.raises(ValueError, match="does not hold a 32-byte seed"):
+        Keyring(seed_path)
+
+
+def test_a_nonce_file_holding_the_wrong_shape_is_ignored_not_trusted(tmp_path) -> None:
+    """A note that parses as JSON but is not the map this expects is the same class as a corrupt
+    one: unknown, so start from the clock rather than from whatever was there."""
+    store = tmp_path / "nonces.json"
+    store.write_text('["not", "a", "map"]')
+    assert NonceStore(store).last("did:key:zX", "room") is None
+
+    store.write_text('{"did:key:zX": "not a room map"}')
+    assert NonceStore(store).last("did:key:zX", "room") is None
+
+    store.write_text('{"did:key:zX": {"room": -5, "other": 7}}')
+    fresh = NonceStore(store)
+    assert fresh.last("did:key:zX", "room") is None, "a negative nonce is not a nonce"
+    assert fresh.last("did:key:zX", "other") == 7
+
+
+def test_concurrent_first_starts_in_one_process_converge(tmp_path) -> None:
+    """@yukkie3276, #803 again, and the sharp part is why the previous test could not see it.
+
+    The staging file was named from `os.getpid()`. Separate processes get distinct names by
+    construction, so the six-subprocess test above is *structurally blind* to two threads: they
+    share a pid, both build the same staging path, and the loser raises at the temporary's own
+    O_EXCL before ever reaching the link that handles the race. A rigorous test of the wrong
+    axis is still a test of the wrong axis.
+
+    A barrier rather than a sleep, so both threads are inside `Keyring.__init__` at the same
+    moment rather than probably-overlapping.
+    """
+    seed_path = tmp_path / "home" / "seed"
+    start = threading.Barrier(2)
+    results: list[object] = []
+    lock = threading.Lock()
+
+    def start_one() -> None:
+        start.wait(timeout=10)
+        try:
+            outcome: object = Keyring(seed_path).did
+        except Exception as exc:  # noqa: BLE001 — the failure mode under test is any raise
+            outcome = exc
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=start_one) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    raised = [r for r in results if isinstance(r, Exception)]
+    assert not raised, f"a concurrent first start raised: {raised!r}"
+    assert len(set(results)) == 1, f"threads disagreed about the identity: {results}"
+    # No staging file outlived the race, and the survivor carries the mode.
+    assert [p.name for p in seed_path.parent.iterdir()] == ["seed"]
+    assert seed_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_concurrent_processes_never_hand_out_the_same_nonce(tmp_path) -> None:
@@ -275,12 +353,18 @@ def test_concurrent_processes_never_hand_out_the_same_nonce(tmp_path) -> None:
     repo = Path(__file__).resolve().parents[2]
     client_dir = f"{repo / 'client'}:{repo / 'src'}"
     with ThreadPoolExecutor(max_workers=6) as pool:
-        outs = list(pool.map(
-            lambda _: subprocess.run(
-                [sys.executable, "-c", program, client_dir, str(store), did],
-                capture_output=True, text=True, timeout=60, check=True).stdout.split(),
-            range(6),
-        ))
+        outs = list(
+            pool.map(
+                lambda _: subprocess.run(
+                    [sys.executable, "-c", program, client_dir, str(store), did],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=True,
+                ).stdout.split(),
+                range(6),
+            )
+        )
 
     nonces = [int(n) for out in outs for n in out]
     assert len(nonces) == 120
