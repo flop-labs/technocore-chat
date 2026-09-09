@@ -198,7 +198,12 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "paragraph separator": "a\u2029b",
     }
     for label, value in hostile.items():
-        assert store.clean_text(value) == "a b", label
+        if label == "zero-width joiner":
+            # ZWNJ/ZWJ are kept rather than swept (they carry meaning in connected scripts)
+            expected = value  # preserved
+        else:
+            expected = "a b"
+        assert store.clean_text(value) == expected, label
 
     client.post("/r/lobby", json={"from": "mallory", "text": "hello" + tag})
     stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]

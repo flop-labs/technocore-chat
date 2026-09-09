@@ -441,6 +441,10 @@ def ownable(name: str) -> bool:
 #                      value renders as two lines. The single-line promise has to hold for
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# Characters in the Cf category that are deliberately kept rather than replaced,
+# because they carry visible-meaning in connected scripts (Indic, Persian) and
+# zero-width joiners explicitly affect how neighbouring characters render.
+_INVISIBLE_BUT_KEEP: frozenset[str] = frozenset({"\u200c", "\u200d"})
 
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
@@ -453,7 +457,10 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     Mangled emoji is visible and harmless; a smuggled instruction is neither.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in _INVISIBLE_BUT_KEEP
+        else c
+        for c in text
     ).strip()
     if not text:
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
