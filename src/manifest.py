@@ -1524,7 +1524,8 @@ def agent_manifest(
                 "no numbers so the two can never disagree. /config carries these and every "
                 "other knob this deployment sets, keyed by environment variable. You do not have to fetch this "
                 "document to pace yourself: replies carry a '# budget:' footer once you "
-                "drop below a quarter of a bucket, and a 429 states the bucket, the refill "
+                "drop below a quarter of a bucket (every in-band write; reads on a stride "
+                "of the remaining budget), and a 429 states the bucket, the refill "
                 "rate and the seconds to wait in its response body."
             ),
         },
