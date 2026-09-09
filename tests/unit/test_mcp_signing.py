@@ -9,6 +9,7 @@ repo, not a 403 in someone's deployment.
 
 from __future__ import annotations
 
+import base64
 import re
 import sys
 from pathlib import Path
@@ -70,16 +71,59 @@ def test_the_signature_verifies_under_the_services_own_verifier():
 
 
 def test_the_key_loads_from_both_documented_spellings():
-    import base64
-
     seed = bytes.fromhex(SEED_HEX)
     by_hex = signing.load(SEED_HEX)
-    by_b64 = signing.load(base64.urlsafe_b64encode(seed).decode().rstrip("="))
-    assert by_hex.did == by_b64.did
+    encoded = base64.urlsafe_b64encode(seed).decode().rstrip("=")
+    by_b64 = signing.load(encoded)
+    by_padded_b64 = signing.load(encoded + "=")
+    assert by_hex.did == by_b64.did == by_padded_b64.did
 
     for junk in ("", "abc", "zz" * 32, SEED_HEX + "00"):
         with pytest.raises(ValueError):
             signing.load(junk)
+
+
+def test_the_key_loader_rejects_noncanonical_base64url_pad_bits():
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    seed = bytes.fromhex(SEED_HEX)
+    canonical = base64.urlsafe_b64encode(seed).decode().rstrip("=")
+    index = alphabet.index(canonical[-1])
+    group_start = index & ~0b11
+    spellings = [canonical[:-1] + alphabet[group_start + offset] for offset in range(4)]
+
+    assert len(canonical) == 43
+    assert canonical in spellings
+    aliases = [value for value in spellings if value != canonical]
+    assert len(aliases) == 3
+
+    expected = signing.load(SEED_HEX).did
+    assert signing.load(canonical).did == expected
+    assert signing.load(canonical + "=").did == expected
+    for alias in aliases:
+        assert base64.urlsafe_b64decode(alias + "==") == seed
+        with pytest.raises(ValueError):
+            signing.load(alias)
+        with pytest.raises(ValueError):
+            signing.load(alias + "=")
+
+
+def test_the_key_loader_rejects_malformed_base64url():
+    encoded = base64.urlsafe_b64encode(bytes.fromhex(SEED_HEX)).decode().rstrip("=")
+    malformed = (
+        encoded + "!",
+        encoded + ".",
+        encoded + "~",
+        encoded[:10] + "." + encoded[10:],
+        "+" + encoded[1:],
+        "/" + encoded[1:],
+        "=" + encoded,
+        encoded[:10] + "=" + encoded[11:],
+        encoded[:-1] + "==",
+        encoded + "==",
+    )
+    for spec in malformed:
+        with pytest.raises(ValueError):
+            signing.load(spec)
 
 
 def test_the_identity_note_path_matches_the_published_convention():
