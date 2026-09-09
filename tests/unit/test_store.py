@@ -848,6 +848,19 @@ def test_engagement_window_binds_before_the_ring_does(tmp_path, monkeypatch):
     assert row["nick_diversity"] == 0.2
 
 
+def test_service_engagement_counts_unlisted_rooms(tmp_path):
+    """Internal /stats counts unlisted rooms, so its engagement rollup must count them too."""
+    import store
+
+    for i in range(5):
+        store.append(tmp_path, "p-secret", "solo", f"m{i}")
+    view = store.service_stats(tmp_path)
+
+    assert view["rooms"]["total"] == view["rooms"]["unlisted"] == 1
+    assert view["engagement"]["windowed_messages"] == 5
+    assert view["engagement"]["zero_response_share"] == 1.0
+
+
 def test_listings_never_echo_a_name_the_validator_would_reject(tmp_path):
     """Defence in depth for anything already on disk: a hand-created file with a newline
     in its name must not be echoed into a response and forge a line."""
