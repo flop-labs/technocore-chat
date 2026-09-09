@@ -1,0 +1,308 @@
+name: pr-guards
+
+# Three CONTRIBUTING.md rules that were prose, made mechanical. They are here rather than in
+# ci.yml because all three key off the pull request's *title* — ci.yml runs on pushes to main
+# too, where there is no title to read, and two of these jobs are skipped for most PRs.
+#
+# Everything here has to work for a fork PR, which is where the rules bite hardest and where
+# the token is read-only. So: no secrets, no `pull_request_target`, nothing written back to
+# the API. A guard that wants to say something says it in $GITHUB_STEP_SUMMARY, which needs
+# no permission at all, and fails the job when it means to block.
+on:
+  pull_request:
+    # `edited` fires on a title change, which is the whole input to the title lint and the
+    # switch that decides whether the other two jobs run at all — retitling `chore:` to
+    # `fix:` has to bring the regression-test guard with it. It also fires on body edits,
+    # which re-runs all this for nothing; that is the price of not missing a retitle.
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  # Editing a title three times should leave one run, not three — and the last one is the
+  # only one whose verdict is about the current title.
+  cancel-in-progress: true
+
+jobs:
+  # Deliberately not gated behind the title lint. An author with a malformed `fix:` title
+  # should learn about the title *and* the missing regression test in one round trip, not
+  # in two.
+  title:
+    name: "title is a conventional commit"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Reads one field of the event payload. It needs no repository, no checkout and no token.
+    permissions: {}
+    steps:
+      - name: Check the title against the types main actually uses
+        env:
+          # Through the environment, never interpolated into the script. A PR title is
+          # attacker-supplied on a fork PR, and `${{ ... }}` inside `run:` is textual
+          # substitution — a title containing a backtick or `$(...)` would be executed.
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+
+          # The ten types are not the conventional-commits default list; they are the types
+          # this repository has actually merged. Over the 144 commits on main:
+          # fix 31, docs 19, perf 15, feat 13, chore 7, release 6, test 5, ci 5, refactor 4,
+          # build 2 — and 37 of the last 40 commits already match this grammar exactly.
+          # `release` is in the set because release.yml makes it an institution here, not a
+          # stray. The one `tests(` and the one `examples:` in that history are not: a single
+          # use each, both plainly the singular type mistyped, so accepting them would only
+          # let the plural spread.
+          GRAMMAR='^(build|chore|ci|docs|feat|fix|perf|refactor|release|test)(\([a-z0-9._/-]+\))?!?: .+'
+
+          if [[ "$TITLE" =~ $GRAMMAR ]]; then
+            # Fenced, not inline: a title is arbitrary text and may hold backticks of its own.
+            { echo "Title ok:"; echo; echo '```'; echo "$TITLE"; echo '```'; } \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "## Pull request title"
+            echo
+            echo "Not a conventional-commit title:"
+            echo
+            echo '```'
+            echo "$TITLE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # A quoted heredoc, so the rejected title's own markdown backticks are text and
+          # nothing in this block is a substitution. The two examples are real merged titles
+          # rather than invented ones, so the shape being asked for is the shape the log
+          # already shows.
+          cat >> "$GITHUB_STEP_SUMMARY" <<'MARKDOWN'
+
+          `type: summary`, or `type(scope): summary`, with `!` before the colon for a
+          breaking change. Accepted types:
+
+          `build` `chore` `ci` `docs` `feat` `fix` `perf` `refactor` `release` `test`
+
+          Two from this repository:
+
+          - `fix(stats): a non-ASCII token byte is a 404, not a 500`
+          - `perf(store): take two things out of the per-room append lock`
+          MARKDOWN
+          echo "::error::PR title is not a conventional commit. Use type: summary or type(scope): summary, with type one of build chore ci docs feat fix perf refactor release test — e.g. 'fix(stats): a non-ASCII token byte is a 404, not a 500'."
+          exit 1
+
+  # CONTRIBUTING.md: "A bug fix should include a regression test that fails without the fix
+  # and passes with it." CI already proves the second half on every run. The first half —
+  # that the test would have caught the bug — is the half nobody can check by reading the
+  # diff, and it is the half that decides whether the test is a regression test or a
+  # restatement of the new code.
+  fix-has-a-failing-test:
+    name: "a fix has a test that fails without it"
+    # `startsWith` is how "starts with fix, with or without a scope" is spelled without
+    # duplicating the grammar above: `fix:`, `fix(scope):` and `fix!:`.
+    if: >-
+      github.event.pull_request.draft == false &&
+      (startsWith(github.event.pull_request.title, 'fix:') ||
+       startsWith(github.event.pull_request.title, 'fix(') ||
+       startsWith(github.event.pull_request.title, 'fix!:'))
+    runs-on: ubuntu-latest
+    # The overlaid files only, never the suite: this is one selection of tests against one
+    # commit, and the whole run is well inside this.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # Full commit pins are the only immutable form for third-party actions. Dependabot
+      # updates these SHAs and the release comments together.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job walks back to the base commit and runs code from two commits, so it
+          # needs both objects present; the default shallow fetch has neither by SHA.
+          fetch-depth: 0
+          # Runs PR-controlled code (the tests), so no checkout credentials are persisted
+          # where that code could read them.
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Run the changed tests against the un-fixed code
+        env:
+          BASE_INPUT: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # The base the branch actually diverged from. base.sha in the event payload is the
+          # tip of the target branch when the pull request was opened and drifts as main
+          # moves; the merge-base is the code the author was looking at, and so the code the
+          # fix is missing.
+          BASE="$(git merge-base "$BASE_INPUT" "$HEAD_SHA")"
+
+          # Two lists, because they answer different questions. CHANGED decides whether a
+          # regression test was written at all — deleting a test file touches tests/ and
+          # proves nothing. OVERLAY is what still exists at head and can therefore be laid
+          # back over the old code.
+          readarray -t CHANGED < <(git diff --name-only "$BASE" "$HEAD_SHA" -- tests)
+          readarray -t OVERLAY < <(git diff --name-only --diff-filter=d "$BASE" "$HEAD_SHA" -- tests)
+
+          {
+            echo "## Does the regression test fail without the fix?"
+            echo
+            echo '```'
+            echo "base   $BASE"
+            echo "head   $HEAD_SHA"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail() {
+            { echo; echo "**FAIL** — $1"; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$1"
+            exit 1
+          }
+
+          if [ "${#CHANGED[@]}" -eq 0 ]; then
+            fail 'no file under tests/ changed. CONTRIBUTING.md: "A bug fix should include a regression test that fails without the fix and passes with it."'
+          fi
+
+          # Everything under tests/ is laid back over the old tree, not only the test
+          # modules: tests/_client.py and the conftests are what those modules import, and
+          # an overlay missing them measures new tests against old helpers, which is a
+          # different question. src/ is deliberately left at the base commit — bringing the
+          # fix over is what this job exists to withhold.
+          RUN=()
+          for f in "${OVERLAY[@]}"; do
+            case "${f##*/}" in test_*.py) RUN+=("$f") ;; esac
+          done
+          if [ "${#RUN[@]}" -eq 0 ]; then
+            fail "this pull request touches tests/ but adds or changes no test_*.py module, so there is nothing to run against the base code: ${CHANGED[*]}"
+          fi
+
+          git checkout --quiet --detach "$BASE"
+          git checkout --quiet "$HEAD_SHA" -- "${OVERLAY[@]}"
+
+          # The base commit's own lockfile — the environment the un-fixed code was written
+          # against. A dependency the fix adds is not available here, by design.
+          uv sync --frozen --quiet
+
+          # The exit code is the measurement, so the failure this job wants must not end it.
+          RC=0
+          uv run python -m pytest "${RUN[@]}" -q > pytest-on-base.log 2>&1 || RC=$?
+
+          {
+            echo
+            echo "Laid over the base commit, from head:"
+            echo
+            for f in "${OVERLAY[@]}"; do echo "- \`$f\`"; done
+            echo
+            echo "Ran \`pytest ${RUN[*]} -q\` against the base code — exit $RC."
+            echo
+            echo '<details><summary>pytest output on the base commit</summary>'
+            echo
+            echo '```'
+            tail -n 40 pytest-on-base.log
+            echo '```'
+            echo
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 5 is "collected nothing": the files are there, so this is a module with no tests
+          # in it, which is as unproven as no test at all. Every other non-zero code is the
+          # evidence being asked for — including the 2 that a collection or import error
+          # produces, since a test written against a helper the fix introduces cannot import
+          # on the old tree, and that is still a test that does not pass without the fix.
+          if [ "$RC" -eq 0 ]; then
+            fail 'these tests already pass on the base commit, so they do not pin this fix. A regression test has to fail without it (CONTRIBUTING.md, "Making a change").'
+          fi
+          if [ "$RC" -eq 5 ]; then
+            fail 'pytest collected no tests from the changed files.'
+          fi
+
+          { echo; echo "**PASS** — the changed tests fail against the un-fixed code."; } >> "$GITHUB_STEP_SUMMARY"
+
+  # CONTRIBUTING.md: "Benchmark claimed speedups against tests/capacity_bench.py — a number,
+  # not a hunch." This produces the number so the claim and the measurement arrive together.
+  #
+  # It informs and does not gate: it fails only if the benchmark crashes, never on a slower
+  # figure. capacity_bench.py's own header says why — "the same container measured every one
+  # of these ~20% faster a few hours earlier ... with no code between the two runs", and a
+  # shared GitHub runner is noisier than that container. A threshold over numbers with that
+  # much host drift would fire on neighbours, and a gate that fires on noise gets re-run
+  # until it is green, which is worse than no gate. The reviewer reads the two columns.
+  perf-bench-delta:
+    name: "capacity_bench, base vs head"
+    if: >-
+      github.event.pull_request.draft == false &&
+      (startsWith(github.event.pull_request.title, 'perf:') ||
+       startsWith(github.event.pull_request.title, 'perf(') ||
+       startsWith(github.event.pull_request.title, 'perf!:'))
+    runs-on: ubuntu-latest
+    # Two syncs and two benchmark runs, measured end to end at 59 s on a 4-core container.
+    # A runner's disk is not that container's tmpfs and this walks tens of thousands of
+    # files, so the budget is an order of magnitude over the measurement rather than double.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Both commits get their own tree below, so both objects have to be here.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Measure the base and the head
+        env:
+          BASE_INPUT: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          BASE="$(git merge-base "$BASE_INPUT" "$HEAD_SHA")"
+
+          # Two worktrees, not the checked-out merge commit: each side is exactly one named
+          # commit with its own .venv resolved from its own lockfile, which is what makes the
+          # two columns comparable. It also means a PR that edits capacity_bench.py is
+          # measured by two different harnesses — say so in the PR body if that is the case.
+          git worktree add --quiet --detach "$RUNNER_TEMP/base" "$BASE"
+          git worktree add --quiet --detach "$RUNNER_TEMP/head" "$HEAD_SHA"
+
+          # --scale 0.25 builds 1280 rooms and 40,960 notes: ~27 s a side on a 4-core
+          # container, and big enough that the O(store) walks this benchmark exists to time
+          # are actually paid. The full caps are the honest measurement and cost tens of
+          # seconds and hundreds of megabytes of inodes per side, twice over here; 0.1 halves
+          # the run but takes the note walk from 20 ms to 8 ms, which is where run-to-run
+          # drift starts to swallow the thing being measured. --seconds stays at its default
+          # 6: the /rooms cache rows count walks per window, so a short one rounds to nothing.
+          #
+          # `set -e` and no `continue-on-error`: a benchmark that cannot run is the one thing
+          # here worth failing on, because it means the claim cannot be checked at all.
+          for side in base head; do
+            cd "$RUNNER_TEMP/$side"
+            uv sync --frozen --quiet
+            uv run python tests/capacity_bench.py --scale 0.25 > "$RUNNER_TEMP/$side.txt" 2>&1
+          done
+
+          # One under the other rather than in a two-column table: these rows are ~100
+          # characters wide, and two of them side by side in the summary pane wrap into
+          # something nobody can read a ratio off.
+          {
+            echo "## capacity_bench.py --scale 0.25"
+            echo
+            echo "Two measurements, no verdict — compare the ratios, not the absolute"
+            echo "figures (tests/capacity_bench.py, header)."
+            echo
+            echo "### base \`$BASE\`"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/base.txt"
+            echo '```'
+            echo
+            echo "### head \`$HEAD_SHA\`"
+            echo
+            echo '```'
+            cat "$RUNNER_TEMP/head.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
