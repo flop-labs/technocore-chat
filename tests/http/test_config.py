@@ -159,6 +159,38 @@ def test_it_is_never_rate_limited_and_stays_indexable(client):
     )
 
 
+def test_the_note_states_the_staleness_this_deployment_actually_allows(client):
+    """The one paragraph in this document that named a period rather than a binding.
+
+    `/config` promises its readers that its values "cannot disagree with the service's
+    behaviour", and the note beside them said a shared cache may hold the document "for up
+    to an hour" — the private `max-age=3600` these JSON documents carried until 0.11.0 put
+    them on `_static_cacheable`. Since then the header has been the knob: 360s at the
+    default (`s-maxage=300` plus a 60s stale-while-revalidate), whatever the operator sets,
+    and `no-store` at 0 — so the document overstated its own staleness by 10x while
+    publishing the number that contradicted it two keys higher up, and told an operator who
+    had switched shared caching *off* that the copy in front of them might be an hour old.
+    """
+    import config
+
+    doc = client.get("/config").json()
+    assert "an hour" not in doc["note"], "the pre-0.11.0 max-age=3600 window, still promised"
+    assert "static_cache_seconds" in doc["note"], "the note has to name the binding it means"
+
+    # The knob is what the note now points at, so it has to move the header with it.
+    with config.override(STATIC_CACHE_SECONDS=30):
+        moved = client.get("/config")
+        assert moved.headers["cache-control"] == (
+            "public, max-age=0, s-maxage=30, stale-while-revalidate=60"
+        )
+        assert moved.json()["settings"]["static_cache_seconds"] == 30
+    # And 0 really is "no shared cache holds it", which is the half an hour cannot describe.
+    with config.override(STATIC_CACHE_SECONDS=0):
+        off = client.get("/config")
+        assert off.headers["cache-control"] == "no-store"
+        assert off.json()["settings"]["static_cache_seconds"] == 0
+
+
 def test_a_published_setting_is_a_number_json_can_carry(client):
     """Publishing a knob makes its finiteness a contract.
 
