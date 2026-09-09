@@ -369,8 +369,8 @@ def test_a_reaped_room_does_not_leave_its_bucket_behind(tmp_path, monkeypatch):
 def test_a_reap_that_prunes_buckets_never_meets_a_create_gate_it_already_holds(
     tmp_path, monkeypatch
 ):
-    """`_prune(rooms)` takes `.rooms-create`, and `_reap` runs on the write path — so the
-    question is whether any caller can be inside that gate when a pass fires.
+    """`_prune(rooms)` takes the room create span, and `_reap` runs on the write path — so
+    the question is whether any caller can be inside that span when a pass fires.
 
     `flock` is per open file description and `_locked` opens a fresh fd every time, so a
     second acquire from the same thread does not re-enter: it blocks on itself, forever, with
@@ -401,6 +401,27 @@ def test_a_reap_that_prunes_buckets_never_meets_a_create_gate_it_already_holds(
     worker.start()
     worker.join(30)
     assert done, "a write deadlocked on a gate the reap it triggered was already holding"
+
+
+def test_a_pass_that_emptied_no_bucket_never_scans_the_bucket_tree(tmp_path, monkeypatch):
+    """Pruning used to mean `_prune(rooms)`: a scandir of all 256 buckets and everything in
+    them, held under `.usage.create` — the span every room create takes shared. It ran on
+    every pass, on a store where a pass typically empties no bucket at all, and it is 39.4% of
+    the blocked time in the production profile paired with the note span beside it.
+
+    A bucket can only need removing if this pass emptied it, so an untouched tree is not read
+    at all. The pruning itself is still pinned by the two tests around this one.
+    """
+    import store
+
+    store.append(tmp_path, "keeper", "bot", "hi")
+    pruned = []
+    monkeypatch.setattr(store, "_prune", lambda d: bool(pruned.append(str(d))))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    store._reap(tmp_path)
+
+    assert pruned == [], f"a pass that reaped nothing still scanned {pruned}"
+    assert store.room_path(tmp_path, "keeper").exists()
 
 
 def test_pruning_keeps_the_bucket_of_a_room_that_survived(tmp_path, monkeypatch):

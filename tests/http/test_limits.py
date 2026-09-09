@@ -6,7 +6,11 @@ import time
 from pathlib import Path
 
 import _client
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from starlette.testclient import TestClient
+
+import limit
 
 client = _client.client  # the shared TestClient fixture
 
@@ -46,14 +50,19 @@ def test_an_instance_with_a_sub_second_ceiling_still_polls(client, monkeypatch):
     import config
 
     with config.override(MAX_WAIT=0.5):
-        published = next(
+        # The ceiling is a clamp, not a refusal, so it is published as prose on the `wait`
+        # parameter and as a number in `limits.long_poll_seconds` rather than as a
+        # `maximum` the handler never enforced (docs/design.md §3.5).
+        published = client.get("/.well-known/agent.json").json()["limits"]["long_poll_seconds"]
+        assert published == 0.5
+        wait = next(
             p
             for p in client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["parameters"]
             if p["name"] == "wait"
-        )["schema"]
-        assert published["maximum"] == 0.5
-        # The largest value the schema permits is a wait the server actually takes.
-        assert app_module._seconds(str(published["maximum"])) == 0.5
+        )
+        assert "clamped to 0.5" in wait["description"]
+        # The largest value the service advertises is a wait the server actually takes.
+        assert app_module._seconds(str(published)) == 0.5
 
 
 def test_the_body_cap_holds_when_nothing_declares_a_length(client):
@@ -241,6 +250,77 @@ def test_budget_warning_appears_before_the_wall(client, monkeypatch):
         for _ in range(5):
             client.get("/r/lobby")
         assert "# budget: 1 of 8 reads left" in client.get("/r/lobby").text
+
+
+def test_the_warning_thins_out_so_the_reply_stays_shareable(client):
+    """The footer makes a reply `no-store`, so emitting it on every reply switches the CDN
+    off for exactly the callers polling hardest — measured in production at 47.7% of room
+    reads `bypass` against a 7.2% hit rate. It now lands on a stride of the remaining budget.
+
+    Asserted at a production-sized budget, because the stride scales with it: below 24/min
+    it is 1 and every in-band reply still warns, which is what the test above depends on.
+    """
+    import limit
+
+    band = [n for n in range(601) if n * 4 <= 600]
+    warned = [n for n in band if limit.budget_note("read", n, 600)]
+    assert warned, "a caller in the warning band must still be told"
+    assert len(warned) < len(band) // 10, (
+        f"{len(warned)} of {len(band)} in-band replies warn — too many to be cacheable"
+    )
+    # Never at zero left: a caller pinned at its ceiling is granted a token the moment one
+    # refills, so warning there would warn on every one of its replies — the case this
+    # exists to remove.
+    assert not limit.budget_note("read", 0, 600)
+    # A stride cannot be stepped over: consecutive values cannot both skip it.
+    gaps = [b - a for a, b in zip(warned, warned[1:], strict=False)]
+    assert gaps and max(gaps) == min(gaps), f"uneven stride {gaps}"
+
+
+# Derandomized and deadline-free, matching tests/unit/test_parse_properties.py: a property
+# whose failures cannot be reproduced is worse than no property.
+_BUDGETS = settings(derandomize=True, deadline=None, max_examples=75)
+
+
+@given(per_min=st.integers(min_value=1, max_value=1200))
+@_BUDGETS
+def test_the_footer_contract_holds_at_every_budget(per_min):
+    """The footer's rules stated over the whole range of budgets, not the one the tests set.
+
+    This exists because of how the write regression got in. Every rate-knob test in this
+    suite picks a tiny budget so it can exhaust it in a few requests — RATE_READ=1, =8,
+    RATE_WRITE=2, =4, =8 — which is right for testing exhaustion and blind to anything that
+    scales with the budget. The read stride is `per_min // 24`, so at every budget any test
+    had ever used it was 1, the thinning never engaged, and applying it to writes as well
+    passed the whole suite. It showed up only at the production 300/min.
+
+    So the claims are asserted for all budgets rather than at a chosen one:
+
+      - a write footer is never thinned — its presence is exactly the threshold, whatever
+        the budget, because a write reply is `no-store` and has no sharing to buy;
+      - neither kind warns outside the threshold band;
+      - a read is never *silent* through the whole band, however the stride divides it.
+    """
+    band = [n for n in range(per_min + 1) if n * 4 <= per_min]
+    above = [n for n in range(per_min + 1) if n * 4 > per_min]
+
+    assert [n for n in band if limit.budget_note("write", n, per_min)] == band, (
+        f"write warnings thinned at {per_min}/min"
+    )
+    assert not any(limit.budget_note("write", n, per_min) for n in above)
+    assert not any(limit.budget_note("read", n, per_min) for n in above)
+    assert [n for n in band if limit.budget_note("read", n, per_min)], (
+        f"a read caller at {per_min}/min is never warned at all"
+    )
+
+
+def test_a_small_budget_still_warns_on_every_reply(client):
+    """The stride is `per_min // 24`, so a deployment with no requests to spare gets 1 —
+    the every-reply behaviour, because thinning a warning nobody has room to miss is worse
+    than the cacheability it would buy."""
+    import limit
+
+    assert all(limit.budget_note("read", n, 8) for n in range(3))
 
 
 def test_new_rooms_are_budgeted_per_ip_and_say_when_to_retry(client, monkeypatch):
@@ -751,9 +831,69 @@ def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(cli
         async def is_disconnected(self):
             return True
 
+    # No note on this exit: the caller that would read it has already gone.
     result = asyncio.run(app_module._await_messages(cast(Request, Gone()), "lobby", 50, 1, 10))
-    assert result is None
+    assert result == (None, "")
     assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
+
+
+def test_a_long_poll_refused_a_slot_says_so_instead_of_looking_like_a_quiet_room(
+    client, monkeypatch
+):
+    """The refusal degrades to an immediate empty reply, which is the right *data* and was
+    an ambiguous *answer*: identical bytes to a wait that was held and found nothing. A
+    caller that cannot tell polls straight back at wire speed, spending the read budget it
+    wanted for real reads. The note is the difference, and it names which cap was hit
+    because the remedies differ — hold fewer waits, or wait for the instance to quieten.
+    """
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 0)
+    refused = client.get("/r/lobby?since=1&wait=10")
+    assert refused.status_code == 200
+    assert "(no new messages)" in refused.text  # the data is unchanged
+    assert "# wait: not held" in refused.text
+    assert "all 0 on this instance are busy" in refused.text
+    assert "rather than after 10s" in refused.text  # the wait it did not get
+    assert "Sleep about that long before retrying" in refused.text
+
+    # The per-caller cap is a different remedy, so it reads differently.
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 64)
+    monkeypatch.setattr(app_module, "MAX_WAITERS_PER_IP", 0)
+    mine = client.get("/r/lobby?since=1&wait=10")
+    assert "you hold all 0 slots one caller may have" in mine.text
+
+    # The JSON lane carries the same verdict as a field, because a program reading it
+    # gets no footer and would otherwise have to infer a refusal from latency — which is
+    # the guessing this whole change removes. Published in /openapi.json, so a machine
+    # reader finds it without being told.
+    assert client.get("/r/lobby?since=1&wait=10&format=json").json()["wait_held"] is False
+
+
+def test_a_wait_that_was_actually_held_reports_nothing_extra(client, monkeypatch):
+    """The other half of the pair: an honest empty answer must stay bare, or the note
+    would train a caller to back off from exactly the polling the service wants."""
+    import app as app_module
+
+    client.get("/r/lobby/say/bot/first")
+    monkeypatch.setattr(app_module, "MAX_WAITERS_TOTAL", 64)
+    monkeypatch.setattr(app_module, "MAX_WAITERS_PER_IP", 4)
+
+    held = client.get("/r/lobby?since=1&wait=0.2")
+    assert "(no new messages)" in held.text
+    assert "# wait:" not in held.text
+    assert app_module._waiters_total == 0  # and the slot went back
+
+    # …and the JSON lane says so positively rather than by omission: a caller never has
+    # to read the absence of something to learn its wait was honoured.
+    assert client.get("/r/lobby?since=1&wait=0.2&format=json").json()["wait_held"] is True
+
+    # A wait that produced messages was held by definition, so the flag stays off the
+    # answer that needs no advice.
+    client.get("/r/lobby/say/bot/second")
+    assert "wait_held" not in client.get("/r/lobby?since=1&wait=0.2&format=json").json()
 
 
 def test_timestamps_carry_microseconds_and_seq_stays_authoritative(client):
