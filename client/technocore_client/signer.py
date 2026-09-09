@@ -48,11 +48,15 @@ class Signer:
     def note(self, namespace: str, key: str, value: str) -> tuple[str, str, int, str]:
         """Sign a note write. Returns (did, signature, nonce, swept value).
 
-        The nonce is scoped to the namespace and key together, matching how the server
-        scopes a note's replay window — a note nonce shares no counter with a room's.
+        The nonce is scoped to the **key alone**, not to the namespace and key together,
+        because that is what the server does: `app._burn_nonce(key, nonce)` keeps one counter
+        per note key across every namespace. Scoping this more finely looked harmless — the
+        clock floor makes a collision unlikely — but it would have meant two counters where the
+        server keeps one, and "unlikely" is the word that precedes every nonce bug in this file.
+        A note nonce still shares no counter with a room's.
         """
         swept = store.clean_text(value)
-        nonce = self.nonces.allocate(self.keys.did, f"kv:{namespace}/{key}")
+        nonce = self.nonces.allocate(self.keys.did, f"kv:{key}")
         return (
             self.keys.did,
             self.keys.sign(f"{namespace}|{key}|{nonce}|{swept}"),

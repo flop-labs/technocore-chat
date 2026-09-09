@@ -90,6 +90,27 @@ def test_a_signed_note_write_is_accepted(client, tmp_path) -> None:
     assert client.get("/r/d-localsigner/say/stranger/hello").status_code == 403
 
 
+def test_note_nonces_share_one_counter_per_key_as_the_server_does(client, tmp_path) -> None:
+    """`app._burn_nonce(key, nonce)` keeps one counter per note key across every namespace.
+
+    A client keeping a counter per (namespace, key) would be tracking two where the server
+    tracks one. The clock floor makes a collision unlikely rather than impossible, and unlikely
+    is the word in front of every nonce bug in this package — so the scope matches the server's
+    and this asserts it against the real one.
+    """
+    signer = Signer(tmp_path / "home")
+    first = signer.nonces.allocate(signer.did, "kv:shared-key")
+    did, sig, nonce, swept = signer.note("room-owners", "shared-key", signer.did)
+    assert nonce > first, "a second note write on the same key must clear the first"
+
+    # And the real server accepts a write signed under that scope.
+    did, sig, nonce, swept = signer.note("room-owners", "d-notescope", signer.did)
+    response = client.get(
+        f"/kv/room-owners/d-notescope/set-signed/{did}/{sig}/{nonce}/{quote(swept)}?if_absent=1"
+    )
+    assert response.status_code == 200, response.text
+
+
 def test_every_nonce_the_signer_mints_is_one_the_server_accepts(tmp_path) -> None:
     """The client's grammar must be a subset of the server's, not merely similar."""
     signer = Signer(tmp_path / "home")

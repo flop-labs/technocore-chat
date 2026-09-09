@@ -81,8 +81,8 @@ class Keyring:
     def _create(self) -> bytes | None:
         """Mint and persist a seed, or return None if another process got there first.
 
-        Written to a pid-scoped temporary and then `os.link`ed into place, rather than opened
-        at the final path and filled in afterwards. Two reasons, and the second is the one that
+        Written to a temporary from `mkstemp` and then `os.link`ed into place, rather than
+        opened at the final path and filled in afterwards. Two reasons, and the second is the one that
         removes a whole class of retry logic:
 
         * `link` is create-or-fail — it raises `FileExistsError` rather than clobbering — so it
