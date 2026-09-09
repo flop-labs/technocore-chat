@@ -995,6 +995,75 @@ def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path
     assert not r_lock.exists()
 
 
+def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_sweep(
+    tmp_path, monkeypatch
+):
+    """When a sidecar lock is unlinked by an orphan sweep while a waiter is blocked
+
+    on flock, the waiter must retry and acquire the replacement lock rather than
+    surfacing FileNotFoundError.
+    """
+    import fcntl
+    import os
+
+    import store
+
+    r_path = store.room_path(tmp_path, "d-swept-waiter")
+    r_lock = r_path.with_suffix(r_path.suffix + ".lock")
+    r_lock.parent.mkdir(parents=True, exist_ok=True)
+    r_lock.touch()
+
+    now = time.time()
+    os.utime(r_lock, (now - store.IDLE_SECONDS - 10, now - store.IDLE_SECONDS - 10))
+
+    real_flock = fcntl.flock
+    real_unlink = os.unlink
+    waiter_at_flock = threading.Event()
+    waiter_acquired = threading.Event()
+    waiter_error = []
+    waiter_tid = None
+    waiter_thread = []
+
+    def hooked_flock(fd, op):
+        if waiter_tid and threading.get_ident() == waiter_tid:
+            waiter_at_flock.set()
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", hooked_flock)
+
+    def hooked_unlink(path):
+        if str(path) == str(r_lock):
+
+            def waiter():
+                try:
+                    with store._locked(r_path):
+                        waiter_acquired.set()
+                except Exception as e:
+                    waiter_error.append(e)
+
+            t = threading.Thread(target=waiter)
+            t.start()
+            nonlocal waiter_tid
+            waiter_tid = t.ident
+            waiter_thread.append(t)
+            assert waiter_at_flock.wait(5), "waiter never reached flock"
+            real_unlink(path)
+            return
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", hooked_unlink)
+
+    touched = {"rooms": set(), "notes": set()}
+    store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+
+    assert waiter_thread, "sweep never attempted to unlink sidecar"
+    waiter_thread[0].join(5)
+    assert not waiter_thread[0].is_alive(), "waiter thread timed out"
+    assert not waiter_error, f"waiter raised: {waiter_error}"
+    assert waiter_acquired.is_set(), "waiter never acquired lock"
+    assert r_lock.exists(), "replacement lock was not created"
+
+
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     owner, owner_sign = _keypair()
     r = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, owner)
