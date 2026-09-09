@@ -71,20 +71,50 @@ class NonceStore:
         self._state: dict[str, dict[str, int]] = self._load()
 
     def _load(self) -> dict[str, dict[str, int]]:
+        """The persisted ledger, or `{}` when there has never been one.
+
+        **Absent and corrupt are not the same fact**, and the first version of this treated them
+        alike. A missing file is a first run: nothing was ever issued, so starting from the clock
+        is correct. A file that exists and does not parse is *unknown*: numbers were issued and
+        we cannot say which. Starting from the clock then is a guess, and @Minh3132's sequence on
+        #803 is when the guess is wrong — a host whose clock later moves backwards allocates
+        below a nonce already used, and every write is refused for a reason the caller cannot see.
+
+        So a corrupt ledger is quarantined and raised on. That is the rule I wrote for consumers
+        elsewhere — a failed read is unknown, not empty, and the only safe action on unknown is
+        none — applied to my own state file, which is where it had not been.
+        """
+        if not self._path.exists():
+            return {}
         try:
             raw = json.loads(self._path.read_text())
-        except (OSError, ValueError):
-            # A missing file is the ordinary first run. A corrupt one is treated the same
-            # way on purpose: the clock floor below keeps a lost file safe, whereas
-            # refusing to start would strand a caller over state it cannot repair.
-            return {}
+        except (OSError, ValueError) as exc:
+            raise self._quarantine(f"could not be read as JSON ({exc.__class__.__name__})") from exc
         if not isinstance(raw, dict):
-            return {}
+            raise self._quarantine("does not hold a JSON object")
         out: dict[str, dict[str, int]] = {}
         for did, rooms in raw.items():
             if isinstance(rooms, dict):
                 out[did] = {r: n for r, n in rooms.items() if isinstance(n, int) and n >= 0}
         return out
+
+    def _quarantine(self, why: str) -> Exception:
+        """Move a damaged ledger aside and describe the recovery, rather than continuing.
+
+        Renamed rather than deleted: it is the only record of what was issued, and whoever has
+        to decide whether waiting out the clock is enough will want to look at it.
+        """
+        aside = self._path.with_name(f"{self._path.name}.corrupt.{int(time.time())}")
+        try:
+            os.replace(self._path, aside)
+        except OSError:  # pragma: no cover - the rename failing does not change the verdict
+            aside = self._path
+        return ValueError(
+            f"{self._path} {why}; moved to {aside}. The nonces already issued for this key are "
+            "unknown, so allocating from the clock could repeat one and every signed write would "
+            "be refused. Recover by waiting until the clock is certainly past the last nonce "
+            "used, or by using a different key."
+        )
 
     def _lock(self):
         """Exclusive lock over the whole read-modify-write.

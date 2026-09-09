@@ -149,14 +149,46 @@ def test_a_lost_nonce_file_does_not_restart_the_counter(tmp_path) -> None:
     assert fresh.allocate(signer.did, "room") > used
 
 
-def test_a_corrupt_nonce_file_is_not_fatal(tmp_path) -> None:
+def test_a_corrupt_nonce_file_is_refused_in_a_fresh_process(tmp_path) -> None:
+    """@Minh3132, #803: the test this replaces proved nothing about the case it named.
+
+    It corrupted the file and then allocated from a new `NonceStore` *in the same process*, where
+    `_process_floor` still held the nonce issued moments earlier — so the new number cleared the
+    old one because of an in-memory value, not because the corrupt-file path was safe. A fresh
+    process has no such floor, and if the clock has since moved backwards it allocates below a
+    nonce already used and every write is refused.
+
+    So the check runs in a subprocess, where the floor is genuinely zero, and asserts the ledger
+    is refused rather than silently treated as empty.
+    """
     home = tmp_path / "home"
     signer = Signer(home)
-    used = signer.nonces.allocate(signer.did, "room")
-    (home / "nonces.json").write_text("{ this is not json")
+    signer.nonces.allocate(signer.did, "room")
+    store = home / "nonces.json"
+    store.write_text("{ this is not json")
 
-    fresh = NonceStore(home / "nonces.json")
-    assert fresh.allocate(signer.did, "room") > used
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client.nonces import NonceStore;"
+        "NonceStore(sys.argv[2])"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(store)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0, "a corrupt ledger was accepted as an empty one"
+    assert "could not be read as JSON" in result.stderr
+    assert "would be refused" in result.stderr, "the error must say what it costs, not just fail"
+
+    # Quarantined rather than deleted: it is the only record of what was issued.
+    aside = list(home.glob("nonces.json.corrupt.*"))
+    assert len(aside) == 1, f"the damaged ledger was not moved aside: {list(home.iterdir())}"
+    assert aside[0].read_text() == "{ this is not json"
+    assert not store.exists()
 
 
 def test_a_new_seed_makes_its_directory_entry_durable(tmp_path, monkeypatch) -> None:
@@ -270,15 +302,19 @@ def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
         Keyring(seed_path)
 
 
-def test_a_nonce_file_holding_the_wrong_shape_is_ignored_not_trusted(tmp_path) -> None:
-    """A note that parses as JSON but is not the map this expects is the same class as a corrupt
-    one: unknown, so start from the clock rather than from whatever was there."""
+def test_a_nonce_file_of_the_wrong_shape_is_refused_and_a_bad_entry_is_dropped(tmp_path) -> None:
+    """Two different facts, deliberately treated differently.
+
+    A file that is not an object at all is unreadable state — same class as unparseable, so it is
+    quarantined. A file that *is* the right shape with one implausible entry is readable state
+    with a hole: the rest is trustworthy and the bad entry is dropped, which leaves that one pair
+    starting from the clock rather than throwing the whole ledger away.
+    """
     store = tmp_path / "nonces.json"
     store.write_text('["not", "a", "map"]')
-    assert NonceStore(store).last("did:key:zX", "room") is None
-
-    store.write_text('{"did:key:zX": "not a room map"}')
-    assert NonceStore(store).last("did:key:zX", "room") is None
+    with pytest.raises(ValueError, match="does not hold a JSON object"):
+        NonceStore(store)
+    assert len(list(tmp_path.glob("nonces.json.corrupt.*"))) == 1
 
     store.write_text('{"did:key:zX": {"room": -5, "other": 7}}')
     fresh = NonceStore(store)
