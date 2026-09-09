@@ -643,6 +643,75 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+
+// ---------------------------------------------------------------- did marker collision
+// shortDid() used to keep only the last 4 base58 characters after the constant `z6Mk`
+// prefix every Ed25519 did:key starts with, so two different keys whose DIDs happened to
+// share their last 4 characters rendered as the exact same marker — nothing in the log
+// told the two identities apart. SEED_A/SEED_B are a real collision under the old scheme
+// and a real distinction under the fixed one, found against didkey.py's own encoding (not
+// reimplemented here) rather than picked by hand.
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
+
+  const SEED_A = "de7cb2f01a67d8b196738e995ffe362d4ea1099301d852e4ccecd17f4c6c0f1f";
+  const DID_A  = "did:key:z6MkrpxBFhfQSjQhhWZJRb9xW2NCy1ayDy16cznvz9tN9DtS";
+  const SEED_B = "0f14584b84e5f0a0cf2b16a1367f26e14d06df8a00876590b9b49a4d09480a9d";
+  const DID_B  = "did:key:z6MkjTvbjitn32Czwguyvqe5dGb5oF6Z17taijbtn4wk9DtS";
+  if (DID_A.slice(-4) !== DID_B.slice(-4) || DID_A.slice(-8) === DID_B.slice(-8)) {
+    throw new Error("did-marker-collision fixture no longer collides — regenerate SEED_A/SEED_B");
+  }
+
+  const room = `didmarker${Date.now().toString(36)}`;
+  const TOKEN_A = `marker-a-${Date.now().toString(36)}`;
+  const TOKEN_B = `marker-b-${Date.now().toString(36)}`;
+
+  await page.click("#keymore summary");
+  await page.fill("#seed", SEED_A);
+  await page.click("#keyuse");
+  await page.waitForFunction((did) => document.getElementById("me")?.getAttribute("title") === did, DID_A);
+  check("did marker: SEED_A signs in as the expected DID",
+        (await page.getAttribute("#me", "title")) === DID_A);
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#text", TOKEN_A);
+  await page.click("#send");
+  const rowA = page.locator(`#log .msg:has(.body:text-is("${TOKEN_A}"))`);
+  await rowA.waitFor({ timeout: 8000 });
+
+  await page.click("#keyout");
+  if (!(await page.locator("#seed").isVisible())) {
+    await page.click("#keymore summary");
+  }
+  await page.fill("#seed", SEED_B);
+  await page.click("#keyuse");
+  await page.waitForFunction((did) => document.getElementById("me")?.getAttribute("title") === did, DID_B);
+  check("did marker: SEED_B signs in as the expected DID",
+        (await page.getAttribute("#me", "title")) === DID_B);
+  await page.fill("#room", room);
+  await page.click("#join");
+  await page.fill("#text", TOKEN_B);
+  await page.click("#send");
+  const rowB = page.locator(`#log .msg:has(.body:text-is("${TOKEN_B}"))`);
+  await rowB.waitFor({ timeout: 8000 });
+
+  const markerA = (await rowA.locator(".who").textContent()).trim();
+  const markerB = (await rowB.locator(".who").textContent()).trim();
+  check("did marker: two different signers render two different markers",
+        markerA !== markerB, `${markerA} vs ${markerB}`);
+  check("did marker: each marker keeps the 8 trailing characters the fix widened to",
+        markerA.endsWith(DID_A.slice(-8)) && markerB.endsWith(DID_B.slice(-8)),
+        `${markerA} / ${markerB}`);
+
+  check("did marker: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
 // -------------------------------------------------------------------- passkey + delegation
 // Two things a Python test cannot reach at all: whether an authenticator's PRF output can
 // actually stand in as an Ed25519 seed, and whether the identity comes back on a browser
