@@ -2523,7 +2523,7 @@ def _write_record(
         rec = {"seq": 0, "ts": _now(), "from": valid_name(nick), "text": clean_text(text)}
     else:
         didkey.public_key(did)
-        if not isinstance(nonce, int) or nonce < 0:
+        if not isinstance(nonce, int) or isinstance(nonce, bool) or nonce < 0:
             raise StoreError(
                 f"signed writes need a non-negative integer nonce, got {nonce!r} — 1-19 "
                 "digits, greater than the last one this key used in this room. A counter "
