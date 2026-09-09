@@ -659,7 +659,11 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
         with open(lock, "a+b") as lf:
             fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
             try:
-                if os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino:
+                try:
+                    match = os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino
+                except OSError:
+                    match = False
+                if match:
                     config._dbg(2, "flock", path=target.name)
                     yield
                     return
