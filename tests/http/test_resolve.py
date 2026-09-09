@@ -97,3 +97,35 @@ def test_resolve_uses_legacy_did_namespace(client, monkeypatch):
     rr = client.get(f"/kv/resolve/{did}")
     assert rr.status_code == 200
     assert "legacy" in rr.text
+
+
+def test_resolve_reflects_note_overwrite(client):
+    """The cache must not keep a resolved name alive after its DID note is rewritten.
+
+    Regression for the reviewer note: an entry cached as immutable without expiry would
+    keep serving `alice` after the note was overwritten to `bob` (or invalidated), breaking
+    the fail-closed guarantee. The note-write path invalidates the DID cache, so the very
+    next resolve re-reads the note and reflects the new/invalid state.
+    """
+    did, sign = _keypair(10)
+    ns, key = _did_note_path(client, did)
+
+    def set_note(value):
+        r = client.get(f"/kv/{ns}/{key}/set/{value.replace(' ', '%20')}")
+        assert r.status_code == 200, r.text
+
+    # 1. publish alice, resolve it (primes the cache)
+    set_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:alice sig:{sign(f'{did}|alice')}")
+    r1 = client.get(f"/kv/resolve/{did}")
+    assert r1.status_code == 200 and "alice" in r1.text
+
+    # 2. overwrite to a different valid name (valid sig)
+    set_note(f"{did} mailbox:mb-p-t x25519:AAAA nick:bob sig:{sign(f'{did}|bob')}")
+    r2 = client.get(f"/kv/resolve/{did}")
+    assert r2.status_code == 200, f"expected 200 got {r2.status_code}: {r2.text}"
+    assert "bob" in r2.text, f"expected bob, got {r2.text!r}"
+
+    # 3. overwrite again, dropping nick:/sig: entirely -> must fail closed
+    set_note(f"{did} mailbox:mb-p-t x25519:AAAA")
+    r3 = client.get(f"/kv/resolve/{did}")
+    assert r3.status_code == 404, f"expected 404 got {r3.status_code}: {r3.text}"

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import threading
+import time
 
 import didkey
 import store
@@ -34,26 +35,33 @@ def _note_ns_and_key(did: str) -> tuple[str, str]:
 
 
 class _NameCache:
-    """Bounded resolve of did:key -> verified display name (or None).
+    """Bounded, expiring resolve of did:key -> verified display name (or None).
 
     The store itself is the source of truth; this is only a bounded in-memory mirror so a
-    50-message room read does not re-read + re-verify the same DID repeatedly. Entries are
-    immutable (a DID note can be overwritten, but a reader is entitled to the name that was
-    there when it looked; a TTL would re-verify on *every* read and defeat the point).
+    50-message room read does not re-read + re-verify the same DID every request. Entries
+    expire after a short TTL, and the note-write path calls :meth:`invalidate` so a just
+    overwritten DID note is reflected on the *next* resolve instead of on some later
+    eviction. A short-lived stale name is acceptable (the TTL is the generous /humans
+    cache window for a name that would be verified again on the next read); a permanently
+    stale one is not — which is exactly what expiry + write-path invalidation prevent.
     """
 
-    __slots__ = ("_lock", "_cap", "_keys", "_map")
+    __slots__ = ("_lock", "_cap", "_keys", "_map", "_ts", "_ttl")
 
-    def __init__(self, cap: int = 1024) -> None:
+    def __init__(self, cap: int = 1024, ttl_ms: int = 30_000) -> None:
         self._lock = threading.Lock()
         self._cap = cap
         self._keys: list[str] = []
         self._map: dict[str, str | None] = {}
+        self._ts: dict[str, float] = {}
+        self._ttl = ttl_ms / 1000.0
 
     def get(self, did: str) -> str | None | bool:
-        """The cached name, None when cached-unresolved, False when not cached."""
+        """The cached name, None when cached-unresolved, False when not cached/expired."""
+        now = _monotonic()
         with self._lock:
-            if did in self._map:
+            age = self._ts.get(did)
+            if did in self._map and age is not None and (now - age) < self._ttl:
                 return self._map[did]
             return False
 
@@ -64,10 +72,45 @@ class _NameCache:
                 if len(self._keys) > self._cap:
                     old = self._keys.pop(0)
                     self._map.pop(old, None)
+                    self._ts.pop(old, None)
             self._map[did] = name
+            self._ts[did] = _monotonic()
+
+    def invalidate(self, did: str) -> None:
+        """Drop any cached result for `did` so the next resolve re-reads the note."""
+        with self._lock:
+            self._map.pop(did, None)
+            self._ts.pop(did, None)
+
+    def invalidate_all(self) -> None:
+        """Drop every cached result (used when a DID-note namespace is rewritten).
+
+        DID-note keys are content fingerprints, not reverse-mappable to a did:key, so a
+        single overwrite cannot target one entry cheaply — but DID notes are written
+        rarely, so clearing the whole (small) DID cache on any such write is simpler than
+        a per-key scan and costs nothing in practice. Non-did namespaces are untouched.
+        """
+        with self._lock:
+            self._map.clear()
+            self._ts.clear()
+            self._keys.clear()
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 _CACHE = _NameCache()
+
+
+def invalidate(did: str) -> None:
+    """Drop the cached result for `did`; call after the DID note is rewritten."""
+    _CACHE.invalidate(did)
+
+
+def invalidate_all_did_namespace() -> None:
+    """Clear the DID cache when a DID-note namespace is written (see _NameCache)."""
+    _CACHE.invalidate_all()
 
 
 def lookahead_nick(did: str, discover: bool = False) -> str | None:
