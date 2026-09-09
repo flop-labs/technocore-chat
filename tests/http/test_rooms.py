@@ -463,7 +463,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     import app
     import store
 
-    assert "no rooms yet" in client.get("/rooms").text
+    assert "no public rooms yet" in client.get("/rooms").text
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
@@ -540,6 +540,23 @@ def test_rooms_kind_filters_before_the_detail_limit(client, tmp_path):
         "default": "all",
     }
     assert "before applying `limit`" in kind["description"] and "400" in operation["responses"]
+
+
+def test_rooms_text_empty_state_names_the_selected_kind(client):
+    expected = {
+        "discussion": "(no discussions)",
+        "mailbox": "(no public mailboxes)",
+        "all": "(no public rooms yet — GET /r/<name>/say/<nick>/<text> creates one)",
+    }
+    for kind, first_line in expected.items():
+        assert client.get(f"/rooms?kind={kind}").text.splitlines()[0] == first_line
+    assert client.get("/rooms").text.splitlines()[0] == expected["all"]
+
+    # An empty category is not an empty service: this is the misleading case the wording
+    # must keep distinct after the kind filter is applied.
+    client.get("/r/discussion/say/bot/hello")
+    mailbox = client.get("/rooms?kind=mailbox").text.splitlines()[0]
+    assert mailbox == expected["mailbox"] and "no public rooms" not in mailbox
 
 
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
