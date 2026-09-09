@@ -80,8 +80,8 @@ class NonceStore:
         #803 is when the guess is wrong — a host whose clock later moves backwards allocates
         below a nonce already used, and every write is refused for a reason the caller cannot see.
 
-        So a corrupt ledger is quarantined and raised on, and "corrupt" includes a file that
-        parses but does not hold the shape this writes. That is the rule I wrote for consumers
+        So an unreadable ledger is refused and left where it is, and "unreadable" includes a
+        file that parses but does not hold the shape this writes. That is the rule I wrote for consumers
         elsewhere — a failed read is unknown, not empty, and the only safe action on unknown is
         none — applied to my own state file, which is where it had not been.
         """
@@ -90,9 +90,9 @@ class NonceStore:
         try:
             raw = json.loads(self._path.read_text())
         except (OSError, ValueError) as exc:
-            raise self._quarantine(f"could not be read as JSON ({exc.__class__.__name__})") from exc
+            raise self._refuse(f"could not be read as JSON ({exc.__class__.__name__})") from exc
         if not isinstance(raw, dict):
-            raise self._quarantine("does not hold a JSON object")
+            raise self._refuse("does not hold a JSON object")
         # Strict, and every violation is fatal rather than filtered. The previous version dropped
         # a malformed entry and carried on, which reads like leniency and is not: dropping an
         # entry does not omit a fact, it *asserts* that the pair has never issued a nonce. That
@@ -101,32 +101,37 @@ class NonceStore:
         # the whole file had been lost (@yukkie3276, #803).
         for did, rooms in raw.items():
             if not isinstance(rooms, dict):
-                raise self._quarantine(f"maps {did!r} to something that is not an object")
+                raise self._refuse(f"maps {did!r} to something that is not an object")
             for room, nonce in rooms.items():
                 # bool before int: `isinstance(True, int)` is true in Python, and `true` in the
                 # file would otherwise load as the nonce 1.
                 if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
-                    raise self._quarantine(
+                    raise self._refuse(
                         f"holds {nonce!r} for {did!r}/{room!r}, which is not a non-negative integer"
                     )
         return {did: dict(rooms) for did, rooms in raw.items()}
 
-    def _quarantine(self, why: str) -> Exception:
-        """Move a damaged ledger aside and describe the recovery, rather than continuing.
+    def _refuse(self, why: str) -> Exception:
+        """Refuse to allocate, and leave the damaged ledger exactly where it is.
 
-        Renamed rather than deleted: it is the only record of what was issued, and whoever has
-        to decide whether waiting out the clock is enough will want to look at it.
+        The first version of this renamed the file aside to preserve it as evidence. That made
+        the refusal last one process: the next `NonceStore` found the canonical path absent,
+        read it as a first run, and allocated from the clock with the previous floor still
+        unknown — the very failure the refusal exists to prevent, delayed by one restart
+        (@yukkie3276, #803).
+
+        Leaving it in place is both the evidence and the lock. Every process that starts reads
+        the same unreadable file and refuses the same way, until a person removes or repairs it —
+        and a person doing that has decided the clock is safely past whatever was issued, which
+        is exactly the judgement no automatic recovery can make.
         """
-        aside = self._path.with_name(f"{self._path.name}.corrupt.{int(time.time())}")
-        try:
-            os.replace(self._path, aside)
-        except OSError:  # pragma: no cover - the rename failing does not change the verdict
-            aside = self._path
         return ValueError(
-            f"{self._path} {why}; moved to {aside}. The nonces already issued for this key are "
-            "unknown, so allocating from the clock could repeat one and every signed write would "
-            "be refused. Recover by waiting until the clock is certainly past the last nonce "
-            "used, or by using a different key."
+            f"{self._path} {why}. The nonces already issued for this key are unknown, so "
+            "allocating from the clock could repeat one and every signed write would be refused. "
+            "This file is left in place deliberately: it is the only record of what was issued, "
+            "and while it is here no process will allocate. Recover by repairing it, or by moving "
+            "it aside once you are satisfied the clock is past the last nonce used — or by using a "
+            "different key."
         )
 
     def _lock(self):

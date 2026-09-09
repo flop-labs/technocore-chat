@@ -12,6 +12,7 @@ world-readable between runs is the failure this catches, and it is silent otherw
 from __future__ import annotations
 
 import base64
+import binascii
 import os
 import stat
 import tempfile
@@ -59,6 +60,27 @@ class Keyring:
         self.did = did_from_seed(self.seed)
 
     def _load(self) -> bytes:
+        """The seed on disk, minting one if there is none.
+
+        Every path out of here fsyncs the directory before returning, not only the one that
+        created the file. A constructor that returns an identity is promising that identity
+        survives a power cut, and the promise cannot depend on which branch it took: a process
+        whose `exists()` check lands after another's `os.link` but before that other's fsync
+        would otherwise return a working DID whose name is not yet durable (@Minh3132, #803).
+
+        The first fix covered only the lost-create race, which left the plain already-there path
+        open — and the test caught that, because it counted directory syncs globally and was
+        acquitted by the winner's. Attributing each sync to the thread that made it is what
+        turned a passing test into a failing one. One fsync per process on an already-synced
+        directory is cheap; reasoning about which interleavings need it is not.
+        """
+        try:
+            return self._load_inner()
+        finally:
+            if self._path.parent.exists():
+                fsync_dir(self._path.parent)
+
+    def _load_inner(self) -> bytes:
         if not self._path.exists():
             created = self._create()
             if created is not None:
@@ -67,15 +89,50 @@ class Keyring:
             # complete by construction — see `_create` — so there is nothing to wait for; fall
             # through and read the winner's identity rather than failing a startup that has no
             # reason to fail (@yukkie3276, #803).
+            #
+            # But fsync the directory before doing so. The winner links the name and fsyncs the
+            # directory afterwards, so a loser that read the file and returned in between would
+            # hand back a working identity whose *name* was not yet durable — the same power-loss
+            # window the directory fsync exists to close, reopened for whichever process did not
+            # create the file (@Minh3132, #803). fsync on an already-synced directory is cheap and
+            # this runs once per process, so ordering it here rather than reasoning about the
+            # interleaving is the trade worth making.
         mode = stat.S_IMODE(self._path.stat().st_mode)
         if mode & 0o077:
             raise PermissionError(
                 f"{self._path} is mode {mode:04o}; a signing seed must not be group- or "
                 "world-readable. Fix with chmod 600 and rotate if it was ever shared."
             )
-        seed = base64.urlsafe_b64decode(self._path.read_text().strip() + "==")
+        # `validate=True`, and this is not a detail. Without it `urlsafe_b64decode` *silently
+        # discards* characters outside the alphabet: "not base64 at all!!" decodes to ten bytes
+        # rather than raising. A corrupted seed therefore does not fail — it becomes a different
+        # 32-byte value whenever the garbage happens to be the right length, and the identity
+        # quietly changes. The length check below is not a substitute; it catches most
+        # corruptions and not the one that matters.
+        #
+        # Raised as a labelled refusal for the same reason the nonce ledger's is: an unreadable
+        # identity is unknown state, and a bare `binascii.Error` traceback tells the operator
+        # neither what it cost nor what to do (found in review by @yukkie3276, #803).
+        try:
+            # `b64decode` with `altchars`, because `urlsafe_b64decode` takes no `validate`
+            # argument — the urlsafe wrapper is the lenient one, and leniency is the bug here.
+            body = self._path.read_text().strip()
+            # Pad to a multiple of four rather than always appending "==": with validate=True,
+            # surplus padding is itself an error ("Excess data after padding"), so the sloppy
+            # version that worked under the lenient decoder does not survive the strict one.
+            seed = base64.b64decode(body + "=" * (-len(body) % 4), altchars=b"-_", validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(
+                f"{self._path} is not base64 ({exc}). A seed that cannot be read is not a seed "
+                "that is absent: generating a new one here would silently change this identity, "
+                "and every signature and published note already names the old key. Repair the "
+                "file or move it aside deliberately."
+            ) from exc
         if len(seed) != 32:
-            raise ValueError(f"{self._path} does not hold a 32-byte seed")
+            raise ValueError(
+                f"{self._path} decodes to {len(seed)} bytes, not 32. Same reasoning as above: "
+                "this is a damaged identity, not a missing one."
+            )
         return seed
 
     def _create(self) -> bytes | None:

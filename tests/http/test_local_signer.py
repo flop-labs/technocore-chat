@@ -170,17 +170,17 @@ def test_a_lost_nonce_file_does_not_restart_the_counter(tmp_path) -> None:
     assert fresh.allocate(signer.did, "room") > used
 
 
-def test_a_corrupt_nonce_file_is_refused_in_a_fresh_process(tmp_path) -> None:
-    """@Minh3132, #803: the test this replaces proved nothing about the case it named.
+def test_a_corrupt_ledger_keeps_refusing_after_a_restart(tmp_path) -> None:
+    """@yukkie3276, #803, twice over.
 
-    It corrupted the file and then allocated from a new `NonceStore` *in the same process*, where
-    `_process_floor` still held the nonce issued moments earlier — so the new number cleared the
-    old one because of an in-memory value, not because the corrupt-file path was safe. A fresh
-    process has no such floor, and if the clock has since moved backwards it allocates below a
-    nonce already used and every write is refused.
+    First: the original test proved nothing, because it allocated from a new `NonceStore` in the
+    same process where `_process_floor` still held the nonce issued moments earlier.
 
-    So the check runs in a subprocess, where the floor is genuinely zero, and asserts the ledger
-    is refused rather than silently treated as empty.
+    Then: the fix that replaced it renamed the damaged file aside, which made the refusal last
+    exactly one process — the next one found the canonical path absent, read it as a first run,
+    and allocated from the clock with the floor still unknown. The refusal has to outlive the
+    process that noticed, so this runs it twice in fresh subprocesses and then checks that
+    deliberate recovery still works.
     """
     home = tmp_path / "home"
     signer = Signer(home)
@@ -195,21 +195,30 @@ def test_a_corrupt_nonce_file_is_refused_in_a_fresh_process(tmp_path) -> None:
         "from technocore_client.nonces import NonceStore;"
         "NonceStore(sys.argv[2])"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(store)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode != 0, "a corrupt ledger was accepted as an empty one"
-    assert "could not be read as JSON" in result.stderr
-    assert "would be refused" in result.stderr, "the error must say what it costs, not just fail"
 
-    # Quarantined rather than deleted: it is the only record of what was issued.
-    aside = list(home.glob("nonces.json.corrupt.*"))
-    assert len(aside) == 1, f"the damaged ledger was not moved aside: {list(home.iterdir())}"
-    assert aside[0].read_text() == "{ this is not json"
-    assert not store.exists()
+    def fresh_process():
+        return subprocess.run(
+            [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(store)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    first = fresh_process()
+    assert first.returncode != 0, "a corrupt ledger was accepted as an empty one"
+    assert "could not be read as JSON" in first.stderr
+    assert "would be refused" in first.stderr, "the error must say what it costs, not just fail"
+
+    second = fresh_process()
+    assert second.returncode != 0, "the refusal did not outlive the process that noticed"
+    assert "could not be read as JSON" in second.stderr
+
+    # The damaged ledger is still there, because it is the evidence and the lock at once.
+    assert store.read_text() == "{ this is not json"
+
+    # Recovery is a deliberate act by someone who has decided the clock is safely past: move it.
+    store.rename(home / "nonces.json.set-aside")
+    assert fresh_process().returncode == 0, "recovery left the store unusable"
 
 
 def test_a_new_seed_makes_its_directory_entry_durable(tmp_path, monkeypatch) -> None:
@@ -319,7 +328,14 @@ def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
     seed_path.parent.mkdir(parents=True)
     seed_path.write_text(base64.urlsafe_b64encode(b"\x02" * 16).decode().rstrip("="))
     seed_path.chmod(0o600)
-    with pytest.raises(ValueError, match="does not hold a 32-byte seed"):
+    with pytest.raises(ValueError, match="not 32"):
+        Keyring(seed_path)
+
+    # The one that matters: without validate=True, base64 silently drops characters outside its
+    # alphabet, so a corrupted file decodes to *something* rather than failing. When that
+    # something is 32 bytes the identity changes and nothing says so.
+    seed_path.write_text("not a seed!! " + base64.urlsafe_b64encode(b"\x03" * 32).decode())
+    with pytest.raises(ValueError, match="is not base64"):
         Keyring(seed_path)
 
 
@@ -350,8 +366,9 @@ def test_every_shape_the_ledger_cannot_hold_is_quarantined(tmp_path, body, reaso
     store.write_text(body)
     with pytest.raises(ValueError, match=reason):
         NonceStore(store)
-    assert len(list(tmp_path.glob("nonces.json.corrupt.*"))) == 1, "damaged ledger not moved aside"
-    assert not store.exists()
+    # Left exactly where it was: it is the evidence, and it is also what makes the refusal
+    # outlast this process.
+    assert store.read_text() == body
 
 
 def test_a_well_formed_ledger_round_trips(tmp_path) -> None:
@@ -363,6 +380,74 @@ def test_a_well_formed_ledger_round_trips(tmp_path) -> None:
     reread = NonceStore(store)
     assert reread.last("did:key:zX", "room") == first
     assert reread.allocate("did:key:zX", "room") > first
+
+
+def test_every_successful_first_start_is_past_the_durability_barrier(tmp_path, monkeypatch) -> None:
+    """@Minh3132, #803: convergence is not the same claim as durability.
+
+    The winner links the seed's name and fsyncs the directory afterwards. A loser that read the
+    winner's complete file and returned in between would hand back a working identity whose
+    *name* was not yet durable — the same power-loss window the directory fsync exists to close,
+    reopened for whichever process did not create the file. The existing race tests prove every
+    constructor agrees on the DID; none proved every constructor had passed the barrier.
+
+    The assertion records **which thread** performed each directory fsync, because the first
+    version of this test counted them globally and therefore passed without the fix: the loser
+    was being acquitted by the winner's sync. Counting is not attribution, and the property is
+    about the loser.
+    """
+    seed_path = tmp_path / "home" / "seed"
+    synced_by: set[int] = set()
+    real_fsync = os.fsync
+    guard = threading.Lock()
+
+    # Attributed by (thread, inode), not merely by thread. `mkdir_durable` syncs the *parent
+    # of* each directory it creates, so a thread that only made the folder would otherwise be
+    # credited with syncing the folder holding the seed. Third way this test found to pass
+    # without the fix; each one was found by running the control rather than by reading it.
+    home_inode = {"value": None}
+
+    def attributing_fsync(fd: int) -> None:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            with guard:
+                if home_inode["value"] is None and seed_path.parent.exists():
+                    home_inode["value"] = seed_path.parent.stat().st_ino
+                if info.st_ino == home_inode["value"]:
+                    synced_by.add(threading.get_ident())
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", attributing_fsync)
+    start = threading.Barrier(2)
+    outcomes: list[object] = []
+    idents: set[int] = set()
+
+    def start_one() -> None:
+        start.wait(timeout=10)
+        try:
+            did = Keyring(seed_path).did
+        except Exception as exc:  # noqa: BLE001 — any raise is the failure under test
+            with guard:
+                outcomes.append(exc)
+            return
+        with guard:
+            outcomes.append(did)
+            idents.add(threading.get_ident())
+
+    threads = [threading.Thread(target=start_one) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not [o for o in outcomes if isinstance(o, Exception)], outcomes
+    assert len(set(outcomes)) == 1, f"threads disagreed about the identity: {outcomes}"
+    # Both constructors returned, and *each* of them fsynced a directory itself — the loser
+    # included, which is the half that was not previously true.
+    assert len(idents) == 2, "both threads should have constructed a Keyring"
+    assert idents <= synced_by, (
+        "a constructor returned without itself syncing the directory holding the seed"
+    )
 
 
 def test_concurrent_first_starts_in_one_process_converge(tmp_path) -> None:
