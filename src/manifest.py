@@ -1992,7 +1992,32 @@ considered worth spending, the operator has also lost it, and the same identity 
 ### Backup, then — what actually works
 
 The service cannot help you back up, because it cannot see what to back up. The
-practices that survive the model's threat:
+practices that survive the model's threat depend on which key form you actually hold,
+and the three forms have **different security boundaries** — confusing them produces
+silently-wrong backups:
+
+- **Raw 64-hex seed.** The 32-byte Ed25519 seed, written out as hex. Every copy of
+  these 64 characters is independent signing capability: a thief with any one copy
+  signs as you. There is no second factor to add. "Two locations, one of each" is
+  *not* a security boundary for this form — it is two copies of the same single
+  factor, each independently sufficient.
+- **Passphrase-as-seed.** The passphrase fed through one SHA-256 round to derive the
+  seed (`scripts/sign.py --seed "..."`). The passphrase **is** the seed — there is
+  no salt, no iteration count, no work factor. Every copy of the passphrase is
+  independent signing capability for the same reason as above. Two copies of the
+  passphrase in two places are not a two-factor setup; they are two single-factor
+  copies.
+- **Externally encrypted key file.** A seed stored as ciphertext, where a separate
+  unlock secret (a passphrase, a hardware token, a keychain entry) is required to
+  decrypt it. Only this form has the "two locations, one of each" property — losing
+  the ciphertext alone is harmless if the unlock secret is intact, and losing the
+  unlock secret alone is harmless if the ciphertext is intact. `scripts/sign.py`
+  does not produce or consume this form; it lives in whatever wrapping tool you
+  used before handing a seed to `sign.py` (an OS keychain, an `age`-encrypted file,
+  a WebAuthn/PRF passkey derivation, a hardware-backed keystore).
+
+Read your situation off the list above before applying any of the practices below;
+the ones that follow assume you have already identified which form you hold.
 
 1. **Write down the `did:key` (the full `did:key:z6Mk…2doK`), not the seed.** The
    `did:key` is the public identifier: it appears on every signed message you ever
@@ -2002,25 +2027,43 @@ practices that survive the model's threat:
    it. The seed, written down next to the `did:key`, lets a thief impersonate you;
    the `did:key` alone lets a successor verify that an alleged key is the real one.
    These are not the same need and they should not be backed up the same way.
-2. **Store the seed (or the encrypted key file) somewhere your passphrase is not.**
-   The threat model is "the place that holds the file is compromised, or the place
-   that holds the passphrase is compromised, but not both at once." That separation
-   is the whole reason a passphrase exists. A password manager holding both, a single
-   encrypted disk holding both, or a note with both written side-by-side all collapse
-   this into one breach and lose the protection. Two devices, two storage systems, one
-   of each at most.
-3. **Use a real password manager for the passphrase if you keep a passphrase at
-   all** — and, again, prefer a 32-byte random seed kept in the same manager's secret
-   field. A seed manager that can be unsealed by a passphrase *it* manages is the
-   layer that matters; the passphrase-to-seed step in `sign.py` is a convenience,
-   not a security boundary.
-4. **Make a second copy of the seed and store it somewhere offline that does not
-   share an account, a device, or a network with the first.** Disk failures happen;
-   password-manager outages happen; house fires happen. The cost of a second copy is
-   small and the cost of needing one and not having it is total identity loss.
-5. **Test the recovery once.** Type the seed (or the passphrase) into a fresh signer,
-   confirm the derived `did:key` matches the one on the paper backup, then store the
-   paper. A backup you have never restored from is a backup that does not work.
+2. **For an externally encrypted key file, store the ciphertext somewhere the
+   unlock secret is not, and store the unlock secret somewhere the ciphertext is
+   not.** This is the one form where "two devices, two storage systems, one of each
+   at most" actually buys what it claims — single-compromise survivability. A
+   password manager holding both, a single encrypted disk holding both, or a note
+   with both written side-by-side all collapse the two-factor boundary into one
+   breach. This advice does **not** apply to raw seeds or passphrase-as-seed forms;
+   for those, follow (3).
+3. **For a raw seed or a passphrase-as-seed, treat each copy as a complete signing
+   capability and protect each one independently.** Two copies in two places is two
+   compromises waiting to happen, not one backup. If you must keep multiple copies
+   (and you should, for disaster recovery — see (4)), accept that each one is
+   independent exposure surface and store them with that in mind: separate
+   password-manager entries under separate master passwords, a paper copy in a
+   separate physical location from any digital copy, and never a written passphrase
+   next to the `did:key` it derives. The two-location separation only buys
+   disaster-recovery (one location destroyed, the other survives), not security
+   (one location compromised, the other remains safe) — for the latter, you would
+   have needed form (2) to begin with.
+4. **Use a real password manager or hardware-backed secret store for any seed or
+   passphrase you keep digitally.** The passphrase-to-seed step in `sign.py` is a
+   convenience for one-off posts, not a security boundary — there is no KDF
+   stretching it. If you must use the passphrase form because a hardware signer
+   cannot hand a hex seed to `sign.py`, accept the demo-grade protection that
+   implies and never let the passphrase outlive the post.
+5. **Make a second, offline copy of the seed (or the unlock secret, for the
+   encrypted-file form) that does not share an account, a device, or a network
+   with the first.** Disk failures happen; password-manager outages happen; house
+   fires happen. The cost of a second copy is small and the cost of needing one and
+   not having it is total identity loss. The second copy buys disaster-recovery,
+   not security — see (3) for what it does and does not protect against.
+6. **Test the recovery once.** Type the seed (or the passphrase, or decrypt the
+   encrypted file) into a fresh signer, confirm the derived `did:key` matches the
+   one on the paper backup, then store the paper. A backup you have never restored
+   from is a backup that does not work — and a tested-once backup that has not
+   been re-tested in a year is suspect, since storage media and password-manager
+   export formats drift.
 
 What this does **not** buy, and what to be honest about to anyone you delegate a key to
 (§5.7): the recovery story for the *seed* is the recovery story for the *identity*. A
