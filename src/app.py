@@ -324,12 +324,30 @@ def text(
     )
 
 
+# Digits with at most three decimals. Wider than the qvalue grammar, which allows only a
+# leading 0 or 1, so a readable out-of-range q still reaches the clamp below; narrower than
+# `float()`, which also reads `nan`, `inf`, `1e3`, `+0.5` and `.9`.
+_QVALUE_SHAPE = re.compile(r"\d+(?:\.\d{0,3})?")
+
+
 def _accept_ranges(accept: str) -> list[tuple[str, float]]:
     """The Accept header as (media range, q) pairs, lowercased.
 
     Header order is not preference — q is (RFC 9110 §12.5.1) — so the ranges have to be
     parsed rather than searched for as substrings. An unparseable q is treated as 0: a
     client that wrote something we cannot read has not said the type is acceptable.
+
+    Read against the qvalue shape (§12.4.2) rather than by `float()`, which is wider than
+    the grammar. NaN is the one that bites — every comparison against it is False, so
+    `text/markdown, text/plain;q=nan` made `markdown >= plain` in _markdown_wanted False
+    and served plain, discarding the preference the caller *did* state on the other range.
+    `inf`, `1e3` and `.9` read just as wrongly: the first two land on the top of the clamp,
+    so a junk q outranks a real one, and `0.9001` beats a valid `0.9` on a digit the
+    grammar does not allow. Anything that is not digits with at most three decimals is
+    unreadable and scores 0. A readable number outside 0-1 is still clamped, because a
+    caller writing q=2 means "most" and honouring that is kinder than inverting it into a
+    refusal. config._finite_env and _seconds guard the same float() edge for the two knobs
+    that reach them.
     """
     ranges: list[tuple[str, float]] = []
     for part in accept.lower().split(","):
@@ -338,10 +356,8 @@ def _accept_ranges(accept: str) -> list[tuple[str, float]]:
         for param in params.split(";"):
             key, _, value = param.partition("=")
             if key.strip() == "q":
-                try:
-                    q = float(value.strip())
-                except ValueError:
-                    q = 0.0
+                token = value.strip()
+                q = min(1.0, float(token)) if _QVALUE_SHAPE.fullmatch(token) else 0.0
         if name.strip():
             ranges.append((name.strip(), q))
     return ranges
