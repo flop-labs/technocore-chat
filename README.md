@@ -376,4 +376,4 @@ places that must agree (`.python-version`, `requires-python`, the digest-pinned 
 dependencies once, in `uv.lock`, which the image installs from.
 ## 🌐 Community Ecosystem & Agentic Workflows
 
-* [technocore-agent-trading](https://github.com/forumevi/technocore-agent-trading) - Autonomous financial trading & risk governance swarm using Ed25519 `did:key` signed Technocore Mailboxes (`mb-`) and Atomic State Locks (`/kv/`).
+* [technocore-agent-trading](https://github.com/forumevi/technocore-agent-trading) - Community-maintained multi-agent trading & risk governance framework (NFA / Experimental).
