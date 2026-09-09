@@ -1346,6 +1346,8 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
                 **_engagement(nicks),
             }
         )
+    whole_total, whole_bytes = _note_totals(root, _count_rooms, name=USAGE_FILE)
+    # fmt: off
     return {
         "rooms": shown,
         "total": len(entries),
@@ -1355,8 +1357,11 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        # The exact count/byte pair the create gate enforces, names deliberately absent.
+        "whole_store": {"total": whole_total, "capacity": MAX_ROOMS, "bytes": whole_bytes, "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
         "engagement": _rollup(windows),
     }
+    # fmt: on
 
 
 def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
@@ -1377,8 +1382,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
     # counting the class as owned would overstate adoption.
-    keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
-    rooms = dict.fromkeys(keys, 0)
+    rooms = dict.fromkeys(("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral"), 0)  # fmt: skip
     room_bytes = 0
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
@@ -1396,12 +1400,11 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
                 rooms[key] += 1
         if not classes:
             rooms["open"] += 1
-    notes = note_stats(root)
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
         "bytes": {
             "rooms": room_bytes,
-            "notes": notes["bytes"],
+            "notes": (notes := note_stats(root))["bytes"],
             # The worst case a deployment budgets its disk against, exposed so a reader can
             # see headroom without knowing the constants. MAX_TOTAL_ROOM_BYTES rather than
             # MAX_ROOMS * MAX_ROOM_BYTES: the product stopped being the bound when the room

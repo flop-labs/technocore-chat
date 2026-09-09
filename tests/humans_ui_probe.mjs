@@ -205,6 +205,7 @@ const browser = await chromium.launch({
     capacity: 5120,
     bytes: 100,
     bytes_capacity: 5368709120,
+    whole_store: { total: 1, capacity: 5120, bytes: 100, bytes_capacity: 5368709120 },
     engagement: {
       window_cap: 200,
       windowed_messages: 1,
@@ -279,9 +280,7 @@ const browser = await chromium.launch({
     let discussionCalls = 0;
     await racePage.route("**/rooms?*", async (route) => {
       const kind = new URL(route.request().url()).searchParams.get("kind");
-      if (kind === "all") {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("global-room")) });
-      } else if (kind === "mailbox") {
+      if (kind === "mailbox") {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("mb-current")) });
       } else if (++discussionCalls === 1) {
         markOldStarted();
@@ -331,32 +330,37 @@ const browser = await chromium.launch({
   capacityPage.setDefaultTimeout(5000);
   await capacityPage.route("**/rooms?*", async (route) => {
     const kind = new URL(route.request().url()).searchParams.get("kind");
+    const whole_store = { total: 10, capacity: 10, bytes: 95, bytes_capacity: 100 };
     const payload = kind === "discussion"
-      ? view("only-discussion", { total: 1, capacity: 100, bytes: 1, bytes_capacity: 100 })
+      ? view("only-discussion", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store })
       : kind === "mailbox"
-        ? view("mb-one-of-many", { total: 90, capacity: 100, bytes: 90, bytes_capacity: 100 })
-        : view("global-room", { total: 91, capacity: 100, bytes: 91, bytes_capacity: 100 });
+        ? view("none", { rooms: [], total: 0, capacity: 10, bytes: 0, bytes_capacity: 100, whole_store })
+        : view("global-room", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store });
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
   });
   await capacityPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
-  const globalUse = "91 of 100 global room cap";
-  const warning = "near capacity — 91% full";
-  await capacityPage.locator("#stats", { hasText: "1 discussion" }).waitFor();
-  check("discussion view keeps its category count", (await capacityPage.locator("#stats").innerText()).includes("1 discussion"));
-  check("discussion view uses global capacity and warns",
+  const globalUse = "10 of 10 global room cap";
+  const globalBytes = "95B of 100B globally stored";
+  const warning = "near capacity — 100% full";
+  await capacityPage.locator("#stats", { hasText: "2 discussions" }).waitFor();
+  check("discussion view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("2 discussions"));
+  check("discussion view uses whole-store capacity and warns",
         (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
         && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
   await capacityPage.selectOption("#kind", "mailbox");
-  await capacityPage.locator("#stats", { hasText: "90 public mailboxes" }).waitFor();
-  check("mailbox view keeps its category count", (await capacityPage.locator("#stats").innerText()).includes("90 public mailboxes"));
+  await capacityPage.locator("#stats", { hasText: "0 public mailboxes" }).waitFor();
+  check("mailbox view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("0 public mailboxes"));
   check("mailbox view keeps the same global warning",
         (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
         && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
   await capacityPage.selectOption("#kind", "all");
-  await capacityPage.locator("#stats", { hasText: "91 public rooms" }).waitFor();
-  check("all view names its public-room total", (await capacityPage.locator("#stats").innerText()).includes("91 public rooms"));
+  await capacityPage.locator("#stats", { hasText: "2 public rooms" }).waitFor();
+  check("all view names only its listed-room total", (await capacityPage.locator("#stats").innerText()).includes("2 public rooms"));
   check("all view keeps the same global warning",
         (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
         && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
   await capacityPage.close();
   await context.close();
