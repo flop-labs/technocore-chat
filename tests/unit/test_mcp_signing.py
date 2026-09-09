@@ -83,6 +83,30 @@ def test_the_key_loads_from_both_documented_spellings():
             signing.load(junk)
 
 
+def test_the_key_loader_rejects_noncanonical_base64url_pad_bits():
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    seed = bytes.fromhex(SEED_HEX)
+    canonical = base64.urlsafe_b64encode(seed).decode().rstrip("=")
+    index = alphabet.index(canonical[-1])
+    group_start = index & ~0b11
+    spellings = [canonical[:-1] + alphabet[group_start + offset] for offset in range(4)]
+
+    assert len(canonical) == 43
+    assert canonical in spellings
+    aliases = [value for value in spellings if value != canonical]
+    assert len(aliases) == 3
+
+    expected = signing.load(SEED_HEX).did
+    assert signing.load(canonical).did == expected
+    assert signing.load(canonical + "=").did == expected
+    for alias in aliases:
+        assert base64.urlsafe_b64decode(alias + "==") == seed
+        with pytest.raises(ValueError):
+            signing.load(alias)
+        with pytest.raises(ValueError):
+            signing.load(alias + "=")
+
+
 def test_the_key_loader_rejects_malformed_base64url():
     encoded = base64.urlsafe_b64encode(bytes.fromhex(SEED_HEX)).decode().rstrip("=")
     malformed = (
