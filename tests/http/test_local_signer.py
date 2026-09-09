@@ -14,8 +14,10 @@ import os
 import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
@@ -195,6 +197,55 @@ def test_a_new_seed_makes_its_directory_entry_durable(tmp_path, monkeypatch) -> 
         assert ident(created) in synced, f"{created.name} was created but its entry never flushed"
     # And the identity is stable across a reload, which is what the durability protects.
     assert Keyring(home / "seed").did == signer.did
+
+
+def test_concurrent_first_starts_converge_on_one_identity(tmp_path) -> None:
+    """@yukkie3276, #803: first start raced, and one starter lost for no good reason.
+
+    `_load` checked `exists()` and then `_create` claimed the name with `O_EXCL`, so two
+    processes starting against the same absent seed both passed the check and the loser raised
+    instead of reading the winner's key. This package already promises a signer shared across
+    concurrent processes for nonce allocation; initialisation has to converge too, or the
+    promise only holds after somebody has started alone once.
+
+    Six processes, one absent path, no coordination: all must succeed and all must report the
+    same DID.
+    """
+    home = tmp_path / "home"
+    gate = tmp_path / "go"
+    # A start gate, because without one this test passed against the broken code roughly one run
+    # in five: the children finished staggered and the race simply did not happen. A flaky guard
+    # over a race is worse than none — it is a regression that goes green often enough to be
+    # believed. Each child imports, then spins until the gate appears, so they all reach the
+    # create within the same few microseconds.
+    program = (
+        "import os, sys, time;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Keyring;"
+        "deadline = time.time() + 30;"
+        "[time.sleep(0.001) for _ in iter(lambda: os.path.exists(sys.argv[3]) or time.time() > deadline, True)];"
+        "print(Keyring(sys.argv[2]).did)"
+    )
+    repo = Path(__file__).resolve().parents[2]
+    paths = f"{repo / 'client'}:{repo / 'src'}"
+    procs = [
+        subprocess.Popen([sys.executable, "-c", program, paths, str(home / "seed"), str(gate)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(6)
+    ]
+    time.sleep(0.5)  # let every child get past its imports and onto the gate
+    gate.write_text("go")
+    results = [SimpleNamespace(returncode=p.wait(timeout=60), **dict(zip(("stdout", "stderr"), p.communicate())))
+               for p in procs]
+
+    failed = [r.stderr.strip().splitlines()[-1] for r in results if r.returncode != 0]
+    assert not failed, f"a concurrent first start failed: {failed}"
+    dids = {r.stdout.strip() for r in results}
+    assert len(dids) == 1, f"first starts disagreed about the identity: {dids}"
+    assert next(iter(dids)).startswith("did:key:z6Mk")
+    # No temporary survived the race, and the winner's file carries the mode the loser skipped.
+    assert list(home.glob("seed.*.tmp")) == []
+    assert (home / "seed").stat().st_mode & 0o777 == 0o600
 
 
 def test_concurrent_processes_never_hand_out_the_same_nonce(tmp_path) -> None:
