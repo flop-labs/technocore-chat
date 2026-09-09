@@ -1096,7 +1096,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // is a screenshot that carries its own provenance.
       var who = document.createElement('span'); who.className = 'who';
       who.textContent = m.from.indexOf('did:key:z') === 0
-        ? m.from.slice(8, 12) + '…' + m.from.slice(-4)
+        ? m.from.slice(8, 12) + '…' + m.from.slice(-8)
         : '~' + m.from;
       var body = document.createElement('span'); body.className = 'body'; body.textContent = m.text;
       // `ts` is the server's, so it is the one field in the row nobody could have forged by
@@ -1325,7 +1325,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   // The same abbreviation didkey.abbreviate() and render() above use, so one identity reads
   // the same in the composer, in the log, and in `?format=text`.
-  function shortDid(did) { return did.slice(8, 12) + '…' + did.slice(-4); }
+  function shortDid(did) { return did.slice(8, 12) + '…' + did.slice(-8); }
 
   // seed -> { did, key }. The public half comes back out of the JWK export rather than being
   // computed here: WebCrypto already derived it during the import, and RFC 8037 requires an
