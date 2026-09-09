@@ -396,6 +396,17 @@ def test_the_skill_states_only_constants_it_can_keep_true(client):
     assert "8 KiB" not in skill
 
 
+# A count and a character unit, in any spelling: "16 characters", "sixteen characters",
+# "a 16-character floor". Named here so the test can assert the pattern itself still
+# rejects a floor, not merely that §7 has none today.
+LENGTH_CLAIM = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
+    r"[\s-]*(?:character|char)s?\b",
+    re.IGNORECASE,
+)
+
+
 def test_patterns_states_only_constants_it_can_keep_true(client):
     """`/patterns.md` is byte-identical on every instance, so it needs the guard SKILL.md has.
 
@@ -434,6 +445,26 @@ def test_patterns_states_only_constants_it_can_keep_true(client):
     assert ordinal is None, (
         f"§7 states {ordinal.group(0)!r}; CHAT_DUPE_MAX_COPIES is per deployment"
     )
+
+    # And the third knob. The prose promises /config for the window, the copy threshold and
+    # the length floor; the first two checks left the floor unguarded, so "a 16-character
+    # floor" could go back into §7 without failing anything. Match the shape — a count and a
+    # character unit — rather than today's 16, since the point is that the value is a
+    # deployment's to choose.
+    floor = LENGTH_CLAIM.search(section)
+    assert floor is None, (
+        f"§7 states {floor.group(0)!r}; CHAT_DUPE_MIN_LENGTH is per deployment"
+    )
+
+    # Assert on the sentence that slipped past, not only on the document as it stands: a
+    # check that passes because §7 happens not to mention a floor today is not a guard.
+    slipped = "the window, copy threshold and a 16-character floor are at /config"
+    assert LENGTH_CLAIM.search(slipped), (
+        "the length-floor check stopped rejecting a hard-coded floor"
+    )
+    for spelling in ("16 characters", "sixteen characters", "a 16-character floor",
+                     "shorter than 16 chars"):
+        assert LENGTH_CLAIM.search(spelling), f"a floor spelled {spelling!r} would slip past"
 
 
 def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
