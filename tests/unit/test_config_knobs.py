@@ -47,7 +47,10 @@ PROBE = (
     "'app.DUPE_MIN_LENGTH': app.DUPE_MIN_LENGTH, "
     "'config.DUPE_MAX_COPIES': config.DUPE_MAX_COPIES, "
     "'app.DUPE_MAX_COPIES': app.DUPE_MAX_COPIES, "
-    "'config.WORKERS': config.WORKERS}))"
+    "'config.WORKERS': config.WORKERS, "
+    "'config.RATE_READ': config.RATE_READ, "
+    "'config.RATE_WRITE': config.RATE_WRITE, "
+    "'config.RATE_ROOMS_PER_DAY': config.RATE_ROOMS_PER_DAY}))"
 )
 
 
@@ -313,3 +316,58 @@ def test_junk_in_the_poll_interval_refuses_to_boot() -> None:
             env={**clean, "CHAT_WAIT_POLL": raw},
         )
         assert run.returncode != 0, f"CHAT_WAIT_POLL={raw!r} booted"
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit overflow protection (PR #750 / issue #744)
+# ---------------------------------------------------------------------------
+
+
+def test_rate_read_overflow_refuses_to_boot() -> None:
+    """A value too large for float() conversion must fail at boot, not at request time."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_RATE_READ": "1" + "0" * 400},
+    )
+    assert run.returncode != 0, "CHAT_RATE_READ with an overflowing value booted"
+    assert "FATAL" in run.stderr or "OverflowError" in run.stderr
+
+
+def test_rate_read_large_float_representable_boots() -> None:
+    """A large but float-representable value must still boot (fixes #744 regression)."""
+    assert boot(CHAT_RATE_READ="10000001")["config.RATE_READ"] == 10000001
+
+
+def test_rate_write_overflow_refuses_to_boot() -> None:
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_RATE_WRITE": "1" + "0" * 400},
+    )
+    assert run.returncode != 0, "CHAT_RATE_WRITE with an overflowing value booted"
+    assert "FATAL" in run.stderr or "OverflowError" in run.stderr
+
+
+def test_rate_write_large_float_representable_boots() -> None:
+    assert boot(CHAT_RATE_WRITE="10000001")["config.RATE_WRITE"] == 10000001
+
+
+def test_rate_rooms_per_day_overflow_refuses_to_boot() -> None:
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_RATE_ROOMS_PER_DAY": "1" + "0" * 400},
+    )
+    assert run.returncode != 0, "CHAT_RATE_ROOMS_PER_DAY overflow value booted"
+    assert "FATAL" in run.stderr or "OverflowError" in run.stderr
+
+
+def test_rate_rooms_per_day_large_float_representable_boots() -> None:
+    assert boot(CHAT_RATE_ROOMS_PER_DAY="10000001")["config.RATE_ROOMS_PER_DAY"] == 10000001
