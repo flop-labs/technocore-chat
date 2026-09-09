@@ -46,7 +46,7 @@ class _NameCache:
     stale one is not — which is exactly what expiry + write-path invalidation prevent.
     """
 
-    __slots__ = ("_lock", "_cap", "_keys", "_map", "_ts", "_ttl")
+    __slots__ = ("_lock", "_cap", "_keys", "_map", "_ts", "_ttl", "_generation")
 
     def __init__(self, cap: int = 1024, ttl_ms: int = 30_000) -> None:
         self._lock = threading.Lock()
@@ -55,6 +55,12 @@ class _NameCache:
         self._map: dict[str, str | None] = {}
         self._ts: dict[str, float] = {}
         self._ttl = ttl_ms / 1000.0
+        self._generation = 0
+
+    def generation(self) -> int:
+        """A counter bumped by every invalidate; see :meth:`put_if_current`."""
+        with self._lock:
+            return self._generation
 
     def get(self, did: str) -> str | None | bool:
         """The cached name, None when cached-unresolved, False when not cached/expired."""
@@ -65,8 +71,18 @@ class _NameCache:
                 return self._map[did]
             return False
 
-    def put(self, did: str, name: str | None) -> None:
+    def put_if_current(self, did: str, name: str | None, generation: int) -> bool:
+        """Publish a resolved name only if no invalidation happened since `generation`.
+
+        Returns True when the entry was cached, False when a concurrent writer bumped the
+        generation between the caller's read and this call — in which case `name` was
+        derived from a pre-invalidation note and must NOT be cached, or an overwritten/lost
+        name would live on in the cache past its TTL. The read returned this name exactly
+        once; it just will not outlive this request.
+        """
         with self._lock:
+            if self._generation != generation:
+                return False
             if did not in self._map:
                 self._keys.append(did)
                 if len(self._keys) > self._cap:
@@ -75,12 +91,14 @@ class _NameCache:
                     self._ts.pop(old, None)
             self._map[did] = name
             self._ts[did] = _monotonic()
+            return True
 
     def invalidate(self, did: str) -> None:
         """Drop any cached result for `did` so the next resolve re-reads the note."""
         with self._lock:
             self._map.pop(did, None)
             self._ts.pop(did, None)
+            self._generation += 1
 
     def invalidate_all(self) -> None:
         """Drop every cached result (used when a DID-note namespace is rewritten).
@@ -89,11 +107,14 @@ class _NameCache:
         single overwrite cannot target one entry cheaply — but DID notes are written
         rarely, so clearing the whole (small) DID cache on any such write is simpler than
         a per-key scan and costs nothing in practice. Non-did namespaces are untouched.
+        Bumping the generation also invalidates any in-flight read/parse/put that began
+        before the write, closing the cache-reinsertion race (see put_if_current).
         """
         with self._lock:
             self._map.clear()
             self._ts.clear()
             self._keys.clear()
+            self._generation += 1
 
 
 def _monotonic() -> float:
@@ -127,12 +148,17 @@ def lookahead_nick(did: str, discover: bool = False) -> str | None:
             # cached name or cached-as-None (bool True is impossible; None is valid)
             return None if cached is True else cached
     ns, key = _note_ns_and_key(did)
+    # Capture the cache generation *before* the disk read: if a writer bumps it (via a
+    # DID-note overwrite + invalidate_all_did_namespace) while we are reading/parsing,
+    # the name we produce is derived from a pre-invalidation note and must not be cached,
+    # or an erased/overwritten name would live on past its TTL (cache-reinsertion race).
+    generation = _CACHE.generation()
     note = store.note_get(store_config_root(), ns, key)
     if note is None:
         # also try legacy single `did` namespace for pre-sharding identities
         note = store.note_get(store_config_root(), "did", _note_legacy_key(did))
     name = _parse_verified(note, did) if note is not None else None
-    _CACHE.put(did, name)
+    _CACHE.put_if_current(did, name, generation)
     return name
 
 
