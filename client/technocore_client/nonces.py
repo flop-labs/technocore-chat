@@ -80,7 +80,8 @@ class NonceStore:
         #803 is when the guess is wrong — a host whose clock later moves backwards allocates
         below a nonce already used, and every write is refused for a reason the caller cannot see.
 
-        So a corrupt ledger is quarantined and raised on. That is the rule I wrote for consumers
+        So a corrupt ledger is quarantined and raised on, and "corrupt" includes a file that
+        parses but does not hold the shape this writes. That is the rule I wrote for consumers
         elsewhere — a failed read is unknown, not empty, and the only safe action on unknown is
         none — applied to my own state file, which is where it had not been.
         """
@@ -92,11 +93,23 @@ class NonceStore:
             raise self._quarantine(f"could not be read as JSON ({exc.__class__.__name__})") from exc
         if not isinstance(raw, dict):
             raise self._quarantine("does not hold a JSON object")
-        out: dict[str, dict[str, int]] = {}
+        # Strict, and every violation is fatal rather than filtered. The previous version dropped
+        # a malformed entry and carried on, which reads like leniency and is not: dropping an
+        # entry does not omit a fact, it *asserts* that the pair has never issued a nonce. That
+        # is the same claim the quarantine above exists to refuse, made one level in — and after
+        # a clock rollback it resumes allocation below the server's replay floor exactly as if
+        # the whole file had been lost (@yukkie3276, #803).
         for did, rooms in raw.items():
-            if isinstance(rooms, dict):
-                out[did] = {r: n for r, n in rooms.items() if isinstance(n, int) and n >= 0}
-        return out
+            if not isinstance(rooms, dict):
+                raise self._quarantine(f"maps {did!r} to something that is not an object")
+            for room, nonce in rooms.items():
+                # bool before int: `isinstance(True, int)` is true in Python, and `true` in the
+                # file would otherwise load as the nonce 1.
+                if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0:
+                    raise self._quarantine(
+                        f"holds {nonce!r} for {did!r}/{room!r}, which is not a non-negative integer"
+                    )
+        return {did: dict(rooms) for did, rooms in raw.items()}
 
     def _quarantine(self, why: str) -> Exception:
         """Move a damaged ledger aside and describe the recovery, rather than continuing.

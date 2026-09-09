@@ -302,24 +302,46 @@ def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
         Keyring(seed_path)
 
 
-def test_a_nonce_file_of_the_wrong_shape_is_refused_and_a_bad_entry_is_dropped(tmp_path) -> None:
-    """Two different facts, deliberately treated differently.
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ('["not", "a", "map"]', "does not hold a JSON object"),
+        ('{"did:key:zX": "not a room map"}', "not an object"),
+        ('{"did:key:zX": {"room": "1730000000000"}}', "not a non-negative integer"),
+        ('{"did:key:zX": {"room": -5}}', "not a non-negative integer"),
+        ('{"did:key:zX": {"room": 1.5}}', "not a non-negative integer"),
+        ('{"did:key:zX": {"room": true}}', "not a non-negative integer"),
+    ],
+)
+def test_every_shape_the_ledger_cannot_hold_is_quarantined(tmp_path, body, reason) -> None:
+    """@yukkie3276, #803: valid JSON of the wrong shape was being filtered rather than refused.
 
-    A file that is not an object at all is unreadable state — same class as unparseable, so it is
-    quarantined. A file that *is* the right shape with one implausible entry is readable state
-    with a hole: the rest is trustworthy and the bad entry is dropped, which leaves that one pair
-    starting from the clock rather than throwing the whole ledger away.
+    The previous version dropped a malformed entry and carried on, and I defended that in the
+    commit before this one as "readable state with a hole". It is not a hole. Dropping the entry
+    *asserts* that the pair has never issued a nonce, which is the same claim the quarantine
+    exists to refuse, made one level further in — and after a clock rollback it resumes below the
+    server's replay floor exactly as a lost file would.
+
+    `true` is in the table because `isinstance(True, int)` is true in Python, so a JSON `true`
+    would otherwise load as the nonce 1.
     """
     store = tmp_path / "nonces.json"
-    store.write_text('["not", "a", "map"]')
-    with pytest.raises(ValueError, match="does not hold a JSON object"):
+    store.write_text(body)
+    with pytest.raises(ValueError, match=reason):
         NonceStore(store)
-    assert len(list(tmp_path.glob("nonces.json.corrupt.*"))) == 1
+    assert len(list(tmp_path.glob("nonces.json.corrupt.*"))) == 1, "damaged ledger not moved aside"
+    assert not store.exists()
 
-    store.write_text('{"did:key:zX": {"room": -5, "other": 7}}')
-    fresh = NonceStore(store)
-    assert fresh.last("did:key:zX", "room") is None, "a negative nonce is not a nonce"
-    assert fresh.last("did:key:zX", "other") == 7
+
+def test_a_well_formed_ledger_round_trips(tmp_path) -> None:
+    """The other half of strictness: what the writer produces, the reader must accept."""
+    store = tmp_path / "nonces.json"
+    written = NonceStore(store)
+    first = written.allocate("did:key:zX", "room")
+    written.allocate("did:key:zX", "other")
+    reread = NonceStore(store)
+    assert reread.last("did:key:zX", "room") == first
+    assert reread.allocate("did:key:zX", "room") > first
 
 
 def test_concurrent_first_starts_in_one_process_converge(tmp_path) -> None:
