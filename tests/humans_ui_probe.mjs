@@ -25,11 +25,13 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-08, 144 checks, all passing — expected shape:
+ * Checked 2026-09-09, 154 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   category        removes stale room targets while the next category request is pending
+ *                   and rejects older same-kind responses after category ABA or overlapping polls
+ *   capacity        category counts stay scoped; global occupancy and warnings do not change views
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -197,7 +199,7 @@ const browser = await chromium.launch({
   const context = await browser.newContext({ viewport: { width: 900, height: 1200 } });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
-  const view = (room) => ({
+  const view = (room, values = {}) => Object.assign({
     rooms: [{ room, count: 1, first_seq: 1, last_seq: 1, bytes: 100, idle_seconds: 0, topic: "" }],
     total: 1,
     capacity: 5120,
@@ -212,7 +214,7 @@ const browser = await chromium.launch({
     },
     notes: { total: 0, bytes: 0, capacity: 163840, capacity_per_namespace: 5120 },
     untrusted: { fields: ["room", "topic"], note: "test data" },
-  });
+  }, values);
   let releaseNew;
   const newGate = new Promise((resolve) => { releaseNew = resolve; });
   let markPending;
@@ -263,6 +265,100 @@ const browser = await chromium.launch({
   await page.fill("#room", "lobby");
   await newRoom.click();
   check("the new category's row remains clickable", (await page.inputValue("#room")) === "mb-new-room");
+  await page.close();
+
+  async function staleRace(categoryABA) {
+    const racePage = await context.newPage();
+    racePage.setDefaultTimeout(5000);
+    let releaseOld;
+    const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+    let markOldStarted;
+    const oldStarted = new Promise((resolve) => { markOldStarted = resolve; });
+    let markOldReturned;
+    const oldReturned = new Promise((resolve) => { markOldReturned = resolve; });
+    let discussionCalls = 0;
+    await racePage.route("**/rooms?*", async (route) => {
+      const kind = new URL(route.request().url()).searchParams.get("kind");
+      if (kind === "all") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("global-room")) });
+      } else if (kind === "mailbox") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("mb-current")) });
+      } else if (++discussionCalls === 1) {
+        markOldStarted();
+        await oldGate;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("stale-discussion")) });
+        markOldReturned();
+      } else {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("fresh-discussion")) });
+      }
+    });
+    await racePage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await oldStarted;
+    if (categoryABA) {
+      await racePage.selectOption("#kind", "mailbox");
+      await racePage.locator(".btn-ghost", { hasText: "mb-current" }).waitFor();
+      await racePage.selectOption("#kind", "discussion");
+    } else {
+      await racePage.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    }
+    await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).waitFor();
+    const before = await racePage.locator("#rooms tbody .btn-ghost").first().innerText();
+    releaseOld();
+    await oldReturned;
+    await racePage.waitForTimeout(100);
+    const result = {
+      before,
+      fresh: await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).count(),
+      stale: await racePage.locator(".btn-ghost", { hasText: "stale-discussion" }).count(),
+      discussionCalls,
+    };
+    await racePage.close();
+    return result;
+  }
+
+  console.log("room response generations");
+  const categoryABA = await staleRace(true);
+  check("a newer discussion response renders after category ABA",
+        categoryABA.before === "fresh-discussion" && categoryABA.discussionCalls === 2);
+  check("the old pre-ABA response cannot replace it", categoryABA.fresh === 1 && categoryABA.stale === 0);
+  const sameKind = await staleRace(false);
+  check("a newer overlapping same-kind response renders",
+        sameKind.before === "fresh-discussion" && sameKind.discussionCalls === 2);
+  check("the older same-kind response cannot replace it", sameKind.fresh === 1 && sameKind.stale === 0);
+
+  console.log("global capacity across category views");
+  const capacityPage = await context.newPage();
+  capacityPage.setDefaultTimeout(5000);
+  await capacityPage.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    const payload = kind === "discussion"
+      ? view("only-discussion", { total: 1, capacity: 100, bytes: 1, bytes_capacity: 100 })
+      : kind === "mailbox"
+        ? view("mb-one-of-many", { total: 90, capacity: 100, bytes: 90, bytes_capacity: 100 })
+        : view("global-room", { total: 91, capacity: 100, bytes: 91, bytes_capacity: 100 });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await capacityPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const globalUse = "91 of 100 global room cap";
+  const warning = "near capacity — 91% full";
+  await capacityPage.locator("#stats", { hasText: "1 discussion" }).waitFor();
+  check("discussion view keeps its category count", (await capacityPage.locator("#stats").innerText()).includes("1 discussion"));
+  check("discussion view uses global capacity and warns",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "mailbox");
+  await capacityPage.locator("#stats", { hasText: "90 public mailboxes" }).waitFor();
+  check("mailbox view keeps its category count", (await capacityPage.locator("#stats").innerText()).includes("90 public mailboxes"));
+  check("mailbox view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "all");
+  await capacityPage.locator("#stats", { hasText: "91 public rooms" }).waitFor();
+  check("all view names its public-room total", (await capacityPage.locator("#stats").innerText()).includes("91 public rooms"));
+  check("all view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.close();
   await context.close();
 }
 
