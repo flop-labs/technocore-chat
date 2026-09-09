@@ -115,10 +115,17 @@ FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # is the right answer for a bug in the software rather than in a deployment — an operator
 # who wants reports about their instance sets this to their own address.
 SECURITY_CONTACT = os.environ.get("CHAT_SECURITY_CONTACT", "security@flop.finance").strip()
-_raw_h = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip().lower()
-if _raw_h and _raw_h != _raw_h.encode("latin-1", errors="replace").decode("latin-1"):
-    raise SystemExit(f"FATAL: CHAT_CLIENT_IP_HEADER={_raw_h!r} contains non-ASCII. HTTP field names are ASCII-only.")
-CLIENT_IP_HEADER = _raw_h
+_raw_h = os.environ.get("CHAT_CLIENT_IP_HEADER", "").strip()
+if _raw_h:
+    # RFC 9110 §5.1: field-name is a token — ASCII alphanumeric + !#$%&'*+-.^_`|~
+    # We store the lowercased form for case-insensitive lookup.
+    _valid = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~")
+    if not all(c in _valid for c in _raw_h):
+        raise SystemExit(
+            f"FATAL: CHAT_CLIENT_IP_HEADER={_raw_h!r} is not a valid HTTP field-name. "
+            "Must be ASCII alphanumeric or one of: !#$%&'*+-.^_`|~"
+        )
+CLIENT_IP_HEADER = _raw_h.lower()
 # The origin to print in /openapi.json and /.well-known/agent.json. Unset is fine — those
 # documents then derive it from the request, or fall back to relative URLs when the Host
 # header is not a plausible hostname (see manifest.public_base). Set it when the service
