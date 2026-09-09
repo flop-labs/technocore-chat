@@ -47,15 +47,35 @@ ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 # configured by hand would turn every rate-limited route into a 500 rather than into the
 # refusal the operator presumably meant. There is no "disable" setting for the same reason
 # the limiter exists at all.
-RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min/IP
-RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
+def _rate(name: str, default: str) -> int:
+    """Parse a rate-limit env var, rejecting values that would overflow
+    float() at request time (fixes #744, #750)."""
+    raw = os.environ.get(name, default)
+    try:
+        v = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"FATAL: {name}={raw!r} is not an integer"
+        ) from None
+    try:
+        float(v)  # catch overflow at boot, not at request time
+    except OverflowError:
+        raise SystemExit(
+            f"FATAL: {name}={v} is too large to convert to float. "
+            f"limit.py:take() calls float() on this value, so anything "
+            f"above ~1.8e308 crashes every rate-limited route at runtime."
+        ) from None
+    return max(1, v)
+
+RATE_READ = _rate("CHAT_RATE_READ", "120")  # requests/min/IP
+RATE_WRITE = _rate("CHAT_RATE_WRITE", "30")
 # A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
 # minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
 # caller could create, and those are not the same resource. At RATE_WRITE a single caller
 # exhausts MAX_ROOMS in a matter of hours, and the slots it takes are everyone's — the
 # next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
 # a cap on the service rather than a race won by whoever creates rooms fastest.
-RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
+RATE_ROOMS_PER_DAY = _rate("CHAT_RATE_ROOMS_PER_DAY", "20")
 CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o]
 # /stats is the one internal surface. Growth numbers are not published — the design doc's
 # §I.2.3 caution against count-based marketing is exactly why they stay off the public
