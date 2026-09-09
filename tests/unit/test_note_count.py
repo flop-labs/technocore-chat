@@ -1153,3 +1153,37 @@ def test_a_second_reap_pass_gives_up_rather_than_overlapping_the_first(tmp_path,
     assert walked, "premise: the first pass walked"
     assert "second" not in walked, f"two passes walked the store at once: {walked}"
     assert store._note_totals(tmp_path) == store._count_notes(tmp_path), "and the count holds"
+
+
+def test_settle_count_does_not_double_count_concurrent_creates_seen_by_walk(tmp_path) -> None:
+    """If creates land during the reap walk and the walk encounters their files, those
+    files are in `kept`. Adding `after - before` on top of `kept` must not double-count
+    them past `after`: `_settle_count` bounds the installed total to `after[0]`.
+    """
+    import store
+
+    store._write_note_count(tmp_path, 15, 150, name=store.NOTES_FILE)
+    before = (10, 100)
+    # The walk kept 13 notes because it saw 3 of the 5 concurrent creates (0 deletions):
+    kept = [13, 130]
+
+    store._settle_count(tmp_path, store.NOTES_FILE, before, kept)
+    settled = store._read_counts(tmp_path, store.NOTES_FILE)
+    assert settled == (15, 150), f"expected (15, 150), got {settled}"
+
+
+def test_settle_count_reconciles_deletions_with_concurrent_creates(tmp_path) -> None:
+    """A pass that unlinks old notes while concurrent creates land settles to
+    `after - reaped`: e.g. before=10, 2 reaped, 5 creates (after=15), walk saw 3
+    new files (kept=8+3=11) -> true disk count is 8+5=13.
+    """
+    import store
+
+    store._write_note_count(tmp_path, 15, 150, name=store.NOTES_FILE)
+    before = (10, 100)
+    # 8 surviving old notes + 3 seen creates + 2 reaped notes (20 bytes):
+    kept = [11, 110, 2, 20]
+
+    store._settle_count(tmp_path, store.NOTES_FILE, before, kept)
+    settled = store._read_counts(tmp_path, store.NOTES_FILE)
+    assert settled == (13, 130), f"expected (13, 130), got {settled}"
