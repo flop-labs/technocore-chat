@@ -447,3 +447,54 @@ def test_pruning_keeps_the_bucket_of_a_room_that_survived(tmp_path, monkeypatch)
     assert not doomed_bucket.exists(), "the emptied bucket was not pruned"
     assert store.room_path(tmp_path, "keeper").exists(), "…and the live room went with it"
     assert store.read_messages(tmp_path, "keeper", limit=5)["messages"][0]["text"] == "hi"
+
+
+def test_the_reaper_unlinks_the_flat_room_it_found_rather_than_migrating_it(tmp_path, monkeypatch):
+    """The reap branch must act on the path its walk locked, never on one it re-resolved.
+
+    Resolving a name MIGRATES a pre-sharding file, so reading the high-water mark by name
+    inside the branch moved the very file the branch had just decided to unlink into its
+    bucket. `p.unlink(missing_ok=True)` then found nothing: the room outlived the retention
+    it had already exceeded, and the pass still reported it reaped and subtracted it from
+    the room count. And the only flat files left on a live store are the ones nobody has
+    read or written since the migration — which is exactly the set the reaper is here for.
+
+    The count is asserted against a walk of the disk rather than against a literal: a cached
+    figure BELOW what is on disk admits creates past MAX_ROOMS. `_settle_count` does not
+    defend against this one — its fail-closed term, `max(0, after - before)`, covers creates
+    that landed while the walk ran, and here the corruption is in `kept` itself, which no
+    later correction can recover.
+    """
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"), _record(2, "two"))
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+
+    store._reap(tmp_path)
+
+    left = sorted(str(p) for p in (tmp_path / "rooms").rglob("*.jsonl"))
+    assert left == [], f"an idle room past its retention is still on disk: {left}"
+    assert store._read_counts(tmp_path, store.USAGE_FILE) == store._count_rooms(tmp_path), (
+        "the cached room count no longer describes the disk"
+    )
+    assert store.last_seq(tmp_path, "old") == 2, "the floor outlived the room it came from"
+
+
+def test_a_reaped_flat_room_is_counted_once_and_not_once_per_pass(tmp_path, monkeypatch):
+    """The digest half of the same bug. A room the pass did not actually delete is found
+    again by the next pass and counted again, so `reaped_idle` — a lifetime counter whose
+    whole contract is that it only ever goes up by real events — over-reports every flat
+    room by one."""
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+
+    store._reap(tmp_path)
+    store._reap(tmp_path)
+
+    assert store.counters(tmp_path)["reaped_idle"] == 1, "one room, one reap"
