@@ -1530,6 +1530,15 @@ def test_a_qvalue_outside_the_grammar_cannot_veto_another_range(client):
     # Valid values are untouched.
     assert label("text/markdown;q=0.5, text/plain;q=1").startswith("text/plain")
     assert label("text/markdown;q=1, text/plain;q=0.5").startswith("text/markdown")
+    # A fourth decimal is outside the grammar, so it cannot outrank a q that is inside it.
+    assert label("text/markdown;q=0.9, text/plain;q=0.9001").startswith("text/markdown")
+    # Neither can a form float() reads but the grammar does not name.
+    assert label("text/markdown;q=0.5, text/plain;q=.9").startswith("text/markdown")
+    assert label("text/markdown;q=0.5, text/plain;q=1e3").startswith("text/markdown")
+    assert label("text/markdown;q=0.5, text/plain;q=+1").startswith("text/markdown")
+    # Three decimals are inside it, and still decide.
+    assert label("text/markdown;q=0.999, text/plain;q=1").startswith("text/plain")
+    assert label("text/markdown;q=1, text/plain;q=0.999").startswith("text/markdown")
 
 
 def test_sitemap_refuses_to_guess_an_origin_it_does_not_know(client):
