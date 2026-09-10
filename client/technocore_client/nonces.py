@@ -87,12 +87,31 @@ class NonceStore:
         self._state: dict[str, dict[str, int]] = self._load()
 
     def initialise(self) -> None:
-        """Write an empty ledger if there is none, so its later absence is evidence."""
-        if self._path.exists():
-            return
+        """Write an empty ledger if there is none, so its later absence is evidence.
+
+        Under the same lock every other write takes, and re-checking inside it. The first
+        version checked `exists()` and then flushed with no lock at all, which put a
+        first-start clobber *into the fix for a first-start race* (@yukkie3276, #803): two
+        starters both see the ledger absent, A initialises, mints its key, allocates and
+        persists nonce N — and B, still holding the stale answer to a question it asked before
+        any of that, replaces `{}` over A's populated ledger. Nothing was deleted and nothing
+        was corrupted, and a durable nonce is gone anyway, which lands the next restart back in
+        exactly the unknown-floor case this whole change exists to close.
+
+        `_flush` publishes with `os.replace`, so it overwrites by design; the only thing that
+        can stop it is not calling it, and the only way to know is to look while holding the
+        lock.
+        """
         mkdir_durable(self._path.parent)
-        self._state = {}
-        self._flush()
+        fd = self._lock()
+        try:
+            if self._path.exists():
+                return
+            self._state = {}
+            self._flush()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def _load(self) -> dict[str, dict[str, int]]:
         """The persisted ledger, or `{}` when there has never been one.

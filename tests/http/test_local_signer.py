@@ -11,6 +11,7 @@ and that is the failure a standalone test cannot see.
 from __future__ import annotations
 
 import base64
+import json
 import os
 import stat
 import subprocess
@@ -27,6 +28,7 @@ import pytest
 
 import didkey
 from technocore_client import Keyring, NonceStore, Signer, did_from_seed
+from technocore_client import nonces as nonces_module
 
 client = _client.client
 
@@ -421,6 +423,56 @@ def test_the_ledger_is_created_before_the_key_on_a_first_run(tmp_path, monkeypat
         "that window would read a healthy first run as a lost ledger and refuse"
     )
     assert signer.nonces.allocate(signer.did, "room") > 0
+
+
+def test_a_concurrent_initialiser_cannot_overwrite_a_populated_ledger(tmp_path, monkeypatch):
+    """@yukkie3276, #803: the fix for a first-start race shipped a first-start clobber.
+
+    `initialise()` checked `exists()` and then flushed, with no lock and no create-only
+    publication, so two starters could both find the ledger absent. A gets there first,
+    initialises, mints its key, allocates nonce N and persists it — and B, still acting on the
+    answer to a question it asked before any of that happened, `os.replace`s `{}` over the top.
+    Nothing was deleted and nothing was corrupted, and a durable nonce is gone anyway, which
+    puts the next restart back into the unknown-floor case this change exists to close.
+
+    The ordering test one function up cannot see this. It proves the ledger exists before the
+    key is published, which is a statement about one process's sequence; this is a statement
+    about two, and they are different claims.
+
+    Deterministic, not timed. B is held inside its own `initialise` — after the stale check the
+    old code made, before the flush that acts on it — while A completes in full. The gate is on
+    `mkdir_durable` because it is the one call both versions make in that stretch, and it is
+    held for B's thread only, so A never blocks on it. B holds no lock while it waits, so there
+    is nothing here to deadlock.
+    """
+    home = tmp_path / "home"
+    ledger = home / "nonces.json"
+    b_arrived, a_done = threading.Event(), threading.Event()
+    b_thread: threading.Thread | None = None
+    real_mkdir = nonces_module.mkdir_durable
+
+    def gated_mkdir(path):
+        if threading.current_thread() is b_thread:
+            b_arrived.set()
+            assert a_done.wait(30), "the winner never finished; the race did not happen"
+        return real_mkdir(path)
+
+    monkeypatch.setattr(nonces_module, "mkdir_durable", gated_mkdir)
+
+    b_thread = threading.Thread(target=lambda: NonceStore(ledger).initialise(), daemon=True)
+    b_thread.start()
+    assert b_arrived.wait(30), "the second initialiser never reached the window"
+
+    signer = Signer(home)
+    issued = signer.nonces.allocate(signer.did, "room")
+    a_done.set()
+    b_thread.join(30)
+    assert not b_thread.is_alive()
+
+    assert json.loads(ledger.read_text()) == {signer.did: {"room": issued}}, (
+        "a concurrent initialiser replaced a populated ledger with an empty one, losing a "
+        "nonce that had already been issued and persisted"
+    )
 
 
 def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
