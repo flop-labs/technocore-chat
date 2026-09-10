@@ -994,19 +994,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     else if (shown < count) parts.push('showing ' + shown + ' of ' + count + ' ' + category);
     else parts.push(count + ' ' + category);
     parts.push(whole.total + ' of ' + whole.capacity + ' global room cap');
-    parts.push(size(whole.bytes) + ' of ' + size(whole.bytes_capacity) + ' globally stored');
+    parts.push(size(whole.bytes_at_last_reap) + ' room bytes at last reap ('
+      + size(whole.bytes_capacity) + ' budget; current byte use is not sampled here)');
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
     statsEl.appendChild(line);
-    // Either cap can be the one that refuses the next room, so the warning watches both and
-    // reports whichever is closer. Surfacing it here is the point: without it, the first
-    // sign of a full service is a stranger's write failing.
-    var full = Math.max(whole.total / whole.capacity, whole.bytes / whole.bytes_capacity);
+    // Room count is current between reaps. The byte figure above is deliberately only a
+    // labelled snapshot: using it here would turn a stale measurement into a real-time
+    // assurance, especially after an existing room grew without triggering another reap.
+    var full = whole.total / whole.capacity;
     if (full >= 0.8) {
       var warn = document.createElement('span');
       warn.className = 'badge err';                 // the word carries it too, not the hue
-      warn.textContent = 'near capacity — ' + Math.round(full * 100) + '% full';
+      warn.textContent = 'near room-count capacity — ' + Math.round(full * 100) + '% full';
       statsEl.appendChild(warn);
     }
   }

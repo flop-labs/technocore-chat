@@ -25,13 +25,14 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-09, 154 checks, all passing — expected shape:
+ * Checked 2026-09-10, 156 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   category        removes stale room targets while the next category request is pending
  *                   and rejects older same-kind responses after category ABA or overlapping polls
- *   capacity        category counts stay scoped; global occupancy and warnings do not change views
+ *   capacity        category counts stay scoped; count warnings do not change views, and
+ *                   last-reap bytes are labelled as a snapshot rather than live headroom
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -205,7 +206,7 @@ const browser = await chromium.launch({
     capacity: 5120,
     bytes: 100,
     bytes_capacity: 5368709120,
-    whole_store: { total: 1, capacity: 5120, bytes: 100, bytes_capacity: 5368709120 },
+    whole_store: { total: 1, capacity: 5120, bytes_at_last_reap: 100, bytes_capacity: 5368709120 },
     engagement: {
       window_cap: 200,
       windowed_messages: 1,
@@ -330,7 +331,7 @@ const browser = await chromium.launch({
   capacityPage.setDefaultTimeout(5000);
   await capacityPage.route("**/rooms?*", async (route) => {
     const kind = new URL(route.request().url()).searchParams.get("kind");
-    const whole_store = { total: 10, capacity: 10, bytes: 95, bytes_capacity: 100 };
+    const whole_store = { total: 10, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
     const payload = kind === "discussion"
       ? view("only-discussion", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store })
       : kind === "mailbox"
@@ -340,8 +341,8 @@ const browser = await chromium.launch({
   });
   await capacityPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
   const globalUse = "10 of 10 global room cap";
-  const globalBytes = "95B of 100B globally stored";
-  const warning = "near capacity — 100% full";
+  const globalBytes = "95B room bytes at last reap (100B budget; current byte use is not sampled here)";
+  const warning = "near room-count capacity — 100% full";
   await capacityPage.locator("#stats", { hasText: "2 discussions" }).waitFor();
   check("discussion view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("2 discussions"));
   check("discussion view uses whole-store capacity and warns",
@@ -363,6 +364,21 @@ const browser = await chromium.launch({
         && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
         && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
   await capacityPage.close();
+
+  const staleBytesPage = await context.newPage();
+  staleBytesPage.setDefaultTimeout(5000);
+  await staleBytesPage.route("**/rooms?*", async (route) => {
+    const whole_store = { total: 1, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
+    const payload = view("growing-room", { whole_store });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await staleBytesPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await staleBytesPage.locator("#stats", { hasText: "room bytes at last reap" }).waitFor();
+  check("last-reap bytes are explicitly labelled as a non-current snapshot",
+        (await staleBytesPage.locator("#stats").innerText()).includes(globalBytes));
+  check("a stale byte snapshot does not drive a real-time capacity warning",
+        (await staleBytesPage.locator("#stats .badge.err").count()) === 0);
+  await staleBytesPage.close();
   await context.close();
 }
 

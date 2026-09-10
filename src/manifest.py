@@ -881,8 +881,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "whole_store": {
                                         "type": "object",
                                         "description": (
-                                            "Whole-store room count and byte usage used by "
-                                            "capacity enforcement. Aggregate numbers only; "
+                                            "Whole-store room count used by capacity enforcement, "
+                                            "plus room bytes measured at the last reap. The byte "
+                                            "snapshot is not current usage. Aggregate numbers only; "
                                             "unlisted room identities remain undisclosed."
                                         ),
                                         "properties": {
@@ -890,7 +891,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                             for key in (
                                                 "total",
                                                 "capacity",
-                                                "bytes",
+                                                "bytes_at_last_reap",
                                                 "bytes_capacity",
                                             )
                                         },
