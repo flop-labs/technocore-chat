@@ -473,7 +473,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "whole_store": {
             "total": 0,
             "capacity": store.MAX_ROOMS,
-            "bytes": 0,
+            "bytes_at_last_reap": 0,
             "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
         },
         "notes": {
@@ -573,7 +573,7 @@ def test_rooms_whole_store_capacity_counts_unlisted_without_naming_them(
     whole = {
         "total": 10,
         "capacity": 10,
-        "bytes": store._count_rooms(tmp_path)[1],
+        "bytes_at_last_reap": store._count_rooms(tmp_path)[1],
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
     }
     assert all(view["whole_store"] == whole for view in views.values())
@@ -585,7 +585,41 @@ def test_rooms_whole_store_capacity_counts_unlisted_without_naming_them(
     whole = schema["paths"]["/rooms"]["get"]["responses"]["200"]["content"]["application/json"][
         "schema"
     ]["properties"]["whole_store"]
-    assert set(whole["properties"]) == {"total", "capacity", "bytes", "bytes_capacity"}
+    assert set(whole["properties"]) == {
+        "total",
+        "capacity",
+        "bytes_at_last_reap",
+        "bytes_capacity",
+    }
+
+
+def test_rooms_labels_stale_whole_store_bytes_after_an_existing_room_grows(
+    client, tmp_path, monkeypatch
+):
+    """The hot-path byte gauge is a last-reap snapshot, never current occupancy.
+
+    Existing rooms keep accepting writes between reaps, so their files can grow while
+    USAGE_FILE stays unchanged. /rooms must name that weaker guarantee explicitly rather
+    than hand /humans a value it could present as live capacity headroom.
+    """
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 100)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 1_000)
+    monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 10)
+    assert client.get("/r/p-hidden/say/bot/seed-record").status_code == 200
+    store._reap_pass(tmp_path, store.time.time())
+    cached = store.room_bytes_used(tmp_path)
+
+    assert client.get(f"/r/p-hidden/say/bot/{'x' * 4096}").status_code == 200
+    live = store._count_rooms(tmp_path)[1]
+    app_module._rooms_walk.cache_clear()
+    whole = client.get("/rooms?kind=all&format=json").json()["whole_store"]
+
+    assert cached < 800 <= live
+    assert whole["bytes_at_last_reap"] == cached
+    assert "bytes" not in whole
 
 
 def test_rooms_text_empty_state_names_the_selected_kind(client):
