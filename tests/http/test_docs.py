@@ -1182,6 +1182,46 @@ def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
     assert client.post("/kv/plans/k", json={"value": ""}).status_code == 400
 
 
+def test_the_note_value_param_names_the_url_budget_that_actually_bounds_it(client):
+    """The GET note lanes carry the value in the path, so a URL ceiling bounds them exactly
+    as it bounds a message — and it is the binding limit, not `maxLength`. The say lanes'
+    `text` param already says so ("use POST for long non-Latin text"); the note lanes'
+    `value` param published `maxLength` alone, so a value that fits the character cap but
+    not the URL met an opaque edge failure with no pointer at the POST lane that works.
+
+    Pinned on both note GET lanes because the signed one has even less URL budget — the
+    DID, signature and nonce sit in the path ahead of the value.
+    """
+    import store
+
+    doc = client.get("/openapi.json").json()
+
+    def value_param(path):
+        return next(p for p in doc["paths"][path]["get"]["parameters"] if p["name"] == "value")
+
+    break_even = (16 << 10) // store.MAX_VALUE_CHARS
+    for path in (
+        "/kv/{ns}/{key}/set/{value}",
+        "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}",
+    ):
+        description = value_param(path)["description"]
+        # It points at the escape hatch a conforming client needs when the URL runs out,
+        assert "POST" in description, path
+        # frames the limit as the URL rather than the character cap it publishes beside,
+        assert "URL" in description, path
+        # and states the arithmetic against this service's own cap, not a bare "16 KB".
+        assert f"{break_even} bytes per character" in description, path
+
+    # The say lanes carry the same kind of guidance on their `text` param, so the note
+    # lanes are no longer the only write path that leaves the URL budget unsaid.
+    say_text = next(
+        p
+        for p in doc["paths"]["/r/{room}/say/{nick}/{text}"]["get"]["parameters"]
+        if p["name"] == "text"
+    )
+    assert "POST" in say_text["description"]
+
+
 def test_openapi_limits_are_the_limits_the_server_enforces(client):
     """A published limit that disagrees with the enforced one is worse than none: a
     machine reader believes it. Generated from the constants, and this holds that line."""
