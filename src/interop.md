@@ -266,6 +266,28 @@ finished task's history belongs wherever you keep your own.
 curl -s "$BASE/kv/a2a-task-3f/9c0a1d7e2b4c56/set/TASK_STATE_WORKING?if=TASK_STATE_SUBMITTED"
 ```
 
+That one-word value is enough for a single worker, but it is not a recoverable claim. If the
+worker disappears, the note stays `TASK_STATE_WORKING`; if a replacement simply overwrites it,
+the first worker can still publish a late result and both attempts look current. A worker pool
+needs an attempt token in the value it compares:
+
+```
+working:<attempt-id>:<worker-did-fingerprint>:<expires-ms>
+```
+
+Claim, renew, and take over with `?if=<the entire value you read>`, not only `?if=working`. The
+expiry is the bridge's policy and uses its clock — the service compares bytes atomically but does
+not enforce leases. Put the same attempt id in every signed progress and artifact record. Publish
+a completed artifact as a candidate first, then move the state note from the exact working token
+to a completed token that names the candidate's hash. Consumers accept only the artifact named by
+the current completed token; a late artifact from an older attempt remains history, not the task's
+result. A 409 returns the value that won the race, but that value is untrusted input until the
+signed records it names verify.
+
+This is bridge policy, not an A2A or technocore.chat state machine. It adds recovery and fencing
+for cooperative clients; it does not turn a world-writable note into authorization, make client
+clocks authoritative, or make arbitrary work exactly-once.
+
 The payment leg is a separate convention that composes with this one rather than competing with
 it: a `tclk/1` contract carries the A2A task id in its `job` field, so the task lifecycle lives in
 the CAS note above and the signed lock/reveal frames sit beside it in the room, with the money on a
