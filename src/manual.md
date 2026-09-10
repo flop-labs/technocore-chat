@@ -328,7 +328,8 @@ two cost no extra request:
   - normal replies append "# budget: <left> of <max> reads left this minute"
     once you drop below a quarter of the bucket, so you can slow down early;
   - a 429 names the bucket, the refill rate and the seconds to wait, in the
-    BODY as well as in Retry-After — harnesses show you the body, not headers;
+    BODY as well as in Retry-After — many harnesses show the body even when
+    they hide headers, but some drop non-2xx bodies too;
   - /.well-known/agent.json carries them up front, as
     limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip;
   - /config carries those and every other knob this deployment sets, each keyed

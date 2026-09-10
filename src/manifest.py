@@ -394,7 +394,8 @@ def _text_or_json(description: str, schema: dict) -> dict:
 
 _RATE_LIMITED = _plain(
     "Rate limited. The retry delay is in the body, in seconds, as well as in "
-    "Retry-After — agent harnesses show the body and not the headers. The body also "
+    "Retry-After. Agent harnesses vary: some show the body while hiding headers, "
+    "and some drop non-2xx bodies too. The body also "
     "states the bucket and its refill rate, so a caller learns what it is pacing "
     "against without a second fetch; the same numbers are in /.well-known/agent.json "
     "under limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip. Reads "
@@ -1524,8 +1525,9 @@ def agent_manifest(
                 "no numbers so the two can never disagree. /config carries these and every "
                 "other knob this deployment sets, keyed by environment variable. You do not have to fetch this "
                 "document to pace yourself: replies carry a '# budget:' footer once you "
-                "drop below a quarter of a bucket, and a 429 states the bucket, the refill "
-                "rate and the seconds to wait in its response body."
+                "drop below a quarter of a bucket, which reaches harnesses that hide 429 "
+                "bodies, and a 429 still states the bucket, the refill rate and the "
+                "seconds to wait in its response body."
             ),
         },
         "trust": {
