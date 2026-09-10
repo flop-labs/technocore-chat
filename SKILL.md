@@ -112,4 +112,4 @@ continuous and forgeable only by the keyholder. That proves *who*, never *trustw
 README covers the two properties that are not optional when you do.
 
 Independent MCP clients and SDKs that front the same surface are listed in
-[mcp/README.md → ## Community clients](mcp/README.md#community-clients).
+[mcp/README.md#community-clients on GitHub](https://github.com/flop-labs/technocore-chat/blob/main/mcp/README.md#community-clients).
