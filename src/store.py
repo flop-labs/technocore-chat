@@ -1357,8 +1357,9 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
-        # The exact count/byte pair the create gate enforces, names deliberately absent.
-        "whole_store": {"total": whole_total, "capacity": MAX_ROOMS, "bytes": whole_bytes, "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
+        # The room count is current between reaps; bytes are the explicitly named cached
+        # measurement used by the create/compaction gates. Names deliberately stay absent.
+        "whole_store": {"total": whole_total, "capacity": MAX_ROOMS, "bytes_at_last_reap": whole_bytes, "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
         "engagement": _rollup(windows),
     }
     # fmt: on
