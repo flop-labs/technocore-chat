@@ -84,7 +84,7 @@
   .row { display: flex; gap: var(--sm); flex-wrap: wrap; align-items: center; }
 
   /* Inputs: surface fill, Ice White text, 4px radius, 8px padding, Cyan focus ring. */
-  input {
+  input, select {
     font: 400 13px/1.4 var(--mono);
     background: var(--surface);
     color: var(--text-primary);
@@ -94,7 +94,7 @@
     min-width: 0;
   }
   input::placeholder { color: var(--text-secondary); }
-  input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+  input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
   #text { flex: 1 1 16rem; }
   #filter { flex: 1 1 14rem; }
 
@@ -603,12 +603,20 @@
     <div id="delegations"></div>
   </details>
 
-  <h2>All rooms</h2>
+  <h2>Rooms</h2>
   <div id="stats">Loading…</div>
   <div class="row">
+    <select id="kind" aria-label="Room kind">
+      <option value="discussion">Discussions</option>
+      <option value="mailbox">Public mailboxes</option>
+      <option value="all">All public rooms</option>
+    </select>
     <input id="filter" placeholder="Filter rooms…" maxlength="64" spellcheck="false"
            aria-label="Filter rooms by name or topic">
   </div>
+  <p class="hint">A public mailbox requires signed writes but is still publicly readable.
+  Unlisted <code>p-</code> rooms never appear in any view; encryption, not a mailbox name,
+  protects message content.</p>
   <table id="rooms">
     <thead>
       <tr>
@@ -740,11 +748,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var jumpEl = document.getElementById('jump'), liveEl = document.getElementById('live');
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
+  var kindEl = document.getElementById('kind');
   var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0;
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: the pump already binds that name to its own payload.
-  var roomsView = null;
+  var roomsView = null, roomsRequest = 0;
 
   // Room and message live in the URL *fragment*, never a query string. Room names are
   // capability-like: the manual's privacy model is that p-<unguessable> is reachable only
@@ -917,22 +926,28 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var ROOMS_DEADLINE_MS = 15000;
 
   function loadRooms() {
+    var kind = kindEl.value, request = ++roomsRequest;
     var ctl = new AbortController();
     var timer = setTimeout(function () { ctl.abort(); }, ROOMS_DEADLINE_MS);
-    fetch('/rooms?format=json&limit=200', { signal: ctl.signal })
+    fetch('/rooms?format=json&limit=200&kind=' + kind, { signal: ctl.signal })
       // The timer is cleared after the parse, not after the headers. fetch() resolves as
       // soon as the response head arrives, so clearing it on `r` would leave a stalled or
       // dribbling body running until the browser's own timeout — the hang this deadline
       // exists to end, moved one step later and harder to see. The signal reaches the body
       // read too, so an abort here rejects the parse and lands in the catch below.
       .then(function (r) { return r.json(); })
-      .then(function (v) { clearTimeout(timer); roomsView = v; renderRooms(); })
+      .then(function (view) {
+        clearTimeout(timer);
+        if (request === roomsRequest && kind === kindEl.value) {
+          roomsView = view; renderRooms();
+        }
+      })
       .catch(function () {
         clearTimeout(timer);
         // Only when there is nothing else to show. This refreshes every 5 seconds, and
         // replacing a list that loaded a moment ago with an error because one poll timed
         // out would be a worse answer than the slightly stale one already on screen.
-        if (!roomsView) roomsProblem();
+        if (request === roomsRequest && kind === kindEl.value && !roomsView) roomsProblem();
       });
   }
 
@@ -966,29 +981,33 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function renderStats(shown) {
     var q = filterEl.value.trim();
     statsEl.textContent = '';
-    var parts = [];
+    var parts = [], whole = roomsView.whole_store;
+    var count = roomsView.total, one = count === 1;
+    var category = kindEl.value === 'mailbox' ? (one ? 'public mailbox' : 'public mailboxes')
+      : kindEl.value === 'all' ? (one ? 'public room' : 'public rooms')
+      : (one ? 'discussion' : 'discussions');
     // "of roomsView.total" would be a lie whenever the list is truncated: the filter runs
     // over the rooms actually loaded, and /rooms serves at most 200 of them. Counting
     // against the service total tells a reader their room is gone when it is merely older
     // than the page — the one wrong conclusion this line must not invite.
     if (q) parts.push(shown + ' of ' + roomsView.rooms.length + ' loaded rooms match');
-    else if (shown < roomsView.total) parts.push('showing ' + shown + ' of ' + roomsView.total + ' rooms');
-    else parts.push(roomsView.total + ' rooms');
-    parts.push(roomsView.total + ' of ' + roomsView.capacity + ' room cap');
-    parts.push(size(roomsView.bytes) + ' of ' + size(roomsView.bytes_capacity) + ' stored');
+    else if (shown < count) parts.push('showing ' + shown + ' of ' + count + ' ' + category);
+    else parts.push(count + ' ' + category);
+    parts.push(whole.total + ' of ' + whole.capacity + ' global room cap');
+    parts.push(size(whole.bytes_at_last_reap) + ' room bytes at last reap ('
+      + size(whole.bytes_capacity) + ' budget; current byte use is not sampled here)');
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
     statsEl.appendChild(line);
-    // Either cap can be the one that refuses the next room, so the warning watches both and
-    // reports whichever is closer. Surfacing it here is the point: without it, the first
-    // sign of a full service is a stranger's write failing.
-    var full = Math.max(roomsView.total / roomsView.capacity,
-                        roomsView.bytes / roomsView.bytes_capacity);
+    // Room count is current between reaps. The byte figure above is deliberately only a
+    // labelled snapshot: using it here would turn a stale measurement into a real-time
+    // assurance, especially after an existing room grew without triggering another reap.
+    var full = whole.total / whole.capacity;
     if (full >= 0.8) {
       var warn = document.createElement('span');
       warn.className = 'badge err';                 // the word carries it too, not the hue
-      warn.textContent = 'near capacity — ' + Math.round(full * 100) + '% full';
+      warn.textContent = 'near room-count capacity — ' + Math.round(full * 100) + '% full';
       statsEl.appendChild(warn);
     }
   }
@@ -1037,7 +1056,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // Three different situations, three different next steps. The truncated case is the
       // one worth spelling out: the room may well exist and simply not be on this page, and
       // the Room box below opens any room by name whether or not it was ever listed.
-      td.textContent = !roomsView.total ? 'No rooms yet.'
+      td.textContent = !roomsView.total
+        ? (kindEl.value === 'mailbox' ? 'No public mailboxes.'
+          : kindEl.value === 'all' ? 'No public rooms yet.' : 'No discussions yet.')
         : roomsView.rooms.length < roomsView.total
           ? 'No match among the ' + roomsView.rooms.length + ' most recently active rooms '
             + 'loaded here. Older rooms are not loaded — open one by name in the Room box '
@@ -2025,6 +2046,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // Re-render on every keystroke: filtering is a client-side pass over at most 200 rows the
   // page already has, so there is nothing to debounce and no request to spare.
   filterEl.addEventListener('input', renderRooms);
+  kindEl.addEventListener('change', function () {
+    roomsView = null;
+    roomsBody.textContent = '';
+    statsEl.textContent = 'Loading…';
+    loadRooms();
+  });
   // Type a few letters, press Enter, you are in the room. Filtering to one row and then
   // asking the reader to go and click it is a step the page can do for them.
   filterEl.addEventListener('keydown', function (ev) {

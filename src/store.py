@@ -1303,8 +1303,13 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dict:
     """Recency-sorted room summaries for the overview.
+
+    `kind` partitions the already-listable population before `limit`: discussion includes
+    every public non-mailbox room (including `events`), mailbox includes every public room
+    carrying the `mb` class, and all preserves the original population. An unlisted
+    composed class is excluded before that choice and therefore cannot leak through it.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
@@ -1315,7 +1320,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     entries = []
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
-        if not _listable(name):
+        if not _listable(name) or ((kind == "mailbox") != is_mailbox(name) and kind != "all"):
             continue
         try:
             st = e.stat()
@@ -1341,6 +1346,8 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
                 **_engagement(nicks),
             }
         )
+    whole_total, whole_bytes = _note_totals(root, _count_rooms, name=USAGE_FILE)
+    # fmt: off
     return {
         "rooms": shown,
         "total": len(entries),
@@ -1350,8 +1357,12 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        # The room count is current between reaps; bytes are the explicitly named cached
+        # measurement used by the create/compaction gates. Names deliberately stay absent.
+        "whole_store": {"total": whole_total, "capacity": MAX_ROOMS, "bytes_at_last_reap": whole_bytes, "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
         "engagement": _rollup(windows),
     }
+    # fmt: on
 
 
 def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
@@ -1372,8 +1383,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
     # counting the class as owned would overstate adoption.
-    keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
-    rooms = dict.fromkeys(keys, 0)
+    rooms = dict.fromkeys(("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral"), 0)  # fmt: skip
     room_bytes = 0
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
@@ -1391,12 +1401,11 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
                 rooms[key] += 1
         if not classes:
             rooms["open"] += 1
-    notes = note_stats(root)
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
         "bytes": {
             "rooms": room_bytes,
-            "notes": notes["bytes"],
+            "notes": (notes := note_stats(root))["bytes"],
             # The worst case a deployment budgets its disk against, exposed so a reader can
             # see headroom without knowing the constants. MAX_TOTAL_ROOM_BYTES rather than
             # MAX_ROOMS * MAX_ROOM_BYTES: the product stopped being the bound when the room

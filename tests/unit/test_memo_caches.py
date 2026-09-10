@@ -164,7 +164,7 @@ def test_the_rooms_cache_answers_every_worker_while_it_is_evicting(monkeypatch):
     slow."""
     app._rooms_walk.cache_clear()
     bound = app.MAX_ROOMS_CACHE
-    gate = _Gated(lambda limit: {"limit": limit})
+    gate = _Gated(lambda limit, kind="all": {"limit": limit, "kind": kind})
     monkeypatch.setattr(app, "_rooms_payload", gate)
     for n in range(bound):
         app._rooms_walk(n, STAMP, 0)
@@ -172,7 +172,7 @@ def test_the_rooms_cache_answers_every_worker_while_it_is_evicting(monkeypatch):
 
     def work() -> None:
         for n in range(bound + WORKERS * 4):
-            assert app._rooms_walk(n, STAMP, 0) == {"limit": n}
+            assert app._rooms_walk(n, STAMP, 0) == {"limit": n, "kind": "all"}
 
     _in_parallel(work)
     assert app._rooms_walk.cache_info().currsize == bound

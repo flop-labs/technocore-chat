@@ -605,7 +605,7 @@ def test_oversize_and_empty_input_fail_closed(client):
     assert client.get("/r/lobby/say/bot/%20%20").status_code == 400  # whitespace-only
     assert client.post("/r/lobby", json={"from": "bot", "text": "x" * 4097}).status_code == 400
     assert client.get("/kv/ns/k/set/" + "y" * 8193).status_code == 400
-    assert client.get("/rooms").text.strip().startswith("(no rooms")  # nothing was created
+    assert client.get("/rooms").text.strip().startswith("(no public rooms")  # nothing was created
 
 
 def test_a_full_length_message_is_accepted(client):
@@ -627,7 +627,7 @@ def test_oversize_body_is_refused_before_it_is_buffered(client):
 
     r = client.post("/r/lobby", content=b"x" * (app_module.MAX_BODY + 1))
     assert r.status_code == 413 and "too large" in r.text
-    assert "no rooms yet" in client.get("/rooms").text  # nothing was written
+    assert "no public rooms yet" in client.get("/rooms").text  # nothing was written
 
 
 def test_chunked_body_is_stopped_at_the_same_cap_and_says_how_to_split_it(client):
