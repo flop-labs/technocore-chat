@@ -1105,7 +1105,10 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         fetch('/kv/resolve/' + encodeURIComponent(m.from) + '?format=json')
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (res) {
-            if (res && res.verified && res.name) { who.textContent = res.name; }
+            // A verified name is a DID->chosen-name binding, NOT uniqueness: two distinct
+            // DIDs can both self-sign the same nick. Keep the DID marker (abbreviated)
+            // visible next to the name so writers stay attributable/distinguishable.
+            if (res && res.verified && res.name) { who.textContent = res.name + ' ' + shortDid(m.from); }
           })
           .catch(function () { /* keep the abbreviated key on failure */ });
       }

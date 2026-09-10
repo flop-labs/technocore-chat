@@ -35,6 +35,13 @@ def _note_ns_and_key(did: str) -> tuple[str, str]:
     return f"did-{fp[:2]}", fp[2:]
 
 
+# Absence is a first-class cached version. A did:key with no backing note (neither
+# sharded `did-*` nor legacy `did`) resolves to None and is cached as *absent*: sending
+# the next lookup back to disk every row would defeat the per-DID cache for the common
+# "writer never published a note" case.
+_NOTE_ABSENT = -1  # sentinel version ("note does not exist"); real mtimes are >= 0
+
+
 class _NameCache:
     """Bounded, store-validated resolve of did:key -> verified display name (or None).
 
@@ -46,6 +53,9 @@ class _NameCache:
     `os.stat(note_path).st_mtime_ns` still matches what was cached. Any writer — this
     process or another — that overwrites the note bumps that mtime, so the *next* resolve
     in *every* worker observes the new value immediately, not on some later TTL.
+
+    A negative result (no note) is cached under the `_NOTE_ABSENT` sentinel so a writer
+    that has never published is a cache hit until a note actually appears.
     """
 
     __slots__ = ("_lock", "_cap", "_keys", "_map", "_mtime")
@@ -58,14 +68,14 @@ class _NameCache:
         self._mtime: dict[str, int] = {}
 
     def get(self, did: str) -> tuple[str | None | bool, int | None]:
-        """The cached (name, note_mtime) pair, or (False, None) when not cached."""
+        """The cached (name, version) pair, or (False, None) when not cached."""
         with self._lock:
             if did in self._map:
                 return self._map[did], self._mtime[did]
             return False, None
 
-    def put(self, did: str, name: str | None, mtime: int) -> None:
-        """Cache `name` as the note's verified name while the note keeps `mtime`."""
+    def put(self, did: str, name: str | None, version: int) -> None:
+        """Cache `name` as the note's verified name while the note keeps `version`."""
         with self._lock:
             if did not in self._map:
                 self._keys.append(did)
@@ -74,7 +84,7 @@ class _NameCache:
                     self._map.pop(old, None)
                     self._mtime.pop(old, None)
             self._map[did] = name
-            self._mtime[did] = mtime
+            self._mtime[did] = version
 
 
 def _monotonic() -> float:
@@ -85,56 +95,73 @@ _CACHE = _NameCache()
 
 
 def _note_mtime_ns(root, ns: str, key: str) -> int | None:
-    """The note file's mtime in nanoseconds, or None when the note does not exist.
-
-    This is *shared-store state*: every worker resolving the same did:key stats the same
-    underlying file, so a writer in another process bumps this value and every worker's
-    cache sees it on the next resolve. It is the freshness authority the cache validates
-    against — deliberately not a process-local invalidation, which could not see writes
-    from another worker.
-    """
+    """The note file's mtime in nanoseconds, or None when the note does not exist."""
     try:
         return store.note_path(root, ns, key).stat().st_mtime_ns
     except OSError:
         return None
 
 
+def _backing_version(root, ns: str, key: str, legacy_key: str) -> int:
+    """A single integer version for whichever note backs `did`.
+
+    Sharded note wins over legacy; if neither exists the version is the `_NOTE_ABSENT`
+    sentinel so "no note" is itself a cacheable, invalidatable result.
+    """
+    m = _note_mtime_ns(root, ns, key)
+    if m is not None:
+        return m
+    m = _note_mtime_ns(root, "did", legacy_key)
+    return _NOTE_ABSENT if m is None else m
+
+
 def lookahead_nick(did: str, discover: bool = False) -> str | None:
     """The verified display name for `did`, or None (fail-closed on any doubt).
 
     * discover=True  -> re-read the note, ignoring the cache.
-    * discover=False -> validate the cache against the note's live mtime, resolve on a miss.
+    * discover=False -> validate the cache against the note's live version, resolve on a miss.
 
-    Cache validity is keyed on the note's on-disk mtime (shared store state), so an
-    overwrite by *any* worker is observed on the very next resolve — not just one whose
-    process-local cache happened to be invalidated.
+    Cache validity is keyed on the note's on-disk version (shared store state), so an
+    overwrite by *any* worker is observed on the very next resolve. A negative result
+    (never published) is itself cached under the absent sentinel.
+
+    TOCTOU: to bind a parsed name to the version it was read under, the note is protected
+    by a stat-before / read / stat-after sequence and retried when the version moves in
+    between — so a name is never cached under a newer version than the one it was read
+    with.
     """
     if not didkey.is_did(did):
         return None
     ns, key = _note_ns_and_key(did)
     root = store_config_root()
-
-    # The mtime of whichever note actually backs this identity (sharded, then legacy).
-    def backing_mtime() -> int | None:
-        m = _note_mtime_ns(root, ns, key)
-        if m is None:
-            m = _note_mtime_ns(root, "did", _note_legacy_key(did))
-        return m
+    legacy_key = _note_legacy_key(did)
 
     if not discover:
-        cached, cached_mtime = _CACHE.get(did)
-        if cached is not False and cached_mtime is not None:
-            # valid only while the shared note still has the mtime we cached under
-            if backing_mtime() == cached_mtime:
-                # cached name or cached-as-None (the None case is cached and current)
+        cached, cached_version = _CACHE.get(did)
+        if cached is not False and cached_version is not None:
+            if _backing_version(root, ns, key, legacy_key) == cached_version:
+                # valid: same shared version as cached under (name or absent/None)
                 return cast("str | None", cached)
             # note changed under us (this or another worker) -> fall through to re-read
 
-    note = store.note_get(root, ns, key)
-    if note is None:
-        note = store.note_get(root, "did", _note_legacy_key(did))
+    # stat-before / read / stat-after with a bounded retry, so the parsed name is only
+    # cached under the version it was read against (closes the TOCTOU window).
+    note = None
+    for _ in range(2):
+        v_before = _backing_version(root, ns, key, legacy_key)
+        note = store.note_get(root, ns, key)
+        if note is None:
+            note = store.note_get(root, "did", legacy_key)
+        v_after = _backing_version(root, ns, key, legacy_key)
+        if v_before == v_after:
+            name = _parse_verified(note, did) if note is not None else None
+            _CACHE.put(did, name, v_after)
+            return name
+        # version moved mid-read; retry once against a stable read
+
+    # Still moving after the bounded retry: cache nothing (a concurrent writer owns the
+    # note), return this one read's result — the next resolve re-reads anyway.
     name = _parse_verified(note, did) if note is not None else None
-    _CACHE.put(did, name, backing_mtime() or 0)
     return name
 
 

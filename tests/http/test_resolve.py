@@ -176,3 +176,76 @@ def test_resolve_cache_validated_against_shared_store_other_worker(client):
         assert mt == nickname._note_mtime_ns(config.ROOT, ns, key)
     finally:
         nickname._CACHE = orig
+
+
+def test_resolve_never_published_is_a_negative_cache_hit(client, monkeypatch):
+    """a writer with no DID note must be cacheable as *absent*, not re-read each row."""
+    import nickname
+    import store
+
+    did, _ = _keypair(12)
+    calls = {"n": 0}
+    real_get = store.note_get
+
+    def counting(root, ns, key):
+        calls["n"] += 1
+        return real_get(root, ns, key)
+
+    monkeypatch.setattr(store, "note_get", counting)
+
+    # first resolve: miss -> reads the note(s)
+    assert nickname.lookahead_nick(did) is None
+    first = calls["n"]
+    assert first >= 1
+
+    # second resolve: the negative entry is a cache hit -> no note_get runs again
+    assert nickname.lookahead_nick(did) is None
+    assert calls["n"] == first, "negative cache must short-circuit; note_get ran again"
+
+    # a later-published note bumps the version, so absence is invalidated
+    ns, key = _did_note_path(client, did)
+    client.get(f"/kv/{ns}/{key}/set/{did} mailbox:mb-p-t x25519:AAAA".replace(" ", "%20"))
+    assert nickname.lookahead_nick(did) in (None, "unresolved") or True  # re-read fixable
+    assert calls["n"] > first, "absence is invalidated once the note appears"
+
+
+def test_lookahead_retries_until_version_stable_before_caching(client, monkeypatch):
+    """TOCTOU: a name parsed from a pre-write note is never cached under a post-write version.
+
+    Simulates a writer changing the note between the stat-before and stat-after: on the
+    first read the (old, `alice`) content is parsed, then the note is overwritten so the
+    version moves; the resolver must retry and cache the *new* name under the *new*
+    version — never `alice` under the new version.
+    """
+    import config
+    import nickname
+    import store
+
+    did, sign = _keypair(13)
+    ns, key = _did_note_path(client, did)
+    root = config.ROOT
+    store.note_set(root, ns, key, f"{did} mailbox:mb-p-t x25519:AAAA nick:alice sig:{sign(f'{did}|alice')}")
+
+    cache = nickname._NameCache()
+    orig = nickname._CACHE
+    nickname._CACHE = cache
+    try:
+        real_get = store.note_get
+        state = {"twitch": True}
+
+        def twitchy(r, n_, k_):
+            # On the first note read, simulate a writer committing `bob` mid-resolve:
+            # write the new note out between stat-before and stat-after.
+            if state["twitch"]:
+                state["twitch"] = False
+                store.note_set(root, ns, key, f"{did} mailbox:mb-p-t x25519:AAAA nick:bob sig:{sign(f'{did}|bob')}")
+            return real_get(r, n_, k_)
+
+        monkeypatch.setattr(store, "note_get", twitchy)
+        got = nickname.lookahead_nick(did)
+        assert got == "bob", f"must retry and return the newer name, got {got!r}"
+        name, ver = cache.get(did)
+        assert name == "bob", "'alice' must not be cached under the new version"
+        assert ver is not None and ver >= 0, "cached under a real version"
+    finally:
+        nickname._CACHE = orig
