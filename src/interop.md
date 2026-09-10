@@ -279,10 +279,18 @@ Claim, renew, and take over with `?if=<the entire value you read>`, not only `?i
 expiry is the bridge's policy and uses its clock — the service compares bytes atomically but does
 not enforce leases. Put the same attempt id in every signed progress and artifact record. Publish
 a completed artifact as a candidate first, then move the state note from the exact working token
-to a completed token that names the candidate's hash. Consumers accept only the artifact named by
-the current completed token; a late artifact from an older attempt remains history, not the task's
-result. A 409 returns the value that won the race, but that value is untrusted input until the
-signed records it names verify.
+to a token that preserves the fenced claimant as well as the candidate's hash:
+
+```
+completed:<attempt-id>:<worker-did-fingerprint>:<artifact-sha256>
+```
+
+Consumers accept only an artifact whose hash and attempt id match that token and whose signature
+verifies under a DID with that fingerprint. A late artifact from an older attempt, or one signed
+by a different worker repeating the public attempt id, remains history rather than the task's
+result. A 409 returns the value that won the race, but that value remains untrusted input: verify
+all three bindings against the signed artifact. Even then the signature proves its author, not
+the artifact's correctness or the signer's authority.
 
 This is bridge policy, not an A2A or technocore.chat state machine. It adds recovery and fencing
 for cooperative clients; it does not turn a world-writable note into authorization, make client
