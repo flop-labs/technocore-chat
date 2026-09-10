@@ -1,6 +1,6 @@
-"""Property tests for the parse/adversarial surface of \x60store.py\x60.
+"""Property tests for the parse/adversarial surface of `store.py`.
 
-Where \x60tests/test_store_stateful.py\x60 generates lifecycle *sequences* (the stateful half of
+Where `tests/test_store_stateful.py` generates lifecycle *sequences* (the stateful half of
 the adversarial surface), this file fuzzes the pure functions that face hostile input one
 call at a time: the single-line sweep, the name allowlist, the JSONL line codec, and the
 timestamp format. Each property is a Hypothesis @given test with derandomize=True, so CI
@@ -21,7 +21,7 @@ import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hypothesis import assume, given, settings
+from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 import didkey
@@ -232,15 +232,34 @@ def test_write_record_line_parses_back_to_same_fields(
 
 # Torn writes, NUL bytes, CJK/emoji payloads, non-UTF8 garbage: whatever hits a room
 # file, _parse answers dict-or-None and never raises — the reader loop depends on that.
+#
+# `st.characters()` here (no codec=) draws from the full codepoint space, surrogates
+# included, and `str.encode()` is strict UTF-8 — the same mismatch ANY_TEXT above hit
+# once already (PR #57): the strategy raises UnicodeEncodeError building its OWN input,
+# before _parse ever sees a byte, so the property it exists to check goes unchecked for
+# every example that happens to land on one. `derandomize=True` below hid this — the
+# pinned seed's 100 examples never rolled a surrogate — but a wider search finds one on
+# the first few hundred (`s = '\ud800'`), and any reseed or example-count bump revives
+# it. `surrogatepass` is what a hostile URL landing raw CESU-8 in a text field actually
+# produces on the wire: bytes, not a valid UTF-8 string, which is exactly the case this
+# generator is supposed to hand _parse.
 HOSTILE_BYTES = st.one_of(
     st.binary(max_size=256),
-    st.builds(lambda s: b'{"seq":1,"text":"' + s.encode(), st.text(st.characters(), max_size=64)),
+    st.builds(
+        lambda s: b'{"seq":1,"text":"' + s.encode("utf-8", "surrogatepass"),
+        st.text(st.characters(), max_size=64),
+    ),
     st.builds(lambda n: b'{"seq":' + str(n).encode(), st.integers(0, 2**63)),
 )
 
 
 @given(HOSTILE_BYTES)
 @settings(derandomize=True, deadline=None, max_examples=100)
+# A lone surrogate in the text field, past the point the `str.encode()` mismatch this
+# strategy once had (fixed above) crashed generation itself, never reaching _parse: see
+# HOSTILE_BYTES's comment. Pinned so CI catches a regression on this input on every
+# seed, not only on the search that happened to find it.
+@example(b'{"seq":1,"text":"' + "\ud800".encode("utf-8", "surrogatepass"))
 def test_parse_never_raises_on_arbitrary_bytes(line: bytes) -> None:
     out = store._parse(line)
     assert out is None or (isinstance(out, dict) and isinstance(out.get("seq"), int))
