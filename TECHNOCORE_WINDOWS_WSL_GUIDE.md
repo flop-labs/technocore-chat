@@ -52,7 +52,9 @@ Create the seed without printing it:
 
 mkdir -p ~/.config/technocore
 umask 077
-python3 -c "import secrets, pathlib; pathlib.Path.home().joinpath('.config/technocore/sign_seed').write_text(secrets.token_hex(32)+'\n')"
+python3 -c "import os,secrets,pathlib; p=pathlib.Path.home()/'.config/technocore/sign_seed'; p.parent.mkdir(parents=True,exist_ok=True); fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(fd,(secrets.token_hex(32)+'\n').encode()); os.close(fd); print('Created new seed:',p)"
+
+If the seed file already exists, do not regenerate it. Reuse the existing ~/.config/technocore/sign_seed so the same DID is preserved.
 
 Verify permissions:
 
