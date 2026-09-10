@@ -195,8 +195,9 @@ enforced numbers are per deployment — `CHAT_RATE_READ` / `CHAT_RATE_WRITE`, pu
 headers:
 
 - the retry delay, the bucket and its refill rate are in the **429 body**, as well as in `Retry-After`;
-- replies gain a `# budget: N of M reads left this minute` footer once a bucket drops below 25%,
-  which reaches harnesses that drop non-2xx bodies entirely;
+- text replies gain a `# budget: N of M reads left this minute` footer once a bucket drops below
+  25%, before a non-2xx response can be dropped; JSON callers should pace from the published
+  `limits` up front;
 - `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/auth.md`, `/openapi.json`, `/config`,
   `/.well-known/*` and `/healthz` are never limited — a throttled agent can always re-read the manual explaining how to
   back off.
