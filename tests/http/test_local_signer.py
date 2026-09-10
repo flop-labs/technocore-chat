@@ -228,6 +228,172 @@ def test_a_bare_store_degrades_to_the_clock_and_not_to_one(tmp_path) -> None:
     assert second > first, "a lost ledger restarted the counter below a nonce already issued"
 
 
+def test_a_ledger_with_history_and_no_key_is_refused(tmp_path) -> None:
+    """@Minh3132, #803: one half of this pair failed closed and the other failed open.
+
+    Seed present, ledger absent was already a refusal. The mirror — ledger present with
+    history, seed gone — walked straight into `Keyring`, which minted a replacement. The new
+    DID then reads the old ledger, finds nothing under its own name, and allocates from the
+    clock as though it had never signed; meanwhile every signature and note already published
+    names an identity nobody can sign as again. `Keyring` refuses to mint over an unreadable
+    *existing* seed for exactly this reason, and the same fact arriving as an absent file was
+    waved through.
+
+    Fresh process, because the whole failure mode is what a restart concludes from disk.
+    """
+    home = tmp_path / "home"
+    signer = Signer(home)
+    original = signer.did
+    signer.nonces.allocate(original, "room")
+    (home / "seed").unlink()
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "print(Signer(sys.argv[2]).did)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"a lost key was replaced silently; the install came back as {result.stdout.strip()} "
+        f"instead of {original}"
+    )
+    assert "its key is gone" in result.stderr
+    assert "can never sign again" in result.stderr, "the error must say what is unrecoverable"
+    # And the refusal is not a one-shot — asserted by running it again rather than by checking
+    # the precondition for it. `exists()` is what would have to be true for a second refusal,
+    # not the refusal, and this branch has a habit of asserting the setup for a claim in place
+    # of the claim.
+    assert (home / "nonces.json").exists()
+    again = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert again.returncode != 0, "the refusal lasted one process"
+    assert "its key is gone" in again.stderr
+
+
+def test_a_corrupt_ledger_beside_no_key_reports_the_lost_key(tmp_path) -> None:
+    """Second reader on this branch: the wrong refusal was answering first.
+
+    The identity check landed after the store was built, so seed-gone plus ledger-corrupt hit
+    `_load`'s refusal instead — a message about lost *nonces* whose advice is to move the file
+    aside once the clock has passed. Follow that here and the next start finds neither file,
+    reads it as a first run, and mints the replacement identity the check exists to prevent.
+    The softer message was attached to the strictly more alarming state.
+
+    An unreadable ledger is never the innocent interrupted first start: that path writes exactly
+    `{}`. Beside a missing seed it is a loss, and it is the identity that was lost.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "nonces.json").write_text("{ this is not json")
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "Signer(sys.argv[2])"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0
+    assert "its key is gone" in result.stderr, "the refusal named the nonces, not the identity"
+    assert "can never sign again" in result.stderr
+    # And it must argue against the recovery the other message recommends, which from this state
+    # leads straight back to a silent first run.
+    assert "Do not move the ledger aside on its own" in result.stderr
+    # And the advice it argues against must not be printed alongside it. Chaining the store's
+    # own refusal as the cause put both in the output: an operator reading the cause block
+    # moves the ledger aside, the next start sees neither file, calls it a first run, and mints
+    # the replacement. Asserting the right phrase is present says nothing about the wrong one.
+    assert "moving it aside once you are satisfied" not in result.stderr, (
+        "the refusal printed the recovery it exists to argue against, as a chained cause"
+    )
+    # The parse failure is still named, folded in rather than chained, so the operator can tell
+    # a truncated file from a corrupted one.
+    assert "could not be read as JSON" in result.stderr
+    # Carried as data, not recovered by splitting the formatted message on its first ". " — a
+    # ledger holding a repr with ". " inside it would have clipped the reason away.
+    (home / "nonces.json").write_text(json.dumps({"did:key:z6MkStub": {"a. b": "x"}}))
+    odd = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert odd.returncode != 0
+    assert "which is not a non-negative integer" in odd.stderr, (
+        "the reason was truncated at a period inside the ledger's own contents"
+    )
+
+
+def test_a_key_with_no_rooms_beside_no_seed_is_history_too(tmp_path) -> None:
+    """Second reader on this branch: "populated" was implemented as a non-zero pair count.
+
+    `{"did:key:z...": {}}` holds zero (key, room) pairs and is not empty. `allocate` cannot
+    produce it — `setdefault(did, {})[room] = nonce` always adds a room — and `initialise`
+    writes exactly `{}`, so a key sitting there with no rooms means something happened that this
+    class did not do: a partial restore, a hand-edit, another tool. Summing pairs called it
+    innocent and minted a replacement identity, which is the outcome the whole branch exists to
+    refuse. The innocent value is `{}` and the predicate now says so.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "nonces.json").write_text(json.dumps({"did:key:z6MkStub": {}}))
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "print(Signer(sys.argv[2]).did)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"a ledger naming a prior key was read as a first start; minted {result.stdout.strip()}"
+    )
+    assert "its key is gone" in result.stderr
+    assert "1 prior key(s) and no allocations" in result.stderr, (
+        "the message must say what was found, since it is not an allocation count"
+    )
+
+
+def test_an_empty_ledger_with_no_key_is_still_a_first_start(tmp_path) -> None:
+    """The innocent half of the same shape, which the refusal above must not swallow.
+
+    This class creates the ledger before the key on purpose, so ledger-present-seed-absent is
+    the ordinary state of a first start that was interrupted — or of a starter that lost the
+    creation race by a microsecond. History is what separates it from a lost key, which is why
+    the check counts allocations rather than testing for the file.
+    """
+    home = tmp_path / "home"
+    NonceStore(home / "nonces.json").initialise()
+    assert not (home / "seed").exists()
+
+    signer = Signer(home)
+    assert signer.did.startswith("did:key:z6Mk")
+    assert signer.nonces.allocate(signer.did, "room") > 0
+
+
 def test_a_first_run_is_not_mistaken_for_a_loss(tmp_path) -> None:
     """The other half: a genuinely new identity must start, or the check above is a brick.
 

@@ -63,6 +63,22 @@ from .durable import fsync_dir, mkdir_durable
 _process_floor = 0
 
 
+class LedgerUnreadableError(ValueError):
+    """A ledger that exists and cannot be trusted, carrying its reason apart from its advice.
+
+    Two callers need different halves of the same refusal. An operator wants the whole message,
+    ending in how to recover. `Signer` wants only the reason, because its own advice is the
+    opposite one — for a *lost key*, moving the ledger aside is the catastrophic step — and it
+    has to quote why the file is unreadable inside a different recommendation. It used to get
+    that by splitting the formatted string on the first ". ", which a `repr` containing ". "
+    would clip. The reason is data; formatting it and parsing it back is not.
+    """
+
+    def __init__(self, why: str, message: str) -> None:
+        super().__init__(message)
+        self.why = why
+
+
 class NonceStore:
     """Per-(did, room) allocation, persisted before each number is handed out."""
 
@@ -112,6 +128,19 @@ class NonceStore:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def records(self) -> tuple[int, int]:
+        """(keys recorded, (key, room) pairs recorded), from one read.
+
+        Exists so `Signer` can tell an empty ledger from one with history without reaching into
+        private state — and it returns both numbers because the first version returned only the
+        pair count, which is not the same predicate. `{"did:key:z...": {}}` holds zero pairs and
+        is not empty: `allocate` never writes a key with no rooms, so a key sitting there means
+        something happened that this class did not do. The innocent value is exactly `{}`, the
+        thing `initialise()` writes, and anything else is history (second reader, #803).
+        """
+        state = self._load()
+        return len(state), sum(len(rooms) for rooms in state.values())
 
     def _load(self) -> dict[str, dict[str, int]]:
         """The persisted ledger, or `{}` when there has never been one.
@@ -173,13 +202,14 @@ class NonceStore:
         and a person doing that has decided the clock is safely past whatever was issued, which
         is exactly the judgement no automatic recovery can make.
         """
-        return ValueError(
+        return LedgerUnreadableError(
+            why,
             f"{self._path} {why}. The nonces already issued for this key are unknown, so "
             "allocating from the clock could repeat one and every signed write would be refused. "
             "This file is left in place deliberately: it is the only record of what was issued, "
             "and while it is here no process will allocate. Recover by repairing it, or by moving "
             "it aside once you are satisfied the clock is past the last nonce used — or by using a "
-            "different key."
+            "different key.",
         )
 
     def _lock(self):

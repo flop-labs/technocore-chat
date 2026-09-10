@@ -19,7 +19,7 @@ from pathlib import Path
 import store
 
 from .keyring import Keyring
-from .nonces import NonceStore
+from .nonces import LedgerUnreadableError, NonceStore
 
 
 class Signer:
@@ -48,8 +48,73 @@ class Signer:
         # means the window does not exist rather than being narrow.
         if not seed_existed and not ledger_existed:
             NonceStore(ledger).initialise()
-        self.keys = Keyring(seed)
+        # The mirror image, which was fail-open while its twin was fail-closed (@Minh3132,
+        # #803). A ledger with history beside no seed is not a first start: the key is gone, and
+        # minting a replacement is the loudest possible failure wearing silence. The new DID
+        # reads the old ledger, finds no entries under its own name, allocates from the clock as
+        # if it had never signed — and every signature and note already published names an
+        # identity nobody can ever sign as again. `Keyring` already refuses to mint over an
+        # unreadable existing seed for exactly this reason; the same fact arriving as an absent
+        # file was being waved through.
+        #
+        # Asked BEFORE the store is built, because the store's own corrupt-ledger refusal
+        # otherwise answers first and answers a different question. Its advice — move the file
+        # aside once you are satisfied the clock has passed — is correct for a lost record and
+        # catastrophic for a lost key: follow it here and the next start finds neither file,
+        # calls it a first run, and mints the replacement identity this check exists to prevent.
+        # An unreadable ledger is never the innocent interrupted first start, because that path
+        # writes exactly `{}`; beside a missing seed it is a loss, and it is the identity that
+        # was lost.
+        #
+        # An *empty* ledger beside no seed stays innocent: that is the window this class opens
+        # on purpose two lines up, and the reason the test is on allocations and not on the file.
+        if ledger_existed and not seed_existed:
+            try:
+                keys_recorded, allocations = NonceStore(ledger).records()
+            except LedgerUnreadableError as exc:
+                # `from None`, and the reason folded into the text instead. Chaining printed the
+                # store's own refusal as the cause, and that message ends "move it aside once
+                # you are satisfied the clock is past the last nonce used" — the one action this
+                # error exists to argue against. Suppressing the wrong answer by putting a right
+                # one in front of it is not suppressing it; an operator reading the cause block
+                # does the catastrophic thing anyway.
+                raise self._identity_lost(
+                    seed, ledger, f"exists but cannot be read ({exc.why})"
+                ) from None
+            # Anything but `{}` is history. Not "any allocations": a key with no rooms holds zero
+            # allocations and is still not the file `initialise()` writes, and `allocate` cannot
+            # produce it, so its presence means something happened here.
+            if keys_recorded or allocations:
+                raise self._identity_lost(
+                    seed,
+                    ledger,
+                    f"records {allocations} nonce allocation(s)"
+                    if allocations
+                    else f"records {keys_recorded} prior key(s) and no allocations",
+                )
+        # One known window, left as it is on purpose. A second starter that reads
+        # `seed_existed=False` after the winner's `initialise()` but before its `os.link` will
+        # come through here, and if the winner's *application* has also allocated by then it
+        # refuses a key that exists. Nothing allocates during `__init__` — only a later sign
+        # does — so the window needs an unlucky interleaving of two different layers, and it
+        # fails closed and clears on retry, which is the direction this module errs in
+        # everywhere else. Recorded rather than fixed: a reader who finds it should know it was
+        # seen (second reader, #803).
         self.nonces = NonceStore(ledger, expect_initialised=lost)
+        # Last, so that a refusal above cannot leave a freshly minted seed behind it.
+        self.keys = Keyring(seed)
+
+    @staticmethod
+    def _identity_lost(seed: Path, ledger: Path, what: str) -> Exception:
+        return ValueError(
+            f"{seed} is missing, but {ledger} {what}, so this install has signed before and its "
+            "key is gone. Minting a new one here would silently change identity: everything "
+            "already published stays under a DID that can never sign again, and the replacement "
+            "would allocate from the clock with no history. Restore the seed from a backup, or "
+            "move this whole directory aside to start deliberately as a new identity. Do not "
+            "move the ledger aside on its own — that turns this into what looks like a first "
+            "run, which is precisely the silent replacement being refused here."
+        )
 
     @property
     def did(self) -> str:
