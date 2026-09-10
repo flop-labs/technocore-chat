@@ -810,6 +810,24 @@ def test_an_over_budget_query_on_a_read_op_is_a_documented_414(client):
     assert str(got.status_code) in responses, "readRoom returned a status its contract omits"
 
 
+def test_the_url_414_does_not_tell_a_read_to_post(client):
+    """#829 review (Minh3132): HeaderLimits runs before routing, so its 414 fires on an
+    over-budget read (`?since=<huge>`) just as on a GET write lane. The body used to say
+    "POST it in a body instead (e.g. POST /r/<room>)" unconditionally — but a read has no
+    payload to move, and POST /r/<room> is a write, so an agent following the refusal
+    literally could turn a failed read into an unintended message. The escape is now stated
+    conditionally; a read must not be steered into a state-changing POST. Anchored on the
+    imperative rather than the substring "POST", so the conditional write-lane guidance the
+    other 414 tests assert can still mention POST without tripping this."""
+    import app as app_module
+
+    huge = "1" * app_module.MAX_URL_BYTES  # a giant ?since= read: no payload to relocate
+    got = client.get(f"/r/room?since={huge}")
+    assert got.status_code == 414 and "URL too long" in got.text
+    assert "POST /r/<room>" not in got.text, "a read must not be told to POST to a write lane"
+    assert "POST it in a body" not in got.text, "the imperative that misreads on a read is gone"
+
+
 def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
     """#180's headline case: 4096 CJK characters is under `maxLength: 4096` but URL-encodes
     to ~36 KiB, far over the budget. That used to land about 1 time in 5 (a coin flip on

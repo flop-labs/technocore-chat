@@ -754,9 +754,14 @@ class HeaderLimits:
             qs = scope.get("query_string", b"")
             url_bytes = len(scope.get("raw_path") or scope["path"].encode()) + len(qs) + bool(qs)
             if url_bytes > MAX_URL_BYTES:
+                # Runs before routing, so it fires on a read with an over-long query
+                # (`?since=<huge>`) too, not only a GET write lane's `:path` payload. Hence a
+                # conditional escape: a concrete `POST /r/<room>` here told an over-budget read
+                # to perform a write it never meant (#829 review, Minh3132); the write lanes get
+                # their correct POST targets from the handler (store.py) when the URL is smaller.
                 body = (
-                    f"414 URL too long: {url_bytes} bytes, over the {MAX_URL_BYTES}-byte budget. The "
-                    f"payload rides in the URL — POST it in a body instead (e.g. POST /r/<room>).\n"
+                    f"414 URL too long: {url_bytes} bytes, over the {MAX_URL_BYTES}-byte budget. A "
+                    f"GET write lane can POST its payload as a body; a read just needs a shorter query.\n"
                 )
                 await text(body, 414)(scope, receive, send)
                 return
