@@ -26,9 +26,30 @@ class Signer:
     """A local identity: one seed, one nonce ledger, both on disk."""
 
     def __init__(self, home: str | Path) -> None:
+        """The ledger is created *before* the key, and the order is the point.
+
+        A missing ledger is only innocent when no key exists yet. Creating it first means that
+        by the time a seed is visible to anyone — including a process that lost the creation
+        race — an empty ledger is visible too, so "seed present, ledger absent" can only mean
+        the ledger was lost. Doing it the other way round leaves a window in which a losing
+        starter sees a key with no ledger and cannot tell that from a theft of the record.
+        """
         home = Path(home)
-        self.keys = Keyring(home / "seed")
-        self.nonces = NonceStore(home / "nonces.json")
+        ledger = home / "nonces.json"
+        seed = home / "seed"
+        # Read both before touching either: an earlier version initialised the ledger and *then*
+        # asked whether it had been missing, answering a question it had just changed.
+        seed_existed, ledger_existed = seed.exists(), ledger.exists()
+        lost = seed_existed and not ledger_existed
+        # And on a first run create the ledger BEFORE the key, which is what the comment used to
+        # claim while the code did the opposite. It matters under concurrency: a second starter
+        # landing between the winner's `os.link(seed)` and a later ledger write would see exactly
+        # seed-present-ledger-absent and refuse a perfectly healthy startup. Creating it first
+        # means the window does not exist rather than being narrow.
+        if not seed_existed and not ledger_existed:
+            NonceStore(ledger).initialise()
+        self.keys = Keyring(seed)
+        self.nonces = NonceStore(ledger, expect_initialised=lost)
 
     @property
     def did(self) -> str:

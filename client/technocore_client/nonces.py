@@ -66,9 +66,33 @@ _process_floor = 0
 class NonceStore:
     """Per-(did, room) allocation, persisted before each number is handed out."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, expect_initialised: bool = False) -> None:
+        """`expect_initialised` says a ledger should already exist for this identity.
+
+        Absence is only proof of a first run when nothing has run before. Once a key exists, an
+        absent ledger is not "nothing was issued" — it is "something may have been issued and
+        the record is gone", which is the same unknown as a corrupt one and gets the same
+        refusal (@yukkie3276, #803).
+
+        The judgement cannot be made here, and the default says so by being `False`. A store on
+        its own sees a path and nothing else; only something that knows whether a *key* already
+        exists can tell a first run from a loss, and that is `Signer`, which creates an empty
+        ledger before the key so that seed-without-ledger can only mean the record went missing.
+        Constructed directly, a `NonceStore` therefore still degrades to the clock floor on a
+        lost file — weaker, and asserted rather than assumed, because deleting the test that
+        covered it would have left the weaker path unexamined.
+        """
         self._path = Path(path)
+        self._expect_initialised = expect_initialised
         self._state: dict[str, dict[str, int]] = self._load()
+
+    def initialise(self) -> None:
+        """Write an empty ledger if there is none, so its later absence is evidence."""
+        if self._path.exists():
+            return
+        mkdir_durable(self._path.parent)
+        self._state = {}
+        self._flush()
 
     def _load(self) -> dict[str, dict[str, int]]:
         """The persisted ledger, or `{}` when there has never been one.
@@ -86,6 +110,11 @@ class NonceStore:
         none — applied to my own state file, which is where it had not been.
         """
         if not self._path.exists():
+            if self._expect_initialised:
+                raise self._refuse(
+                    "is missing, and this key already exists, so a ledger was written and has "
+                    "since been lost"
+                )
             return {}
         try:
             raw = json.loads(self._path.read_text())

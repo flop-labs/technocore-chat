@@ -154,20 +154,93 @@ def test_a_nonce_handed_out_before_a_crash_is_never_handed_out_again(tmp_path) -
     assert revived.allocate(did, "crashroom") > lost
 
 
-def test_a_lost_nonce_file_does_not_restart_the_counter(tmp_path) -> None:
-    """Losing the file degrades to the clock, not to 1.
+def test_a_deleted_ledger_is_refused_in_a_fresh_process(tmp_path) -> None:
+    """@yukkie3276, #803: absence was still being read as proof of a first run.
 
-    A counter that restarted would be refused by the server for as long as it took to
-    climb back past what the key had already used, with nothing local to explain it.
+    The test this replaces deleted the ledger and allocated from a new `NonceStore` in the same
+    interpreter, where `_process_floor` still held the earlier nonce — the identical test-axis
+    flaw already corrected for the corrupt-ledger case, sitting in the function next to it. I
+    fixed one and left its neighbour, which is the failure I had written into my own notes the
+    day before.
+
+    A fresh process has no floor, so if the clock has since moved backwards it allocates below a
+    nonce already used. `Signer` now writes an empty ledger before the key exists, so a seed with
+    no ledger can only mean the ledger was lost — and that is unknown, not empty.
     """
     home = tmp_path / "home"
     signer = Signer(home)
-    used = signer.nonces.allocate(signer.did, "room")
+    signer.nonces.allocate(signer.did, "room")
     (home / "nonces.json").unlink()
 
-    fresh = NonceStore(home / "nonces.json")
-    assert fresh.last(signer.did, "room") is None
-    assert fresh.allocate(signer.did, "room") > used
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "Signer(sys.argv[2])"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0, "a lost ledger was accepted as a first run"
+    assert "has since been lost" in result.stderr
+    assert "would be refused" in result.stderr, "the error must say what it costs"
+
+
+def test_a_bare_store_degrades_to_the_clock_and_not_to_one(tmp_path) -> None:
+    """The layer below `Signer` cannot detect a loss, so assert what it does instead.
+
+    Second reader on this branch: replacing the old lost-ledger test removed the only coverage of
+    a directly-constructed `NonceStore` — the exported surface, and the one the rest of the
+    package builds on. The refusal cannot live here (a store sees a path and nothing else; only
+    something that knows whether a *key* exists can tell a first run from a loss), so the honest
+    thing is to state the weaker guarantee and check it: a lost ledger falls back to the wall
+    clock, which is ahead of every nonce a sane clock has already issued, rather than restarting
+    at 1, which is behind all of them.
+
+    Fresh process on purpose. In-process, `_process_floor` survives the deletion and would carry
+    the guarantee for free — the same test-axis flaw this branch has now fixed twice.
+    """
+    store_path = tmp_path / "nonces.json"
+    first = NonceStore(store_path).allocate("did:key:zStub", "room")
+    store_path.unlink()
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import NonceStore;"
+        "print(NonceStore(sys.argv[2]).allocate('did:key:zStub', 'room'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(store_path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    second = int(result.stdout.strip())
+    assert second > first, "a lost ledger restarted the counter below a nonce already issued"
+
+
+def test_a_first_run_is_not_mistaken_for_a_loss(tmp_path) -> None:
+    """The other half: a genuinely new identity must start, or the check above is a brick.
+
+    Both files absent is a first run. The ledger is created before the key precisely so that the
+    two cases stay distinguishable, and this asserts the innocent one still works — including a
+    second construction, which is where an over-eager refusal would show up.
+    """
+    home = tmp_path / "home"
+    signer = Signer(home)
+    first = signer.nonces.allocate(signer.did, "room")
+    assert (home / "nonces.json").exists(), "the ledger should exist from the start"
+
+    again = Signer(home)
+    assert again.did == signer.did
+    assert again.nonces.allocate(again.did, "room") > first
 
 
 def test_a_corrupt_ledger_keeps_refusing_after_a_restart(tmp_path) -> None:
@@ -312,6 +385,42 @@ def test_concurrent_first_starts_converge_on_one_identity(tmp_path) -> None:
     # No temporary survived the race, and the winner's file carries the mode the loser skipped.
     assert list(home.glob("seed.*.tmp")) == []
     assert (home / "seed").stat().st_mode & 0o777 == 0o600
+
+
+def test_the_ledger_is_created_before_the_key_on_a_first_run(tmp_path, monkeypatch) -> None:
+    """Second reader on this branch: the loss check reopened, one level up, the race below it.
+
+    `Keyring._load` was made safe across processes, and then `Signer.__init__` put the same
+    two-process window back: it read `seed.exists() and not ledger.exists()`, then constructed
+    the keyring — which may mint the seed — and only afterwards created the ledger. A second
+    starter arriving between the winner's `os.link(seed)` and the winner's ledger write saw
+    exactly seed-present-ledger-absent, concluded the record had been lost, and refused a
+    perfectly healthy startup. My own comment claimed the opposite order was "the point" while
+    the code did it backwards, which is the kind of promise the compiler does not check.
+
+    Asserting the ordering rather than the collision, and deliberately. A gated six-process race
+    passes against the broken code every time: gated starters all evaluate the check before the
+    winner has minted anything, so they take the safe branch and the window is never entered. It
+    needs an arrival inside a window microseconds wide — and reproducing that by sleeping is the
+    flaky guard this file already refuses elsewhere. The window is closed by creating the ledger
+    first, so that is what gets checked, at the syscall that publishes the key.
+    """
+    seen: dict[str, bool] = {}
+    real_link = os.link
+
+    def recording_link(src, dst, **kwargs):
+        seen.setdefault("ledger_first", (tmp_path / "home" / "nonces.json").exists())
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", recording_link)
+    signer = Signer(tmp_path / "home")
+
+    assert seen.get("ledger_first") is not None, "the seed was never minted; test proves nothing"
+    assert seen["ledger_first"], (
+        "the key was published before the ledger existed, so a concurrent starter landing in "
+        "that window would read a healthy first run as a lost ledger and refuse"
+    )
+    assert signer.nonces.allocate(signer.did, "room") > 0
 
 
 def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
