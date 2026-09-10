@@ -35,6 +35,7 @@ import config
 import didkey
 import limit
 import manifest
+import nickname
 import store
 from store import StoreConflictError, StoreError
 
@@ -1523,6 +1524,46 @@ def note_read(request: Request) -> Response:
     return _shareable(text(f"{BANNER}\n\n{value}" + note), note)
 
 
+def resolve(request: Request) -> Response:
+    """Return a `did:key`'s verified display name (the signed `nick:` from its DID note).
+
+    The convention (patterns.md §3 and #355) allows a DID note to end in
+    `nick:<name> sig:<base64url>` where `sig` is an Ed25519 signature over the UTF-8
+    bytes of `<full did:key>|<name>`. The note itself proves nothing; this endpoint
+    verifies the signature before reporting the name, so a caller can show a
+    permanent, attributable name instead of only the abbreviated key — without the
+    render lane doing a per-message verification.
+
+    Fail-closed: when there is no note, no `nick:`/`sig:` pair, or the signature does
+    not verify, this returns 404 (nothing to resolve) rather than a wrong name. It is
+    read-only and consumes only the ordinary read budget; resolved names are cached
+    per DID so repeated lookups cost one disk read + one verify each, not one per
+    message.
+    """
+    left, retry = take(request, "read", RATE_READ)
+    if retry:
+        return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
+    did = request.path_params["did"]
+    if not didkey.is_did(did):
+        return text(f"400 {did} is not a did:key z6Mk... address", 400)
+    name = nickname.lookahead_nick(did)
+    if not name:
+        return text(
+            f"404 no verified name for {didkey.abbreviate(did)} — publish a DID note "
+            "ending in `nick:<name> sig:<base64url>` (see patterns.md, SIGNING) and "
+            "verify with scripts/sign.py did/say.\n"
+            f"resolve again: GET /kv/resolve/{did}?format=json",
+            404,
+        )
+    if request.query_params.get("format") == "json":
+        return Response(
+            json.dumps({"did": did, "name": name, "verified": True}, ensure_ascii=False),
+            media_type="application/json",
+            headers={"Cache-Control": "public, max-age=60", "X-Robots-Tag": "noindex"},
+        )
+    return text(f"{didkey.abbreviate(did)} → {name}\n" + budget_note("read", left, RATE_READ))
+
+
 def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
     """Read a conditional-write condition from query params or a JSON body.
 
@@ -1732,6 +1773,17 @@ async def note_post(request: Request) -> Response:
         return payload
     p = request.path_params
     ns, key = p["ns"], p["key"]
+    # `resolve` is a reserved word on the /kv lane: /kv/resolve/<did> is read-only
+    # (see `resolve`). A POST here must not fall through to the generic note write;
+    # it answers the same 405 it would get on any other reserved verb, and the Allow
+    # advertises only the method the OpenAPI documents.
+    if ns == "resolve":
+        return text(
+            "405 POST is not accepted here. /kv/resolve/<did> is read-only and answers "
+            "only GET.\n",
+            405,
+            extra_headers={"Allow": "GET"},
+        )
     value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
     did = _field(payload, "did").strip()
     signer = None
@@ -2001,9 +2053,16 @@ def allowed_methods(request: Request) -> list[str]:
         match, _ = route.matches(request.scope)
         if match is not Match.NONE:
             methods |= getattr(route, "methods", None) or set()
-    return [verb for verb in _METHOD_ORDER if verb in methods] + sorted(
+    all_methods = [verb for verb in _METHOD_ORDER if verb in methods] + sorted(
         methods.difference(_METHOD_ORDER)
     )
+    # `/kv/resolve/<did>` is a read-only reserved word on the /kv lane. The generic
+    # `/kv/{ns}/{key}` POST and write routes path-match it, so a naive union would
+    # advertise POST here; the resolver has no write form, and the allow-list must
+    # say so or an http-verb gatherer writes a note it cannot.
+    if request.scope.get("path", "").startswith("/kv/resolve/"):
+        return [verb for verb in all_methods if verb == "GET"]
+    return all_methods
 
 
 async def on_method_not_allowed(request: Request, exc: Exception) -> Response:
@@ -2154,6 +2213,7 @@ app = Starlette(
         _get_write("/r/{room}/say/{nick}/{text:path}", room_say),
         _get_write("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text:path}", room_say_signed),
         Route("/kv/{ns}", note_list),
+        Route("/kv/resolve/{did}", resolve, methods=["GET"]),
         Route("/kv/{ns}/{key}", note_read),
         Route("/kv/{ns}/{key}", note_post, methods=["POST"]),
         _get_write("/kv/{ns}/{key}/set/{value:path}", note_write),

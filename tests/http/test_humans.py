@@ -39,6 +39,23 @@ def test_humans_page_pins_its_inline_code_with_hashes_of_the_blocks_it_serves(cl
         assert f"{directive} 'sha256-{digest}'" in csp, f"{directive} does not pin its own block"
 
 
+def test_humans_keeps_did_marker_visible_next_to_resolved_name(client):
+    """Two distinct DIDs can self-sign the same nick; /humans must keep them apart.
+
+    A resolved name is a verified DID->chosen-name binding, not a unique identity. The
+    page's resolver must render the name *together with* an abbreviated DID marker
+    (`res.name + ' ' + shortDid(m.from)`), never the bare name alone, so colliding
+    self-signed nicks stay attributable to their distinct keys.
+    """
+    r = client.get("/humans")
+    assert r.status_code == 200
+    page = r.text
+    # the decorated render keeps the DID marker
+    assert "res.name + ' ' + shortDid(m.from)" in page
+    # the bare replacement is gone (no path renders only the name)
+    assert "who.textContent = res.name;" not in page
+
+
 def test_humans_page_is_byte_identical_between_requests_so_the_edge_can_hold_it(client):
     """The point of hashing rather than minting a nonce. A per-response nonce pinned the
     blocks just as tightly, but made the one 60 KiB document this service renders unique
