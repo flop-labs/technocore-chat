@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import re
 import threading
 import time
 import unicodedata
@@ -42,7 +43,20 @@ PROXY_IP_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip", "true-cl
 # The paths that cost nothing, named once because the 429 body and the manual both list
 # them. A 429 that points at a path which is itself rate limited is advice that fails at
 # exactly the moment it is taken.
-FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config, /.well-known/* and /healthz"
+# The paths a throttled agent is told it may still reach. /healthz is NOT here, and its
+# absence is the point: it is genuinely never rate limited — the handler simply never calls
+# take() — but naming it in a 429 is handing a throttled caller a free endpoint at the exact
+# moment it is looking for one. Measured 2026-09-02: /healthz was 10.4% of all traffic
+# (19.6 req/s, 2,478 of 2,480 requests arriving through the tunnel rather than from the
+# container's own probes) while appearing in no other document. This list, rendered into the
+# manual as __FREE_PATHS__ and into every 429 body, was the only place the service mentioned
+# it in prose. The list stays honest either way: it promises the named paths are free, never
+# that they are the only free ones.
+#
+# The api-catalog still advertises /healthz as the service's `status` link, and /openapi.json
+# still describes the operation. Those are deliberate, machine-readable and asked for; a
+# rate-limit refusal is neither.
+FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /openapi.json, /config and /.well-known/*"
 
 # Bounded LRU, because every unseen IP would otherwise add entries forever and the
 # proxy's per-IP rule caps requests per IP, not the number of distinct IPs — a rotating
@@ -57,7 +71,7 @@ _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
 # sits beside it, not a number that outlives the process it describes.
-_requests: dict[str, int] = {"read": 0, "write": 0, "rate_limited": 0}
+_requests = {"read": 0, "write": 0, "rate_limited": 0, "duplicate": 0, "followed": 0}
 # Two numbers that together say whether per-IP limits are actually per-IP. `proxied` counts
 # requests that carried a CDN header we are not configured to read; `identities` is how many
 # distinct client IPs the limiter has ever keyed on. A busy service showing a high `proxied`
@@ -131,7 +145,11 @@ def normalize_text(text: str) -> str:
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
-    return " ".join(text.casefold().split())
+    # A duplicate 422's ref token (app._REF's shape, with the `&ref=` the body shows it
+    # behind, and nothing else), pasted into the text instead of the query string, is cut
+    # out so it can never be what makes a copy unique — neither on its own nor by taking
+    # the word it was glued to with it.
+    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
@@ -288,8 +306,7 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
     _requests[kind] = _requests.get(kind, 0) + 1
-    if wait:
-        _requests["rate_limited"] += 1
+    _requests["rate_limited"] += bool(wait)
     config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
     return int(tokens), wait
 
@@ -383,8 +400,39 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
 
 
 def budget_note(kind: str, left: int, per_min: int) -> str:
-    """Warn before the wall, not at it — only once the budget is nearly gone."""
-    if left * 4 > per_min:
+    """Warn before the wall, not at it — and on a stride, so the warning stays shareable.
+
+    The footer is one caller's pacing, so a reply carrying one is `no-store` and the CDN
+    bypasses it (see the read paths in app.py). That is fine for a warning nobody sees
+    twice, and it was not: a client polling at its ceiling sits permanently inside the
+    last quarter of its budget, so *every* reply it got carried a footer and *none* of them
+    could be cached. Measured on production, 47.7% of room reads were `bypass` at the edge
+    against a 7.2% hit rate — the cache switched itself off for exactly the callers
+    generating the most load.
+
+    Lowering the threshold does not fix that: a client pinned at its ceiling is permanently
+    inside whatever band is chosen. What fixes it is emitting on a *stride* of the remaining
+    budget — roughly every `per_min // 24` requests, so about six warnings across the warning
+    band and the rest of the replies shareable. At the production read budget of 600/min that
+    is one footer every 25 requests; the other 24 can be served from the edge.
+
+    The stride scales with the budget rather than being a constant, because a deployment with
+    a small budget has no requests to spare: at anything under 24/min it is 1, which is the
+    every-reply behaviour this replaces. A caller cannot step over a stride without landing
+    on it, so the warning is never skipped, only thinned.
+
+    `(left + 1) % stride` rather than `left % stride` so that the multiple is never *zero
+    left*: a caller pinned at its ceiling is granted a token the instant one refills and
+    would otherwise sit on the one value that always warns, which is the case this exists to
+    remove. It lands on stride-1 instead — 24, 49, 74 … at 600/min.
+
+    Reads only. A write reply is `no-store` whatever it carries — it mutates — so thinning
+    its footer buys no cacheability and costs a writer its pacing. Sharing one helper made
+    that easy to miss: at the production write budget of 300/min the stride is 12, which
+    silently took write warnings from every in-band reply to 7.9% of them, and the test
+    default of 30/min has a stride of 1 so nothing failed.
+    """
+    if left * 4 > per_min or (kind == "read" and (left + 1) % max(1, per_min // 24)):
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "
