@@ -770,20 +770,44 @@ def test_the_url_budget_counts_the_query_string_separator(client):
     assert at_budget.status_code != 414, "a query-bearing target exactly at the budget passes"
 
 
-def test_the_414_is_published_in_the_openapi_contract(client):
-    """#829 review (Minh3132): the 414 HeaderLimits returns is part of the public HTTP
-    contract, so /openapi.json must publish it on every affected operation or a generated
-    client sees an impossible-to-model status. The four GET write lanes carry the payload in
-    the URL and are the operations whose `:path` target can breach the budget. This pins the
-    contract side deterministically; the Schemathesis `openapi contract` job exercises an
-    over-budget target too, but generatively."""
-    ops = {
-        op["operationId"]: op
+def test_the_middleware_refusals_are_published_on_every_operation(client):
+    """#829 review (Minh3132): HeaderLimits runs before routing, so the 414 (URL over budget)
+    and 431 (header block over limit) it raises are reachable on *every* operation, not only
+    the four GET write lanes whose `:path` target trips 414 most easily. A contract that lists
+    them on four operations and omits them from the rest leaves a generated client an
+    impossible-to-model status on all the others, which CONTRIBUTING treats as drift. Both
+    must appear on every operation the document publishes."""
+    ops = [
+        op
         for p in client.get("/openapi.json").json()["paths"].values()
         for op in p.values()
-    }
-    for oid in ("say", "saySigned", "writeNote", "writeNoteSigned"):
-        assert "414" in ops[oid]["responses"], f"{oid} does not document the 414 it can return"
+        if isinstance(op, dict) and "responses" in op
+    ]
+    assert ops  # the walk found operations rather than silently passing on an empty list
+    for op in ops:
+        oid = op.get("operationId", "?")
+        assert "414" in op["responses"], f"{oid} does not document the 414 it can return"
+        assert "431" in op["responses"], f"{oid} does not document the 431 it can return"
+
+
+def test_an_over_budget_query_on_a_read_op_is_a_documented_414(client):
+    """#829 review (Minh3132): a normal room read such as `/r/<room>?since=<very long>` reaches
+    HeaderLimits before `_cursor()` and is refused 414, so the read operation's own contract
+    has to include it — the earlier fix left 414 on the write lanes only. This exercises the
+    non-write lane the write-lane tests never reach, and ties the observed status back to the
+    operation's published responses, so it stays honest whichever way a future change moves
+    the boundary: scoping the check off the read lane (no longer 414) or documenting it (414
+    published) both keep observed and documented in step; only leaving them out of step fails.
+    """
+    import app as app_module
+
+    huge = "1" * app_module.MAX_URL_BYTES  # a giant `since=` decimal, no route-level cap
+    got = client.get(f"/r/room?since={huge}")
+    assert got.status_code == 414, "an over-budget query must be refused before routing"
+    assert "URL too long" in got.text
+
+    responses = client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["responses"]
+    assert str(got.status_code) in responses, "readRoom returned a status its contract omits"
 
 
 def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
