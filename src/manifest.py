@@ -456,6 +456,16 @@ _BAD_BODY = _plain(
     "character cap. The body names the correction."
 )
 
+# The GET write lanes carry the payload in the URL, so a value that fits the character cap
+# can still put the URL past the byte budget (multibyte text especially — 4096 CJK
+# characters is a ~36 KiB URL). The edge refuses it before routing rather than at random in
+# the parser, and points at the POST lane, which takes the same payload in the body.
+_URL_TOO_LONG = _plain(
+    "The request URL is over the byte budget. These lanes carry the payload in the URL, so "
+    "multibyte text can exceed it under the character cap — send it through the POST lane, "
+    "which takes the same payload in the body. The body names the budget and the byte count."
+)
+
 
 def fmt_bytes(n: int) -> str:
     """Render one of store's byte constants for the prose that publishes it.
@@ -712,6 +722,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "owned `d-` room, or `/r/events`, which is server-written."
                         ),
                         "404": _UNROUTABLE_PATH,
+                        "414": _URL_TOO_LONG,
                         "422": _DUPLICATE_TEXT,
                         "429": _RATE_LIMITED,
                     },
@@ -759,6 +770,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "carries the exact string the signature must cover."
                         ),
                         "404": _UNROUTABLE_PATH,
+                        "414": _URL_TOO_LONG,
                         "422": _DUPLICATE_TEXT,
                         "429": _RATE_LIMITED,
                     },
@@ -1049,6 +1061,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "Condition failed; the body carries the current value, marked "
                             "untrusted without disturbing where ?if= expects to find it."
                         ),
+                        "414": _URL_TOO_LONG,
                         "429": _RATE_LIMITED,
                     },
                 }
@@ -1111,6 +1124,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             "server-side compare-and-set on this room's nonce counter "
                             "when two signed writes race. Count up, re-sign, retry."
                         ),
+                        "414": _URL_TOO_LONG,
                         "429": _RATE_LIMITED,
                     },
                 }

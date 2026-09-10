@@ -61,6 +61,19 @@ CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
 MAX_HEADERS = 48
 MAX_HEADER_BYTES = 8192
 
+# The GET write lanes carry their whole payload in the URL (`{text:path}`, `{value:path}`),
+# so the binding limit there is URL *bytes*, not the character cap the schema advertises:
+# 4096 CJK characters is a 36 KiB URL, well inside `maxLength: 4096` (#180). Measured on the
+# live service, the URL is reliable below 16 KiB and a coin flip above it — the uvicorn h11
+# parser rejects an over-long request line only when it arrives across TCP segments, and
+# lets an identical one that lands in a single segment through, so the same over-budget URL
+# 200s or 400s at random. This makes the budget the enforced contract: refuse deterministically
+# above it, in the app's own voice, naming bytes and the POST escape, instead of leaving it to
+# a parser cap that fires probabilistically. Set to the measured boundary; the Dockerfile's
+# --h11-max-incomplete-event-size is set comfortably above it so a just-over-budget request
+# reaches the app for this clean refusal rather than dying opaquely in the parser.
+MAX_URL_BYTES = 16 << 10
+
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
 # client may pick. A conditional note may carry two 8192-character values (`value` and
 # `if`); escaped by json.dumps' default ensure_ascii=True, astral characters cost 12 bytes
@@ -706,13 +719,20 @@ _REF = re.compile(rb"(?:^|&)ref=(422-[0-9a-f]{1,8}-[0-9a-f]{4})(?:&|$)")
 
 
 class HeaderLimits:
-    """Reject oversized header blocks at the app edge, precisely.
+    """Reject oversized header blocks and request URLs at the app edge, precisely.
 
     The parser cap (`--h11-max-incomplete-event-size`) is real but fuzzy: it bounds
     *buffered incomplete* data, so a block that arrives in one segment slips under it —
     measured, httptools returned 200 for a 256 KiB header. This is the deterministic
     bound, and it also documents the contract. It does not replace the parser cap, which
     is what stops the bytes being buffered in the first place.
+
+    The URL check is the same shape for the same reason (#180): the h11 cap bounds a
+    request line the same fuzzy way, so an over-budget URL 400s or 200s depending only on
+    how the kernel segmented it. Here the bound is exact and phrased in the app's voice —
+    a 414 that names the byte count and points at the POST body — and, because the parser
+    cap is deliberately set above `MAX_URL_BYTES`, a request just over the budget reaches
+    this check for that clean refusal rather than dying as a bare `Invalid HTTP request`.
 
     Also where a request carrying a duplicate 422's ref token is counted and logged,
     because this is the one point every request passes exactly once: the docs the 422
@@ -726,6 +746,18 @@ class HeaderLimits:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
+            # raw_path is the percent-encoded target uvicorn parsed (the URL as the client
+            # sent it); fall back to the decoded path. The query string rides the same line,
+            # so it counts against the budget too.
+            qs = scope.get("query_string", b"")
+            url_bytes = len(scope.get("raw_path") or scope["path"].encode()) + len(qs)
+            if url_bytes > MAX_URL_BYTES:
+                body = (
+                    f"414 URL too long: {url_bytes} bytes, over the {MAX_URL_BYTES}-byte budget. The "
+                    f"payload rides in the URL — POST it in a body instead (e.g. POST /r/<room>).\n"
+                )
+                await text(body, 414)(scope, receive, send)
+                return
             headers = scope.get("headers", [])
             total = sum(len(k) + len(v) + 4 for k, v in headers)
             if len(headers) > MAX_HEADERS or total > MAX_HEADER_BYTES:

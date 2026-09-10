@@ -720,6 +720,71 @@ def test_header_block_is_capped_far_below_the_edge_ceiling(client):
     assert "a plain GET with no custom headers" in r.text  # tells the client what to do
 
 
+def test_the_url_byte_budget_refuses_deterministically_at_the_boundary(client):
+    """#180: the GET write lanes carry their payload in the URL, so the binding limit is
+    URL *bytes*, not the character cap. It used to be enforced only by the h11 parser cap,
+    which fires by TCP segmentation — the same over-budget URL 200s or 400s at random. The
+    app now refuses it itself, exactly at MAX_URL_BYTES, in its own voice.
+
+    A URL one byte over the budget must 414 regardless of how it arrives; a URL at the
+    budget must not be refused by this check (it falls through to the app, which here 400s
+    on the character cap). The 414 must name the actual byte count and point at POST."""
+    import app as app_module
+
+    prefix = "/r/rr/say/bot/"
+    pad = app_module.MAX_URL_BYTES - len(prefix.encode())
+    at_budget = client.get(prefix + "a" * pad)  # URL == budget exactly
+    one_over = client.get(prefix + "a" * (pad + 1))  # one byte over
+
+    assert one_over.status_code == 414, "an over-budget URL must be refused deterministically"
+    assert "URL too long" in one_over.text
+    assert str(app_module.MAX_URL_BYTES) in one_over.text  # names the budget
+    assert str(app_module.MAX_URL_BYTES + 1) in one_over.text  # and the actual size
+    assert "POST" in one_over.text  # points at the escape hatch
+    assert at_budget.status_code != 414, "a URL at the budget is not refused by the URL check"
+    # The middleware runs before routing, so it refuses without the request touching a
+    # handler — a normal small write is untouched.
+    assert client.get("/r/rr/say/bot/hi").status_code == 200
+
+
+def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
+    """#180's headline case: 4096 CJK characters is under `maxLength: 4096` but URL-encodes
+    to ~36 KiB, far over the budget. That used to land about 1 time in 5 (a coin flip on
+    segmentation); it must now refuse every time, and the POST escape the 414 names must
+    carry the identical text whole."""
+    import json
+
+    import store
+
+    text = "あ" * store.MAX_TEXT_CHARS  # 4096 chars, ~36 KiB as a URL, under the char cap
+    got = client.get(f"/r/cjk/say/bot/{text}")
+    assert got.status_code == 414 and "POST" in got.text  # deterministic now, not 1-in-5
+
+    posted = client.post(
+        "/r/cjk",
+        content=json.dumps({"from": "bot", "text": text}, ensure_ascii=True).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert posted.status_code == 200
+    assert client.get("/r/cjk?format=json").json()["messages"][0]["text"] == text  # byte-exact
+
+
+def test_the_h11_parser_cap_is_set_above_the_url_budget(client):
+    """#180: the app's 414 is only deterministic for a just-over-budget request if that
+    request reaches the app — the h11 parser cap must sit ABOVE MAX_URL_BYTES, or the parser
+    rejects it first, and does so by TCP segmentation rather than by rule. Pin the deployment
+    so a later edit that equalises the two (reopening the coin flip at the boundary) fails
+    here. Raising the cap is a per-connection buffering trade-off, documented at the CMD."""
+    import re
+
+    import app as app_module
+
+    dockerfile = Path(app_module.__file__).resolve().parents[1] / "docker" / "Dockerfile"
+    m = re.search(r'--h11-max-incomplete-event-size", "(\d+)"', dockerfile.read_text())
+    assert m, "Dockerfile no longer sets --h11-max-incomplete-event-size"
+    assert int(m.group(1)) > app_module.MAX_URL_BYTES, "parser cap must exceed the URL budget"
+
+
 def test_a_full_length_message_is_postable_in_every_encoding(client):
     """The documented cap is in *characters*. json.dumps defaults to ensure_ascii=True,
     so astral characters cost 12 body bytes each as surrogate-pair escapes. The byte cap
