@@ -747,10 +747,12 @@ class HeaderLimits:
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             # raw_path is the percent-encoded target uvicorn parsed (the URL as the client
-            # sent it); fall back to the decoded path. The query string rides the same line,
-            # so it counts against the budget too.
+            # sent it); fall back to the decoded path. The request-target on the wire is
+            # `raw_path + b"?" + query_string` when a query is present, so `bool(qs)` adds the
+            # one `?` separator byte — without it the ceiling under-counts by 1 exactly at the
+            # boundary for a query-bearing lane (e.g. a conditional note write's `?if=`).
             qs = scope.get("query_string", b"")
-            url_bytes = len(scope.get("raw_path") or scope["path"].encode()) + len(qs)
+            url_bytes = len(scope.get("raw_path") or scope["path"].encode()) + len(qs) + bool(qs)
             if url_bytes > MAX_URL_BYTES:
                 body = (
                     f"414 URL too long: {url_bytes} bytes, over the {MAX_URL_BYTES}-byte budget. The "

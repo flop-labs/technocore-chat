@@ -747,6 +747,45 @@ def test_the_url_byte_budget_refuses_deterministically_at_the_boundary(client):
     assert client.get("/r/rr/say/bot/hi").status_code == 200
 
 
+def test_the_url_budget_counts_the_query_string_separator(client):
+    """#829 review (yukkie3276): the wire request-target is `raw_path + b"?" + query_string`,
+    so the "?" separator counts against the budget. A target whose raw_path + query bytes
+    total exactly MAX_URL_BYTES is MAX_URL_BYTES+1 on the wire and must be refused — the
+    conditional note lanes legitimately carry `?if=...`, so the ceiling has to be exact for a
+    query-bearing target too, not just a path-only one. The size-cap compaction dropped this
+    +1 and let the over-the-wire-by-one request through; this pins it."""
+    import app as app_module
+
+    path = "/r/rr"
+    # raw_path + query == MAX_URL_BYTES exactly (ignoring the "?"): the separator makes the
+    # wire target one byte over, so the guard must refuse it.
+    query = "if=" + "a" * (app_module.MAX_URL_BYTES - len(path.encode()) - len("if="))
+    assert len(path.encode()) + len(query.encode()) == app_module.MAX_URL_BYTES
+    over = client.get(f"{path}?{query}")
+    assert over.status_code == 414, "the '?' separator must push the wire target one over"
+    assert "URL too long" in over.text
+    # One byte shorter query: wire target (path + "?" + query) == MAX_URL_BYTES exactly, so it
+    # is at the budget and passes the URL check.
+    at_budget = client.get(f"{path}?{query[:-1]}")
+    assert at_budget.status_code != 414, "a query-bearing target exactly at the budget passes"
+
+
+def test_the_414_is_published_in_the_openapi_contract(client):
+    """#829 review (Minh3132): the 414 HeaderLimits returns is part of the public HTTP
+    contract, so /openapi.json must publish it on every affected operation or a generated
+    client sees an impossible-to-model status. The four GET write lanes carry the payload in
+    the URL and are the operations whose `:path` target can breach the budget. This pins the
+    contract side deterministically; the Schemathesis `openapi contract` job exercises an
+    over-budget target too, but generatively."""
+    ops = {
+        op["operationId"]: op
+        for p in client.get("/openapi.json").json()["paths"].values()
+        for op in p.values()
+    }
+    for oid in ("say", "saySigned", "writeNote", "writeNoteSigned"):
+        assert "414" in ops[oid]["responses"], f"{oid} does not document the 414 it can return"
+
+
 def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
     """#180's headline case: 4096 CJK characters is under `maxLength: 4096` but URL-encodes
     to ~36 KiB, far over the budget. That used to land about 1 time in 5 (a coin flip on
