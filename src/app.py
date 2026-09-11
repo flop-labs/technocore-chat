@@ -62,16 +62,25 @@ MAX_HEADERS = 48
 MAX_HEADER_BYTES = 8192
 
 # The GET write lanes carry their whole payload in the URL (`{text:path}`, `{value:path}`),
-# so the binding limit there is URL *bytes*, not the character cap the schema advertises:
-# 4096 CJK characters is a 36 KiB URL, well inside `maxLength: 4096` (#180). Measured on the
-# live service, the URL is reliable below 16 KiB and a coin flip above it — the uvicorn h11
-# parser rejects an over-long request line only when it arrives across TCP segments, and
-# lets an identical one that lands in a single segment through, so the same over-budget URL
-# 200s or 400s at random. This makes the budget the enforced contract: refuse deterministically
-# above it, in the app's own voice, naming bytes and the POST escape, instead of leaving it to
-# a parser cap that fires probabilistically. Set to the measured boundary; the Dockerfile's
-# --h11-max-incomplete-event-size is set comfortably above it so a just-over-budget request
-# reaches the app for this clean refusal rather than dying opaquely in the parser.
+# so the binding limit there is URL *bytes*, not the character cap the schema advertises: a
+# value well inside `maxLength` can still blow the URL budget, because a code point costs up
+# to 4 bytes and each byte URL-encodes to 3 (#180) — 4096 CJK characters is a ~36 KiB URL,
+# 4096 emoji ~49 KiB, an 8192-char note up to ~98 KiB. Those payloads belong on the POST lane,
+# and the 414 body says so.
+#
+# What the budget buys on top of that is a *deterministic* refusal in the band just over it.
+# Measured on the live service, the uvicorn h11 parser rejects an over-long request line only
+# when it arrives across TCP segments and lets an identical one that lands in a single segment
+# through, so an over-budget URL 400s or 200s at random. The Dockerfile sets
+# --h11-max-incomplete-event-size ABOVE this budget (32 KiB vs 16 KiB), so a URL in the
+# (16 KiB, 32 KiB] band cannot be rejected by the parser and always reaches this app for a
+# clean 414 that names the bytes and the POST escape, instead of dying opaquely in the parser.
+# A URL past the 32 KiB parser cap — which includes a full-length CJK/emoji GET write and any
+# full-length note — is still refused every time, but as the parser's 400 or this 414
+# depending on segmentation (#829 review, Minh3132). Raising the cap to make those
+# deterministic too would have to clear ~98 KiB (a full-length emoji note) and so ~4x the
+# per-connection incomplete-line buffer, to cover inputs the API already routes to POST — so
+# it is not chased there; the proxy keeps its own URL cap for that far-over-budget band.
 MAX_URL_BYTES = 16 << 10
 
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a

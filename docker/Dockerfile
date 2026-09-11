@@ -103,10 +103,14 @@ HEALTHCHECK --interval=30s --timeout=20s --retries=3 \
 # TRADE-OFF (accepted): raising this doubles the worst-case per-connection buffer for an
 # incomplete request line, from 16 KiB to 32 KiB. --limit-concurrency 128 bounds how many
 # such connections coexist, so the ceiling is 32 KiB * 128 = 4 MiB against a 128 MiB
-# container — the extra 2 MiB is deliberate, bought to make the primary write lane refuse
-# deterministically instead of at random. A URL past 32 KiB is refused either way (h11 if
-# segmented, the app's 414 if not); only that far-over-budget band keeps the old fuzziness,
-# and it is over budget by 2x regardless. Header blocks are capped far tighter in app.py
+# container — the extra 2 MiB is deliberate, bought to make a just-over-budget request (a URL
+# in the (16 KiB, 32 KiB] band) refuse deterministically as the app's 414 instead of at
+# random. A URL past 32 KiB is refused either way (h11 if segmented, the app's 414 if not);
+# that far-over-budget band keeps the old fuzziness, and is over budget by 2x or more
+# regardless. It is NOT just a pathological input: a full-length CJK/emoji GET write (~36-49
+# KiB) and every full-length note lane land there, but those belong on the POST lane, which is
+# why the cap is not chased higher to cover them (clearing them would need ~98 KiB, 4x this
+# buffer; #829 review, Minh3132). Header blocks are capped far tighter in app.py
 # (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
 # instead of "whatever was buffered".
 # --no-proxy-headers, deliberately. uvicorn's ProxyHeadersMiddleware REWRITES

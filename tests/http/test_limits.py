@@ -829,17 +829,27 @@ def test_the_url_414_does_not_tell_a_read_to_post(client):
 
 
 def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
-    """#180's headline case: 4096 CJK characters is under `maxLength: 4096` but URL-encodes
-    to ~36 KiB, far over the budget. That used to land about 1 time in 5 (a coin flip on
-    segmentation); it must now refuse every time, and the POST escape the 414 names must
-    carry the identical text whole."""
+    """#180: a value under `maxLength: 4096` can still blow the URL budget — 4096 CJK
+    characters URL-encode to ~36 KiB — so the GET write lane refuses it and the POST lane
+    carries the identical text whole.
+
+    Scope of the GET assertion (#829 review, Minh3132): this exercises the app's HeaderLimits,
+    which returns 414 for the over-budget URL. TestClient hands the request straight to the
+    ASGI app and bypasses the h11 parser, so it does NOT prove determinism against the deployed
+    stack — and cannot, because ~36 KiB is above the 32 KiB h11 cap. Over a real socket this
+    URL is refused as EITHER the parser's 400 or this 414 depending on TCP segmentation: both
+    refusals, neither guaranteed. The genuinely deterministic 414 band, (16 KiB, 32 KiB], is
+    pinned by test_the_url_byte_budget_refuses_deterministically_at_the_boundary; real-socket
+    behaviour above the cap is observed by tests/http_hardening_probe.py, not asserted here."""
     import json
 
     import store
 
     text = "あ" * store.MAX_TEXT_CHARS  # 4096 chars, ~36 KiB as a URL, under the char cap
     got = client.get(f"/r/cjk/say/bot/{text}")
-    assert got.status_code == 414 and "POST" in got.text  # deterministic now, not 1-in-5
+    assert (
+        got.status_code == 414 and "POST" in got.text
+    )  # app refuses over-budget; names the POST escape
 
     posted = client.post(
         "/r/cjk",
