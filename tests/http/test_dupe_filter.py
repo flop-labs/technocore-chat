@@ -361,15 +361,17 @@ def test_a_non_finite_window_refuses_to_boot(raw: str) -> None:
 
 
 def test_a_write_the_store_refuses_never_spends_a_copy(client) -> None:
-    """The copy is reserved BEFORE the append - that is what makes the check and the
-    record one step - and the append has refusals of its own: an invalid nick, a stale
-    nonce, a text past the character cap, a full rooms directory. Those must not spend
-    the room's window on a text nothing stored, or COPIES malformed requests would leave
-    the next well-formed caller a 422 for copies that do not exist."""
+    """A write the store refuses must not spend the room's window on a text nothing stored,
+    or COPIES malformed requests would leave the next well-formed caller a 422 for copies
+    that do not exist. The reservation now happens INSIDE the append, keyed by the generation
+    the write settles on (#734); the store's own refusals - an invalid nick, a stale nonce, a
+    full rooms directory - are checked BEFORE it, so they never reserve, and a failure AFTER
+    it hands the slot back (test_a_store_failure_after_the_reservation_hands_the_slot_back).
+
+    Drives the pre-reservation half: an uppercase nick store.valid_name rejects at the top of
+    the write, well before the room lock the reservation is taken under."""
     with _filter_on():
         for _ in range(COPIES + 3):
-            # Uppercase, which store.valid_name refuses - a 400 raised INSIDE the
-            # append, after the slot for this text was already reserved.
             assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
         assert _say(client, "lobby", "nick", PHRASE).status_code == 200
     assert _view(client) == [PHRASE], "eight refused writes, one that landed"
@@ -650,3 +652,85 @@ def test_a_reaped_and_recreated_room_starts_with_an_empty_share_ring(client, mon
     # dead incarnation's slots are untouched, sitting idle until MAX_RING_ROOMS evicts them.
     assert len(limit._rings[("room-x", new_gen)]) == 2, "the recreated room's own two writes"
     assert old_gen in _ring_of("room-x"), "the dead incarnation's ring is orphaned, not read"
+
+
+def test_a_reap_between_a_reservation_and_its_write_cannot_orphan_the_slot(
+    client, monkeypatch
+) -> None:
+    """yukkie3276's TOCTOU race (#734, at head 7ee9c4d). The reservation used to read the
+    generation and the room's existence BEFORE store.append took the room lock, so a reap
+    landing in that gap recreated the room at a NEW generation while the slot stayed keyed to
+    the old one: the accepted copy stranded a generation back, counting against nothing, so
+    the room's share cap ran one copy loose.
+
+    The reservation is taken INSIDE the append now, under the room lock the append and the
+    reaper share, keyed by the generation the write settles on - the seam the race needed is
+    gone. Reproduced through the one read that used to make the prediction, app._room_exists:
+    pinned True while the room is actually absent on disk is exactly what a reap in the gap
+    leaves - the room LOOKS present (the old code predicted the old generation) but the write
+    recreates it at generation+1. The lie changes nothing now; store reads the generation
+    itself, under the lock. On the old code the first copy's slot orphaned under generation 0,
+    the cap counted short, and the (allowed+1)th copy wrongly landed.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    # A share cap of three, exactly as the reap/recreate test above, so the ring fills inside
+    # one window and the share rule (not the looser window rule at COPIES) is what binds.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 3 / limit.DUPE_RING)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    assert allowed == 3
+    # Seen as existing at prediction time while every write recreates it - the reap in the gap.
+    # The room starts absent, so the first write bumps its generation from 0 to 1 under the lock.
+    monkeypatch.setattr(app_module, "_room_exists", lambda room: True)
+    with _filter_on():
+        outcomes = [
+            _say(client, "toctou", "n" + str(i), PHRASE).status_code for i in range(allowed + 1)
+        ]
+    new_gen = store.room_generation(root, "toctou")
+    assert new_gen == 1, "the first write recreated the room at generation 1"
+    # Exactly `allowed` land and the next is refused: the cap binds under the generation the
+    # writes actually live in. The old code stranded one slot a generation back, counted
+    # `allowed - 1`, and let this last copy through with a 200.
+    assert outcomes == [200] * allowed + [422], outcomes
+    assert len(limit._rings[("toctou", new_gen)]) == allowed, "every landed copy in the live ring"
+    assert ("toctou", 0) not in limit._rings, "nothing stranded under the pre-recreation generation"
+
+
+def test_a_store_failure_after_the_reservation_hands_the_slot_back(client, monkeypatch) -> None:
+    """The reservation is taken inside the append now, so a store failure AFTER it - a torn
+    write, a disk error - must hand the slot back, the way the old pre-append reservation
+    released on any append refusal. Otherwise a run of such failures would spend a room's
+    window on a text nothing stored, and the next well-formed caller of that phrase would meet
+    a 422 for copies that never landed.
+
+    Fails at last_seq, the first store read after the reservation and before any byte is
+    written, so nothing lands and only the release path runs. Driven through store.append
+    directly - the failure raises, which the TestClient would re-raise through the HTTP lane.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    real_last_seq = store.last_seq
+
+    def boom(r, room):
+        if room == "boom":
+            raise OSError("injected: the write failed after the slot was reserved")
+        return real_last_seq(r, room)
+
+    monkeypatch.setattr(store, "last_seq", boom)
+    with _filter_on():
+        for _ in range(COPIES + 2):  # more failures than the window would ever allow copies
+            with pytest.raises(OSError):
+                store.append(
+                    root, "boom", "nick", PHRASE, reserve=app_module._reserver("boom", PHRASE)
+                )
+        monkeypatch.undo()
+        # Nothing holds the phrase's window - every reserved slot was handed back - so COPIES
+        # fresh copies land and only the (COPIES+1)th is the refusal the filter is actually for.
+        for i in range(COPIES):
+            assert _say(client, "boom", "n" + str(i), PHRASE).status_code == 200
+        assert _say(client, "boom", "last", PHRASE).status_code == 422
+    assert len(limit._rings[("boom", 1)]) == COPIES, "the copies that landed, and only those"

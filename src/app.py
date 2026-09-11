@@ -18,7 +18,7 @@ import secrets
 import time
 import tomllib
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -36,7 +36,7 @@ import didkey
 import limit
 import manifest
 import store
-from store import StoreConflictError, StoreError
+from store import DuplicateRefused, StoreConflictError, StoreError
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
 # module in src/ that reads it — and read here as config.<name> at call time, so
@@ -1307,43 +1307,40 @@ optional: add &ref={ref} to your next requests. the server ignores it; it only l
     )
 
 
-@contextmanager
-def _dupe_slot(room: str, body: str):
-    """Reserve one copy of `body` in `room`'s ring for the append that follows, yielding
-    True when the room has already taken enough copies and the caller must refuse.
+class _DupeReserver:
+    """One copy of `body` in `room`'s ring, reserved and released by store.append UNDER the
+    room lock, keyed by the generation the append settles on — which store passes in, so the
+    prediction that used to be made here (and could be invalidated by a reap landing before
+    the write) is gone: the reservation and the write can no longer disagree on the
+    incarnation (#734, and the TOCTOU class yukkie3276 found on top of it).
 
-    Knobs read HERE at call time so config.override() and monkeypatch.setattr(app, ...)
-    keep reaching the ring — the same contract take() already follows.
-
-    A context manager rather than a bare call because the reservation has to be undone
-    when the append refuses the write: store.append validates the nick, the nonce and
-    the room's capacity, so DUPE_MAX_COPIES malformed requests would otherwise spend a
-    room's whole window on a text nothing ever stored. Returning (the refusal, or the
-    200 path) releases nothing; only an exception does.
+    Knobs read HERE, at reserve()/release() time, so config.override() and
+    monkeypatch.setattr(app, ...) keep reaching the ring — the contract take() also follows.
+    `now` is captured once so a release matches the slot its reserve added (the #734 stale-
+    release race). store calls release only when a reservation was taken and the write then
+    failed — an invalid nick or a stale nonce raises before reserve() is ever reached.
     """
-    now = time.monotonic()
-    # The incarnation this write lands in, so the ring is keyed per room INCARNATION rather
-    # than per name: a room reaped and recreated under the same name gets a clean ring (#734).
-    # `room_generation` is preserved across a reap and bumped on (re)create, and the bump
-    # happens inside the append that FOLLOWS this reservation — so a write to an absent room
-    # is recreating it and lands in generation+1, which is the value store.append will settle
-    # on. Computed only when the filter is on: an opted-out deployment (window <= 0) must keep
-    # the pre-filter hot path exactly, paying no store read here, and dupe_refused ignores the
-    # value in that case anyway.
-    gen = 0
-    if DUPE_FILTER_SECONDS > 0:
-        gen = store.room_generation(config.ROOT, room) + (0 if _room_exists(room) else 1)
-    refused = limit.dupe_refused(
-        room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES, generation=gen
-    )
-    try:
-        yield refused
-    except BaseException:
-        if not refused:
-            limit.dupe_release(
-                room, body, now, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, generation=gen
-            )
-        raise
+
+    __slots__ = ("args", "gen")
+
+    def __init__(self, room: str, body: str) -> None:
+        self.args = (room, body, time.monotonic())  # (room, text, now); the head both calls share
+        self.gen = 0
+
+    def reserve(self, generation: int) -> bool:
+        self.gen = generation  # remembered so release() gives back the slot it added
+        return limit.dupe_refused(
+            *self.args, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES, generation=generation
+        )
+
+    def release(self) -> None:
+        limit.dupe_release(*self.args, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, generation=self.gen)
+
+
+def _reserver(room: str, body: str) -> _DupeReserver | None:
+    """The slot store.append drives, or None when the filter is off — None keeps the
+    pre-filter hot path exactly: store reads no generation and reserves nothing."""
+    return _DupeReserver(room, body) if DUPE_FILTER_SECONDS > 0 else None
 
 
 def room_say(request: Request) -> Response:
@@ -1355,10 +1352,7 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    with _dupe_slot(room, body) as refused:
-        if refused:
-            return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, nick, body)
+    rec = store.append(config.ROOT, room, nick, body, reserve=_reserver(room, body))
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1386,10 +1380,10 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    with _dupe_slot(room, body) as refused:
-        if refused:
-            return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
+    slot = _reserver(room, body)
+    rec = store.append(
+        config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"], reserve=slot
+    )
     config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
     limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
     view = store.read_messages(config.ROOT, room, limit=20)
@@ -1487,17 +1481,12 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick = _field(payload, "from", is_name=True)
-            with _dupe_slot(room, sent) as refused:
-                if refused:
-                    return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, nick, sent)
+            posted = store.append(config.ROOT, room, nick, sent, reserve=_reserver(room, sent))
         else:
-            with _dupe_slot(room, body) as refused:
-                if refused:
-                    return _dupe_refusal(request, room)
-                posted = store.append(
-                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
-                )
+            slot = _reserver(room, body)
+            posted = store.append(
+                config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig, reserve=slot
+            )
         config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
         limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
         return respond(
@@ -2051,6 +2040,13 @@ async def on_bad_input(request: Request, exc: Exception) -> Response:
     return text(f"400 {exc}", 400)
 
 
+async def on_duplicate(request: Request, exc: Exception) -> Response:
+    """store.append raised DuplicateRefused under the room lock: the bespoke 422, not the
+    generic 400 a StoreError maps to. Rendered here, not at each write lane, so all four map
+    the one refusal the one way; `room` is the path segment every write route carries."""
+    return _dupe_refusal(request, request.path_params["room"])
+
+
 async def on_conflict(request: Request, exc: Exception) -> Response:
     """409 carries the value that was actually there, so a loser can rebase without a
     second round trip — one fewer request on a service where requests are the budget.
@@ -2185,6 +2181,7 @@ app = Starlette(
     ],
     exception_handlers={
         StoreError: on_bad_input,
+        DuplicateRefused: on_duplicate,
         StoreConflictError: on_conflict,
         404: on_not_found,
         405: on_method_not_allowed,

@@ -24,6 +24,7 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+from typing import Protocol
 
 import orjson
 
@@ -339,6 +340,24 @@ class StoreConflictError(ValueError):
     def __init__(self, message: str, current: str | None) -> None:
         super().__init__(message)
         self.current = current
+
+
+class DuplicateRefused(Exception):  # noqa: N818 - a refusal signal, deliberately not an *Error
+    """A dupe-filter reservation refused the write — its share or window cap was met.
+
+    Deliberately NOT a StoreError: StoreError maps to the generic 400 on_bad_input, but a
+    duplicate is the bespoke 422 the write lanes render. Raised only when a caller passed a
+    `reserve` to `append`; every internal writer passes none and never sees it."""
+
+
+class Reservation(Protocol):
+    """The dupe-filter slot `append` drives under the room lock, so the reservation is keyed
+    by the generation the write settles on rather than one predicted before the lock — which
+    is what closes the reap/recreate TOCTOU class (#734). `reserve` returns True to refuse
+    (nothing is written); `release` gives a taken slot back when the write then fails."""
+
+    def reserve(self, generation: int) -> bool: ...
+    def release(self) -> None: ...
 
 
 def valid_name(name: str) -> str:
@@ -2426,6 +2445,7 @@ def append(
     did: str | None = None,
     nonce: int | None = None,
     sig: str | None = None,
+    reserve: Reservation | None = None,
 ) -> dict:
     """Append a message, and announce the room the first time it appears.
 
@@ -2442,7 +2462,9 @@ def append(
     primitive that already exists does the rest — `?since=` for incremental reads,
     `?format=json`, `?wait=` for near-real-time, ring retention, the same rate limits.
     """
-    rec, created = _write_record(root, room, nick, text, did=did, nonce=nonce, sig=sig)
+    rec, created = _write_record(
+        root, room, nick, text, did=did, nonce=nonce, sig=sig, reserve=reserve
+    )
     # Counted here rather than in `_write_record`, so the server's own announcements
     # (`_log_event` writes one per created room) never inflate the message count. This
     # counts what callers wrote, which is what "new messages" has to mean.
@@ -2512,6 +2534,7 @@ def _write_record(
     did: str | None = None,
     nonce: int | None = None,
     sig: str | None = None,
+    reserve: Reservation | None = None,
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
@@ -2566,36 +2589,59 @@ def _write_record(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
-        rec["seq"] = last_seq(root, room) + 1
-        line = orjson.dumps(rec) + b"\n"
-        # Heal a torn tail before appending. A write cut short by a crash leaves a record
-        # with no trailing newline; appending straight onto it would fuse the two into one
-        # unparseable line, so the *next* message would be lost too — the torn record must
-        # cost only itself.
-        size = path.stat().st_size if path.exists() else 0
-        if size:
-            with path.open("rb") as f:
-                f.seek(size - 1)
-                if f.read(1) != b"\n":
-                    line = b"\n" + line
-        with path.open("ab") as f:
-            f.write(line)
-            f.flush()
-            if config.FSYNC:  # see the knob: the one durability trade an operator may make
-                os.fsync(f.fileno())
-        limit = _ring_limit(root)
-        # `size + len(line)` rather than another stat(): we hold the exclusive lock, we
-        # just wrote `line`, and `size` was read after the torn-tail heal decided whether
-        # `line` gained a leading newline — so this is exact, not an estimate.
-        if size + len(line) > limit:
-            _compact(path, cutoff=_cutoff(room), keep=limit // 2)
-    if created:
-        # Bump the room's generation: a (re)created room is a new conversation, and the read
-        # view exposes the old generation's number so a stateful client can detect the
-        # discontinuity and resync instead of silently watching a different conversation
-        # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
-        # has taken up the sequence where the old one left off, so it must not be reused.
-        _set_seq_entry(root, room, None)
+        # The dupe-filter reservation, keyed by the generation THIS write settles on:
+        # old_gen + 1 for a create, old_gen otherwise. The reap that preserves the generation
+        # and the create that bumps it both hold this same room lock, so the value read here
+        # cannot move before the write commits — which is what counts the slot under the
+        # incarnation the message actually lives in, closing yukkie3276's reap/recreate TOCTOU
+        # class (#734) rather than the one interleaving that surfaced it. After the nonce check
+        # so a stale nonce never reserves; before the write so a share/window refusal costs no
+        # append. `reserve` is None when the filter is off — the hot path pays no seq read.
+        # The reserver remembers the generation it was keyed at, so release() below needs no
+        # argument (and cannot re-derive a create's old_gen after the bump moved it).
+        if reserve is not None:
+            if reserve.reserve(_seq_field(root, room, "gen") + (1 if created else 0)):
+                raise DuplicateRefused
+        try:
+            rec["seq"] = last_seq(root, room) + 1
+            line = orjson.dumps(rec) + b"\n"
+            # Heal a torn tail before appending. A write cut short by a crash leaves a record
+            # with no trailing newline; appending straight onto it would fuse the two into one
+            # unparseable line, so the *next* message would be lost too — the torn record must
+            # cost only itself.
+            size = path.stat().st_size if path.exists() else 0
+            if size:
+                with path.open("rb") as f:
+                    f.seek(size - 1)
+                    if f.read(1) != b"\n":
+                        line = b"\n" + line
+            with path.open("ab") as f:
+                f.write(line)
+                f.flush()
+                if config.FSYNC:  # see the knob: the one durability trade an operator may make
+                    os.fsync(f.fileno())
+            limit = _ring_limit(root)
+            # `size + len(line)` rather than another stat(): we hold the exclusive lock, we
+            # just wrote `line`, and `size` was read after the torn-tail heal decided whether
+            # `line` gained a leading newline — so this is exact, not an estimate.
+            if size + len(line) > limit:
+                _compact(path, cutoff=_cutoff(room), keep=limit // 2)
+        except BaseException:
+            # The slot was reserved but the write did not land — hand it back, or a store
+            # failure would spend a copy on a text nothing stored. Only reached after a
+            # successful reserve() above: every pre-write refusal raises before this try.
+            if reserve is not None:
+                reserve.release()
+            raise
+        if created:
+            # Bump the room's generation: a (re)created room is a new conversation, and the
+            # read view exposes the old generation's number so a stateful client can detect the
+            # discontinuity and resync instead of silently watching a different conversation
+            # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
+            # has taken up the sequence where the old one left off, so it must not be reused.
+            # Inside the room lock, beside the reservation it makes authoritative and matching
+            # the reaper's floor/generation write under this same lock (#734).
+            _set_seq_entry(root, room, None)
     return rec, created
 
 
