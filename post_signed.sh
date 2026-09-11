@@ -21,7 +21,44 @@ if [[ "$PERMS" != "600" ]]; then
   exit 1
 fi
 
-NONCE="$(date +%s%3N)"
+DID="$(SIGN_SEED="$(cat "$SEED_FILE")" uv run scripts/sign.py did)"
+
+NONCE="$(python3 - "$DID" "$ROOM" <<'PYNONCE'
+import fcntl
+import hashlib
+import os
+import sys
+import time
+from pathlib import Path
+
+did, room = sys.argv[1], sys.argv[2]
+
+state_dir = Path.home() / ".config" / "technocore" / "nonces"
+state_dir.mkdir(parents=True, exist_ok=True)
+os.chmod(state_dir, 0o700)
+
+key = hashlib.sha256((did + "\0" + room).encode()).hexdigest()
+state_file = state_dir / key
+
+with state_file.open("a+", encoding="utf-8") as f:
+    os.chmod(state_file, 0o600)
+    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+    f.seek(0)
+    raw = f.read().strip()
+    last = int(raw) if raw else 0
+    clock = time.time_ns() // 1_000_000
+    nonce = max(last + 1, clock)
+
+    f.seek(0)
+    f.truncate()
+    f.write(str(nonce) + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+    print(nonce)
+PYNONCE
+)"
 
 OUT="$(SIGN_SEED="$(cat "$SEED_FILE")" uv run scripts/sign.py say "$ROOM" "$NONCE" "$TEXT")"
 DID="$(printf '%s\n' "$OUT" | head -n1)"
