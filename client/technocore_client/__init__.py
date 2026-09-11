@@ -10,7 +10,12 @@ that must never disagree.
 """
 
 from .keyring import Keyring, did_from_seed
-from .nonces import NonceStore
+from .nonces import LedgerUnreadableError, NonceStore
 from .signer import Signer
 
-__all__ = ["Keyring", "NonceStore", "Signer", "did_from_seed"]
+# `LedgerUnreadableError` is part of the contract, not an internal: this package refuses
+# rather than guessing when the nonce record is untrustworthy, so an application has to be
+# able to catch that by type. It was reachable only as `technocore_client.nonces.` until a
+# test needed it, which is a caller reaching into a private module to do the documented
+# thing.
+__all__ = ["Keyring", "LedgerUnreadableError", "NonceStore", "Signer", "did_from_seed"]

@@ -40,7 +40,6 @@ class Signer:
         # Read both before touching either: an earlier version initialised the ledger and *then*
         # asked whether it had been missing, answering a question it had just changed.
         seed_existed, ledger_existed = seed.exists(), ledger.exists()
-        lost = seed_existed and not ledger_existed
         # And on a first run create the ledger BEFORE the key, which is what the comment used to
         # claim while the code did the opposite. It matters under concurrency: a second starter
         # landing between the winner's `os.link(seed)` and a later ledger write would see exactly
@@ -63,8 +62,8 @@ class Signer:
         # catastrophic for a lost key: follow it here and the next start finds neither file,
         # calls it a first run, and mints the replacement identity this check exists to prevent.
         # An unreadable ledger is never the innocent interrupted first start, because that path
-        # writes exactly `{}`; beside a missing seed it is a loss, and it is the identity that
-        # was lost.
+        # writes a stamped, entry-free ledger; beside a missing seed it is a loss, and it is the
+        # identity that was lost.
         #
         # An *empty* ledger beside no seed stays innocent: that is the window this class opens
         # on purpose two lines up, and the reason the test is on allocations and not on the file.
@@ -100,7 +99,10 @@ class Signer:
         # fails closed and clears on retry, which is the direction this module errs in
         # everywhere else. Recorded rather than fixed: a reader who finds it should know it was
         # seen (second reader, #803).
-        self.nonces = NonceStore(ledger, expect_initialised=lost)
+        # `key_exists`, not `lost`: the store needs to know a key is here even when the
+        # ledger is present, because a ledger emptied to `{}` is only detectable as a loss
+        # against the fact that this install has a key (@Minh3132, #803).
+        self.nonces = NonceStore(ledger, key_exists=seed_existed)
         # Last, so that a refusal above cannot leave a freshly minted seed behind it.
         self.keys = Keyring(seed)
 

@@ -27,7 +27,7 @@ import _client  # noqa: F401 (imported for the fixture alias below)
 import pytest
 
 import didkey
-from technocore_client import Keyring, NonceStore, Signer, did_from_seed
+from technocore_client import Keyring, LedgerUnreadableError, NonceStore, Signer, did_from_seed
 from technocore_client import nonces as nonces_module
 
 client = _client.client
@@ -190,6 +190,104 @@ def test_a_deleted_ledger_is_refused_in_a_fresh_process(tmp_path) -> None:
     assert result.returncode != 0, "a lost ledger was accepted as a first run"
     assert "has since been lost" in result.stderr
     assert "would be refused" in result.stderr, "the error must say what it costs"
+
+
+def test_a_ledger_emptied_to_braces_is_refused_beside_an_existing_key(tmp_path) -> None:
+    """@Minh3132, #803: `{}` meant both "never used" and "history erased".
+
+    The previous round closed an absent ledger, malformed JSON, and entries of the wrong shape.
+    It left the one value that needs no corruption at all: truncate a populated ledger to
+    exactly `{}` and it is byte-identical to what `initialise()` wrote on a first run, so every
+    fail-closed check passed it. A fresh process then found no entry and no floor, allocated from
+    the clock, and on a host whose clock had moved backwards issued below a nonce already spent —
+    after which the server refused every signed write until wall time caught up.
+
+    So the innocent value stopped being `{}`. Ledgers this class writes carry an initialisation
+    marker, and an entry-free object without one, beside a key that exists, is an emptied file
+    rather than a new one.
+
+    No clock manipulation here, deliberately. The review asked for a rollback in the regression,
+    and the refusal does not depend on one: an emptied ledger is unknown whichever way the clock
+    has moved, which is a stronger guarantee than the test it was asked to make.
+    """
+    home = tmp_path / "home"
+    signer = Signer(home)
+    issued = signer.nonces.allocate(signer.did, "room")
+    ledger = home / "nonces.json"
+    assert issued > 0 and json.loads(ledger.read_text()), "the ledger was not populated"
+    ledger.write_text("{}")
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "s = Signer(sys.argv[2]);"
+        "print(s.nonces.allocate(s.did, 'room'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"an emptied ledger was accepted and allocated {result.stdout.strip()!r}, which is not "
+        "known to be above the nonce already issued"
+    )
+    assert "no initialisation record" in result.stderr, result.stderr
+    assert "would be refused" in result.stderr, "the error must say what it costs"
+    assert ledger.read_text() == "{}", "the refusal moved the evidence instead of leaving it"
+
+
+def test_a_marker_of_the_wrong_shape_is_refused_like_any_other_damage(tmp_path) -> None:
+    """The marker is now load-bearing, so a malformed one has to refuse rather than be ignored.
+
+    In-process and against `NonceStore` directly, because the point is the branch and not the
+    plumbing: this repository's own standard is that a refusal nobody exercises is a refusal
+    nobody has checked. Treating a bad marker as absent would be the lenient reading the rest of
+    this loader exists to reject — it would turn a damaged file into an entry-free one and hand
+    back the clock.
+    """
+    path = tmp_path / "nonces.json"
+    path.write_text(json.dumps({"!ledger": "v1"}))
+    with pytest.raises(LedgerUnreadableError) as caught:
+        NonceStore(path, key_exists=True)
+    assert "not an object" in str(caught.value)
+    assert path.exists(), "the refusal removed the evidence"
+
+
+def test_a_stamped_ledger_with_no_entries_stays_innocent_beside_a_key(tmp_path) -> None:
+    """The other half of the pair above, and the reason the marker exists rather than a ban on
+    `{}`.
+
+    Refusing every entry-free ledger beside a key would refuse the state a first run legitimately
+    produces: the ledger is created *before* the key, so an install interrupted after both exist
+    and before anything signs has a key and no allocations. That is innocent, and it has to keep
+    starting, or the fix for an erased ledger becomes a fresh install that cannot boot.
+    """
+    home = tmp_path / "home"
+    first = Signer(home)
+    ledger = home / "nonces.json"
+    assert not [k for k in json.loads(ledger.read_text()) if k != "!ledger"], (
+        "this test needs the never-allocated state it is named for"
+    )
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import Signer;"
+        "print(Signer(sys.argv[2]).did)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(home)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, f"an interrupted first start was refused: {result.stderr}"
+    assert result.stdout.strip() == first.did, "the second start changed identity"
 
 
 def test_a_bare_store_degrades_to_the_clock_and_not_to_one(tmp_path) -> None:
@@ -635,10 +733,16 @@ def test_a_concurrent_initialiser_cannot_overwrite_a_populated_ledger(tmp_path, 
     b_thread.join(30)
     assert not b_thread.is_alive()
 
-    assert json.loads(ledger.read_text()) == {signer.did: {"room": issued}}, (
+    on_disk = json.loads(ledger.read_text())
+    assert on_disk.get(signer.did) == {"room": issued}, (
         "a concurrent initialiser replaced a populated ledger with an empty one, losing a "
         "nonce that had already been issued and persisted"
     )
+    # Asserted rather than dropped from the comparison: the marker is what tells the next
+    # process this file was written here and not truncated to `{}`, so a flush that lost it
+    # would reopen the emptied-ledger case this format exists to close.
+    assert "!ledger" in on_disk, "the flush dropped the initialisation marker"
+    assert set(on_disk) == {"!ledger", signer.did}, f"unexpected entries on disk: {on_disk}"
 
 
 def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:

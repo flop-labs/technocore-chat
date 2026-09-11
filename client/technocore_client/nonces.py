@@ -62,6 +62,16 @@ from .durable import fsync_dir, mkdir_durable
 # millisecond later.
 _process_floor = 0
 
+# The ledger's "initialised and never used" value. It used to be exactly `{}`, and `{}` is also
+# what you get by truncating a populated ledger — so the innocent state and an erased one were
+# byte-identical and no check could separate them (@Minh3132, #803). A file this class wrote
+# carries this key; a file wiped to `{}` does not, and beside an existing key that is unknown.
+#
+# Not a DID, and cannot be mistaken for one: every DID begins `did:`, so `!` can never collide
+# with a real entry in the same object.
+_MARKER = "!ledger"
+_FORMAT_VERSION = 1
+
 
 class LedgerUnreadableError(ValueError):
     """A ledger that exists and cannot be trusted, carrying its reason apart from its advice.
@@ -82,8 +92,8 @@ class LedgerUnreadableError(ValueError):
 class NonceStore:
     """Per-(did, room) allocation, persisted before each number is handed out."""
 
-    def __init__(self, path: str | Path, *, expect_initialised: bool = False) -> None:
-        """`expect_initialised` says a ledger should already exist for this identity.
+    def __init__(self, path: str | Path, *, key_exists: bool = False) -> None:
+        """`key_exists` says a signing key already exists at this home.
 
         Absence is only proof of a first run when nothing has run before. Once a key exists, an
         absent ledger is not "nothing was issued" — it is "something may have been issued and
@@ -99,7 +109,8 @@ class NonceStore:
         covered it would have left the weaker path unexamined.
         """
         self._path = Path(path)
-        self._expect_initialised = expect_initialised
+        self._key_exists = key_exists
+        self._marker: dict[str, int] = {"v": _FORMAT_VERSION}
         self._state: dict[str, dict[str, int]] = self._load()
 
     def initialise(self) -> None:
@@ -124,6 +135,7 @@ class NonceStore:
             if self._path.exists():
                 return
             self._state = {}
+            self._marker = {"v": _FORMAT_VERSION}
             self._flush()
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -136,8 +148,10 @@ class NonceStore:
         private state — and it returns both numbers because the first version returned only the
         pair count, which is not the same predicate. `{"did:key:z...": {}}` holds zero pairs and
         is not empty: `allocate` never writes a key with no rooms, so a key sitting there means
-        something happened that this class did not do. The innocent value is exactly `{}`, the
-        thing `initialise()` writes, and anything else is history (second reader, #803).
+        something happened that this class did not do. The innocent value is a ledger holding the
+        initialisation marker and no entries, which is what `initialise()` writes, and anything
+        else is history (second reader, #803). The marker is stripped by `_load`, so it is never
+        counted here as a key.
         """
         state = self._load()
         return len(state), sum(len(rooms) for rooms in state.values())
@@ -158,7 +172,7 @@ class NonceStore:
         none — applied to my own state file, which is where it had not been.
         """
         if not self._path.exists():
-            if self._expect_initialised:
+            if self._key_exists:
                 raise self._refuse(
                     "is missing, and this key already exists, so a ledger was written and has "
                     "since been lost"
@@ -170,6 +184,29 @@ class NonceStore:
             raise self._refuse(f"could not be read as JSON ({exc.__class__.__name__})") from exc
         if not isinstance(raw, dict):
             raise self._refuse("does not hold a JSON object")
+        # Take the initialisation record out before the entries are validated: it is not a DID
+        # and must not be walked as one, and `records()` must not count it as history.
+        marker = raw.pop(_MARKER, None)
+        if marker is not None and not isinstance(marker, dict):
+            raise self._refuse(f"holds {_MARKER!r} as something that is not an object")
+        self._marker = dict(marker) if marker is not None else {"v": _FORMAT_VERSION}
+        # An empty object carrying no initialisation record, beside a key that already exists.
+        # `initialise()` stamps every ledger it creates, so this file was not created by this
+        # class — it was emptied. That is the same unknown as a corrupt one and takes the same
+        # refusal. Without this, a ledger truncated to `{}` read as "initialised and never
+        # used": allocation restarted from the clock, and on a host whose clock had moved
+        # backwards it issued below a nonce already spent, so every signed write was refused
+        # until wall time caught up (@Minh3132, #803).
+        #
+        # The legitimate never-signed state is not caught here. A first run creates the ledger
+        # before the key and stamps it, so an interrupted one leaves the marker present with no
+        # entries, which is exactly what this admits.
+        if marker is None and not raw and self._key_exists:
+            raise self._refuse(
+                "holds an empty object with no initialisation record, and this key already "
+                "exists, so the ledger this class wrote has been emptied rather than left as "
+                "it was"
+            )
         # Strict, and every violation is fatal rather than filtered. The previous version dropped
         # a malformed entry and carried on, which reads like leniency and is not: dropping an
         # entry does not omit a fact, it *asserts* that the pair has never issued a nonce. That
@@ -228,7 +265,10 @@ class NonceStore:
         mkdir_durable(self._path.parent)
         tmp = self._path.with_suffix(f"{self._path.suffix}.{os.getpid()}.tmp")
         with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(self._state, handle, indent=2, sort_keys=True)
+            # The marker is written on every flush, not only at creation: it is what separates
+            # this file from one truncated to `{}`, and a rewrite that dropped it would erase
+            # that distinction for the next process to start.
+            json.dump({_MARKER: self._marker, **self._state}, handle, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, self._path)
