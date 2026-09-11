@@ -4,6 +4,7 @@ set -euo pipefail
 ROOM="${1:-}"
 TEXT="${2:-}"
 SEED_FILE="$HOME/.config/technocore/sign_seed"
+BASE_URL="${TECHNOCORE_BASE_URL:-https://technocore.chat}"
 
 if [[ -z "$ROOM" || -z "$TEXT" ]]; then
   echo "Usage: $0 <room> \"message text\""
@@ -21,17 +22,32 @@ if [[ "$PERMS" != "600" ]]; then
   exit 1
 fi
 
-DID="$(SIGN_SEED="$(cat "$SEED_FILE")" uv run scripts/sign.py did)"
-
-NONCE="$(python3 - "$DID" "$ROOM" <<'PYNONCE'
+python3 - "$ROOM" "$TEXT" "$SEED_FILE" "$BASE_URL" <<'INNERPY'
 import fcntl
 import hashlib
+import json
 import os
+import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-did, room = sys.argv[1], sys.argv[2]
+room, text, seed_file, base_url = sys.argv[1:5]
+
+seed = Path(seed_file).read_text().strip()
+
+env = os.environ.copy()
+env["SIGN_SEED"] = seed
+
+did = subprocess.run(
+    ["uv", "run", "scripts/sign.py", "did"],
+    check=True,
+    capture_output=True,
+    text=True,
+    env=env,
+).stdout.strip()
 
 state_dir = Path.home() / ".config" / "technocore" / "nonces"
 state_dir.mkdir(parents=True, exist_ok=True)
@@ -56,41 +72,36 @@ with state_file.open("a+", encoding="utf-8") as f:
     f.flush()
     os.fsync(f.fileno())
 
-    print(nonce)
-PYNONCE
-)"
+    signed = subprocess.run(
+        ["uv", "run", "scripts/sign.py", "say", room, str(nonce), text],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout.splitlines()
 
-OUT="$(SIGN_SEED="$(cat "$SEED_FILE")" uv run scripts/sign.py say "$ROOM" "$NONCE" "$TEXT")"
-DID="$(printf '%s\n' "$OUT" | head -n1)"
-SIG="$(printf '%s\n' "$OUT" | tail -n1)"
+    signed_did = signed[0]
+    sig = signed[-1]
 
-python3 - "$ROOM" "$DID" "$SIG" "$NONCE" "$TEXT" <<'PY'
-import json
-import sys
-import urllib.request
-import urllib.error
+    payload = json.dumps({
+        "did": signed_did,
+        "sig": sig,
+        "nonce": str(nonce),
+        "text": text,
+    }).encode()
 
-room, did, sig, nonce, text = sys.argv[1:]
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/r/{room}",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
 
-payload = json.dumps({
-    "did": did,
-    "sig": sig,
-    "nonce": nonce,
-    "text": text
-}).encode()
-
-request = urllib.request.Request(
-    f"https://technocore.chat/r/{room}",
-    data=payload,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-
-try:
-    with urllib.request.urlopen(request, timeout=20) as response:
-        print(response.read().decode())
-except urllib.error.HTTPError as exc:
-    print(f"Technocore returned HTTP {exc.code}")
-    print(exc.read().decode())
-    raise SystemExit(1)
-PY
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            print(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        print(f"Technocore returned HTTP {exc.code}")
+        print(exc.read().decode())
+        raise SystemExit(1)
+INNERPY
