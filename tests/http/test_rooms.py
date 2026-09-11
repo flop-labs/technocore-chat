@@ -1,9 +1,11 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import threading
 import time
 from pathlib import Path
 
 import _client
+import pytest
 from _client import (
     _age,
     _at,
@@ -890,6 +892,179 @@ def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
         == 200
     )
     assert _say_signed(client, "d-bounty", thief, thief_sign, "mine now").status_code == 200
+
+
+def test_previous_owner_cannot_commit_an_allow_list_after_handoff(client, tmp_path, monkeypatch):
+    """Authorization and commit must observe the same owner.
+
+    The old shape checked ownership in `_note_write_gate`, then separately burned the
+    nonce and wrote `room-allow`. This forces a handoff into that gap: owner A's request
+    passes the gate, owner A transfers the room to B, then A's stale request resumes.
+    """
+    import app as app_module
+    import store
+
+    owner, owner_sign = _keypair()
+    successor, _ = _keypair(seed=2)
+    assert _claim(client, "d-handoff", owner, owner_sign).status_code == 200
+
+    entered = threading.Event()
+    resume = threading.Event()
+    real_burn = app_module._burn_nonce
+
+    def pause_after_authorization(room, nonce):
+        if nonce == "10":
+            entered.set()
+            assert resume.wait(5), "handoff never released the stale request"
+        return real_burn(room, nonce)
+
+    monkeypatch.setattr(app_module, "_burn_nonce", pause_after_authorization)
+    stale = {}
+
+    def write_as_previous_owner():
+        stale["response"] = _set_signed(
+            client, store.ALLOW_NS, "d-handoff", owner, owner_sign, owner, nonce=10
+        )
+
+    worker = threading.Thread(target=write_as_previous_owner)
+    worker.start()
+    assert entered.wait(5), "request never reached the post-authorization gap"
+
+    transferred = threading.Event()
+    handoff = {}
+
+    def transfer_ownership():
+        handoff["response"] = _set_signed(
+            client, store.OWNERS_NS, "d-handoff", owner, owner_sign, successor, nonce=11
+        )
+        transferred.set()
+
+    transfer = threading.Thread(target=transfer_ownership)
+    transfer.start()
+    assert not transferred.wait(0.2), "handoff overtook an authorized allow-list transaction"
+
+    resume.set()
+    worker.join(5)
+    transfer.join(5)
+    assert not worker.is_alive() and not transfer.is_alive()
+
+    assert stale["response"].status_code == 200
+    assert handoff["response"].status_code == 200
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-handoff") == successor
+    assert store.note_get(tmp_path, store.ALLOW_NS, "d-handoff") == owner
+
+
+def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path, monkeypatch):
+    """The transaction gate lock is tied to room_path, and stays held across orphan sweeps while live."""
+    import store
+
+    owner, owner_sign = _keypair()
+    room = "d-reaped"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+
+    r_path = store.room_path(tmp_path, room)
+    r_lock = r_path.with_suffix(r_path.suffix + ".lock")
+    assert r_lock.exists()
+
+    # While live (room guard notes exist), a lock sweep does not unlink the active transaction domain lock
+    now = time.time()
+    touched = {"rooms": set(), "notes": set()}
+    with store._locked(r_path):
+        store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+        # The room guards exist so lock is preserved
+        assert r_lock.exists()
+        # Verify a second locked attempt is blocked (single transaction domain)
+        with pytest.raises(BlockingIOError):
+            with store._locked(r_path, nb=True):
+                pass
+
+    # Once reaped (all guard notes unlinked), an actively held lock still survives aged sweeps
+    for ns in store.ROOM_GUARD_NS:
+        store.note_path(tmp_path, ns, room).unlink(missing_ok=True)
+    r_path.unlink(missing_ok=True)
+
+    with store._locked(r_path):
+        store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+        assert r_lock.exists()
+        with pytest.raises(BlockingIOError):
+            with store._locked(r_path, nb=True):
+                pass
+
+    # When unheld, the aged reaped sidecar is cleanly swept
+    store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+    assert not r_lock.exists()
+
+
+def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_sweep(
+    tmp_path, monkeypatch
+):
+    """When a sidecar lock is unlinked by an orphan sweep while a waiter is blocked
+
+    on flock, the waiter must retry and acquire the replacement lock rather than
+    surfacing FileNotFoundError.
+    """
+    import fcntl
+    import os
+
+    import store
+
+    r_path = store.room_path(tmp_path, "d-swept-waiter")
+    r_lock = r_path.with_suffix(r_path.suffix + ".lock")
+    r_lock.parent.mkdir(parents=True, exist_ok=True)
+    r_lock.touch()
+
+    now = time.time()
+    os.utime(r_lock, (now - store.IDLE_SECONDS - 10, now - store.IDLE_SECONDS - 10))
+
+    real_flock = fcntl.flock
+    real_unlink = os.unlink
+    waiter_ready = threading.Event()
+    waiter_at_flock = threading.Event()
+    waiter_acquired = threading.Event()
+    waiter_error = []
+    waiter_tid = None
+    waiter_thread = []
+
+    def hooked_flock(fd, op):
+        if waiter_tid is not None and threading.get_ident() == waiter_tid:
+            waiter_at_flock.set()
+        return real_flock(fd, op)
+
+    monkeypatch.setattr(fcntl, "flock", hooked_flock)
+
+    def hooked_unlink(path):
+        if str(path) == str(r_lock):
+
+            def waiter():
+                nonlocal waiter_tid
+                waiter_tid = threading.get_ident()
+                waiter_ready.set()
+                try:
+                    with store._locked(r_path):
+                        waiter_acquired.set()
+                except Exception as e:
+                    waiter_error.append(e)
+
+            t = threading.Thread(target=waiter)
+            t.start()
+            assert waiter_ready.wait(5), "waiter thread never initialized identity"
+            waiter_thread.append(t)
+            assert waiter_at_flock.wait(5), "waiter never reached flock"
+            real_unlink(path)
+            return
+        return real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", hooked_unlink)
+
+    touched = {"rooms": set(), "notes": set()}
+    store._sweep_orphan_locks(tmp_path, now + store.IDLE_SECONDS + 1, touched)
+
+    assert waiter_thread, "sweep never attempted to unlink sidecar"
+    waiter_thread[0].join(5)
+    assert not waiter_thread[0].is_alive(), "waiter thread timed out"
+    assert not waiter_error, f"waiter raised: {waiter_error}"
+    assert waiter_acquired.is_set(), "waiter never acquired lock"
+    assert r_lock.exists(), "replacement lock was not created"
 
 
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):

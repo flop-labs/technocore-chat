@@ -655,13 +655,20 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
-    with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
-        config._dbg(2, "flock", path=target.name)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    while True:
+        with open(lock, "a+b") as lf:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+            try:
+                try:
+                    match = os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino
+                except OSError:
+                    match = False
+                if match:
+                    config._dbg(2, "flock", path=target.name)
+                    yield
+                    return
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -1662,8 +1669,13 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                 data = entry.path[: -len(".lock")]
                 if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
-                os.unlink(entry.path)
-                touched[sub].add(_emptied(base, entry.path, sub == "notes"))
+                with open(entry.path, "a+b") as s_lf:
+                    try:
+                        fcntl.flock(s_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        continue
+                    os.unlink(entry.path)
+                    touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue
 
