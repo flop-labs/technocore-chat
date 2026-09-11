@@ -45,6 +45,12 @@ dev = [
     # the SDK has to be importable *here* for those tests to run — it is not a runtime
     # dependency of technocore-chat and must never become one.
     "mcp>=2.1,<3",
+    # Dev-only for the same reason and on the same terms: the exporter in exporter/
+    # declares this itself (exporter/pyproject.toml), and nothing in src/ imports or ships
+    # it. It is here so `ty` can check exporter/ and so its suite runs from a plain
+    # `uv sync --frozen`. Not a runtime dependency of technocore-chat, and must not become
+    # one — the exporter reads the published /stats over HTTP, never the store.
+    "prometheus-client>=0.20",
     # In `dev` rather than its own group since tests/test_contract.py — the generative half
     # of the input doctrine (docs/design.md §3.5) — runs inside pytest, so the ordinary
     # `uv sync --frozen` has to be enough to run the suite. Pinned exactly, not `>=` like
@@ -77,18 +83,18 @@ known-first-party = ["app", "didkey", "store"]
 [tool.ty.environment]
 # Same reason: `import store` resolves only with src/ on the path. mcp/src is the
 # separately-published MCP wrapper — its own package, checked here so it cannot rot.
-extra-paths = ["./src", "./mcp/src"]
+extra-paths = ["./src", "./mcp/src", "./exporter/src"]
 
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The single source of path bootstrap for the suite — src for import app/store/didkey,
 # tests for _client — so no test file needs its own sys.path.insert.
-pythonpath = ["src", "tests"]
+pythonpath = ["src", "tests", "exporter/src"]
 
 [tool.coverage.run]
 branch = true
-source = ["src", "mcp/src"]
+source = ["src", "mcp/src", "exporter/src"]
 
 [tool.coverage.report]
 # Combined statement + branch coverage. A branch-aware floor keeps a PR from improving the
