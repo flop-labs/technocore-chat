@@ -1,17 +1,27 @@
 # The automated half of CONTRIBUTING.md "Overlapping work": one comment naming open PRs
 # that cite the same issues, and a failure on PRs editing maintainer-regenerated files.
-# Runs on pull_request_target and never checks out PR code — both jobs read only the API,
-# so an untrusted branch gets no execution here.
+# Never checks out PR code — every job reads only the API, so an untrusted branch gets no
+# execution here. That is what makes the workflow_run trigger below safe as well: it runs in
+# base-repo context, which is only dangerous to a workflow that runs the code it was told
+# about, and none of these do.
 name: queue-guard
 on:
   pull_request_target:
     types: [opened, reopened, edited, synchronize]
+  # ci-not-run-clear only. Matched by workflow *name* because that is the only thing this
+  # filter accepts — the job body still matches on path, which is the stable identifier.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
   pull-requests: write
 
 jobs:
   protected-files:
+    # Every job here is pull_request_target's except ci-not-run-clear, and this one reads
+    # context.payload.pull_request, which a workflow_run event does not carry.
+    if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v9
@@ -89,3 +99,159 @@ jobs:
               { ...context.repo, comment_id: mine.id, body });
             else await github.rest.issues.createComment(
               { ...context.repo, issue_number: pr.number, body });
+
+  ci-not-run:
+    # #693: a fork PR from an author with no merged PR here has its CI run created as
+    # `action_required` and never executed. Nothing on the PR says so — `protected-files`
+    # reports success and `overlap` reports skipped, so the checks list looks populated,
+    # and the only hint is `mergeable_state: blocked`, which does not say why. This says
+    # why, once, in the thread where people are already looking.
+    #
+    # It does not change the gate. Approving the run stays a maintainer action; this only
+    # makes the wait legible so an approval is not read as "the repo's gate passed".
+    if: >-
+      github.event.action == 'opened' || github.event.action == 'reopened'
+      || github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    permissions:
+      # Narrower than the workflow default: this job reads run state and writes one
+      # comment, so it needs `actions: read` on top of the comment scope, and nothing else.
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            // Same fork test as protected-files: a head branch in this repository cannot
+            // be a fork, and only forks are gated. author_association is not consulted --
+            // it reports MEMBER for authors who still need approval (see #567).
+            const pr = context.payload.pull_request;
+            if (pr.head.repo && pr.head.repo.full_name === pr.base.repo.full_name) return;
+            const marker = '<!-- queue-guard-ci-not-run -->';
+            // `pull_request` and `pull_request_target` dispatch from the same push, so the
+            // CI run may not be listed yet when this job reaches the API. Poll briefly
+            // rather than reporting "never ran" against a run that is seconds from
+            // existing -- a false positive here is worse than a late comment, because it
+            // says the opposite of the truth on a PR that is fine.
+            const CI = '.github/workflows/ci.yml';
+            let run = null;
+            for (let i = 0; i < 6 && !run; i++) {
+              if (i) await new Promise(r => setTimeout(r, 10000));
+              const res = await github.rest.actions.listWorkflowRunsForRepo({
+                ...context.repo, head_sha: pr.head.sha, per_page: 100,
+              });
+              // Matched on path, not display name: the name is prose and can be edited
+              // without anyone thinking of this file.
+              run = res.data.workflow_runs.find(r => r.path === CI) || null;
+            }
+            // Only `action_required` is reported. A queued or running CI is not a problem,
+            // and no run at all after the poll is ambiguous -- it can mean the event was
+            // filtered -- so it stays silent rather than guessing.
+            // Three states, not two. `blocked === false` meant both "a run was observed
+            // and it is not gated" and "no run was observed at all", and both deleted. On a
+            // synchronize whose new run has not surfaced within the poll above, that deleted
+            // the previous head's notice and nothing re-posted it: this job fires only on
+            // opened/reopened/synchronize, and ci-not-run-clear ignores `action_required` by
+            // design. The comment above already calls the no-run case ambiguous; deleting on
+            // it was the code disagreeing with that. Raised by @yukkie3276.
+            const state = run === null ? 'unknown'
+              : run.conclusion === 'action_required' ? 'gated' : 'ran';
+            // An unobserved run is not evidence that CI executed, so nothing is written and
+            // nothing is removed. Whatever is on the thread outlives this event.
+            if (state === 'unknown') return;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pr.number, per_page: 100,
+            });
+            const mine = comments.find(
+              c => c.user && c.user.type === 'Bot'
+                && c.body && c.body.startsWith(marker));
+            if (state === 'ran') {
+              // Upserted and removed by marker, like the overlap comment: once the run is
+              // approved the notice is wrong, and a stale warning is its own bug.
+              if (mine) await github.rest.issues.deleteComment(
+                { ...context.repo, comment_id: mine.id });
+              return;
+            }
+            const body = marker + '\nCI has not run on this head: the workflow run was ' +
+              'created as `action_required` and is waiting for a maintainer to approve ' +
+              'it. Until then the checks above do not mean the repo\'s gate passed — ' +
+              '`lint + tests + image` has not executed at all.\n\nThis is the default ' +
+              '"require approval for first-time contributors" setting, not anything ' +
+              'wrong with this pull request, and it clears once a maintainer releases ' +
+              'the run (#693).';
+            if (!mine) await github.rest.issues.createComment(
+              { ...context.repo, issue_number: pr.number, body });
+            else if (mine.body !== body) await github.rest.issues.updateComment(
+              { ...context.repo, comment_id: mine.id, body });
+            // Compare-after-write. Every read above is a snapshot, and approving a gated run
+            // emits no event this job can see, so the state can move between the read and the
+            // write -- and the write is the thing that makes a stale notice observable, so
+            // the reconcile belongs after it rather than in front of it. Re-checking before
+            // the write would only narrow the window. Raised by @Minh3132.
+            const after = await github.rest.actions.listWorkflowRunsForRepo({
+              ...context.repo, head_sha: pr.head.sha, per_page: 100,
+            });
+            const now = after.data.workflow_runs.find(r => r.path === CI) || null;
+            if (now === null || now.conclusion === 'action_required') return;
+            const fresh = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pr.number, per_page: 100,
+            });
+            const stale = fresh.find(
+              c => c.user && c.user.type === 'Bot'
+                && c.body && c.body.startsWith(marker));
+            if (stale) await github.rest.issues.deleteComment(
+              { ...context.repo, comment_id: stale.id });
+
+  ci-not-run-clear:
+    # The other half of ci-not-run, and the reason it needs one: approving a gated run emits
+    # no pull_request_target event at all, so the notice cannot clear itself from that
+    # trigger. It would sit there saying CI has not run, immediately after CI ran, which is
+    # the moment the message is most wrong. Raised by @yukkie3276 on #735.
+    #
+    # Checked rather than assumed, because the obvious counter-example is not one: #156's
+    # queue-guard run at 2026-09-06T05:31:32Z looks like an approval firing the trigger, but
+    # its head `b83fc306` is a merge commit authored four seconds earlier — that was Update
+    # branch, i.e. a synchronize, not the approval.
+    #
+    # A CI run reaching `completed` is the transition pull_request_target cannot see: it is
+    # what a released run does, and what an already-running one does anyway.
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    permissions:
+      # No `actions: read` here: the run that fired this is in the event payload, and
+      # nothing else about it is read.
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            // `workflow_run.pull_requests` is empty for a fork PR — the same reason #693
+            // had to resolve heads by hand — so the head SHA is matched against open PRs.
+            // No match is the normal case for a push to main, and does nothing.
+            // A CI run on a push to main has no PR to clear, and matching it would cost a
+            // walk of every open pull request (212 of them today) on every merge.
+            const run = context.payload.workflow_run;
+            if (run.event !== 'pull_request') return;
+            // A gated run is `status: completed, conclusion: action_required`, so it
+            // reaches this trigger without having executed a single job. Clearing on
+            // it would delete the notice ci-not-run is posting for that same head, on
+            // the one transition the notice is about. It has not run; the notice stays.
+            if (run.conclusion === 'action_required') return;
+            const sha = run.head_sha;
+            const marker = '<!-- queue-guard-ci-not-run -->';
+            const prs = await github.paginate(github.rest.pulls.list, {
+              ...context.repo, state: 'open', per_page: 100,
+            });
+            const pr = prs.find(p => p.head.sha === sha);
+            if (!pr) return;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: pr.number, per_page: 100,
+            });
+            const mine = comments.find(
+              c => c.user && c.user.type === 'Bot'
+                && c.body && c.body.startsWith(marker));
+            // Deleted whatever the run concluded, the gated case above excepted. A failed
+            // run is still a run: the notice says CI has not executed, and once it has,
+            // that is false regardless of result.
+            if (mine) await github.rest.issues.deleteComment(
+              { ...context.repo, comment_id: mine.id });
