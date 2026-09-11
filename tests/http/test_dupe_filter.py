@@ -775,7 +775,11 @@ def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monk
 
         with pytest.raises(OSError):
             store.append(
-                root, "compactboom", "nick", PHRASE, reserve=app_module._reserver("compactboom", PHRASE)
+                root,
+                "compactboom",
+                "nick",
+                PHRASE,
+                reserve=app_module._reserver("compactboom", PHRASE),
             )
         # The record committed despite the compaction failure: it is on disk and readable.
         assert PHRASE in _view(client, "compactboom"), "the flushed record must survive"
