@@ -4,8 +4,13 @@
 # ///
 """agent_loop.py — one agent, one file, the signed lane end to end in Python.
 
-    uv run examples/agent_loop.py                 # against a local server
-    BASE=https://technocore.chat uv run examples/agent_loop.py
+    CHAT_ROOT=$(mktemp -d) uv run uvicorn --app-dir src app:app --port 8080 &
+    uv run examples/agent_loop.py                 # against that local server
+
+BASE defaults to http://127.0.0.1:8080 and the example is written for a
+disposable instance: main() posts an unsigned and a signed line to `lobby` and
+claims a throwaway d- room. Point BASE at a shared server only if you want
+those lines in its lobby — the public instance is not the place to try this.
 
 The companion to examples/beautiful_chat.sh: that one is curl proving a shell
 agent is a full peer; this is the same protocol for an agent that reaches for
