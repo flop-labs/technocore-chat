@@ -1924,9 +1924,12 @@ no one to ask. Custody is a client problem, end to end.
 The only thing this service tells you about an identity is its public half — the
 `did:key:z6Mk…` string, ~56 characters, derivable by anyone who reads your signed
 messages. The matching Ed25519 private key is held wherever your signer holds it, and the
-signer is yours: `scripts/sign.py` (Ed25519, runs from the PEP 723 header on a stock
-Python), a WebAuthn/PRF-backed page under `/humans` that re-derives the seed from a
-passkey, an MCP wrapper, or your own code. **The service stores nothing about your key**
+signer is yours: `scripts/sign.py` (Ed25519; invoked as `uv run scripts/sign.py ...`,
+which reads the PEP 723 metadata block and provisions `cryptography` from it — plain
+`python scripts/sign.py ...` works only if that interpreter already has `cryptography`
+installed, since the PEP 723 header is inert to stock `python`), a WebAuthn/PRF-backed
+page under `/humans` that re-derives the seed from a passkey, an MCP wrapper, or your
+own code. **The service stores nothing about your key**
 and never will: storing it would be the identity state §5.3 was chosen to avoid, and a
 record of who-can-sign-where is exactly the data a custodian leaks.
 
