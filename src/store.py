@@ -2620,19 +2620,30 @@ def _write_record(
                 f.flush()
                 if config.FSYNC:  # see the knob: the one durability trade an operator may make
                     os.fsync(f.fileno())
-            limit = _ring_limit(root)
-            # `size + len(line)` rather than another stat(): we hold the exclusive lock, we
-            # just wrote `line`, and `size` was read after the torn-tail heal decided whether
-            # `line` gained a leading newline — so this is exact, not an estimate.
-            if size + len(line) > limit:
-                _compact(path, cutoff=_cutoff(room), keep=limit // 2)
         except BaseException:
             # The slot was reserved but the write did not land — hand it back, or a store
             # failure would spend a copy on a text nothing stored. Only reached after a
             # successful reserve() above: every pre-write refusal raises before this try.
+            #
+            # The try ends at the append's clean exit — the commit point. Once `line` is on
+            # disk it is a readable, counted record, so anything past here (compaction, the
+            # generation bump) must NOT release: a compaction I/O failure would otherwise hand
+            # back a slot whose copy is permanently stored, and repeated failures would leak
+            # copies past both the window and the ring cap (#734, Minh3132). A torn write stays
+            # inside the try and still releases correctly — a half-written line is no parseable
+            # record, and the next append's torn-tail heal isolates the fragment.
             if reserve is not None:
                 reserve.release()
             raise
+        limit = _ring_limit(root)
+        # `size + len(line)` rather than another stat(): we hold the exclusive lock, we just
+        # wrote `line`, and `size` was read after the torn-tail heal decided whether `line`
+        # gained a leading newline — so this is exact, not an estimate. Outside the release try
+        # above: the record is committed, and `_compact` only rewrites through the atomic
+        # `_replace` (temp + os.replace), so a failure here leaves the just-appended record
+        # intact and the reservation rightly held.
+        if size + len(line) > limit:
+            _compact(path, cutoff=_cutoff(room), keep=limit // 2)
         if created:
             # Bump the room's generation: a (re)created room is a new conversation, and the
             # read view exposes the old generation's number so a stateful client can detect the

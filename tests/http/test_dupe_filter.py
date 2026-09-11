@@ -734,3 +734,61 @@ def test_a_store_failure_after_the_reservation_hands_the_slot_back(client, monke
             assert _say(client, "boom", "n" + str(i), PHRASE).status_code == 200
         assert _say(client, "boom", "last", PHRASE).status_code == 422
     assert len(limit._rings[("boom", 1)]) == COPIES, "the copies that landed, and only those"
+
+
+def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monkeypatch) -> None:
+    """The mirror image of the release test above (Minh3132, #734 at head 5ffc86f). A failure
+    BEFORE the record commits hands the slot back; a failure AFTER it must NOT. `_write_record`
+    used to wrap the append and the follow-on `_compact` in one release-covered try, so a
+    compaction I/O error on an over-limit room released a reservation whose record was already
+    flushed to disk - the copy stayed stored but stopped counting against both the window and
+    the ring, and a run of such failures would leak copies past the cap.
+
+    The try now ends at the append's clean exit, and `_compact` runs outside it. So: an
+    existing room (created=False - the realistic over-limit case, and the one that keeps the
+    reservation's generation matching the room's), one copy of PHRASE whose append flushes and
+    then fails in compaction, and a cap of one. The committed copy must hold its slot, so the
+    NEXT identical copy is refused by the window rule. On the old code the release dropped the
+    slot and this second copy wrongly landed while the first sat stored and uncounted.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    with _filter_on(DUPE_MAX_COPIES=1):
+        # Bring the room into existence first, with a different phrase, so the failing append
+        # below is a plain write (created=False) and its reservation keys under the same
+        # generation the room already sits at - not the create path, where the skipped
+        # generation bump would be its own separate concern.
+        opener = "an opening line for this room that is not the phrase under test at all"
+        assert _say(client, "compactboom", "opener", opener).status_code == 200
+        gen = store.room_generation(root, "compactboom")
+
+        # From here every write to this room reports over-limit and compaction raises - the
+        # append lands, then _compact fails.
+        monkeypatch.setattr(store, "_ring_limit", lambda r: 0)
+
+        def boom(path, cutoff=None, keep=0):
+            raise OSError("injected: compaction failed after the record was written")
+
+        monkeypatch.setattr(store, "_compact", boom)
+
+        with pytest.raises(OSError):
+            store.append(
+                root, "compactboom", "nick", PHRASE, reserve=app_module._reserver("compactboom", PHRASE)
+            )
+        # The record committed despite the compaction failure: it is on disk and readable.
+        assert PHRASE in _view(client, "compactboom"), "the flushed record must survive"
+
+        monkeypatch.undo()  # restore real compaction for the follow-on write
+        # The kept reservation means the room already holds its one allowed copy, so a second
+        # identical copy from another sender is the refusal the filter is for. Under the old
+        # release-on-compaction-failure this landed with a 200.
+        second = _say(client, "compactboom", "other", PHRASE)
+    assert second.status_code == 422, (
+        "a copy committed before a compaction failure was not counted, so a second copy leaked "
+        "past the cap: " + second.text[:200]
+    )
+    assert len(limit._rings[("compactboom", gen)]) == 2, (
+        "the opener and the committed PHRASE copy each hold a slot; nothing was released"
+    )
