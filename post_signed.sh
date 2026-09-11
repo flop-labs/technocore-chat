@@ -27,6 +27,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -56,6 +57,47 @@ os.chmod(state_dir, 0o700)
 key = hashlib.sha256((did + "\0" + room).encode()).hexdigest()
 state_file = state_dir / key
 
+
+def persist_nonce(f, nonce):
+    f.seek(0)
+    f.truncate()
+    f.write(str(nonce) + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+
+def signed_payload(nonce):
+    signed = subprocess.run(
+        ["uv", "run", "scripts/sign.py", "say", room, str(nonce), text],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout.splitlines()
+    return json.dumps(
+        {
+            "did": signed[0],
+            "sig": signed[-1],
+            "nonce": str(nonce),
+            "text": text,
+        }
+    ).encode()
+
+
+def post(nonce):
+    request = urllib.request.Request(
+        f"{base_url.rstrip('/')}/r/{room}",
+        data=signed_payload(nonce),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.read().decode(), None
+    except urllib.error.HTTPError as exc:
+        return exc.read().decode(), exc.code
+
+
 with state_file.open("a+", encoding="utf-8") as f:
     os.chmod(state_file, 0o600)
     fcntl.flock(f.fileno(), fcntl.LOCK_EX)
@@ -65,43 +107,29 @@ with state_file.open("a+", encoding="utf-8") as f:
     last = int(raw) if raw else 0
     clock = time.time_ns() // 1_000_000
     nonce = max(last + 1, clock)
+    persist_nonce(f, nonce)
 
-    f.seek(0)
-    f.truncate()
-    f.write(str(nonce) + "\n")
-    f.flush()
-    os.fsync(f.fileno())
+    body, status = post(nonce)
+    if status is None:
+        print(body)
+        raise SystemExit(0)
 
-    signed = subprocess.run(
-        ["uv", "run", "scripts/sign.py", "say", room, str(nonce), text],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-    ).stdout.splitlines()
+    # Another machine using the same DID, or a restored nonce file, can leave the server's
+    # per-DID/per-room high-water ahead of local state. The replay refusal names that
+    # authoritative floor; consume it once and retry above it instead of walking a large gap
+    # one failed invocation at a time. The local lock stays held across both deliveries so a
+    # same-machine sender still cannot overtake the recovery write.
+    match = re.search(r"nonce \d+ is not greater than (\d+), the last one this key used", body)
+    if status == 400 and match:
+        server_last = int(match.group(1))
+        retry_nonce = max(server_last + 1, nonce + 1, time.time_ns() // 1_000_000)
+        persist_nonce(f, retry_nonce)
+        body, status = post(retry_nonce)
+        if status is None:
+            print(body)
+            raise SystemExit(0)
 
-    signed_did = signed[0]
-    sig = signed[-1]
-
-    payload = json.dumps({
-        "did": signed_did,
-        "sig": sig,
-        "nonce": str(nonce),
-        "text": text,
-    }).encode()
-
-    request = urllib.request.Request(
-        f"{base_url.rstrip('/')}/r/{room}",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            print(response.read().decode())
-    except urllib.error.HTTPError as exc:
-        print(f"Technocore returned HTTP {exc.code}")
-        print(exc.read().decode())
-        raise SystemExit(1)
+    print(f"Technocore returned HTTP {status}")
+    print(body)
+    raise SystemExit(1)
 INNERPY
