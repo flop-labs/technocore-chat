@@ -708,6 +708,14 @@ def test_a_store_failure_after_the_reservation_hands_the_slot_back(client, monke
     Fails at last_seq, the first store read after the reservation and before any byte is
     written, so nothing lands and only the release path runs. Driven through store.append
     directly - the failure raises, which the TestClient would re-raise through the HTTP lane.
+
+    Each doomed call here is a create (the room never comes into existence), and the create
+    now advances the generation as its precondition, ahead of the reservation and the append
+    (Minh3132, #734) - so every failure burns one generation before failing. That is the
+    benign skipped-generation the design accepts: monotonic, gapless-not-required, and the
+    reservation still keys on whatever generation is actually durable. So the room settles a
+    few generations on from 0, and the assertions read the live generation rather than assume
+    it, and check nothing stayed reserved under the burned ones.
     """
     import app as app_module
     import store
@@ -733,7 +741,11 @@ def test_a_store_failure_after_the_reservation_hands_the_slot_back(client, monke
         for i in range(COPIES):
             assert _say(client, "boom", "n" + str(i), PHRASE).status_code == 200
         assert _say(client, "boom", "last", PHRASE).status_code == 422
-    assert len(limit._rings[("boom", 1)]) == COPIES, "the copies that landed, and only those"
+    gen = store.room_generation(root, "boom")
+    assert len(limit._rings[("boom", gen)]) == COPIES, "the copies that landed, and only those"
+    assert sum(len(s) for (r, _), s in limit._rings.items() if r == "boom") == COPIES, (
+        "nothing stayed reserved under the generations the failed creates burned"
+    )
 
 
 def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monkeypatch) -> None:
@@ -795,4 +807,81 @@ def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monk
     )
     assert len(limit._rings[("compactboom", gen)]) == 2, (
         "the opener and the committed PHRASE copy each hold a slot; nothing was released"
+    )
+
+
+def test_a_create_whose_generation_write_fails_commits_nothing(client, monkeypatch) -> None:
+    """Minh3132's fifth #734 finding, at head c0a2d32. The create path used to bump the
+    generation AFTER flushing the record and swallow that write's own failure: the committed
+    record and its reserved slot then sat at generation g+1 while the durable generation
+    stayed g, so every later write keyed under g and never counted the stored copy against the
+    live room's cap - an undercount, and a g+1 the next reap/recreate would collide with.
+
+    The bump is the create's PRECONDITION now, before the reservation and before the append,
+    and it propagates its failure rather than swallowing it. So there is no window: a
+    generation that cannot be persisted commits no record and reserves no slot. This drives
+    the exact failure - the create-path generation write raises - and asserts the room is left
+    as if untouched: no record, no ring slot, generation still 0, room count not moved.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    real_set = store._set_seq_entry
+
+    def boom(r, room, floor=None, *, bump=False):
+        if room == "genboom" and bump:  # the create-path precondition bump, and only it
+            raise OSError("injected: the generation could not be persisted")
+        return real_set(r, room, floor, bump=bump)
+
+    rooms_before = store._count_rooms(root)[0]
+    monkeypatch.setattr(store, "_set_seq_entry", boom)
+    with _filter_on():
+        with pytest.raises(OSError):
+            store.append(
+                root, "genboom", "nick", PHRASE, reserve=app_module._reserver("genboom", PHRASE)
+            )
+    # Nothing committed: no file, no record, generation never advanced off "never existed".
+    assert not store.room_path(root, "genboom").exists(), "a failed create left a room file"
+    assert store.room_generation(root, "genboom") == 0, "the generation advanced despite failing"
+    assert not any(r == "genboom" for r, _ in limit._rings), "a slot was reserved and stranded"
+    assert store._count_rooms(root)[0] == rooms_before, "the room-count reservation leaked"
+
+    # And no poison for the next well-formed create: with the injection gone it bumps to 1,
+    # keys its slot under that live generation, and counts normally.
+    monkeypatch.undo()
+    with _filter_on():
+        assert _say(client, "genboom", "nick", PHRASE).status_code == 200
+    gen = store.room_generation(root, "genboom")
+    assert gen == 1, "the first real create bumps the generation to 1"
+    assert len(limit._rings[("genboom", gen)]) == 1, "the committed copy counts under the live gen"
+
+
+def test_a_created_rooms_first_copy_counts_under_the_generation_it_commits_at(client) -> None:
+    """The positive half of Minh3132's finding: a create's committed copy must count against
+    the room's cap, and it can only do so if the reserved slot's generation and the room's
+    durable generation agree. They now settle together - the bump precedes the commit, so the
+    reservation reads the real durable generation rather than predicting g+1 - so the first,
+    room-creating copy of a phrase holds its slot under the same generation `room_generation`
+    reports, and the very next identical copy is refused by it.
+    """
+    import store
+
+    root = config.ROOT
+    with _filter_on(DUPE_MAX_COPIES=1):
+        # The room-creating write: created=True, so the generation bumps 0 -> 1 as its
+        # precondition and the slot is reserved under that same 1.
+        assert _say(client, "gencount", "opener", PHRASE).status_code == 200
+        gen = store.room_generation(root, "gencount")
+        assert gen == 1, "the creating write settled the room at generation 1"
+        # The reservation and the durable generation agree: the only slot is under (room, 1),
+        # nothing stranded under 0 (the pre-bump value the old prediction would have used) or 2.
+        assert ("gencount", 0) not in limit._rings, "a slot stranded a generation behind"
+        assert len(limit._rings[("gencount", gen)]) == 1, "the created copy counts under gen 1"
+        # So the next identical copy from another sender is the refusal the cap is for - the
+        # committed create was counted, not lost to a generation nothing else keys under.
+        second = _say(client, "gencount", "other", PHRASE)
+    assert second.status_code == 422, (
+        "a created room's first committed copy was not counted, so a second leaked past the "
+        "cap: " + second.text[:200]
     )

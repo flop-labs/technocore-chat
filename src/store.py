@@ -1086,29 +1086,36 @@ def _seq_field(root: Path, room: str, key: str) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
-def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
+def _set_seq_entry(root: Path, room: str, floor: int | None = None, *, bump: bool = False) -> None:
     """Record `room`'s floor and generation in its shard, under that shard's lock.
 
-    `floor=None` is a (re)create: the generation advances and the floor clears. An int is a
-    reap: that high-water mark becomes the floor and the generation is preserved. The old
-    generation is read *inside* the lock, so two rooms sharing a shard cannot lose each
+    `floor` is the new high-water mark, or `None` to leave the stored one untouched; `bump`
+    advances the generation. A reap sets `floor=<high-water>` and keeps the generation
+    (`bump=False`). A create advances the generation and preserves the floor (`bump=True`,
+    `floor=None`): the floor is what the record's `seq` continues from (#139 dir #2), so it
+    must survive the bump, and once the room file exists again nothing reads the floor until
+    the next reap overwrites it — so a live room's stored floor is dead weight and need not be
+    cleared. Both are read *inside* the lock, so two rooms sharing a shard cannot lose each
     other's update — the point of a lock this narrow is that they no longer wait on the other
     255 shards' rooms, not that they stop being ordered against their own.
 
+    A write failure PROPAGATES. The create path bumps the generation as a *precondition* of
+    its commit — the record must not land under a generation that could not be persisted — so
+    it must see the failure. Best-effort callers (the reaper, whose write has already
+    succeeded and must not be failed by bookkeeping) `suppress(OSError)` at the call site
+    instead, which is the clearer place to say a write may be ignored.
+
     `t` is when the entry was last touched. Nothing reads it yet: it is here so that reclaiming
     entries for rooms long gone — the half of #489 this change does not do, and the one the map
-    was unbounded for — needs no second migration to date what it finds. Best effort, like
-    `_bump`: the caller's write has already succeeded and must not be failed by bookkeeping.
+    was unbounded for — needs no second migration to date what it finds.
     """
     path = _seq_state_path(root, room)
-    try:
-        with _locked(path):
-            gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
-            state = _read_seq_state(path)
-            state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
-            _replace(path, orjson.dumps(state), fsync=config.FSYNC)
-    except OSError:
-        pass
+    with _locked(path):
+        gen = _seq_field(root, room, "gen") + (1 if bump else 0)
+        new_floor = floor if floor is not None else _seq_field(root, room, "floor")
+        state = _read_seq_state(path)
+        state[room] = {"floor": max(0, new_floor), "gen": gen, "t": int(time.time())}
+        _replace(path, orjson.dumps(state), fsync=config.FSYNC)
 
 
 def last_seq(root: Path, room: str) -> int:
@@ -1897,7 +1904,10 @@ def _reap_pass(root: Path, now: float) -> None:
                             # reader, but a stateful one needs to know the conversation changed.
                             # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
                             room = p.name[: -len(".jsonl")]
-                            _set_seq_entry(root, room, max(0, last_seq(root, room)))
+                            # Best effort: the file is about to be unlinked whether or not the
+                            # floor write lands, so a failed floor write must not abort the reap.
+                            with suppress(OSError):
+                                _set_seq_entry(root, room, floor=max(0, last_seq(root, room)))
                         p.unlink(missing_ok=True)
                         held[0] -= 1
                         held[1] -= st.st_size
@@ -2589,18 +2599,34 @@ def _write_record(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
-        # The dupe-filter reservation, keyed by the generation THIS write settles on:
-        # old_gen + 1 for a create, old_gen otherwise. The reap that preserves the generation
-        # and the create that bumps it both hold this same room lock, so the value read here
-        # cannot move before the write commits — which is what counts the slot under the
-        # incarnation the message actually lives in, closing yukkie3276's reap/recreate TOCTOU
+        if created:
+            # Advance the generation NOW, before the reservation reads it and before the
+            # record commits — and let a failure here abort the create (`_set_seq_entry`
+            # propagates; only the reaper suppresses it). This is the precondition
+            # the create's commit depends on: a (re)created room is a new conversation whose
+            # read view must expose the fresh generation so a stateful client resyncs (#139
+            # dir #3), and whose dupe ring must key under a new incarnation so a reaped-and-
+            # recreated room inherits none of the dead one's slots (#734). Persisting it here,
+            # under the room lock the reaper also holds, means the record can only land under a
+            # generation that is already durable — so "the record is committed" and "the
+            # generation is committed" can never disagree the way they could when this bump ran
+            # AFTER the flush and silently swallowed its own failure (Minh3132, #734): a bump
+            # that fails now aborts the create with nothing written and nothing reserved. The
+            # floor is preserved, not cleared: `seq` below continues from it (#139 dir #2), and
+            # once the file exists nothing reads it until the next reap overwrites it.
+            _set_seq_entry(root, room, bump=True)
+        # The dupe-filter reservation, keyed by the room's now-durable generation — the create
+        # above already bumped it, so this reads the real value rather than predicting old_gen+1
+        # (a prediction the post-flush bump could falsify). The reap that preserves the
+        # generation and the create that bumps it both hold this same room lock, so the value
+        # read here cannot move before the write commits, which counts the slot under the
+        # incarnation the message actually lives in — closing yukkie3276's reap/recreate TOCTOU
         # class (#734) rather than the one interleaving that surfaced it. After the nonce check
         # so a stale nonce never reserves; before the write so a share/window refusal costs no
-        # append. `reserve` is None when the filter is off — the hot path pays no seq read.
-        # The reserver remembers the generation it was keyed at, so release() below needs no
-        # argument (and cannot re-derive a create's old_gen after the bump moved it).
+        # append. `reserve` is None when the filter is off — the hot path pays no seq read. The
+        # reserver remembers the generation it was keyed at, so release() below needs no argument.
         if reserve is not None:
-            if reserve.reserve(_seq_field(root, room, "gen") + (1 if created else 0)):
+            if reserve.reserve(_seq_field(root, room, "gen")):
                 raise DuplicateRefused
         try:
             rec["seq"] = last_seq(root, room) + 1
@@ -2626,10 +2652,11 @@ def _write_record(
             # successful reserve() above: every pre-write refusal raises before this try.
             #
             # The try ends at the append's clean exit — the commit point. Once `line` is on
-            # disk it is a readable, counted record, so anything past here (compaction, the
-            # generation bump) must NOT release: a compaction I/O failure would otherwise hand
-            # back a slot whose copy is permanently stored, and repeated failures would leak
-            # copies past both the window and the ring cap (#734, Minh3132). A torn write stays
+            # disk it is a readable, counted record, so anything past here (compaction) must
+            # NOT release: a compaction I/O failure would otherwise hand back a slot whose copy
+            # is permanently stored, and repeated failures would leak copies past both the
+            # window and the ring cap (#734, Minh3132). The generation bump is no longer past
+            # here — it is the create's precondition, above the reservation. A torn write stays
             # inside the try and still releases correctly — a half-written line is no parseable
             # record, and the next append's torn-tail heal isolates the fragment.
             if reserve is not None:
@@ -2644,15 +2671,10 @@ def _write_record(
         # intact and the reservation rightly held.
         if size + len(line) > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
-        if created:
-            # Bump the room's generation: a (re)created room is a new conversation, and the
-            # read view exposes the old generation's number so a stateful client can detect the
-            # discontinuity and resync instead of silently watching a different conversation
-            # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
-            # has taken up the sequence where the old one left off, so it must not be reused.
-            # Inside the room lock, beside the reservation it makes authoritative and matching
-            # the reaper's floor/generation write under this same lock (#734).
-            _set_seq_entry(root, room, None)
+        # No generation write here any more. It ran BEFORE the reservation and the append now
+        # (see `created` above), as the create's precondition rather than its epilogue — so
+        # there is no post-commit seq-state write left whose independent failure could leave a
+        # committed record disagreeing with the durable generation (Minh3132, #734).
     return rec, created
 
 
