@@ -1018,6 +1018,7 @@ def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_swee
 
     real_flock = fcntl.flock
     real_unlink = os.unlink
+    waiter_ready = threading.Event()
     waiter_at_flock = threading.Event()
     waiter_acquired = threading.Event()
     waiter_error = []
@@ -1025,7 +1026,7 @@ def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_swee
     waiter_thread = []
 
     def hooked_flock(fd, op):
-        if waiter_tid and threading.get_ident() == waiter_tid:
+        if waiter_tid is not None and threading.get_ident() == waiter_tid:
             waiter_at_flock.set()
         return real_flock(fd, op)
 
@@ -1035,6 +1036,9 @@ def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_swee
         if str(path) == str(r_lock):
 
             def waiter():
+                nonlocal waiter_tid
+                waiter_tid = threading.get_ident()
+                waiter_ready.set()
                 try:
                     with store._locked(r_path):
                         waiter_acquired.set()
@@ -1043,8 +1047,7 @@ def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_swee
 
             t = threading.Thread(target=waiter)
             t.start()
-            nonlocal waiter_tid
-            waiter_tid = t.ident
+            assert waiter_ready.wait(5), "waiter thread never initialized identity"
             waiter_thread.append(t)
             assert waiter_at_flock.wait(5), "waiter never reached flock"
             real_unlink(path)
