@@ -45,3 +45,8 @@ edge/public/
 edge/src/routing.json
 edge/node_modules/
 edge/.wrangler/
+# FLOP Passport local state and operator-owned identity links
+.passport-data/
+.passport-indexer.json
+.passport-identities.json
+examples/flop_passport/.data/
