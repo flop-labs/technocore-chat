@@ -383,6 +383,10 @@ def test_a_ledger_with_a_duplicate_key_is_refused_rather_than_resolved(tmp_path)
             '{"!ledger": {"v": 1}, "did:key:zStub": {"room": 900}, "did:key:zStub": {"other": 5}}',
             "did:key:zStub",
         ),
+        # The marker is not exempt, and this asserts it rather than leaving it to the hook's
+        # docstring. A file carrying two of those is exactly as unreadable as one carrying two
+        # DIDs, and the hook runs before `_load` pops the marker, so nothing special protects it.
+        ('{"!ledger": {"v": 1}, "!ledger": {"v": 1}}', "!ledger"),
     ):
         store.write_text(body)
         with pytest.raises(LedgerUnreadableError) as caught:
@@ -1079,6 +1083,39 @@ def test_a_seed_of_the_wrong_length_is_refused_at_both_doors(tmp_path) -> None:
     seed_path.write_text("not a seed!! " + base64.urlsafe_b64encode(b"\x03" * 32).decode())
     with pytest.raises(ValueError, match="is not base64"):
         Keyring(seed_path)
+
+
+def test_a_seed_holding_a_character_base64url_cannot_emit_is_refused(tmp_path) -> None:
+    """`+` and `/` are the two characters `altchars` hides, and each one is provable damage.
+
+    `b64decode(body, altchars=b"-_", validate=True)` translates `-` to `+` and `_` to `/` and
+    then validates against the *standard* alphabet, which contains both. `_create` writes with
+    `urlsafe_b64encode`, so neither can come from a file this package wrote — and yet both
+    decoded to a different valid 32-byte seed, after which `Keyring.did` and `Signer.sign`
+    published and signed under an identity nobody chose, with no error anywhere.
+
+    Not corruption detection in general, and it must not be read as it. Over every
+    single-character substitution in a 43-character body, 2706 still decode to a different valid
+    seed because base64url can emit those characters, and nothing downstream of base64 can
+    separate them from the original. The 84 base64url can never emit are what this closes.
+
+    The last assertion is the other half: the guard is an alphabet check and not a length or a
+    content check, so an ordinary seed must still load and still derive the same DID.
+    """
+    seed = b"\x04" * 32
+    body = base64.urlsafe_b64encode(seed).decode().rstrip("=")
+    seed_path = tmp_path / "home" / "seed"
+    seed_path.parent.mkdir(parents=True)
+
+    for character in ("+", "/"):
+        seed_path.write_text(character + body[1:])
+        seed_path.chmod(0o600)
+        with pytest.raises(ValueError, match="is not base64"):
+            Keyring(seed_path)
+
+    seed_path.write_text(body)
+    seed_path.chmod(0o600)
+    assert Keyring(seed_path).did == did_from_seed(seed)
 
 
 @pytest.mark.parametrize(

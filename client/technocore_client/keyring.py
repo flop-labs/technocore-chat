@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -25,6 +26,11 @@ import didkey
 from .durable import fsync_dir, mkdir_durable
 
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+# The base64url alphabet, matched with `fullmatch` the way `didkey.verify` gates a signature's
+# alphabet before it decodes one. Trailing padding is admitted because the decode below already
+# accepts a padded body; rejecting it would be a new refusal rather than this fix.
+_B64URL_BODY = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 
 def _b58encode(raw: bytes) -> str:
@@ -139,6 +145,38 @@ class Keyring:
                 "silently change this identity. Fix the permissions, or move the file aside "
                 "deliberately."
             ) from exc
+        # The alphabet, before the decode and not left to it. `altchars=b"-_"` translates `-` to
+        # `+` and `_` to `/`, and `validate=True` then checks what came out against the STANDARD
+        # alphabet — which contains `+` and `/`, the two characters base64url exists to exclude.
+        # So a `+` or a `/` in the file passes as ordinary alphabet and decodes to a different
+        # valid 32-byte seed, and `_create` writes with `urlsafe_b64encode`, so neither character
+        # can come from a file this package wrote: it is damage, and it was being accepted.
+        # `Keyring.did` derives from those bytes and `Signer.sign` signs with them, so the install
+        # publishes and signs under a different did:key with no error at all (second reader, #803).
+        #
+        # This does not make a corrupted seed detectable in general, and claiming it would be
+        # false. Over every single-character substitution in a 43-character body, 2706 still
+        # decode to a different valid seed because base64url can emit those characters — inherent
+        # to base64, and no decoder can see it. The 84 that base64url can never emit are exactly
+        # what this closes.
+        #
+        # Same defect as `nonces._no_duplicate_keys`, in a different parser: a permissive default
+        # silently changing the meaning of damaged input, where the leniency *is* the bug.
+        # `validate=True` stays — it still catches everything else, padding included.
+        # `body and`, because an empty or whitespace-only file holds no character outside the
+        # alphabet — it holds none at all, and saying otherwise names evidence that is not
+        # there. Left to the length check below, which already calls it a damaged identity
+        # rather than a missing one. Caught while verifying this guard rather than by a
+        # reviewer, and it is the same defect the rest of this branch keeps producing: a true
+        # refusal carrying a claim the file does not support.
+        if body and not _B64URL_BODY.fullmatch(body):
+            raise ValueError(
+                f"{self._path} is not base64url: it holds a character outside A-Z a-z 0-9 '-' "
+                "'_', and a seed file this package wrote can never contain one. A seed that "
+                "cannot be read is not a seed that is absent: generating a new one here would "
+                "silently change this identity, and every signature and published note already "
+                "names the old key. Repair the file or move it aside deliberately."
+            )
         try:
             # `b64decode` with `altchars`, because `urlsafe_b64decode` takes no `validate`
             # argument — the urlsafe wrapper is the lenient one, and leniency is the bug here.
