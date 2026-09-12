@@ -11,6 +11,11 @@ if [[ -z "$ROOM" || -z "$TEXT" ]]; then
   exit 1
 fi
 
+# Resolve both uv signer calls from this helper's checkout, never the caller's
+# working directory, which may contain an unrelated project or scripts/sign.py.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd -- "$SCRIPT_DIR"
+
 if [[ ! -f "$SEED_FILE" ]]; then
   echo "Error: Technocore seed file not found at $SEED_FILE"
   exit 1
