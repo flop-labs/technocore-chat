@@ -41,17 +41,59 @@ uv sync
 mkdir -p "$SEED_DIR"
 chmod 700 "$SEED_DIR"
 
-if [[ ! -f "$SEED_FILE" ]]; then
-  echo "Creating a new private Ed25519 seed..."
-  umask 077
-  python3 - <<'PY'
-from pathlib import Path
+SEED_STATUS="$(python3 - <<'PY'
+import os
 import secrets
+import tempfile
+from pathlib import Path
 
-seed_file = Path.home() / ".config" / "technocore" / "sign_seed"
-seed_file.write_text(secrets.token_hex(32) + "\n")
+seed_dir = Path.home() / ".config" / "technocore"
+seed_file = seed_dir / "sign_seed"
+
+# Prepare a complete private seed away from the public path, then publish it
+# with a same-filesystem hard link. link(2) is atomic and fails if another
+# onboarding process already won, so the public path is never visible empty
+# or partially written and every loser converges on the winner's seed.
+fd, tmp_name = tempfile.mkstemp(prefix=".sign_seed.", dir=seed_dir)
+tmp_path = Path(tmp_name)
+created = False
+
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        fd = -1
+        handle.write((secrets.token_hex(32) + "\n").encode())
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    try:
+        os.link(tmp_path, seed_file)
+        created = True
+
+        # Persist the directory entry before reporting the new identity.
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        dir_fd = os.open(seed_dir, flags)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except FileExistsError:
+        # Another process atomically published first. Its complete seed is the
+        # canonical identity; discard this candidate without ever exposing it.
+        pass
+finally:
+    if fd != -1:
+        os.close(fd)
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+
+print("created" if created else "existing")
 PY
-  chmod 600 "$SEED_FILE"
+)"
+
+if [[ "$SEED_STATUS" == "created" ]]; then
   echo "New seed created."
 else
   echo "Existing seed preserved."
