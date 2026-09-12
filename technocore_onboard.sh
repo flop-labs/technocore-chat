@@ -85,18 +85,21 @@ try:
     try:
         os.link(tmp_path, seed_file)
         created = True
-
-        # Persist the directory entry before reporting the new identity.
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        dir_fd = os.open(seed_dir, flags)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
     except FileExistsError:
         # Another process atomically published first. Its complete seed is the
         # canonical identity; discard this candidate without ever exposing it.
         pass
+
+    # Whether this process published the seed or observed another process's
+    # winning link, make the parent directory entry durable before reporting
+    # success. This closes the loser-side window where a DID could be reported
+    # before any process had fsynced the directory entry.
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_fd = os.open(seed_dir, flags)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 finally:
     if fd != -1:
         os.close(fd)
