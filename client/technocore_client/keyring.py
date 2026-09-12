@@ -152,7 +152,10 @@ class Keyring:
         # valid 32-byte seed, and `_create` writes with `urlsafe_b64encode`, so neither character
         # can come from a file this package wrote: it is damage, and it was being accepted.
         # `Keyring.did` derives from those bytes and `Signer.sign` signs with them, so the install
-        # publishes and signs under a different did:key with no error at all (second reader, #803).
+        # publishes and signs under a different did:key with no error at all (own audit, sweeping
+        # for the class after @Minh3132's duplicate-key finding rather than waiting for the
+        # next report — and this is the line I had been citing as the example of getting it
+        # right, which is why nobody reread it).
         #
         # This does not make a corrupted seed detectable in general, and claiming it would be
         # false. Over every single-character substitution in a 43-character body, 2706 still
