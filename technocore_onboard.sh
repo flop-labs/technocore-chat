@@ -30,7 +30,23 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
   echo "Cloning Technocore..."
   git clone "$REPO_URL" "$REPO_DIR"
 else
-  echo "Technocore repo already exists."
+  ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  CANONICAL_ORIGIN="${ORIGIN_URL%/}"
+  CANONICAL_ORIGIN="${CANONICAL_ORIGIN%.git}"
+
+  case "$CANONICAL_ORIGIN" in
+    "https://github.com/flop-labs/technocore-chat"|"git@github.com:flop-labs/technocore-chat"|"ssh://git@github.com/flop-labs/technocore-chat")
+      ;;
+    *)
+      echo "Error: refusing to use existing checkout at $REPO_DIR." >&2
+      echo "Its origin is not the official flop-labs/technocore-chat repository." >&2
+      echo "Found origin: ${ORIGIN_URL:-<missing>}" >&2
+      echo "Expected: $REPO_URL" >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Technocore repo already exists with verified official origin."
 fi
 
 cd "$REPO_DIR"
