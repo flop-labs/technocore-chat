@@ -97,6 +97,19 @@ class Keyring:
             # create the file (@Minh3132, #803). fsync on an already-synced directory is cheap and
             # this runs once per process, so ordering it here rather than reasoning about the
             # interleaving is the trade worth making.
+        # A seed that exists and is not a regular file, before anything else asks about its
+        # mode or its contents. Without this a directory named `seed` made `exists()` true, so
+        # `Signer` refused about the *nonce ledger* — "this key already exists, so a ledger was
+        # written and has since been lost" — and sent the operator to investigate the wrong
+        # file entirely. A dangling symlink got a bare FileNotFoundError from the read. Neither
+        # minted a key, so both failed closed; both named the wrong problem (own audit).
+        if not self._path.is_file():
+            raise ValueError(
+                f"{self._path} exists and is not a regular file. A signing seed must be a plain "
+                "file containing 32 base64 bytes; a directory, a socket or a symlink with no "
+                "target is not one. Nothing was created and no identity was derived — move "
+                "whatever is there out of the way, or point this install at a different home."
+            )
         mode = stat.S_IMODE(self._path.stat().st_mode)
         if mode & 0o077:
             raise PermissionError(
@@ -113,10 +126,22 @@ class Keyring:
         # Raised as a labelled refusal for the same reason the nonce ledger's is: an unreadable
         # identity is unknown state, and a bare `binascii.Error` traceback tells the operator
         # neither what it cost nor what to do (found in review by @yukkie3276, #803).
+        # Read before decoding, and refused separately: mode 0000 clears the group/other check
+        # above and then raised a bare PermissionError from inside the base64 attempt, which
+        # would have been reported as "is not base64" — a wrong diagnosis of a permissions
+        # problem (own audit).
+        try:
+            body = self._path.read_text().strip()
+        except OSError as exc:
+            raise ValueError(
+                f"{self._path} exists and cannot be read ({exc.__class__.__name__}). A seed that "
+                "cannot be read is not a seed that is absent: generating a new one here would "
+                "silently change this identity. Fix the permissions, or move the file aside "
+                "deliberately."
+            ) from exc
         try:
             # `b64decode` with `altchars`, because `urlsafe_b64decode` takes no `validate`
             # argument — the urlsafe wrapper is the lenient one, and leniency is the bug here.
-            body = self._path.read_text().strip()
             # Pad to a multiple of four rather than always appending "==": with validate=True,
             # surplus padding is itself an error ("Excess data after padding"), so the sloppy
             # version that worked under the lenient decoder does not survive the strict one.

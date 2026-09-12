@@ -40,6 +40,19 @@ class Signer:
         # Read both before touching either: an earlier version initialised the ledger and *then*
         # asked whether it had been missing, answering a question it had just changed.
         seed_existed, ledger_existed = seed.exists(), ledger.exists()
+        # Before any of the lost-state reasoning below, because that reasoning takes
+        # `seed_existed` to mean "a usable key is here". A directory named `seed` makes it
+        # true, and then an absent ledger was refused as "this key already exists, so a
+        # ledger was written and has since been lost" — pointing the operator at the wrong
+        # file for a problem that is not the ledger's. `Keyring` has the same check, and it
+        # never runs, because this function answers first (own audit).
+        if seed_existed and not seed.is_file():
+            raise ValueError(
+                f"{seed} exists and is not a regular file, so this home has no usable key "
+                "and nothing here can be trusted to describe one. This is not a lost ledger: "
+                "move whatever is at that path out of the way, or point this install at a "
+                "different home."
+            )
         # And on a first run create the ledger BEFORE the key, which is what the comment used to
         # claim while the code did the opposite. It matters under concurrency: a second starter
         # landing between the winner's `os.link(seed)` and a later ledger write would see exactly
@@ -91,6 +104,14 @@ class Signer:
                     if allocations
                     else f"records {keys_recorded} prior key(s) and no allocations",
                 )
+            # Nothing above refused, so this ledger provably holds no history and no key exists
+            # yet to have made any. Stamp it before `Keyring` runs. Without this, a stray `{}`
+            # stays unmarked, the key is created immediately below, and the first `allocate()`
+            # refuses on a ledger that was never written — a fresh install holding an identity
+            # it can never use, told that its records were erased. My own change one commit ago
+            # opened that path: the refusal it added keys off a fact this constructor is about
+            # to make true.
+            NonceStore(ledger).stamp_if_empty()
         # One known window, left as it is on purpose. A second starter that reads
         # `seed_existed=False` after the winner's `initialise()` but before its `os.link` will
         # come through here, and if the winner's *application* has also allocated by then it

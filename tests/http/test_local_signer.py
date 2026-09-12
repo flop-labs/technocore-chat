@@ -287,6 +287,111 @@ def test_a_marker_of_the_wrong_shape_is_refused_like_any_other_damage(tmp_path) 
     assert path.exists(), "the refusal removed the evidence"
 
 
+def test_the_refusal_for_a_missing_ledger_does_not_advise_moving_it_aside(tmp_path) -> None:
+    """One refusal, two situations, and the advice only fitted one of them.
+
+    `_refuse` told every caller the file "is left in place deliberately" and to recover by
+    repairing it or moving it aside. For a ledger that is *missing* there is nothing to repair
+    and nothing to move, so an operator following the message hunts for a file that is not there
+    and has no route out of a refusal that repeats on every start. The verdict was right and the
+    instructions were impossible — the same shape as the chained-refusal fix earlier on this
+    branch, where a true message told someone to do the catastrophic thing.
+    """
+    store = tmp_path / "nonces.json"
+    with pytest.raises(LedgerUnreadableError) as missing:
+        NonceStore(store, key_exists=True)
+    text = str(missing.value)
+    assert "nothing here to repair or move aside" in text
+    assert "left in place" not in text, "advice for a damaged file was given for a missing one"
+    assert "backup" in text and "different key" in text, "no recovery was offered"
+
+    # And the damaged case must keep the advice that does fit it.
+    store.write_text("{ not json")
+    with pytest.raises(LedgerUnreadableError) as damaged:
+        NonceStore(store, key_exists=True)
+    assert "left in place" in str(damaged.value)
+
+
+def test_a_seed_that_is_not_a_regular_file_names_itself_and_not_the_ledger(tmp_path) -> None:
+    """`seed_existed` meant "a usable key is here", and a directory made it true.
+
+    With a directory named `seed` and no ledger, `Signer` refused about the *nonce ledger* —
+    "this key already exists, so a ledger was written and has since been lost" — which sends
+    the operator to investigate a file that was never the problem. `Keyring` grew the same check
+    and it never ran, because the ledger reasoning answers first. Both layers now have it: the
+    one in `Signer` because it owns the ordering, the one in `Keyring` because it is reachable
+    directly.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "seed").mkdir(mode=0o700)
+    with pytest.raises(ValueError) as caught:
+        Signer(home)
+    assert "is not a regular file" in str(caught.value)
+    assert "not a lost ledger" in str(caught.value).lower()
+
+    # Reachable on its own too, and a dangling symlink is the same fact wearing a different shape.
+    other = tmp_path / "other"
+    other.mkdir(parents=True)
+    os.symlink(str(other / "nowhere"), str(other / "seed"))
+    with pytest.raises(ValueError) as dangling:
+        Keyring(other / "seed")
+    assert "is not a regular file" in str(dangling.value)
+
+
+def test_a_ledger_from_a_newer_format_is_unknown_rather_than_fresh(tmp_path) -> None:
+    """The marker carried a version that nothing read.
+
+    A future writer stamping `v2` with different semantics would have been read as a v1 ledger
+    and quietly misinterpreted, which is the same "unknown treated as understood" that the rest
+    of this loader exists to refuse. A marker with no usable version is refused for the same
+    reason: it is a record this build cannot vouch for.
+    """
+    newer = tmp_path / "newer.json"
+    newer.write_text(json.dumps({"!ledger": {"v": 2}}))
+    with pytest.raises(LedgerUnreadableError) as ahead:
+        NonceStore(newer)
+    assert "v2" in str(ahead.value) and "understands" in str(ahead.value)
+
+    unversioned = tmp_path / "unversioned.json"
+    unversioned.write_text(json.dumps({"!ledger": {}}))
+    with pytest.raises(LedgerUnreadableError) as bare:
+        NonceStore(unversioned)
+    assert "no usable version" in str(bare.value)
+
+
+def test_a_stray_empty_ledger_on_a_first_run_is_adopted_and_not_fatal(tmp_path) -> None:
+    """The marker's own regression, found by auditing the commit that added it.
+
+    A bare `{}` in a directory with no key was innocent before the marker existed, and had to
+    stay innocent. It did not. `initialise()` skips a file that already exists, so the stray
+    ledger survived startup unmarked; `Keyring` created the key one line later, which flipped
+    `key_exists` true; and the first `allocate()` refused, telling the operator their ledger had
+    been emptied when nothing had ever written one. A fresh install came up holding an identity
+    it could never sign with, and the next start refused during construction.
+
+    Worth a test rather than a comment because the refusal was right and its trigger was a fact
+    the constructor itself was about to make true — the same shape as every other finding on this
+    branch, which is a new line meeting an ordering constraint somewhere else.
+    """
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    (home / "nonces.json").write_text("{}")
+
+    signer = Signer(home)
+    issued = signer.nonces.allocate(signer.did, "room")
+    assert issued > 0, "a fresh install with a stray empty ledger could not sign"
+
+    on_disk = json.loads((home / "nonces.json").read_text())
+    assert "!ledger" in on_disk, "the stray ledger was used without being adopted"
+    assert on_disk[signer.did] == {"room": issued}
+
+    # And the next start, which is where the old behaviour refused during construction.
+    again = Signer(home)
+    assert again.did == signer.did
+    assert again.nonces.allocate(again.did, "room") > issued
+
+
 def test_a_stamped_ledger_with_no_entries_stays_innocent_beside_a_key(tmp_path) -> None:
     """The other half of the pair above, and the reason the marker exists rather than a ban on
     `{}`.

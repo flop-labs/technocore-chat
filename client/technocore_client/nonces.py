@@ -127,6 +127,7 @@ class NonceStore:
             key_exists if callable(key_exists) else (lambda: bool(key_exists))
         )
         self._marker: dict[str, int] = {"v": _FORMAT_VERSION}
+        self._marker_present = False
         self._state: dict[str, dict[str, int]] = self._load()
 
     def initialise(self) -> None:
@@ -152,6 +153,40 @@ class NonceStore:
                 return
             self._state = {}
             self._marker = {"v": _FORMAT_VERSION}
+            self._flush()
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def stamp_if_empty(self) -> None:
+        """Adopt an unmarked, entry-free ledger that was already here, by stamping it.
+
+        The marker turned "an empty ledger beside an existing key" into a refusal, which is
+        right — but a bare `{}` sitting in a directory with no key yet was innocent before that
+        and had to stay innocent. It did not: `initialise()` skips a file that exists, so the
+        stray `{}` survived startup unmarked, `Keyring` then created the key one line later, and
+        the first `allocate()` refused — telling the operator their ledger had been emptied when
+        nothing had ever written one. A fresh install minted an identity it could never use.
+
+        Found by auditing my own change rather than by a reviewer, which is the only reason it is
+        worth writing down twice: the refusal was correct and its trigger was a fact that the
+        constructor itself was about to make true.
+
+        Stamping is honest only here. `Signer` calls this having just established that the ledger
+        holds no keys and no allocations *and* that no key exists yet — so there is no history it
+        could be hiding. Beside an existing key the same file stays a refusal, because then
+        emptiness proves nothing.
+
+        Re-reads under the lock and writes only if the file is still unmarked and still empty,
+        for the same reason `initialise()` does: a writer that decided outside the lock is a
+        writer that clobbers.
+        """
+        fd = self._lock()
+        try:
+            state = self._load()
+            if self._marker_present or state:
+                return
+            self._state = state
             self._flush()
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -205,7 +240,21 @@ class NonceStore:
         marker = raw.pop(_MARKER, None)
         if marker is not None and not isinstance(marker, dict):
             raise self._refuse(f"holds {_MARKER!r} as something that is not an object")
+        if marker is not None:
+            # A marker written by a newer version may mean something this code does not know,
+            # and "I do not understand this record" is the same unknown as a damaged one. The
+            # version was unchecked when the marker was introduced, so a future v2 ledger would
+            # have been read as a v1 one and quietly misinterpreted (own audit).
+            version = marker.get("v")
+            if isinstance(version, bool) or not isinstance(version, int):
+                raise self._refuse(f"holds {_MARKER!r} with no usable version")
+            if version > _FORMAT_VERSION:
+                raise self._refuse(
+                    f"was written in ledger format v{version}, and this build understands "
+                    f"v{_FORMAT_VERSION}"
+                )
         self._marker = dict(marker) if marker is not None else {"v": _FORMAT_VERSION}
+        self._marker_present = marker is not None
         # An empty object carrying no initialisation record, beside a key that already exists.
         # `initialise()` stamps every ledger it creates, so this file was not created by this
         # class — it was emptied. That is the same unknown as a corrupt one and takes the same
@@ -255,15 +304,32 @@ class NonceStore:
         and a person doing that has decided the clock is safely past whatever was issued, which
         is exactly the judgement no automatic recovery can make.
         """
-        return LedgerUnreadableError(
-            why,
-            f"{self._path} {why}. The nonces already issued for this key are unknown, so "
-            "allocating from the clock could repeat one and every signed write would be refused. "
-            "This file is left in place deliberately: it is the only record of what was issued, "
-            "and while it is here no process will allocate. Recover by repairing it, or by moving "
-            "it aside once you are satisfied the clock is past the last nonce used — or by using a "
-            "different key.",
+        cost = (
+            "The nonces already issued for this key are unknown, so allocating from the clock "
+            "could repeat one and every signed write would be refused. "
         )
+        # Two different recoveries, and giving the wrong one is not a cosmetic problem: the
+        # advice for a damaged file is to repair it or move it aside, and neither is possible
+        # for a file that is not there. An operator who follows it looks for something to move,
+        # finds nothing, and has no route out of a refusal that repeats on every start. Same
+        # lesson as the chained-refusal fix earlier on this branch — a true message can still
+        # tell someone to do something impossible (own audit, after @yukkie3276's live-predicate
+        # finding).
+        if self._path.exists():
+            advice = (
+                "This file is left in place deliberately: it is the only record of what was "
+                "issued, and while it is here no process will allocate. Recover by repairing it, "
+                "or by moving it aside once you are satisfied the clock is past the last nonce "
+                "used — or by using a different key."
+            )
+        else:
+            advice = (
+                "There is nothing here to repair or move aside. Restore the ledger from a backup, "
+                "or use a different key. Creating a fresh one is safe only once you are certain "
+                "the wall clock is past every nonce this key has ever used, which is a judgement "
+                "no automatic recovery can make — so this refuses rather than making it for you."
+            )
+        return LedgerUnreadableError(why, f"{self._path} {why}. {cost}{advice}")
 
     def _lock(self):
         """Exclusive lock over the whole read-modify-write.
