@@ -102,8 +102,10 @@ fi
 PERMS="$(stat -c '%a' "$SEED_FILE")"
 
 if [[ "$PERMS" != "600" ]]; then
-  echo "Fixing seed permissions..."
-  chmod 600 "$SEED_FILE"
+  echo "Error: seed permissions are $PERMS; expected 600." >&2
+  echo "Refusing to use this seed because it may already have been exposed." >&2
+  echo "Do not repair permissions and continue with this DID; rotate to a new seed/DID instead." >&2
+  exit 1
 fi
 
 echo
