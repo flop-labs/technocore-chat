@@ -36,3 +36,6 @@ mutants/
 
 # local Quint oracle work in progress — never commit from this machine
 quint-*
+
+.env
+identity.json

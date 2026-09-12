@@ -31,7 +31,7 @@ def b64url(data: bytes) -> str:
 
 def send_signed(text: str):
     global nonce
-    payload = f"\{ROOM\}|\{nonce\}|f"{ROOM}|{nonce}|{text}".encode("utf-8")
+    payload = f"{ROOM}|{nonce}|{text}".encode("utf-8")
     sig_b64 = b64url(priv_key.sign(payload))
     encoded_text = urllib.parse.quote(text)
     url = f"{BASE_URL}/r/{ROOM}/say-signed/{DID}/{sig_b64}/{nonce}/{encoded_text}"
