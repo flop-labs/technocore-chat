@@ -47,19 +47,18 @@ else
   esac
 
   # A trusted remote name is not enough: local commits or working-tree edits can
-  # replace the signer that receives SIGN_SEED. Refresh upstream main, then fail
-  # closed unless this checkout is exactly that commit and has no local changes.
+  # replace the signer that receives SIGN_SEED. Resolve upstream main directly
+  # from the official remote, then fail closed unless this checkout is exactly
+  # that commit and has no local changes.
   echo "Verifying existing checkout against upstream main..."
-  if ! git -C "$REPO_DIR" fetch --quiet --no-tags origin main; then
-    echo "Error: could not refresh official upstream main; refusing to execute local checkout code." >&2
+  if ! TRUSTED_HEAD="$(git -C "$REPO_DIR" ls-remote "$REPO_URL" refs/heads/main | awk 'NR == 1 {print $1}')"; then
+    echo "Error: could not query official upstream main; refusing to execute local checkout code." >&2
     exit 1
   fi
-
   LOCAL_HEAD="$(git -C "$REPO_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
-  TRUSTED_HEAD="$(git -C "$REPO_DIR" rev-parse --verify FETCH_HEAD 2>/dev/null || true)"
 
   if [[ -z "$LOCAL_HEAD" || -z "$TRUSTED_HEAD" || "$LOCAL_HEAD" != "$TRUSTED_HEAD" ]]; then
-    echo "Error: refusing to use existing checkout because HEAD does not match freshly fetched origin/main." >&2
+    echo "Error: refusing to use existing checkout because HEAD does not match verified upstream main." >&2
     echo "Local HEAD: ${LOCAL_HEAD:-<missing>}" >&2
     echo "Trusted upstream HEAD: ${TRUSTED_HEAD:-<missing>}" >&2
     echo "Use a clean checkout of the official main branch before onboarding." >&2
