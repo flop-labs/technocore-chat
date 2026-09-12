@@ -30,7 +30,7 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
   echo "Cloning Technocore..."
   git clone "$REPO_URL" "$REPO_DIR"
 else
-  ORIGIN_URL="$(git -C "$REPO_DIR" config --get remote.origin.url 2>/dev/null || true)"
+  ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
   CANONICAL_ORIGIN="${ORIGIN_URL%/}"
   CANONICAL_ORIGIN="${CANONICAL_ORIGIN%.git}"
 
@@ -46,40 +46,67 @@ else
       ;;
   esac
 
-  # A trusted remote name is not enough: local commits or working-tree edits can
-  # replace the signer that receives SIGN_SEED. Resolve upstream main directly
-  # from the official remote, then fail closed unless this checkout is exactly
-  # that commit and has no local changes.
-  echo "Verifying existing checkout against upstream main..."
-  if ! TRUSTED_HEAD="$(git -C "$REPO_DIR" ls-remote "$REPO_URL" refs/heads/main | awk 'NR == 1 {print $1}')"; then
-    echo "Error: could not query official upstream main; refusing to execute local checkout code." >&2
-    exit 1
-  fi
-  LOCAL_HEAD="$(git -C "$REPO_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
-
-  if [[ -z "$LOCAL_HEAD" || -z "$TRUSTED_HEAD" || "$LOCAL_HEAD" != "$TRUSTED_HEAD" ]]; then
-    echo "Error: refusing to use existing checkout because HEAD does not match verified upstream main." >&2
-    echo "Local HEAD: ${LOCAL_HEAD:-<missing>}" >&2
-    echo "Trusted upstream HEAD: ${TRUSTED_HEAD:-<missing>}" >&2
-    echo "Use a clean checkout of the official main branch before onboarding." >&2
-    exit 1
-  fi
-
-  WORKTREE_STATUS="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
-  if [[ -n "$WORKTREE_STATUS" ]]; then
-    echo "Error: refusing to use existing checkout because the working tree is not clean." >&2
-    echo "Local modifications or untracked files could replace code that receives the persistent seed." >&2
-    echo "Use a clean checkout of the official main branch before onboarding." >&2
-    exit 1
-  fi
-
-  echo "Technocore repo already exists and matches verified upstream main."
+  echo "Technocore repo already exists with verified official origin."
 fi
 
+# A remote name alone does not authenticate the local code that receives the
+# seed. Check the currently advertised official main commit without updating
+# the user's refs, index or working tree (also safe for concurrent onboarding).
+checked_git() {
+  git --no-replace-objects -c core.fsmonitor=false -C "$REPO_DIR" "$@"
+}
+
+if [[ "$(checked_git ls-remote --get-url "$REPO_URL")" != "$REPO_URL" ]]; then
+  echo "Error: refusing a rewritten official repository URL." >&2
+  exit 1
+fi
+
+if ! UPSTREAM_RECORD="$(checked_git ls-remote --exit-code "$REPO_URL" refs/heads/main)"; then
+  echo "Error: cannot verify official main; refusing dependency execution and seed use." >&2
+  exit 1
+fi
+UPSTREAM_SHA="${UPSTREAM_RECORD%%$'\t'*}"
+if [[ ! "$UPSTREAM_SHA" =~ ^[0-9a-f]{40}$ ||
+      "$UPSTREAM_RECORD" != "$UPSTREAM_SHA"$'\t'"refs/heads/main" ]]; then
+  echo "Error: unexpected official main response; refusing seed use." >&2
+  exit 1
+fi
+
+verify_checkout() {
+  local head status path expected actual
+  head="$(checked_git rev-parse --verify 'HEAD^{commit}')"
+  if [[ "$head" != "$UPSTREAM_SHA" ]]; then
+    echo "Error: checkout HEAD does not match verified upstream main." >&2
+    echo "Use a clean checkout of official main; local work has not been changed." >&2
+    exit 1
+  fi
+  status="$(checked_git status --porcelain=v1 --untracked-files=all)"
+  if [[ -n "$status" ]]; then
+    echo "Error: checkout has local changes or untracked files; refusing seed use." >&2
+    echo "Preserve your work separately and use a clean checkout of official main." >&2
+    exit 1
+  fi
+  # Check the raw execution inputs too: index flags or Git filters must not
+  # make a modified signer/dependency definition appear safe to git status.
+  for path in scripts/sign.py pyproject.toml uv.lock; do
+    expected="$(checked_git rev-parse --verify "$UPSTREAM_SHA:$path")"
+    if [[ ! -f "$REPO_DIR/$path" || -L "$REPO_DIR/$path" ]]; then
+      echo "Error: $path is not a regular upstream file; refusing seed use." >&2
+      exit 1
+    fi
+    actual="$(checked_git hash-object --no-filters -- "$REPO_DIR/$path")"
+    if [[ "$actual" != "$expected" ]]; then
+      echo "Error: $path differs from verified upstream content; refusing seed use." >&2
+      exit 1
+    fi
+  done
+}
+
+verify_checkout
 cd "$REPO_DIR"
 
 echo "Installing locked dependencies..."
-uv sync
+uv sync --frozen
 
 mkdir -p "$SEED_DIR"
 chmod 700 "$SEED_DIR"
@@ -154,9 +181,12 @@ if [[ "$PERMS" != "600" ]]; then
   exit 1
 fi
 
+# Do not hand the seed to code changed during dependency setup either.
+verify_checkout
+
 echo
 echo "Public DID:"
-SIGN_SEED="$(cat "$SEED_FILE")" uv run scripts/sign.py did
+SIGN_SEED="$(cat "$SEED_FILE")" uv run --frozen scripts/sign.py did
 
 echo
 echo "Setup complete."
