@@ -192,6 +192,36 @@ def test_a_deleted_ledger_is_refused_in_a_fresh_process(tmp_path) -> None:
     assert "would be refused" in result.stderr, "the error must say what it costs"
 
 
+def test_a_ledger_lost_mid_process_is_refused_by_the_signer_that_created_it(tmp_path) -> None:
+    """@yukkie3276, #803: the lost-ledger refusal was off for exactly the process that mattered.
+
+    `Signer` builds the store before `Keyring` mints the key, deliberately — the ledger has to
+    exist first so that seed-without-ledger can only mean the record went missing. That ordering
+    made a plain boolean wrong: on a first run the store was told "no key here", and it kept
+    believing it while the key was created one line later and nonces were issued under it. Delete
+    the ledger in that same process and the refusal did not fire, because the store still thought
+    this was an install that had never had a key to lose a ledger for.
+
+    In-process on purpose: the earlier tests in this file use a subprocess precisely to get away
+    from a stale `_process_floor`, and here the staleness under test is the flag rather than the
+    floor, so the same live `Signer` has to be the one that asks.
+
+    The module's in-memory floor does keep this particular sequence above the nonces *this*
+    process issued. It says nothing about a nonce a second process wrote and the deleted ledger
+    was the only record of, which is what the refusal is for.
+    """
+    home = tmp_path / "home"
+    signer = Signer(home)
+    issued = signer.nonces.allocate(signer.did, "room")
+    assert issued > 0
+    assert (home / "seed").exists(), "this test needs the key the first run creates"
+    (home / "nonces.json").unlink()
+
+    with pytest.raises(LedgerUnreadableError) as caught:
+        signer.nonces.allocate(signer.did, "room")
+    assert "has since been lost" in str(caught.value)
+
+
 def test_a_ledger_emptied_to_braces_is_refused_beside_an_existing_key(tmp_path) -> None:
     """@Minh3132, #803: `{}` meant both "never used" and "history erased".
 

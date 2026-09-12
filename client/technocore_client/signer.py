@@ -102,7 +102,14 @@ class Signer:
         # `key_exists`, not `lost`: the store needs to know a key is here even when the
         # ledger is present, because a ledger emptied to `{}` is only detectable as a loss
         # against the fact that this install has a key (@Minh3132, #803).
-        self.nonces = NonceStore(ledger, key_exists=seed_existed)
+        #
+        # And `seed.exists` rather than `seed_existed` — the method, not the snapshot. This line
+        # runs BEFORE `Keyring` mints the key, so on a first run the boolean was false for the
+        # life of the store: delete the ledger later in this same process, after it has signed,
+        # and the lost-ledger refusal did not fire because the store still believed there was no
+        # key to have lost one for (@yukkie3276, #803). Handing over the question keeps the
+        # judgement here and removes the staleness.
+        self.nonces = NonceStore(ledger, key_exists=seed.exists)
         # Last, so that a refusal above cannot leave a freshly minted seed behind it.
         self.keys = Keyring(seed)
 

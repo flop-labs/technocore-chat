@@ -45,6 +45,7 @@ import fcntl
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .durable import fsync_dir, mkdir_durable
@@ -92,24 +93,39 @@ class LedgerUnreadableError(ValueError):
 class NonceStore:
     """Per-(did, room) allocation, persisted before each number is handed out."""
 
-    def __init__(self, path: str | Path, *, key_exists: bool = False) -> None:
-        """`key_exists` says a signing key already exists at this home.
+    def __init__(self, path: str | Path, *, key_exists: bool | Callable[[], bool] = False) -> None:
+        """`key_exists` says whether a signing key exists at this home — a bool, or a callable
+        asked afresh at every load.
+
+        Pass the callable whenever the answer can change while this store is alive. It can:
+        `Signer` has to build the store before it mints the key, so a boolean captured there is
+        false for the whole life of the store that created the identity (@yukkie3276, #803). A
+        snapshot of a fact that is about to change is not a cheaper version of the fact.
 
         Absence is only proof of a first run when nothing has run before. Once a key exists, an
         absent ledger is not "nothing was issued" — it is "something may have been issued and
         the record is gone", which is the same unknown as a corrupt one and gets the same
         refusal (@yukkie3276, #803).
 
-        The judgement cannot be made here, and the default says so by being `False`. A store on
-        its own sees a path and nothing else; only something that knows whether a *key* already
-        exists can tell a first run from a loss, and that is `Signer`, which creates an empty
-        ledger before the key so that seed-without-ledger can only mean the record went missing.
+        The judgement still cannot be made here, and the default says so by being `False`. A store
+        on its own sees a path and nothing else; only something that knows whether a *key* exists
+        can tell a first run from a loss, and that is `Signer`, which creates an empty ledger
+        before the key so that seed-without-ledger can only mean the record went missing. Handing
+        over a question rather than an answer keeps that division and drops the staleness.
         Constructed directly, a `NonceStore` therefore still degrades to the clock floor on a
         lost file — weaker, and asserted rather than assumed, because deleting the test that
         covered it would have left the weaker path unexamined.
         """
         self._path = Path(path)
-        self._key_exists = key_exists
+        # A question, not an answer. Passed as a plain `bool` this was read once at
+        # construction, and `Signer` constructs the store BEFORE `Keyring` mints the key —
+        # so on a first run the store held "no key here" for its whole life, and a ledger
+        # deleted later in that same process was read as a first run by the very install
+        # that had just created the identity (@yukkie3276, #803). A callable is asked at
+        # every load, so there is no snapshot left to go stale.
+        self._key_exists: Callable[[], bool] = (
+            key_exists if callable(key_exists) else (lambda: bool(key_exists))
+        )
         self._marker: dict[str, int] = {"v": _FORMAT_VERSION}
         self._state: dict[str, dict[str, int]] = self._load()
 
@@ -172,7 +188,7 @@ class NonceStore:
         none — applied to my own state file, which is where it had not been.
         """
         if not self._path.exists():
-            if self._key_exists:
+            if self._key_exists():
                 raise self._refuse(
                     "is missing, and this key already exists, so a ledger was written and has "
                     "since been lost"
@@ -201,7 +217,7 @@ class NonceStore:
         # The legitimate never-signed state is not caught here. A first run creates the ledger
         # before the key and stamps it, so an interrupted one leaves the marker present with no
         # entries, which is exactly what this admits.
-        if marker is None and not raw and self._key_exists:
+        if marker is None and not raw and self._key_exists():
             raise self._refuse(
                 "holds an empty object with no initialisation record, and this key already "
                 "exists, so the ledger this class wrote has been emptied rather than left as "
