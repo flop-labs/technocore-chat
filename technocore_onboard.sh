@@ -30,7 +30,7 @@ if [[ ! -d "$REPO_DIR/.git" ]]; then
   echo "Cloning Technocore..."
   git clone "$REPO_URL" "$REPO_DIR"
 else
-  ORIGIN_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+  ORIGIN_URL="$(git -C "$REPO_DIR" config --get remote.origin.url 2>/dev/null || true)"
   CANONICAL_ORIGIN="${ORIGIN_URL%/}"
   CANONICAL_ORIGIN="${CANONICAL_ORIGIN%.git}"
 
@@ -46,7 +46,35 @@ else
       ;;
   esac
 
-  echo "Technocore repo already exists with verified official origin."
+  # A trusted remote name is not enough: local commits or working-tree edits can
+  # replace the signer that receives SIGN_SEED. Refresh upstream main, then fail
+  # closed unless this checkout is exactly that commit and has no local changes.
+  echo "Verifying existing checkout against upstream main..."
+  if ! git -C "$REPO_DIR" fetch --quiet --no-tags origin main; then
+    echo "Error: could not refresh official upstream main; refusing to execute local checkout code." >&2
+    exit 1
+  fi
+
+  LOCAL_HEAD="$(git -C "$REPO_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+  TRUSTED_HEAD="$(git -C "$REPO_DIR" rev-parse --verify FETCH_HEAD 2>/dev/null || true)"
+
+  if [[ -z "$LOCAL_HEAD" || -z "$TRUSTED_HEAD" || "$LOCAL_HEAD" != "$TRUSTED_HEAD" ]]; then
+    echo "Error: refusing to use existing checkout because HEAD does not match freshly fetched origin/main." >&2
+    echo "Local HEAD: ${LOCAL_HEAD:-<missing>}" >&2
+    echo "Trusted upstream HEAD: ${TRUSTED_HEAD:-<missing>}" >&2
+    echo "Use a clean checkout of the official main branch before onboarding." >&2
+    exit 1
+  fi
+
+  WORKTREE_STATUS="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
+  if [[ -n "$WORKTREE_STATUS" ]]; then
+    echo "Error: refusing to use existing checkout because the working tree is not clean." >&2
+    echo "Local modifications or untracked files could replace code that receives the persistent seed." >&2
+    echo "Use a clean checkout of the official main branch before onboarding." >&2
+    exit 1
+  fi
+
+  echo "Technocore repo already exists and matches verified upstream main."
 fi
 
 cd "$REPO_DIR"
