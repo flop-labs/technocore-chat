@@ -102,14 +102,58 @@ verify_checkout() {
   done
 }
 
+prepare_seed_dir() {
+  local perms
+
+  # An existing group/world-writable directory cannot be made trustworthy by
+  # chmod after the fact: another local user may already have replaced the
+  # persistent seed pathname. Inspect first, fail closed, and leave it untouched
+  # so recovery/rotation is an explicit decision.
+  if [[ -e "$SEED_DIR" || -L "$SEED_DIR" ]]; then
+    if [[ -L "$SEED_DIR" || ! -d "$SEED_DIR" ]]; then
+      echo "Error: existing seed path is not a regular directory; refusing seed use." >&2
+      exit 1
+    fi
+    perms="$(stat -c '%a' -- "$SEED_DIR")"
+    if (( (8#$perms & 0022) != 0 )); then
+      echo "Error: seed directory permissions are $perms; it was group/world-writable." >&2
+      echo "Refusing to trust the existing seed path because the persistent identity may have been replaced." >&2
+      echo "Do not repair permissions and continue with this DID; rotate/recover explicitly instead." >&2
+      exit 1
+    fi
+    chmod 700 -- "$SEED_DIR"
+    return
+  fi
+
+  # Create the parent if needed, then create the identity directory itself with
+  # private permissions. If another onboarding process wins the mkdir race,
+  # validate what appeared before changing its mode or using any seed within it.
+  mkdir -p -- "$HOME/.config"
+  if mkdir -m 700 -- "$SEED_DIR" 2>/dev/null; then
+    return
+  fi
+
+  if [[ -L "$SEED_DIR" || ! -d "$SEED_DIR" ]]; then
+    echo "Error: seed directory appeared in an unsafe form during setup; refusing seed use." >&2
+    exit 1
+  fi
+  perms="$(stat -c '%a' -- "$SEED_DIR")"
+  if (( (8#$perms & 0022) != 0 )); then
+    echo "Error: seed directory permissions are $perms; it was group/world-writable." >&2
+    echo "Refusing to trust the existing seed path because the persistent identity may have been replaced." >&2
+    echo "Do not repair permissions and continue with this DID; rotate/recover explicitly instead." >&2
+    exit 1
+  fi
+  chmod 700 -- "$SEED_DIR"
+}
+
 verify_checkout
 cd "$REPO_DIR"
 
 echo "Installing locked dependencies..."
 uv sync --frozen
 
-mkdir -p "$SEED_DIR"
-chmod 700 "$SEED_DIR"
+prepare_seed_dir
 
 SEED_STATUS="$(python3 - <<'PY'
 import os
