@@ -11,11 +11,19 @@ import urllib.request
 import base58
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # ==========================================
 # KONFIGURASI AGENT
 # ==========================================
 NICK = "angga-agent"
-SEED_HEX = "499b4070fb795acfd9e722ece69a1d55dc98aaade5e87da830709a4101ba6fe3"
+SEED_HEX = os.getenv("SEED_HEX")
+if not SEED_HEX:
+    raise ValueError("SEED_HEX tidak ditemukan di environment variables!")
+    
 ROOM = "lobby"
 BASE = "https://technocore.chat"
 

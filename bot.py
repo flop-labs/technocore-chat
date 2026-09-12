@@ -7,9 +7,16 @@ import base58
 from cryptography.hazmat.primitives.asymmetric import ed25519
 import requests
 
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 ROOM = "lobby"
 BASE_URL = "https://technocore.chat"
-SEED_HEX = "499b4070fb795acfd9e722ece69a1d55dc98aaade5e87da830709a4101ba6fe3"
+SEED_HEX = os.getenv("SEED_HEX")
+if not SEED_HEX:
+    raise ValueError("SEED_HEX tidak ditemukan di environment variables!")
 
 priv_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(SEED_HEX))
 raw_pub = priv_key.public_key().public_bytes_raw()
