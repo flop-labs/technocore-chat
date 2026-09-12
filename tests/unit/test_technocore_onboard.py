@@ -1,11 +1,13 @@
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import pytest
 
 OFFICIAL_REPO_URL = "https://github.com/flop-labs/technocore-chat.git"
 
@@ -17,30 +19,62 @@ def _did_from_output(output: str) -> str:
     raise AssertionError(f"no DID in output:\n{output}")
 
 
-def _init_repo_with_origin(path: Path, origin: str = OFFICIAL_REPO_URL) -> None:
-    path.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.email", "technocore-tests@example.invalid"], check=True)
-    subprocess.run(["git", "-C", str(path), "config", "user.name", "Technocore Tests"], check=True)
-    subprocess.run(["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "trusted upstream fixture"], check=True)
+@pytest.fixture(autouse=True)
+def _local_upstream_transport(tmp_path, monkeypatch) -> None:
+    """Use real Git objects/status, replacing only the official network transport."""
+    real_git = shutil.which("git")
+    assert real_git is not None
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Onboarding test")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Onboarding test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.invalid")
+    monkeypatch.delenv("SIGN_SEED", raising=False)
 
-    if origin == OFFICIAL_REPO_URL:
-        upstream = path.parent / f"{path.name}-official-upstream.git"
-        subprocess.run(["git", "clone", "--bare", "-q", str(path), str(upstream)], check=True)
-        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(path),
-                "config",
-                f"url.file://{upstream.resolve()}.insteadOf",
-                OFFICIAL_REPO_URL,
-            ],
-            check=True,
-        )
-    else:
-        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    upstream = tmp_path / "upstream"
+    subprocess.run([real_git, "init", "-q", "-b", "main", str(upstream)], check=True)
+    (upstream / "scripts").mkdir()
+    (upstream / "scripts" / "sign.py").write_text("# trusted signer fixture\n")
+    (upstream / "pyproject.toml").write_text("# trusted dependencies fixture\n")
+    (upstream / "uv.lock").write_text("# trusted lock fixture\n")
+    subprocess.run([real_git, "-C", str(upstream), "add", "."], check=True)
+    subprocess.run([real_git, "-C", str(upstream), "commit", "-qm", "upstream"], check=True)
+    monkeypatch.setenv("TEST_UPSTREAM_REPO", str(upstream))
+
+    transport_bin = tmp_path / "git-bin"
+    transport_bin.mkdir()
+    git_wrapper = transport_bin / "git"
+    git_wrapper.write_text(
+        f"#!{sys.executable} -S\n"
+        + """import os
+import sys
+
+args = sys.argv[1:]
+official = "https://github.com/flop-labs/technocore-chat.git"
+if "ls-remote" in args and "--get-url" not in args:
+    if os.environ.get("TEST_UPSTREAM_QUERY_FAIL"):
+        raise SystemExit(128)
+    if "TEST_UPSTREAM_RESPONSE" in os.environ:
+        print(os.environ["TEST_UPSTREAM_RESPONSE"])
+        raise SystemExit(0)
+    assert official in args, "verification must query the official URL, not a local ref"
+    args[args.index(official)] = os.environ["TEST_UPSTREAM_REPO"]
+if "clone" in args and official in args:
+    args[args.index(official)] = os.environ["TEST_UPSTREAM_REPO"]
+"""
+        + f"os.execv({real_git!r}, [{real_git!r}, *args])\n"
+    )
+    git_wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{transport_bin}{os.pathsep}{os.environ['PATH']}")
+
+
+def _init_repo_with_origin(path: Path, origin: str = OFFICIAL_REPO_URL) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", "-q", os.environ["TEST_UPSTREAM_REPO"], str(path)], check=True
+    )
+    subprocess.run(["git", "-C", str(path), "remote", "set-url", "origin", origin], check=True)
 
 
 def test_two_first_run_processes_converge_on_persisted_did(tmp_path) -> None:
@@ -56,8 +90,8 @@ def test_two_first_run_processes_converge_on_persisted_did(tmp_path) -> None:
     barrier = tmp_path / "sync-barrier"
     barrier.mkdir()
 
-    # The helper only needs `uv sync` plus `uv run scripts/sign.py did` here.
-    # Synchronizing the two `uv sync` calls makes both onboarding processes
+    # The helper only needs `uv sync --frozen` plus `uv run --frozen scripts/sign.py did` here.
+    # Synchronizing the two `uv sync --frozen` calls makes both onboarding processes
     # reach first-time seed creation together and reliably exercises the race.
     fake_uv = bin_dir / "uv"
     fake_uv.write_text(
@@ -70,7 +104,7 @@ from pathlib import Path
 
 args = sys.argv[1:]
 
-if args == ["sync"]:
+if args == ["sync", "--frozen"]:
     barrier = Path(os.environ["TEST_UV_SYNC_BARRIER"])
     (barrier / str(os.getpid())).write_text("")
     deadline = time.monotonic() + 5
@@ -80,7 +114,7 @@ if args == ["sync"]:
         time.sleep(0.01)
     raise SystemExit(0)
 
-if args == ["run", "scripts/sign.py", "did"]:
+if args == ["run", "--frozen", "scripts/sign.py", "did"]:
     seed = os.environ["SIGN_SEED"].strip()
     digest = hashlib.sha256(seed.encode()).hexdigest()
     print(f"did:key:{digest}")
@@ -167,7 +201,7 @@ import time
 from pathlib import Path
 
 args = sys.argv[1:]
-if args == ["sync"]:
+if args == ["sync", "--frozen"]:
     barrier = Path(os.environ["TEST_UV_SYNC_BARRIER"])
     (barrier / str(os.getpid())).write_text("")
     deadline = time.monotonic() + 5
@@ -176,7 +210,7 @@ if args == ["sync"]:
             raise SystemExit("timed out waiting for concurrent onboarding")
         time.sleep(0.01)
     raise SystemExit(0)
-if args == ["run", "scripts/sign.py", "did"]:
+if args == ["run", "--frozen", "scripts/sign.py", "did"]:
     seed = os.environ["SIGN_SEED"].strip()
     print(f"did:key:{hashlib.sha256(seed.encode()).hexdigest()}")
     raise SystemExit(0)
@@ -333,9 +367,9 @@ import sys
 from pathlib import Path
 
 args = sys.argv[1:]
-if args == ["sync"]:
+if args == ["sync", "--frozen"]:
     raise SystemExit(0)
-if args == ["run", "scripts/sign.py", "did"]:
+if args == ["run", "--frozen", "scripts/sign.py", "did"]:
     Path(os.environ["TEST_DID_MARKER"]).write_text("called")
     print("did:key:should-not-be-reported")
     raise SystemExit(0)
@@ -377,7 +411,7 @@ def test_existing_checkout_with_untrusted_origin_fails_before_code_execution(tmp
     _init_repo_with_origin(fake_repo, "https://github.com/example/untrusted-technocore.git")
 
     scripts_dir = fake_repo / "scripts"
-    scripts_dir.mkdir()
+    scripts_dir.mkdir(exist_ok=True)
     signer_marker = tmp_path / "signer-observed-seed"
     (scripts_dir / "sign.py").write_text(
         """import os
@@ -408,7 +442,7 @@ import sys
 from pathlib import Path
 
 Path(os.environ["TEST_UV_MARKER"]).write_text(" ".join(sys.argv[1:]))
-if sys.argv[1:] == ["run", "scripts/sign.py", "did"]:
+if sys.argv[1:] == ["run", "--frozen", "scripts/sign.py", "did"]:
     os.execv(sys.executable, [sys.executable, "scripts/sign.py"])
 raise SystemExit(0)
 """
@@ -451,7 +485,7 @@ def test_existing_official_origin_with_untrusted_local_commit_fails_before_code_
     _init_repo_with_origin(fake_repo)
 
     scripts_dir = fake_repo / "scripts"
-    scripts_dir.mkdir()
+    scripts_dir.mkdir(exist_ok=True)
     signer_marker = tmp_path / "signer-observed-seed"
     (scripts_dir / "sign.py").write_text(
         """import os
@@ -487,7 +521,7 @@ import sys
 from pathlib import Path
 
 Path(os.environ["TEST_UV_MARKER"]).write_text(" ".join(sys.argv[1:]))
-if sys.argv[1:] == ["run", "scripts/sign.py", "did"]:
+if sys.argv[1:] == ["run", "--frozen", "scripts/sign.py", "did"]:
     os.execv(sys.executable, [sys.executable, "scripts/sign.py"])
 raise SystemExit(0)
 """
@@ -517,3 +551,193 @@ raise SystemExit(0)
     assert not signer_marker.exists()
     assert seed_file.read_text() == "preexisting-secret-seed\n"
     assert stat.S_IMODE(seed_file.stat().st_mode) == 0o600
+
+
+SENTINEL_SIGNER = """import os
+from pathlib import Path
+
+if os.environ.get("SIGN_SEED"):
+    Path(os.environ["TEST_SIGNER_MARKER"]).write_text("seed observed")
+raise SystemExit("untrusted signer must not execute")
+"""
+
+
+def _trust_case(tmp_path, *, existing_checkout=True):
+    home = tmp_path / "home"
+    checkout = home / "technocore-chat"
+    if existing_checkout:
+        _init_repo_with_origin(checkout)
+    seed_dir = home / ".config" / "technocore"
+    seed_dir.mkdir(parents=True)
+    seed_file = seed_dir / "sign_seed"
+    seed_file.write_text("onboarding-test-fixture-not-a-real-key\n")
+    seed_file.chmod(0o600)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_marker = tmp_path / "uv-invoked"
+    signer_marker = tmp_path / "signer-observed-seed"
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        f"#!{sys.executable} -S\n"
+        + """import hashlib
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+with Path(os.environ["TEST_UV_MARKER"]).open("a") as marker:
+    marker.write(" ".join(args) + "\\n")
+args = [arg for arg in args if arg != "--frozen"]
+if args == ["sync"]:
+    if os.environ.get("TEST_MODIFY_DURING_SYNC"):
+        Path("scripts/sign.py").write_text("# modified during sync\\n")
+    raise SystemExit(0)
+if args == ["run", "scripts/sign.py", "did"]:
+    if Path("scripts/sign.py").read_text() != "# trusted signer fixture\\n":
+        os.execv(sys.executable, [sys.executable, "scripts/sign.py"])
+    seed = os.environ["SIGN_SEED"].strip()
+    print(f"did:key:{hashlib.sha256(seed.encode()).hexdigest()}")
+    raise SystemExit(0)
+raise SystemExit(f"unexpected uv arguments: {args!r}")
+"""
+    )
+    fake_uv.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
+        TEST_UV_MARKER=str(uv_marker),
+        TEST_SIGNER_MARKER=str(signer_marker),
+    )
+    return checkout, seed_file, uv_marker, signer_marker, env
+
+
+def _run_onboarding(env):
+    repo = Path(__file__).resolve().parents[2]
+    return subprocess.run(
+        ["bash", str(repo / "technocore_onboard.sh")],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def _assert_refused(result, seed_file, uv_marker, signer_marker) -> None:
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0, combined
+    assert "did:key:" not in combined
+    assert "Setup complete." not in combined
+    assert not uv_marker.exists()
+    assert not signer_marker.exists()
+    assert seed_file.read_text() == "onboarding-test-fixture-not-a-real-key\n"
+    assert stat.S_IMODE(seed_file.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize(
+    "change", ["unstaged", "staged", "local-commit", "forged-tracking-ref"]
+)
+def test_official_origin_does_not_trust_modified_or_local_signer(tmp_path, change) -> None:
+    checkout, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    signer = checkout / "scripts" / "sign.py"
+    signer.write_text(SENTINEL_SIGNER)
+    if change != "unstaged":
+        subprocess.run(["git", "-C", str(checkout), "add", "scripts/sign.py"], check=True)
+    if change in {"local-commit", "forged-tracking-ref"}:
+        subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "local signer"], check=True)
+    if change == "forged-tracking-ref":
+        subprocess.run(
+            ["git", "-C", str(checkout), "update-ref", "refs/remotes/origin/main", "HEAD"],
+            check=True,
+        )
+    before_head = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"])
+    result = _run_onboarding(env)
+    _assert_refused(result, seed, uv_marker, signer_marker)
+    assert signer.read_text() == SENTINEL_SIGNER
+    assert subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"]) == before_head
+
+
+@pytest.mark.parametrize("path", ["pyproject.toml", "uv.lock", "scripts/extra.py"])
+def test_modified_dependencies_or_untracked_code_are_refused(tmp_path, path) -> None:
+    checkout, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    (checkout / path).write_text("# local modification\n")
+    result = _run_onboarding(env)
+    _assert_refused(result, seed, uv_marker, signer_marker)
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_signer_raw_content_check_cannot_be_hidden_by_index_flags(tmp_path, flag) -> None:
+    checkout, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    subprocess.run(["git", "-C", str(checkout), "update-index", flag, "scripts/sign.py"], check=True)
+    (checkout / "scripts" / "sign.py").write_text(SENTINEL_SIGNER)
+    assert subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"]) == b""
+    result = _run_onboarding(env)
+    _assert_refused(result, seed, uv_marker, signer_marker)
+    assert "scripts/sign.py differs from verified upstream content" in result.stderr
+
+
+@pytest.mark.parametrize("response", [None, "", "not-a-commit\trefs/heads/main"])
+def test_unavailable_or_invalid_upstream_proof_fails_closed(tmp_path, response) -> None:
+    _, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    if response is None:
+        env["TEST_UPSTREAM_QUERY_FAIL"] = "1"
+    else:
+        env["TEST_UPSTREAM_RESPONSE"] = response
+    result = _run_onboarding(env)
+    _assert_refused(result, seed, uv_marker, signer_marker)
+
+
+@pytest.mark.parametrize("existing_checkout", [True, False])
+def test_clean_verified_upstream_preserves_existing_identity(tmp_path, existing_checkout) -> None:
+    _, seed, uv_marker, signer_marker, env = _trust_case(
+        tmp_path, existing_checkout=existing_checkout
+    )
+    before = seed.read_text()
+    result = _run_onboarding(env)
+    assert result.returncode == 0, result.stderr
+    assert "Setup complete." in result.stdout
+    assert seed.read_text() == before
+    assert _did_from_output(result.stdout) == f"did:key:{hashlib.sha256(before.strip().encode()).hexdigest()}"
+    assert uv_marker.read_text().splitlines() == [
+        "sync --frozen",
+        "run --frozen scripts/sign.py did",
+    ]
+    assert not signer_marker.exists()
+
+
+def test_checkout_is_rechecked_before_seed_reaches_signer(tmp_path) -> None:
+    _, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    env["TEST_MODIFY_DURING_SYNC"] = "1"
+    before = seed.read_text()
+    result = _run_onboarding(env)
+    assert result.returncode != 0
+    assert "did:key:" not in result.stdout
+    assert "Setup complete." not in result.stdout
+    assert uv_marker.read_text().splitlines() == ["sync --frozen"]
+    assert not signer_marker.exists()
+    assert seed.read_text() == before
+
+
+def test_official_url_cannot_be_rewritten_to_a_local_signer(tmp_path) -> None:
+    checkout, seed, uv_marker, signer_marker, env = _trust_case(tmp_path)
+    (checkout / "scripts" / "sign.py").write_text(SENTINEL_SIGNER)
+    subprocess.run(["git", "-C", str(checkout), "add", "scripts/sign.py"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "-qm", "local signer"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "config",
+            f"url.{checkout.as_uri()}.insteadOf",
+            OFFICIAL_REPO_URL,
+        ],
+        check=True,
+    )
+    # Model the destination Git's insteadOf rule would actually contact.
+    env["TEST_UPSTREAM_REPO"] = str(checkout)
+    result = _run_onboarding(env)
+    _assert_refused(result, seed, uv_marker, signer_marker)
