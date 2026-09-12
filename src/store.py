@@ -2298,7 +2298,7 @@ def _check_room_capacity(root: Path, path: Path) -> None:
         )
 
 
-def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
+def _check_note_capacity(root: Path, ns_dir: Path, path: Path, persist=True) -> None:
     """Both note caps, neither of which walks any more. Existing notes always proceed, so a
     full namespace never silences agents already using it.
 
@@ -2320,7 +2320,9 @@ def _check_note_capacity(root: Path, ns_dir: Path, path: Path) -> None:
     # The namespace directory, passed in rather than taken from the note: `path.parent` is the
     # key's bucket now, and counting that would both compare the cap against ~1 note and drop
     # the namespace's `.notes-count` two levels below where every other reader looks for it.
-    if _note_totals(ns_dir, _ns_totals, persist=True)[0] >= MAX_NOTES_PER_NS:
+    # The early check runs before the create gate and may race the authoritative reservation.
+    # Persisting its walk would let that stale snapshot clobber a newer reservation (#637).
+    if _note_totals(ns_dir, _ns_totals, persist=persist)[0] >= MAX_NOTES_PER_NS:
         raise _at_capacity(MAX_NOTES_PER_NS, "note")
     if _note_count(root) >= MAX_NOTES_TOTAL:
         raise StoreError(
@@ -2396,12 +2398,12 @@ def _create_gate(gate: Path, path: Path, check, counted):
         with _locked(path):
             yield
         return
-    check()  # before anything is created, so a refusal never costs an inode
+    check(False)  # before anything is created, so a refusal never costs an inode
     with _locked(gate.with_suffix(".create"), shared=True), _locked(path):
         reserved = False
         if not path.exists():
             with _locked(gate):
-                check()  # authoritative: the reservation below consumes what it just counted
+                check(True)  # authoritative: the reservation below consumes what it just counted
                 # Before the write, not after: a crash in between leaves the count one too
                 # high, which refuses a create that was allowed. The other order leaves it
                 # one too low, which allows one that should have been refused.
@@ -2549,7 +2551,7 @@ def _write_record(
     with _create_gate(
         root / USAGE_FILE,
         path,
-        lambda: _check_room_capacity(root, path),
+        lambda _authoritative: _check_room_capacity(root, path),
         lambda d: _count_new_room(root, d),
     ):
         # Under the lock, before the write: two concurrent first-writers must not both
@@ -2682,7 +2684,7 @@ def note_set(
     with _create_gate(
         root / NOTES_FILE,
         path,
-        lambda: _check_note_capacity(root, ns_dir, path),
+        lambda authoritative: _check_note_capacity(root, ns_dir, path, persist=authoritative),
         lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
     ):
         if expect_absent or expect is not None:

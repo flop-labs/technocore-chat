@@ -161,6 +161,35 @@ def test_a_read_outside_the_gate_never_persists_what_it_rebuilt(tmp_path) -> Non
     )
 
 
+def test_the_early_capacity_check_cannot_persist_a_stale_namespace_rebuild(
+    tmp_path, monkeypatch
+) -> None:
+    """The pre-gate check is only an admission fast path, not an authority.
+
+    If its namespace sidecar is missing, its walk can overlap a different create that has
+    already reserved a slot. Installing that old snapshot after the reservation makes the
+    per-namespace count drift low and lets later writes cross the cap (#637). Only the check
+    inside the counter lock may persist a rebuilt count.
+    """
+    import store
+
+    calls = []
+    real = store._check_note_capacity
+
+    def record(root, ns_dir, path, persist=True):
+        calls.append(persist)
+        return real(root, ns_dir, path, persist=persist)
+
+    monkeypatch.setattr(store, "_check_note_capacity", record)
+    store.note_set(tmp_path, "did", "seed", "v")
+    ns = tmp_path / "notes" / "did"
+    (ns / store.NOTES_FILE).unlink()
+    store.note_set(tmp_path, "did", "next", "v")
+
+    assert calls == [False, True, False, True]
+    assert store._note_totals(ns, store._ns_totals)[0] == 2
+
+
 def test_a_reap_reconciles_a_drifted_count(tmp_path, monkeypatch) -> None:
     """Drift is bounded by one reap interval rather than by hope. Writing a deliberately
     wrong count and running a reap must restore the truth — this is what keeps a lost
@@ -401,8 +430,8 @@ def test_the_per_namespace_cap_holds_under_concurrent_creates(tmp_path, monkeypa
     monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 4)
     real_check = store._check_note_capacity
 
-    def slow_check(root, ns_dir, path):
-        real_check(root, ns_dir, path)
+    def slow_check(root, ns_dir, path, persist=True):
+        real_check(root, ns_dir, path, persist=persist)
         time.sleep(0.02)  # widen the count->write window every racer must lose
 
     monkeypatch.setattr(store, "_check_note_capacity", slow_check)
