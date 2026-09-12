@@ -19,8 +19,28 @@ def _did_from_output(output: str) -> str:
 
 def _init_repo_with_origin(path: Path, origin: str = OFFICIAL_REPO_URL) -> None:
     path.mkdir(parents=True)
-    subprocess.run(["git", "init", "-q", str(path)], check=True)
-    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "technocore-tests@example.invalid"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Technocore Tests"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "trusted upstream fixture"], check=True)
+
+    if origin == OFFICIAL_REPO_URL:
+        upstream = path.parent / f"{path.name}-official-upstream.git"
+        subprocess.run(["git", "clone", "--bare", "-q", str(path), str(upstream)], check=True)
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(path),
+                "config",
+                f"url.file://{upstream.resolve()}.insteadOf",
+                OFFICIAL_REPO_URL,
+            ],
+            check=True,
+        )
+    else:
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
 
 
 def test_two_first_run_processes_converge_on_persisted_did(tmp_path) -> None:
@@ -416,6 +436,83 @@ raise SystemExit(0)
     assert "refusing to use existing checkout" in combined
     assert "origin is not the official flop-labs/technocore-chat repository" in combined
     assert "https://github.com/example/untrusted-technocore.git" in combined
+    assert not uv_marker.exists()
+    assert not signer_marker.exists()
+    assert seed_file.read_text() == "preexisting-secret-seed\n"
+    assert stat.S_IMODE(seed_file.stat().st_mode) == 0o600
+
+
+def test_existing_official_origin_with_untrusted_local_commit_fails_before_code_execution(tmp_path) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    helper = repo / "technocore_onboard.sh"
+
+    home = tmp_path / "home"
+    fake_repo = home / "technocore-chat"
+    _init_repo_with_origin(fake_repo)
+
+    scripts_dir = fake_repo / "scripts"
+    scripts_dir.mkdir()
+    signer_marker = tmp_path / "signer-observed-seed"
+    (scripts_dir / "sign.py").write_text(
+        """import os
+from pathlib import Path
+
+seed = os.environ.get("SIGN_SEED")
+if seed is not None:
+    Path(os.environ["TEST_SIGNER_MARKER"]).write_text(seed)
+raise SystemExit("sentinel signer should never execute")
+"""
+    )
+    subprocess.run(["git", "-C", str(fake_repo), "add", "scripts/sign.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(fake_repo), "commit", "-q", "-m", "local untrusted signer"],
+        check=True,
+    )
+
+    seed_dir = home / ".config" / "technocore"
+    seed_dir.mkdir(parents=True)
+    seed_file = seed_dir / "sign_seed"
+    seed_file.write_text("preexisting-secret-seed\n")
+    seed_file.chmod(0o600)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_marker = tmp_path / "uv-invoked"
+
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+Path(os.environ["TEST_UV_MARKER"]).write_text(" ".join(sys.argv[1:]))
+if sys.argv[1:] == ["run", "scripts/sign.py", "did"]:
+    os.execv(sys.executable, [sys.executable, "scripts/sign.py"])
+raise SystemExit(0)
+"""
+    )
+    fake_uv.chmod(0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["TEST_UV_MARKER"] = str(uv_marker)
+    env["TEST_SIGNER_MARKER"] = str(signer_marker)
+
+    result = subprocess.run(
+        ["bash", str(helper)],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "HEAD does not match verified upstream main" in combined
     assert not uv_marker.exists()
     assert not signer_marker.exists()
     assert seed_file.read_text() == "preexisting-secret-seed\n"
