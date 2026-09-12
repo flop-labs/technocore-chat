@@ -313,3 +313,60 @@ def test_junk_in_the_poll_interval_refuses_to_boot() -> None:
             env={**clean, "CHAT_WAIT_POLL": raw},
         )
         assert run.returncode != 0, f"CHAT_WAIT_POLL={raw!r} booted"
+
+
+# ---------------------------------------------------------------------------
+# CHAT_CLIENT_IP_HEADER validation (PR #752 / issue #745)
+# ---------------------------------------------------------------------------
+
+
+def _boot_fails(env_name: str, value: str, marker: str = "FATAL") -> bool:
+    """Return True if the app refuses to boot with env set to value."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, env_name: value},
+    )
+    return run.returncode != 0 and marker in (run.stderr + run.stdout)
+
+
+def test_client_ip_header_non_ascii_refuses_to_boot() -> None:
+    """Non-ASCII values like é (U+00E9, Latin-1) must fail at boot."""
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "é")
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "☃")
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "café")
+
+
+def test_client_ip_header_colon_refuses_to_boot() -> None:
+    """A colon is not a valid HTTP field-name token character."""
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "x-forwarded-for:8080")
+
+
+def test_client_ip_header_space_refuses_to_boot() -> None:
+    """Space is not a valid HTTP field-name token character."""
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "x forward")
+
+
+def test_client_ip_header_comma_refuses_to_boot() -> None:
+    """Comma is not a valid HTTP field-name token character."""
+    assert _boot_fails("CHAT_CLIENT_IP_HEADER", "x,forwarded")
+
+
+def test_client_ip_header_valid_ascii_header_boots() -> None:
+    """A real HTTP header like cf-connecting-ip must boot and be lowercased."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_CLIENT_IP_HEADER": "CF-Connecting-IP"},
+    )
+    assert run.returncode == 0, f"valid header failed: {run.stderr}"
+
+
+def test_client_ip_header_empty_is_opt_out() -> None:
+    """Empty string is the documented opt-out and must boot."""
+    assert boot(CHAT_CLIENT_IP_HEADER="")["config.WORKERS"] == 1
+    assert boot(CHAT_CLIENT_IP_HEADER="  ")["config.WORKERS"] == 1  # stripped to empty
