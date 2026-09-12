@@ -104,6 +104,7 @@ def _reset_process_state(monkeypatch) -> None:
     app_module._identities.clear()
     app_module._proxy_evidence["proxied_requests"] = 0
     limit._dupes.clear()
+    limit._rings.clear()
 
 
 @pytest.fixture()

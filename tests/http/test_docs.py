@@ -778,6 +778,7 @@ def _one_copy_too_many(client, lane: str):
     import limit
 
     limit._dupes.clear()
+    limit._rings.clear()  # the share cap's state too, or lane two inherits lane one's copies
     app_module._buckets.clear()  # the cases above spent the shared write bucket; buy it back
     with config.override(DUPE_FILTER_SECONDS=30, DUPE_MAX_COPIES=5, RATE_WRITE=600):
         allowed = config.DUPE_MAX_COPIES  # the pinned 5, read so count and knob cannot drift
