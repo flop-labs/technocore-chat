@@ -429,6 +429,70 @@ def test_the_share_ring_is_bounded_per_room_and_across_rooms() -> None:
     limit._rings.clear()
 
 
+def test_a_share_capped_room_survives_eviction_while_under_attack() -> None:
+    """Minh3132's #734 finding: a refused write is an access, and the ring's LRU has to
+    treat it as one. Fill a room to the share cap, then admit a filterable message in more
+    than MAX_RING_ROOMS other rooms while hammering the capped room with copies the SHARE
+    CAP alone turns away. The capped room is older by creation than every flood room, so
+    only its refused touches can keep it resident - and they must. Before the fix the ring
+    was refreshed only by an ACCEPTED write, so a room whose traffic is all refusals looked
+    idle, got evicted, and its next copy met an empty ring and rebuilt a fresh cap's worth
+    of allowance - reopening exactly the slow-repetition this filter exists to bound."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    for i in range(allowed):
+        assert refused(LONG, now=float(i) * (WINDOW + 1), room="hot") is False, i
+    assert refused(LONG, now=float(allowed) * (WINDOW + 1), room="hot") is True
+    contents = limit._rings[("hot", 0)]
+    for i in range(limit.MAX_RING_ROOMS + 50):
+        # A share-cap refusal in the capped room, each spaced past the window so ONLY the
+        # cap can be refusing, then one accepted message in a brand-new room that pushes the
+        # LRU front along. Without refresh-on-refusal "hot" is the oldest key and is evicted.
+        assert refused(LONG, now=float(allowed + 1 + i) * (WINDOW + 1), room="hot") is True, i
+        assert (
+            refused("a phrase long enough to be filtered", now=1000.0, room="new" + str(i)) is False
+        )
+    assert ("hot", 0) in limit._rings, "the room under active attack must survive its own flood"
+    assert limit._rings[("hot", 0)] == contents, "and a share-cap refusal still records no slot"
+    assert refused(LONG, now=1e9, room="hot") is True, "so the next copy is still refused"
+    assert len(limit._rings) == limit.MAX_RING_ROOMS
+    assert ("new0", 0) not in limit._rings, "while an idle flood room is the one evicted"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_a_window_hammered_room_survives_eviction_too() -> None:
+    """The same finding by its other door, which is what makes the fix the root and not a
+    patch on one exit. A room refused by the WINDOW rule (copies inside the window, well
+    under the share cap) also returns above the accepted write that used to be the ring's
+    only LRU refresh, so its ring is evictable while under active attack in exactly the way
+    a share-capped room's is. Refresh-on-refusal has to cover both refusal rules at once, or
+    a fix that touched only the share-cap exit would leave this path as the next finding."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    # COPIES accepted copies at one instant give "hot" both a ring and a full window; every
+    # further copy at that same instant is a WINDOW refusal (COPIES is far under the share
+    # cap of 32), and since a refusal adds no timestamp the window stays full while `now`
+    # holds - so the whole flood below is real window refusals, not a decayed rate.
+    for i in range(COPIES):
+        assert refused(LONG, now=1000.0, room="hot") is False, i
+    assert refused(LONG, now=1000.0, room="hot") is True, "the sixth copy trips the window"
+    contents = limit._rings[("hot", 0)]
+    assert len(contents) == COPIES, "the accepted copies are the room's whole ring"
+    for i in range(limit.MAX_RING_ROOMS + 50):
+        assert refused(LONG, now=1000.0, room="hot") is True, i  # window refusal, not the cap
+        assert (
+            refused("a phrase long enough to be filtered", now=1000.0, room="new" + str(i)) is False
+        )
+    assert ("hot", 0) in limit._rings, "a window-refused room is under attack and must survive"
+    assert limit._rings[("hot", 0)] == contents, "and its ring is untouched by the refusals"
+    assert len(limit._rings) == limit.MAX_RING_ROOMS
+    assert ("new0", 0) not in limit._rings, "the evicted room is an idle one, not the attacked one"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
 def test_releasing_a_reserved_copy_gives_back_its_ring_slot_too() -> None:
     """The share ring is reserved before the append exactly as the window's timestamp is,
     and the append refuses writes of its own. A slot that no write ever used has to come

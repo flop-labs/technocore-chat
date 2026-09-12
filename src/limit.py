@@ -280,6 +280,17 @@ def dupe_refused(
     # recreated room does not inherit the dead one's slots (#734, and the block above _rings).
     ring = (room, generation)
     with _dupes_lock:
+        # A refused write is an access too. Refresh this ring's LRU slot on EVERY path
+        # through the lock — share-cap refusal, window refusal, accepted write — so a room
+        # under live duplicate attack is never mistaken for idle and evicted out from under
+        # the very cap that is refusing its copies (Minh3132, #734). Move-only, guarded by
+        # membership: the accepted write below stays the sole place a ring key is born, so
+        # this records no slot and creates no empty ring. Mirrors _dupes, whose pop+reinsert
+        # already refreshes it on the window's refusal path — _rings' two refusals both
+        # return above that pop, so only the accepted write refreshed the ring before, which
+        # let a room evicted while still under attack rebuild a fresh share allowance.
+        if ring in _rings:
+            _rings.move_to_end(ring)
         # The share cap first, and before anything is recorded: a refusal here may no more
         # extend a window than one below does, and the room's ring is the cheaper check.
         if sum(d == key[1] for _, d in _rings.get(ring, ())) + 1 > DUPE_SHARE * DUPE_RING:
