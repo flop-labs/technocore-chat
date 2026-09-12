@@ -80,9 +80,15 @@ class Signer:
         #
         # An *empty* ledger beside no seed stays innocent: that is the window this class opens
         # on purpose two lines up, and the reason the test is on allocations and not on the file.
-        if ledger_existed and not seed_existed:
+        # Live reads, not the snapshot taken before `initialise()` ran. With the snapshot, a
+        # ledger carrying history that arrived after line 1 of this function — a partial
+        # restore, a file-by-file sync, a `cp -r` racing a start — left `ledger_existed`
+        # false, so this check was skipped and the key was minted over it. A fresh re-check
+        # cannot miss a real loss: if the seed has appeared since, it is not lost (own audit,
+        # same staleness @yukkie3276 found one consumer away).
+        if ledger.exists() and not seed.exists():
             try:
-                keys_recorded, allocations = NonceStore(ledger).records()
+                keys_recorded, allocations, marked = NonceStore(ledger).records()
             except LedgerUnreadableError as exc:
                 # `from None`, and the reason folded into the text instead. Chaining printed the
                 # store's own refusal as the cause, and that message ends "move it aside once
@@ -104,14 +110,21 @@ class Signer:
                     if allocations
                     else f"records {keys_recorded} prior key(s) and no allocations",
                 )
-            # Nothing above refused, so this ledger provably holds no history and no key exists
-            # yet to have made any. Stamp it before `Keyring` runs. Without this, a stray `{}`
-            # stays unmarked, the key is created immediately below, and the first `allocate()`
-            # refuses on a ledger that was never written — a fresh install holding an identity
-            # it can never use, told that its records were erased. My own change one commit ago
-            # opened that path: the refusal it added keys off a fact this constructor is about
-            # to make true.
-            NonceStore(ledger).stamp_if_empty()
+            # An entry-free ledger with no marker, beside no key. Every ledger this package
+            # writes is stamped, so this file did not come from here: either it is a stray that
+            # something else created, or it is a ledger of ours that was emptied — and an
+            # emptied one means this install had a key and has lost it as well as its history.
+            # The two are indistinguishable on disk, which is exactly why this refuses instead
+            # of choosing.
+            #
+            # I chose, one commit ago, and chose wrong. `stamp_if_empty` adopted the file so a
+            # stray `{}` would stop bricking a fresh install. It also stamped the emptied case,
+            # which erased the single bit that distinguished them and then let `Keyring` mint a
+            # replacement identity on top — signing happily under a new DID forever, evidence
+            # gone. Reproduced before reverting it. Refusing costs a fresh install one manual
+            # step; stamping cost a real one its identity, silently. That asymmetry decides it.
+            if not marked:
+                raise self._unknown_ledger(seed, ledger)
         # One known window, left as it is on purpose. A second starter that reads
         # `seed_existed=False` after the winner's `initialise()` but before its `os.link` will
         # come through here, and if the winner's *application* has also allocated by then it
@@ -144,6 +157,30 @@ class Signer:
             "move this whole directory aside to start deliberately as a new identity. Do not "
             "move the ledger aside on its own — that turns this into what looks like a first "
             "run, which is precisely the silent replacement being refused here."
+        )
+
+    @staticmethod
+    def _unknown_ledger(seed: Path, ledger: Path) -> Exception:
+        """Refuse without asserting which of two things happened, because it cannot be known.
+
+        `_identity_lost` states as fact that the install has signed before. For a ledger holding
+        *entries* that is sound. For an entry-free ledger with no marker it is one of two
+        readings, and the file cannot tell them apart: something else created a stray `{}`, or a
+        ledger of ours was emptied — and only the second means a key existed. Reusing the
+        confident wording here would have been the same defect this package keeps finding, a true
+        refusal carrying a claim the evidence does not support.
+        """
+        return ValueError(
+            f"{seed} is missing, and {ledger} exists, holds no entries and carries no "
+            "initialisation record. Every ledger this package writes is stamped, so this one was "
+            "not written here, and that has two readings it cannot distinguish: something else "
+            "created the file and nothing has ever signed from this directory, or a stamped "
+            "ledger was emptied — in which case this install had a key and both the key and its "
+            "nonce history are gone. Minting a key now would be right in the first case and a "
+            "silent identity replacement in the second, so it refuses and leaves the choice with "
+            f"you. If nothing has ever signed from here, delete {ledger} and start again. If it "
+            "has, restore the seed from a backup; a new identity will not be the old one, and "
+            "everything already published stays under a DID that can never sign again."
         )
 
     @property

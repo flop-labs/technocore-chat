@@ -339,6 +339,29 @@ def test_a_seed_that_is_not_a_regular_file_names_itself_and_not_the_ledger(tmp_p
     assert "is not a regular file" in str(dangling.value)
 
 
+def test_an_unmarked_ledger_with_entries_is_refused_beside_a_key(tmp_path) -> None:
+    """The guard checked "empty" while its reasoning claimed "not written here".
+
+    Narrowed to the exact shape `{}`, it missed `{"did:key:z...": {"room": 1}}` and even
+    `{"did:key:z...": {}}`: no marker, but a non-empty object, so nothing refused and allocation
+    fell back to the clock — the rollback failure the marker exists to prevent, reachable through
+    a shape one character away from the one that was covered.
+
+    Safe to broaden to any unmarked ledger because this package has never been released, so
+    there are no unmarked ledgers in the world for the stricter rule to reject.
+    """
+    store = tmp_path / "nonces.json"
+    for shape in ({"did:key:zStub": {}}, {"did:key:zStub": {"room": 1_700_000_000_000}}):
+        store.write_text(json.dumps(shape))
+        with pytest.raises(LedgerUnreadableError) as caught:
+            NonceStore(store, key_exists=True)
+        assert "carries no initialisation record" in str(caught.value)
+
+    # A marked ledger of the same shape is ordinary history and must still load.
+    store.write_text(json.dumps({"!ledger": {"v": 1}, "did:key:zStub": {"room": 5}}))
+    assert NonceStore(store, key_exists=True).last("did:key:zStub", "room") == 5
+
+
 def test_a_ledger_from_a_newer_format_is_unknown_rather_than_fresh(tmp_path) -> None:
     """The marker carried a version that nothing read.
 
@@ -360,36 +383,92 @@ def test_a_ledger_from_a_newer_format_is_unknown_rather_than_fresh(tmp_path) -> 
     assert "no usable version" in str(bare.value)
 
 
-def test_a_stray_empty_ledger_on_a_first_run_is_adopted_and_not_fatal(tmp_path) -> None:
-    """The marker's own regression, found by auditing the commit that added it.
+def test_an_unmarked_empty_ledger_with_no_seed_refuses_rather_than_guessing(tmp_path) -> None:
+    """Two readings, indistinguishable on disk, so it refuses instead of picking one.
 
-    A bare `{}` in a directory with no key was innocent before the marker existed, and had to
-    stay innocent. It did not. `initialise()` skips a file that already exists, so the stray
-    ledger survived startup unmarked; `Keyring` created the key one line later, which flipped
-    `key_exists` true; and the first `allocate()` refused, telling the operator their ledger had
-    been emptied when nothing had ever written one. A fresh install came up holding an identity
-    it could never sign with, and the next start refused during construction.
+    Every ledger this package writes is stamped. An entry-free ledger with *no* marker therefore
+    did not come from here, and that has two meanings: something else created a stray `{}` and
+    nothing has ever signed, or a stamped ledger was emptied — which means a key existed and is
+    now gone along with its history.
 
-    Worth a test rather than a comment because the refusal was right and its trigger was a fact
-    the constructor itself was about to make true — the same shape as every other finding on this
-    branch, which is a new line meeting an ordering constraint somewhere else.
+    I picked the innocent reading once and it was the wrong half. A `stamp_if_empty` adopted the
+    file so that a stray would stop bricking a fresh install; it also stamped the emptied case,
+    erasing the one bit that told them apart, after which `Keyring` minted a replacement and the
+    client signed under a new DID indefinitely with the evidence destroyed. Refusing costs a
+    fresh install one manual step. Stamping cost a real install its identity, silently. The
+    asymmetry is the whole argument.
     """
     home = tmp_path / "home"
     home.mkdir(parents=True)
     (home / "nonces.json").write_text("{}")
 
-    signer = Signer(home)
-    issued = signer.nonces.allocate(signer.did, "room")
-    assert issued > 0, "a fresh install with a stray empty ledger could not sign"
+    with pytest.raises(ValueError) as caught:
+        Signer(home)
+    text = str(caught.value)
+    # Both readings named, and neither asserted as fact — the failure mode of every refusal on
+    # this branch has been a true message carrying a claim its evidence did not support.
+    assert "two readings it cannot distinguish" in text
+    assert "nothing has ever signed" in text and "was emptied" in text
+    assert "has signed before" not in text, "asserted a history it cannot know"
+    # A usable route out for each reading.
+    assert "delete" in text and "restore the seed from a backup" in text.lower()
 
-    on_disk = json.loads((home / "nonces.json").read_text())
-    assert "!ledger" in on_disk, "the stray ledger was used without being adopted"
-    assert on_disk[signer.did] == {"room": issued}
 
-    # And the next start, which is where the old behaviour refused during construction.
-    again = Signer(home)
-    assert again.did == signer.did
-    assert again.nonces.allocate(again.did, "room") > issued
+def test_an_emptied_ledger_beside_a_lost_seed_is_never_silently_replaced(tmp_path) -> None:
+    """The case the adopt-and-stamp version got wrong, asserted directly.
+
+    An install signs under one identity; its ledger is then truncated to `{}` and its seed lost.
+    Both are gone, so the identity is already unrecoverable — the only thing left to protect is
+    the operator's knowledge that it happened. Stamping made the state look innocent and signed
+    on under a new DID forever. This asserts the refusal, and that the evidence is left alone.
+    """
+    home = tmp_path / "home"
+    first = Signer(home)
+    first.nonces.allocate(first.did, "room")
+
+    (home / "nonces.json").write_text("{}")
+    (home / "seed").unlink()
+
+    with pytest.raises(ValueError) as caught:
+        Signer(home)
+    assert "carries no initialisation record" in str(caught.value)
+    assert not (home / "seed").exists(), "a replacement key was minted behind the refusal"
+    assert (home / "nonces.json").read_text() == "{}", "the evidence was rewritten"
+
+
+def test_a_ledger_arriving_after_the_startup_snapshot_is_still_seen(tmp_path, monkeypatch) -> None:
+    """The gate consumed a snapshot taken before it, so a late arrival was invisible.
+
+    `seed.exists()` and `ledger.exists()` were sampled once at the top of `__init__`, and the
+    identity-loss gate tested the sample. A ledger carrying real history that lands *after* that
+    sample — a partial restore, a file-by-file sync, a copy racing a start — left the flag false,
+    so the gate was skipped and a key was minted over the restored history. The store could not
+    catch it either: its own key check answers false at that moment too.
+
+    The first version of this test wrote the ledger before constructing `Signer`, so the snapshot
+    and a live read agreed and it passed with the bug present — a regression that proved nothing
+    about the case in its name, which is a mistake this branch has already been corrected for
+    once. The arrival has to happen *inside* the constructor, so `initialise()` is hooked to
+    deliver the file exactly where an external writer would.
+    """
+    home = tmp_path / "home"
+    ledger = home / "nonces.json"
+    history = {"!ledger": {"v": 1}, "did:key:zStub": {"room": 1_700_000_000_000}}
+
+    real_initialise = nonces_module.NonceStore.initialise
+
+    def deliver_then_initialise(self) -> None:
+        real_initialise(self)
+        # An external writer landing between the snapshot and the gate.
+        ledger.write_text(json.dumps(history))
+
+    monkeypatch.setattr(nonces_module.NonceStore, "initialise", deliver_then_initialise)
+
+    with pytest.raises(ValueError) as caught:
+        Signer(home)
+    assert "nonce allocation(s)" in str(caught.value)
+    assert not (home / "seed").exists(), "a key was minted over history that arrived late"
+    assert json.loads(ledger.read_text()) == history, "the refusal rewrote the evidence"
 
 
 def test_a_stamped_ledger_with_no_entries_stays_innocent_beside_a_key(tmp_path) -> None:

@@ -44,6 +44,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -158,41 +159,7 @@ class NonceStore:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-    def stamp_if_empty(self) -> None:
-        """Adopt an unmarked, entry-free ledger that was already here, by stamping it.
-
-        The marker turned "an empty ledger beside an existing key" into a refusal, which is
-        right — but a bare `{}` sitting in a directory with no key yet was innocent before that
-        and had to stay innocent. It did not: `initialise()` skips a file that exists, so the
-        stray `{}` survived startup unmarked, `Keyring` then created the key one line later, and
-        the first `allocate()` refused — telling the operator their ledger had been emptied when
-        nothing had ever written one. A fresh install minted an identity it could never use.
-
-        Found by auditing my own change rather than by a reviewer, which is the only reason it is
-        worth writing down twice: the refusal was correct and its trigger was a fact that the
-        constructor itself was about to make true.
-
-        Stamping is honest only here. `Signer` calls this having just established that the ledger
-        holds no keys and no allocations *and* that no key exists yet — so there is no history it
-        could be hiding. Beside an existing key the same file stays a refusal, because then
-        emptiness proves nothing.
-
-        Re-reads under the lock and writes only if the file is still unmarked and still empty,
-        for the same reason `initialise()` does: a writer that decided outside the lock is a
-        writer that clobbers.
-        """
-        fd = self._lock()
-        try:
-            state = self._load()
-            if self._marker_present or state:
-                return
-            self._state = state
-            self._flush()
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-
-    def records(self) -> tuple[int, int]:
+    def records(self) -> tuple[int, int, bool]:
         """(keys recorded, (key, room) pairs recorded), from one read.
 
         Exists so `Signer` can tell an empty ledger from one with history without reaching into
@@ -205,7 +172,7 @@ class NonceStore:
         counted here as a key.
         """
         state = self._load()
-        return len(state), sum(len(rooms) for rooms in state.values())
+        return len(state), sum(len(rooms) for rooms in state.values()), self._marker_present
 
     def _load(self) -> dict[str, dict[str, int]]:
         """The persisted ledger, or `{}` when there has never been one.
@@ -228,6 +195,11 @@ class NonceStore:
                     "is missing, and this key already exists, so a ledger was written and has "
                     "since been lost"
                 )
+            # Reset both, or this store keeps reporting the marker of a file it no longer has.
+            # `records()` and anything else asking about marker presence would answer about the
+            # previous read rather than the current state of disk (own audit).
+            self._marker = {"v": _FORMAT_VERSION}
+            self._marker_present = False
             return {}
         try:
             raw = json.loads(self._path.read_text())
@@ -255,7 +227,12 @@ class NonceStore:
                 )
         self._marker = dict(marker) if marker is not None else {"v": _FORMAT_VERSION}
         self._marker_present = marker is not None
-        # An empty object carrying no initialisation record, beside a key that already exists.
+        # Any ledger with no initialisation record, beside a key that already exists. Narrowing
+        # this to the exact shape `{}` left `{"did:key:z...": {}}` accepted — no marker, but a
+        # non-empty object, so the guard missed it and allocation fell back to the clock. The
+        # property is "a file this package did not write", not "an empty file", and the code
+        # claimed the former while checking the latter (own audit). Safe to broaden because this
+        # package has never been released: there are no unmarked ledgers in the world to reject.
         # `initialise()` stamps every ledger it creates, so this file was not created by this
         # class — it was emptied. That is the same unknown as a corrupt one and takes the same
         # refusal. Without this, a ledger truncated to `{}` read as "initialised and never
@@ -266,11 +243,10 @@ class NonceStore:
         # The legitimate never-signed state is not caught here. A first run creates the ledger
         # before the key and stamps it, so an interrupted one leaves the marker present with no
         # entries, which is exactly what this admits.
-        if marker is None and not raw and self._key_exists():
+        if marker is None and self._key_exists():
             raise self._refuse(
-                "holds an empty object with no initialisation record, and this key already "
-                "exists, so the ledger this class wrote has been emptied rather than left as "
-                "it was"
+                "carries no initialisation record, and this key already exists, so it was not "
+                "written by this package — a stamped ledger has been replaced or emptied"
             )
         # Strict, and every violation is fatal rather than filtered. The previous version dropped
         # a malformed entry and carried on, which reads like leniency and is not: dropping an
@@ -345,8 +321,17 @@ class NonceStore:
 
     def _flush(self) -> None:
         mkdir_durable(self._path.parent)
-        tmp = self._path.with_suffix(f"{self._path.suffix}.{os.getpid()}.tmp")
-        with open(tmp, "w", encoding="utf-8") as handle:
+        # `mkstemp`, not a pid-derived name. The pid is unique across processes and shared by
+        # threads, and nothing on this method said it must be called under the lock — so one
+        # caller flushing outside it would give two threads the same path to write and rename in
+        # turn, tearing the file before `os.replace` ever sees it. `keyring.py` learned this and
+        # moved to `mkstemp`; the ledger kept the pid (own audit). Latent rather than live: all
+        # callers do hold the lock today.
+        fd_tmp, tmp_name = tempfile.mkstemp(
+            dir=self._path.parent, prefix=self._path.name + ".", suffix=".tmp"
+        )
+        tmp = Path(tmp_name)
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as handle:
             # The marker is written on every flush, not only at creation: it is what separates
             # this file from one truncated to `{}`, and a rewrite that dropped it would erase
             # that distinction for the next process to start.
@@ -383,11 +368,15 @@ class NonceStore:
         # the state after a lost file — and the server's rule is strictly greater, so
         # returning `now` would be refused with nothing local to explain it. The test for
         # this failed before the `+ 1` was here.
-        previous = known if known is not None else int(time.time() * 1000)
+        # One read, used for both the fallback and the floor. Reading the clock twice meant a
+        # millisecond boundary falling between them returned a nonce equal to the clock — exactly
+        # the value the `+ 1` above was added to avoid, refunded silently (own audit).
+        now_ms = int(time.time() * 1000)
+        previous = known if known is not None else now_ms
         # `max` and not `previous + 1`: a clock that has moved forward since the last write
         # jumps the counter, which keeps two processes sharing one key from colliding on a
         # value neither has persisted yet.
-        nonce = max(int(time.time() * 1000), previous + 1, _process_floor + 1)
+        nonce = max(now_ms, previous + 1, _process_floor + 1)
         _process_floor = nonce
         self._state.setdefault(did, {})[room] = nonce
         self._flush()
