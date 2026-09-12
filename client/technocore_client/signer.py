@@ -146,6 +146,22 @@ class Signer:
         self.nonces = NonceStore(ledger, key_exists=seed.exists)
         # Last, so that a refusal above cannot leave a freshly minted seed behind it.
         self.keys = Keyring(seed)
+        # And the ledger-versus-key comparison after that, because it needs the DID, which does
+        # not exist until `Keyring` has loaded or minted the seed. That ordering does not give up
+        # the property the line above buys: every state that can reach this refusal already had a
+        # seed on disk when `Keyring` ran, because a ledger recording another DID *without* a seed
+        # is the identity-loss gate's case and that gate answers first. So nothing was minted
+        # behind this refusal in any state the gates admit.
+        #
+        # The residue is the window the gate cannot close — a ledger with history arriving between
+        # its live re-check and `os.link(seed)`. That start does mint, and then refuses here. It
+        # keeps refusing on every later start, because the seed it left derives a DID the ledger
+        # still does not record, so the operator gets a repeating refusal rather than the silent
+        # success that is the thing being fixed. Closing the window instead would mean deriving a
+        # DID before the keyring exists, which is a second copy of the seed loader.
+        recorded = self.nonces.identities()
+        if recorded and self.keys.did not in recorded:
+            raise self._identity_mismatch(seed, ledger, recorded, self.keys.did)
 
     @staticmethod
     def _identity_lost(seed: Path, ledger: Path, what: str) -> Exception:
@@ -181,6 +197,41 @@ class Signer:
             f"you. If nothing has ever signed from here, delete {ledger} and start again. If it "
             "has, restore the seed from a backup; a new identity will not be the old one, and "
             "everything already published stays under a DID that can never sign again."
+        )
+
+    @staticmethod
+    def _identity_mismatch(
+        seed: Path, ledger: Path, recorded: tuple[str, ...], did: str
+    ) -> Exception:
+        """Refuse a ledger whose recorded identities do not include this key's own.
+
+        Nothing compared the two before, and the route into the gap is our own recovery advice.
+        An operator who loses a seed, restores a backup and restores the wrong one gets a silent
+        success: the key is present, so the identity-loss gate is skipped; the entries are
+        well-formed, so `_load` accepts them; and the first `allocate` finds no record under the
+        restored DID and starts from the clock — while a ledger holding the previous identity's
+        entire history sits unread beside it. The install comes back up signing as somebody else
+        and reports nothing wrong.
+
+        Two readings, and the file cannot tell them apart: the wrong seed was restored, or this
+        home is being reused for a new identity deliberately. Asserting either one is the defect
+        this branch keeps finding — a true refusal carrying a claim its evidence does not support
+        — so both are named, with the route out of each, and neither is stated as fact.
+
+        A ledger recording no DIDs at all is not this case and stays acceptable: it is what
+        `initialise()` writes, and a first run reaches here before it has allocated anything.
+        """
+        return ValueError(
+            f"{ledger} records nonce history for {', '.join(sorted(recorded))} and none for "
+            f"{did}, which is the identity the key at {seed} derives. The ledger and the key "
+            "describe different identities, and that has two readings this cannot distinguish: a "
+            "seed was restored from the wrong backup, in which case signing now would publish "
+            "under an identity this home has never used and leave the recorded history unread — "
+            "or this home is being reused for a new identity on purpose. Restore the seed that "
+            "derives one of the recorded identities, or, to start deliberately as a new one, "
+            f"clear this home: move or delete {seed.parent} so that nothing left here describes "
+            "the old identity. Do not delete the ledger on its own — that leaves a key whose "
+            "history is gone, which is the unknown-floor state refused elsewhere in this package."
         )
 
     @property

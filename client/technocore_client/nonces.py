@@ -342,9 +342,51 @@ class NonceStore:
         # The rename itself needs to be durable, not just the bytes it points at.
         fsync_dir(self._path.parent)
 
+    def identities(self) -> tuple[str, ...]:
+        """Every DID this ledger records, named rather than counted, from one read.
+
+        `records()` counts, and a count cannot answer the question `Signer` has to ask: whether
+        the identities in this ledger include the one the local key derives. A ledger recording
+        only somebody else's DID is a wrong seed restored or a home reused, and both look
+        identical to `records()` — one key, some allocations, nothing wrong.
+
+        The judgement stays with `Signer` and cannot move here. A store constructed directly may
+        hold several DIDs and sign for all of them legitimately, so "none of these is mine" is
+        only a defect for a caller that knows there is exactly one key at this home.
+        """
+        return tuple(self._reload())
+
     def last(self, did: str, room: str) -> int | None:
-        """The last nonce allocated for this pair, or None if there has never been one."""
-        return self._state.get(did, {}).get(room)
+        """The last nonce allocated for this pair, or None if there has never been one.
+
+        Reloaded rather than read from memory. It used to answer from `self._state`, which is
+        whatever the last load happened to leave there — so a store still open across another
+        process's allocation reported a number that process had already passed, and a caller
+        deciding anything from it was reading history as the present. Every other read in this
+        class reloads, `_allocate_locked` explains at length why the in-memory copy cannot be
+        trusted, and this was the one exception; no caller depended on the stale answer (own
+        audit).
+        """
+        return self._reload().get(did, {}).get(room)
+
+    def _reload(self) -> dict[str, dict[str, int]]:
+        """Re-read the ledger under the lock, for the paths that only look.
+
+        The same reload `_allocate_locked` does, without the write: taking the lock for a read
+        means the answer is not one an allocation already holding it has decided to supersede.
+
+        Never called from inside the lock. `flock` attaches to the open file description and
+        `_lock` opens a fresh one per call, so a nested read would block on a lock this same
+        process holds — a deadlock rather than a re-entry. `allocate` is the only holder, and it
+        reloads itself rather than calling this.
+        """
+        fd = self._lock()
+        try:
+            self._state = self._load()
+            return self._state
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
     def allocate(self, did: str, room: str) -> int:
         """Reserve and persist the next nonce for `did` in `room`, then return it."""

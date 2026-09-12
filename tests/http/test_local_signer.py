@@ -436,6 +436,61 @@ def test_an_emptied_ledger_beside_a_lost_seed_is_never_silently_replaced(tmp_pat
     assert (home / "nonces.json").read_text() == "{}", "the evidence was rewritten"
 
 
+def test_a_ledger_recording_another_identity_is_refused(tmp_path) -> None:
+    """Nothing compared the DIDs in the ledger to the DID the key derives, and our own recovery
+    advice walks an operator into the gap.
+
+    Lose a seed, restore from a backup, restore the wrong one: the key is present, so the
+    identity-loss gate is skipped; the entries are well-formed, so `_load` accepts them; and the
+    first `allocate` finds no record under the restored DID and starts from the clock — while a
+    ledger holding the previous identity's whole history sits unread beside it. A silent success,
+    which is the outcome every other check on this branch exists to refuse.
+
+    In-process, unlike the floor tests: nothing here turns on `_process_floor` or on what a fresh
+    interpreter concludes, because the comparison is made from disk inside every construction.
+
+    The second half is the innocent case, asserted because a refusal that also rejects the right
+    seed is a home nobody can start.
+    """
+    home = tmp_path / "home"
+    original = Signer(home)
+    issued = original.nonces.allocate(original.did, "room")
+    ledger = home / "nonces.json"
+    before = ledger.read_text()
+    assert original.did in json.loads(before), "this test needs the recorded history it names"
+
+    # The wrong backup: a valid seed, correctly permissioned, deriving a different identity — so
+    # every existing check passes it and only the comparison under test can see anything wrong.
+    seed = home / "seed"
+    wrong = b"\x07" * 32
+    seed.write_text(base64.urlsafe_b64encode(wrong).decode().rstrip("="))
+    seed.chmod(0o600)
+    assert did_from_seed(wrong) != original.did
+
+    with pytest.raises(ValueError) as caught:
+        Signer(home)
+    text = str(caught.value)
+    assert original.did in text and did_from_seed(wrong) in text, (
+        "the refusal must name both identities, or the operator cannot tell which seed is wrong"
+    )
+    # Both readings named and neither asserted. The recurring defect on this branch is a true
+    # refusal carrying a claim the evidence does not support, and which of these two happened is
+    # not on disk.
+    assert "two readings this cannot distinguish" in text
+    assert "wrong backup" in text and "reused for a new identity" in text
+    assert "has signed before" not in text, "reused the wording that asserts one of the readings"
+    # A route out for the deliberate half, which is clearing the home rather than the ledger.
+    assert "clear this home" in text
+    assert ledger.read_text() == before, "the refusal rewrote the evidence"
+
+    # And the right seed still starts, allocating above what the old one had already issued.
+    seed.write_text(base64.urlsafe_b64encode(original.keys.seed).decode().rstrip("="))
+    seed.chmod(0o600)
+    restored = Signer(home)
+    assert restored.did == original.did
+    assert restored.nonces.allocate(restored.did, "room") > issued
+
+
 def test_a_ledger_arriving_after_the_startup_snapshot_is_still_seen(tmp_path, monkeypatch) -> None:
     """The gate consumed a snapshot taken before it, so a late arrival was invisible.
 
@@ -1025,6 +1080,65 @@ def test_a_well_formed_ledger_round_trips(tmp_path) -> None:
     reread = NonceStore(store)
     assert reread.last("did:key:zX", "room") == first
     assert reread.allocate("did:key:zX", "room") > first
+
+
+def test_last_reloads_under_the_lock_rather_than_answering_from_memory(tmp_path, monkeypatch):
+    """`last` returned from `self._state`, which is whatever the previous load left there.
+
+    Every other read in this class reloads, and `_allocate_locked` says why at length: the copy
+    in memory is stale the moment another process allocates, and this package's whole claim is
+    that a signer works across concurrent processes. So a store still open across a sibling's
+    allocation answered with a number that sibling had already passed — history reported as the
+    present, with nothing local to show it.
+
+    A real second process, not a thread, because the staleness is exactly what separate address
+    spaces cannot share.
+
+    The lock is asserted separately and by mechanism, because the reload alone would satisfy the
+    read: `os.replace` means a reader sees the old file or the new one, never a torn one. What
+    the lock buys is that the number returned is not one an allocation already holding the lock
+    has decided to supersede, and the only way to check that here is the call itself.
+    """
+    store_path = tmp_path / "nonces.json"
+    store = NonceStore(store_path)
+    did = "did:key:zStub"
+    first = store.allocate(did, "room")
+
+    repo = Path(__file__).resolve().parents[2]
+    program = (
+        "import sys;"
+        "sys.path[:0] = sys.argv[1].split(':');"
+        "from technocore_client import NonceStore;"
+        "print(NonceStore(sys.argv[2]).allocate(sys.argv[3], 'room'))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, f"{repo / 'client'}:{repo / 'src'}", str(store_path), did],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    second = int(result.stdout.strip())
+    assert second > first, "the child did not allocate above the parent; the test proves nothing"
+    assert store.last(did, "room") == second, (
+        "`last` answered from memory, reporting a nonce another process had already passed"
+    )
+
+    real = nonces_module.fcntl
+    exclusive: list[int] = []
+
+    def recording_flock(fd: int, operation: int) -> None:
+        if operation == real.LOCK_EX:
+            exclusive.append(fd)
+        real.flock(fd, operation)
+
+    monkeypatch.setattr(
+        nonces_module,
+        "fcntl",
+        SimpleNamespace(flock=recording_flock, LOCK_EX=real.LOCK_EX, LOCK_UN=real.LOCK_UN),
+    )
+    assert store.last(did, "room") == second
+    assert exclusive, "`last` read without the lock every other read in this class takes"
 
 
 def test_every_successful_first_start_is_past_the_durability_barrier(tmp_path, monkeypatch) -> None:
