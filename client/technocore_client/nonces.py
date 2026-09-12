@@ -171,7 +171,12 @@ class NonceStore:
         else is history (second reader, #803). The marker is stripped by `_load`, so it is never
         counted here as a key.
         """
-        state = self._load()
+        # Through `_reload` like the other two readers, rather than a bare `_load`. Its single
+        # caller runs before anything has allocated, so the lock changes no answer today — but
+        # three read paths with two different locking rules is the kind of asymmetry this file
+        # otherwise has to justify in a comment, and the justification would have been "nobody
+        # calls it at a bad time yet".
+        state = self._reload()
         return len(state), sum(len(rooms) for rooms in state.values()), self._marker_present
 
     def _load(self) -> dict[str, dict[str, int]]:

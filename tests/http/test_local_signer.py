@@ -479,8 +479,13 @@ def test_a_ledger_recording_another_identity_is_refused(tmp_path) -> None:
     assert "two readings this cannot distinguish" in text
     assert "wrong backup" in text and "reused for a new identity" in text
     assert "has signed before" not in text, "reused the wording that asserts one of the readings"
-    # A route out for the deliberate half, which is clearing the home rather than the ledger.
-    assert "clear this home" in text
+    # A route out for the deliberate half, and it must not be a destructive one. The first
+    # version of this message offered to "move or delete" the home, which is safe if the home is
+    # genuinely being reused and destroys evidence if the wrong seed was restored — the ledger is
+    # the only surviving record of the old identity's history in exactly that case. Asserted on
+    # the property rather than the phrasing, because the phrasing is what was wrong.
+    assert "move" in text and "keep it rather than delete it" in text
+    assert "move or delete" not in text, "advised destroying the evidence under one reading"
     assert ledger.read_text() == before, "the refusal rewrote the evidence"
 
     # And the right seed still starts, allocating above what the old one had already issued.

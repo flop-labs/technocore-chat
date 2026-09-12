@@ -220,6 +220,14 @@ class Signer:
 
         A ledger recording no DIDs at all is not this case and stays acceptable: it is what
         `initialise()` writes, and a first run reaches here before it has allocated anything.
+
+        The advice says *move aside*, never delete. The first draft of it offered "move or delete
+        this home", which is safe under one reading and destroys evidence under the other — the
+        ledger is the only surviving record of the old identity's history precisely in the case
+        where the wrong seed was restored. Every other refusal in this module says the file is
+        deliberately left in place; this one shipped telling the operator to remove it, and was
+        corrected within the hour. A refusal that gives destructive advice for the situation it
+        was written to protect is the same defect as the chained one fixed earlier on this branch.
         """
         return ValueError(
             f"{ledger} records nonce history for {', '.join(sorted(recorded))} and none for "
@@ -229,9 +237,11 @@ class Signer:
             "under an identity this home has never used and leave the recorded history unread — "
             "or this home is being reused for a new identity on purpose. Restore the seed that "
             "derives one of the recorded identities, or, to start deliberately as a new one, "
-            f"clear this home: move or delete {seed.parent} so that nothing left here describes "
-            "the old identity. Do not delete the ledger on its own — that leaves a key whose "
-            "history is gone, which is the unknown-floor state refused elsewhere in this package."
+            f"move {seed.parent} aside — keep it rather than delete it, because under the first "
+            "reading this ledger is the only surviving record of what the old identity issued, "
+            "and it is the thing you would need to restore the right seed against. Do not delete "
+            "the ledger on its own: that leaves a key whose history is gone, which is the "
+            "unknown-floor state refused elsewhere in this package."
         )
 
     @property
