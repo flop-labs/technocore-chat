@@ -362,6 +362,43 @@ def test_an_unmarked_ledger_with_entries_is_refused_beside_a_key(tmp_path) -> No
     assert NonceStore(store, key_exists=True).last("did:key:zStub", "room") == 5
 
 
+def test_a_ledger_with_a_duplicate_key_is_refused_rather_than_resolved(tmp_path) -> None:
+    """@Minh3132, #803: the parser chose which nonce survived, before any check could see either.
+
+    `json.loads` accepts a repeated key and keeps the last value, so a ledger holding `900` and
+    then `5` for the same (did, room) loads as `5`. Every existing check passes it — valid JSON,
+    an object, an entry of the right shape — and `_allocate_locked` takes 5 as the last nonce
+    issued, which after a clock rollback puts allocation below the server's retained replay floor.
+    The number that would have prevented that was discarded during parsing. A repeated DID throws
+    away a whole room map the same way, one level up.
+
+    Written as raw text on purpose: there is no Python object `json.dumps` could turn into a
+    duplicate, which is also why no ledger this class writes can contain one. It means the file
+    was hand-edited or damaged, and that is unknown state rather than something to resolve.
+    """
+    store = tmp_path / "nonces.json"
+    for body, repeated in (
+        ('{"!ledger": {"v": 1}, "did:key:zStub": {"room": 900, "room": 5}}', "room"),
+        (
+            '{"!ledger": {"v": 1}, "did:key:zStub": {"room": 900}, "did:key:zStub": {"other": 5}}',
+            "did:key:zStub",
+        ),
+    ):
+        store.write_text(body)
+        with pytest.raises(LedgerUnreadableError) as caught:
+            NonceStore(store, key_exists=True)
+        text = str(caught.value)
+        assert f"{repeated!r} twice" in text, (
+            f"the refusal must name the duplicated key, or there is nothing to repair: {text}"
+        )
+        assert "would be refused" in text, "the error must say what it costs"
+        assert store.read_text() == body, "the refusal rewrote the evidence"
+
+    # The innocent half, because a hook that rejected ordinary objects would brick every start.
+    store.write_text(json.dumps({"!ledger": {"v": 1}, "did:key:zStub": {"room": 900}}))
+    assert NonceStore(store, key_exists=True).last("did:key:zStub", "room") == 900
+
+
 def test_a_ledger_from_a_newer_format_is_unknown_rather_than_fresh(tmp_path) -> None:
     """The marker carried a version that nothing read.
 

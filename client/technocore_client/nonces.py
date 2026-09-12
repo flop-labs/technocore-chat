@@ -91,6 +91,46 @@ class LedgerUnreadableError(ValueError):
         self.why = why
 
 
+class _DuplicateLedgerKeyError(Exception):
+    """A key repeated inside one JSON object, carrying its name so the refusal can say it.
+
+    Deliberately not a `ValueError`: `_load` turns one of those into "could not be read as JSON",
+    and this is the opposite fact. The file parsed perfectly; the parser is what lost the data.
+    Folding it into the parse-failure message would send an operator looking for damaged syntax
+    in a file whose syntax is fine.
+    """
+
+    def __init__(self, key: str) -> None:
+        super().__init__(key)
+        self.key = key
+
+
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """`object_pairs_hook` that refuses a repeated key rather than keeping the last one.
+
+    `json.loads` accepts `{"room": 900, "room": 5}` and returns `{"room": 5}` without a word. A
+    ledger damaged that way satisfies every check below — valid JSON, an object, an entry of the
+    right shape — while the higher number is gone before any of them runs. `_allocate_locked`
+    then treats 5 as the last nonce issued, and after a clock rollback allocates beneath the
+    server's retained replay floor, which is the failure the whole loader exists to prevent
+    (@Minh3132, #803). A repeated DID discards an entire room map by the same mechanism.
+
+    This is the defect `keyring.py` fixes with `base64.b64decode(..., validate=True)`, in a
+    different parser: a permissive default silently changing the meaning of damaged input, where
+    the leniency *is* the bug. The package refuses both now rather than interpreting either.
+
+    Every key is treated alike, `_MARKER` included. `_load` pops the marker after parsing, so it
+    is an ordinary key at this point, and a file carrying two of them is exactly as unreadable as
+    one carrying two DIDs.
+    """
+    seen: dict[str, object] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _DuplicateLedgerKeyError(key)
+        seen[key] = value
+    return seen
+
+
 class NonceStore:
     """Per-(did, room) allocation, persisted before each number is handed out."""
 
@@ -207,7 +247,15 @@ class NonceStore:
             self._marker_present = False
             return {}
         try:
-            raw = json.loads(self._path.read_text())
+            raw = json.loads(self._path.read_text(), object_pairs_hook=_no_duplicate_keys)
+        except _DuplicateLedgerKeyError as exc:
+            # `json.dump` cannot emit a duplicate key, so no file this class wrote can hold one:
+            # it was hand-edited, or damaged by something merging two ledgers. That is unknown
+            # state, not something to interpret, and it takes the same refusal as the rest.
+            raise self._refuse(
+                f"records {exc.key!r} twice in one object, so the parser kept one of the two "
+                "values and discarded the other"
+            ) from exc
         except (OSError, ValueError) as exc:
             raise self._refuse(f"could not be read as JSON ({exc.__class__.__name__})") from exc
         if not isinstance(raw, dict):
