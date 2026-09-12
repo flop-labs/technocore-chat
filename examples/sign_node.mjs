@@ -8,6 +8,7 @@
  *   message: <room>|<nonce>|<text-after-sweep>
  *   note:    <ns>|<key>|<nonce>|<value-after-sweep>
  *
+ * Nonces are 1-19 ASCII digits without leading zeros; "0" is valid.
  * SIGN_SEED must be exactly 64 hexadecimal characters (32 random bytes).
  * Keep it secret and never substitute a wallet seed or recovery phrase.
  *
@@ -30,7 +31,9 @@ const MULTICODEC_ED25519 = Buffer.from([0xed, 0x01]);
 const PKCS8_SEED_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 const SPKI_PUBLIC_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,47}$/;
-const NONCE_RE = /^[0-9]{1,19}$/;
+// Stored message nonces become integers: padding would change the signed bytes
+// on JSON/export reads. Match #356 without converting large counters to Number.
+const NONCE_RE = /^(?:0|[1-9][0-9]{0,18})$/;
 const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
 
 function fail(message) {
@@ -91,7 +94,9 @@ function validName(name, label) {
 }
 
 function validNonce(nonce) {
-  if (!NONCE_RE.test(nonce ?? "")) fail("nonce must contain 1-19 ASCII digits");
+  if (!NONCE_RE.test(nonce ?? "")) {
+    fail("nonce must contain 1-19 ASCII digits with no leading zero");
+  }
   return nonce;
 }
 

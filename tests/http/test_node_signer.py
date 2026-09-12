@@ -6,6 +6,7 @@ keeping this example's deliberately narrower hex-seed-only interface.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -142,8 +143,10 @@ def test_node_signer_rejects_extra_arguments(args: tuple[str, ...]) -> None:
 
 
 @pytest.mark.parametrize("prefix", [("say", "room"), ("set", "coord", "key")])
-@pytest.mark.parametrize("nonce", ["", "1" * 20, "-1", "1.0", "\u0661", "1\n"])
+@pytest.mark.parametrize("nonce", ["", "1" * 20, "-1", "1.0", "\u0661", "1\n", "0007", "00", "01"])
 def test_node_signer_rejects_invalid_nonce(prefix: tuple[str, ...], nonce: str) -> None:
+    # Padded counters lose their signed spelling when stored as integers. Reject
+    # them here even on servers/Python signers predating the matching fix in #356.
     result = run_node(*prefix, nonce, "hello")
     assert result.returncode != 0
     assert result.stdout == ""
@@ -151,13 +154,37 @@ def test_node_signer_rejects_invalid_nonce(prefix: tuple[str, ...], nonce: str) 
 
 
 @pytest.mark.parametrize("prefix", [("say", "room"), ("set", "coord", "key")])
-@pytest.mark.parametrize("nonce", ["0", "0007", "9" * 19])
+@pytest.mark.parametrize("nonce", ["0", "7", "10", "9" * 19])
 def test_node_signer_preserves_nonce_bytes(prefix: tuple[str, ...], nonce: str) -> None:
+    assert str(int(nonce)) == nonce
     node = run_node(*prefix, nonce, "hello")
     python = run_python(*prefix, nonce, "hello")
     assert node.returncode == 0, node.stderr
     assert python.returncode == 0, python.stderr
     assert node.stdout == python.stdout
+
+
+@pytest.mark.parametrize("nonce", ["0", "7", "9" * 19])
+def test_node_message_reverifies_from_json_and_export(client, nonce: str) -> None:
+    import didkey
+
+    # Check storage, not only agreement between two signers: both used to accept
+    # padded nonces. The upper boundary also catches lossy JS Number conversion.
+    room = "node-nonce"
+    node = run_node("say", room, nonce, "hello")
+    assert node.returncode == 0, node.stderr
+    did, signature = node.stdout.splitlines()
+    posted = client.get(f"/r/{room}/say-signed/{did}/{signature}/{nonce}/hello")
+    assert posted.status_code == 200, posted.text
+    served = client.get(f"/r/{room}?format=json").json()["messages"]
+    exported = [json.loads(line) for line in client.get(f"/r/{room}/export").content.splitlines()]
+    assert len(served) == len(exported) == 1
+    for record in (served[0], exported[0]):
+        assert record["from"] == did
+        assert record["sig"] == signature
+        assert str(record["nonce"]) == nonce
+        assert record["text"] == "hello"
+        didkey.verify(record["from"], record["sig"], f"{room}|{record['nonce']}|{record['text']}")
 
 
 @pytest.mark.parametrize("prefix", [("say", "room"), ("set", "coord", "key")])
