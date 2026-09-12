@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+import app  # noqa: E402
 import limit  # noqa: E402
 import store  # noqa: E402
 
@@ -618,5 +619,82 @@ def test_the_sweep_survives_an_entry_a_direct_caller_can_leave_empty() -> None:
     # A later write whose sweep walks from the front and meets it: no raise, and it goes.
     assert refused("a different phrase entirely here", now=1000.0, window=1.0) is False
     assert key not in limit._dupes, "an entry with nothing live in it is swept, not raised on"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+# The reservation instant (yukkie3276, #734 finding #8): _DupeReserver used to capture
+# time.monotonic() at CONSTRUCTION, before store.append takes the room lock, and stamp the
+# accepted copy with it. A write that waited out the whole window on the lock landed now but
+# was recorded in the past, so the next identical copy pruned it as expired and walked through
+# the dupe_max_copies/window cap. The instant must be sampled INSIDE reserve(), under the lock.
+# These drive the real app._DupeReserver with a controlled clock standing in for monotonic time.
+def _reserver_knobs(monkeypatch, clock) -> None:
+    monkeypatch.setattr(app.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app, "DUPE_FILTER_SECONDS", WINDOW)
+    monkeypatch.setattr(app, "DUPE_MIN_LENGTH", FLOOR)
+    monkeypatch.setattr(app, "DUPE_MAX_COPIES", COPIES)
+
+
+def test_the_window_instant_is_sampled_at_reserve_not_construction(monkeypatch) -> None:
+    """The finding itself. Construct the reserver, then advance the clock a full window before
+    reserve() runs - the lock wait - and the copy must be stamped at reserve time, not at the
+    instant it was queued. Before the fix this recorded 100.0; after it records the later one."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    clock = [100.0]
+    _reserver_knobs(monkeypatch, clock)
+    reserver = app._DupeReserver("r", LONG)  # constructed at clock=100
+    clock[0] = 100.0 + WINDOW + 5  # a full-window wait on the room lock before reserve()
+    assert reserver.reserve(1) is False, "the first copy lands"
+    key = limit._dupe_key("r", LONG, FLOOR)
+    assert key is not None
+    assert limit._dupes[key] == (100.0 + WINDOW + 5,), "stamped when it landed, not when it queued"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_a_copy_after_a_long_lock_wait_still_counts_against_the_window(monkeypatch) -> None:
+    """The contract the under-lock instant protects. One copy is delayed a full window on the
+    lock, then COPIES-1 more land a second apart - all within one window of the first's LANDING.
+    The copy past the cap is refused by the window. Before the fix the delayed copy was stamped
+    in the past, pruned by the later ones, and the count never reached the cap (a silent bypass);
+    the share ring (cap 32) is nowhere near, so only the window can be the one refusing here."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    clock = [100.0]
+    _reserver_knobs(monkeypatch, clock)
+    r0 = app._DupeReserver("r", LONG)  # queued at 100
+    clock[0] = 100.0 + WINDOW + 5  # landed a full window later
+    assert r0.reserve(1) is False
+    for i in range(1, COPIES):  # COPIES-1 more, a second apart, all within a window of r0's landing
+        clock[0] = 100.0 + WINDOW + 5 + i
+        assert app._DupeReserver("r", LONG).reserve(1) is False, i
+    clock[0] = 100.0 + WINDOW + 5 + COPIES
+    assert app._DupeReserver("r", LONG).reserve(1) is True, "the window cap fires across the wait"
+    limit._dupes.clear()
+    limit._rings.clear()
+
+
+def test_release_matches_a_slot_reserved_under_the_lock(monkeypatch) -> None:
+    """Release identity rides the same under-lock instant the copy was dated with. A reserve at
+    T records a window entry and a ring slot at T; a second successful copy at T' owns its own
+    slot, and releasing the first gives back ONLY (T, digest) - the later copy's slot survives,
+    the stale-release guarantee now exercised through the reserver with an under-lock instant."""
+    limit._dupes.clear()
+    limit._rings.clear()
+    clock = [100.0]
+    _reserver_knobs(monkeypatch, clock)
+    key = limit._dupe_key("r", LONG, FLOOR)
+    assert key is not None
+    r1 = app._DupeReserver("r", LONG)
+    clock[0] = 150.0
+    assert r1.reserve(1) is False
+    r2 = app._DupeReserver("r", LONG)
+    clock[0] = 151.0
+    assert r2.reserve(1) is False
+    r1.release()
+    assert limit._dupes[key] == (151.0,), "the release took only its own window stamp"
+    assert limit._rings[("r", 1)] == ((151.0, key[1]),), "and only its own ring slot"
     limit._dupes.clear()
     limit._rings.clear()

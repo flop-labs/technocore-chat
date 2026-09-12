@@ -1316,19 +1316,32 @@ class _DupeReserver:
 
     Knobs read HERE, at reserve()/release() time, so config.override() and
     monkeypatch.setattr(app, ...) keep reaching the ring — the contract take() also follows.
-    `now` is captured once so a release matches the slot its reserve added (the #734 stale-
-    release race). store calls release only when a reservation was taken and the write then
-    failed — an invalid nick or a stale nonce raises before reserve() is ever reached.
+    `now` is sampled once, INSIDE reserve(), which runs under the room lock — not at
+    construction, which runs before store.append takes that lock. A write that waited out the
+    whole duplicate window on the lock would otherwise be stamped at the instant it was queued,
+    not the instant it landed, and the next identical copy would prune it as already expired and
+    walk through the dupe_max_copies/window cap (yukkie3276, #734). Retained on the reserver so a
+    release matches the slot its own reserve added, window age and release identity being one
+    value: the window map stores bare instants and matches a release by equality, so the instant
+    that dates the copy is also what names it. store calls release only when a reservation was
+    taken and the write then failed — an invalid nick or a stale nonce raises before reserve() is
+    ever reached, so `now` is always set by then.
     """
 
     __slots__ = ("args", "gen")
 
     def __init__(self, room: str, body: str) -> None:
-        self.args = (room, body, time.monotonic())  # (room, text, now); the head both calls share
+        self.args = (room, body, 0.0)  # the 0.0 (now) is set under the lock by reserve(), below
         self.gen = 0
 
     def reserve(self, generation: int) -> bool:
         self.gen = generation  # remembered so release() gives back the slot it added
+        # Sample the window instant HERE, under the room lock store holds — not at construction,
+        # which runs before the lock — so a copy delayed on the lock past its window is dated when
+        # it lands, not when it queued; otherwise the next identical copy prunes it as expired and
+        # walks through the dupe_max_copies/window cap (yukkie3276, #734). Kept in `args`, so both
+        # calls still share one head and a release matches the slot its own reserve added.
+        self.args = (self.args[0], self.args[1], time.monotonic())  # (room, text, now)
         return limit.dupe_refused(
             *self.args, DUPE_FILTER_SECONDS, DUPE_MIN_LENGTH, DUPE_MAX_COPIES, generation=generation
         )
