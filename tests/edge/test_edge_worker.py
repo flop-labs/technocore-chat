@@ -74,6 +74,16 @@ def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     assert _wrangler_routes() - accounted == set()
 
 
+def test_every_edge_lane_path_is_routed_to_the_worker():
+    """A path in EDGE_CACHED, EDGE_REVALIDATE, or EDGE_ONLY without a matching
+    wrangler route is silently unrouted — every request falls through to the
+    origin, defeating the lane entirely.
+    """
+    snapshot = _snapshot_module()
+    edge_lanes = set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE) | set(snapshot.EDGE_ONLY)
+    assert edge_lanes - _wrangler_routes() == set()
+
+
 def test_a_liveness_path_is_never_snapshotted():
     """The invariant the third lane exists to hold.
 
