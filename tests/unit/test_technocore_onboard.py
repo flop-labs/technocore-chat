@@ -1,0 +1,112 @@
+import hashlib
+import os
+import stat
+import subprocess
+import time
+from pathlib import Path
+
+
+def _did_from_output(output: str) -> str:
+    for line in output.splitlines():
+        if line.startswith("did:key:"):
+            return line.strip()
+    raise AssertionError(f"no DID in output:\n{output}")
+
+
+def test_two_first_run_processes_converge_on_persisted_did(tmp_path) -> None:
+    repo = Path(__file__).resolve().parents[2]
+    helper = repo / "technocore_onboard.sh"
+
+    home = tmp_path / "home"
+    fake_repo = home / "technocore-chat"
+    (fake_repo / ".git").mkdir(parents=True)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    barrier = tmp_path / "sync-barrier"
+    barrier.mkdir()
+
+    # The helper only needs `uv sync` plus `uv run scripts/sign.py did` here.
+    # Synchronizing the two `uv sync` calls makes both onboarding processes
+    # reach first-time seed creation together and reliably exercises the race.
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        """#!/usr/bin/env python3
+import hashlib
+import os
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+
+if args == ["sync"]:
+    barrier = Path(os.environ["TEST_UV_SYNC_BARRIER"])
+    (barrier / str(os.getpid())).write_text("")
+    deadline = time.monotonic() + 5
+    while len(list(barrier.iterdir())) < 2:
+        if time.monotonic() >= deadline:
+            raise SystemExit("timed out waiting for concurrent onboarding")
+        time.sleep(0.01)
+    raise SystemExit(0)
+
+if args == ["run", "scripts/sign.py", "did"]:
+    seed = os.environ["SIGN_SEED"].strip()
+    digest = hashlib.sha256(seed.encode()).hexdigest()
+    print(f"did:key:{digest}")
+    raise SystemExit(0)
+
+raise SystemExit(f"unexpected uv arguments: {args!r}")
+"""
+    )
+    fake_uv.chmod(0o755)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["TEST_UV_SYNC_BARRIER"] = str(barrier)
+
+    first = subprocess.Popen(
+        ["bash", str(helper)],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    second = subprocess.Popen(
+        ["bash", str(helper)],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    out_first, err_first = first.communicate(timeout=10)
+    out_second, err_second = second.communicate(timeout=10)
+
+    assert first.returncode == 0, err_first
+    assert second.returncode == 0, err_second
+
+    did_first = _did_from_output(out_first)
+    did_second = _did_from_output(out_second)
+    assert did_first == did_second
+
+    seed_file = home / ".config" / "technocore" / "sign_seed"
+    persisted_seed = seed_file.read_text().strip()
+    expected_did = f"did:key:{hashlib.sha256(persisted_seed.encode()).hexdigest()}"
+
+    # Neither process may observe a disposable intermediate identity: both
+    # reported DIDs must derive from the single seed that remains on disk.
+    assert did_first == expected_did
+    assert did_second == expected_did
+    assert stat.S_IMODE(seed_file.stat().st_mode) == 0o600
+
+    outputs = [out_first, out_second]
+    assert sum("New seed created." in output for output in outputs) == 1
+    assert sum("Existing seed preserved." in output for output in outputs) == 1
+
+    # Atomic publish uses private temporary candidates; none may be left behind.
+    seed_dir = seed_file.parent
+    assert list(seed_dir.glob(".sign_seed.*")) == []
