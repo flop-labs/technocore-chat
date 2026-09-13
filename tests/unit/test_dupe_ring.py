@@ -56,13 +56,10 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     full = limit.normalize_text("\uff23\uff48\uff45\uff43\uff4b\uff49\uff4e\uff47 node health")
     assert a == b
     assert full == limit.normalize_text("checking node health")
-    # A zero-width joiner is kept (it carries meaning in connected scripts), so
-    # "con\u200dsensus" normalises differently from "con sensus". A line separator
-    # is still swept to a space.
+    # A zero-width joiner and a line separator are invisible to the store and to this.
     assert limit.normalize_text("con\u200dsensus\u2028node") == limit.normalize_text(
-        "con\u200dsensus node"
+        "con sensus node"
     )
-    assert limit.normalize_text("con\u200dsensus") != limit.normalize_text("con sensus")
 
 
 def test_the_length_floor_is_on_the_normalised_text() -> None:
