@@ -70,7 +70,7 @@ jobs:
     steps:
       - name: Publish signed Technocore record
         id: technocore
-        uses: hazzanzico/technocore-signed-action@17531944cf49f09722405837d9aca7ff0cdd8ecc # v0.2.0
+        uses: hazzanzico/technocore-signed-action@e77cb1bc2f8cbf0cefe2dde4183c4ba06f0ceb0d # logs each write attempt
         with:
           room: technocore
           text: >-
@@ -86,13 +86,57 @@ jobs:
           printf 'Technocore record: %s\n' "$TECHNOCORE_RECORD_URL"
 ```
 
-The Action exposes the derived public DID, accepted nonce, room sequence, timestamp, and public
+After confirmation, the Action exposes the derived public DID, accepted nonce, room sequence, timestamp, and public
 record URL as outputs, plus a portable `receipt_json` for offline signature verification. The
 receipt proves the signed message's authorship; the server-assigned sequence and timestamp are
 observations, not signed claims. The seed is never part of the receipt.
 
-If the Action reports an unknown write outcome, inspect the room for the reported DID and nonce
-before rerunning the job. A failed response does not prove that the server rejected the write.
+## Recover an unknown write outcome
+
+Before each POST, the pinned Action prints a `Technocore write attempt:` line in the
+**Publish signed Technocore record** step's log. It contains only the public `did`, `room`, and
+exact `nonce` as JSON strings. It does not contain the seed or message text. If a clear stale-nonce
+refusal caused a second attempt, use the **last** attempt line: the replacement nonce differs.
+The line identifies an attempted write; it does not mean the server accepted it. Step outputs,
+including `record_url` and `receipt_json`, are available only after confirmation.
+
+On a network error, HTTP 5xx, or malformed success response, the Action first reads the latest
+200 room records for the same DID, nonce, and cleaned text. If it cannot confirm the write, it
+fails without automatically posting again. An HTTP 400 that explicitly identifies the attempted
+automatic nonce as stale permits one re-signed retry; an explicit nonce is never replaced.
+
+For the `technocore` room in this example, copy the DID and nonce from the last attempt line and
+run this read-only check in Bash with Python 3 installed. Replace the two placeholder values;
+neither is a secret. Python preserves the exact integer value of a 19-digit JSON nonce.
+
+```bash
+TECHNOCORE_ATTEMPT_DID='paste the logged did:key value' \
+TECHNOCORE_ATTEMPT_NONCE='paste the logged nonce digits' python3 - <<'PY'
+import json
+import os
+import urllib.request
+
+did = os.environ["TECHNOCORE_ATTEMPT_DID"]
+nonce = os.environ["TECHNOCORE_ATTEMPT_NONCE"]
+url = "https://technocore.chat/r/technocore?limit=200&format=json"
+with urllib.request.urlopen(url, timeout=30) as response:
+    messages = json.load(response)["messages"]
+matches = [record for record in messages
+           if record.get("from") == did and str(record.get("nonce")) == nonce]
+for record in matches:
+    print(json.dumps(record, ensure_ascii=True))
+if not matches:
+    raise SystemExit("No match in this window; the write outcome is still unknown. Do not blindly rerun.")
+PY
+```
+
+Check each matching record's `text` against the workflow, repository, commit, and build result
+from that run. If it matches, the notification is already present; do not rerun it. Adapt the URL
+if you change the room or service. A missing match or failed read does **not** prove rejection:
+this endpoint returns a bounded window, and rooms expire older records. Inspect the retained
+room export or seek service-side evidence if needed; keep the result unknown if it cannot be
+established. Rerunning in automatic mode creates a new nonce and can duplicate the notification.
+If a runner terminates before its logs are retained, the attempted values may be unavailable.
 
 ## Security boundary
 
