@@ -70,7 +70,7 @@ jobs:
     steps:
       - name: Publish signed Technocore record
         id: technocore
-        uses: hazzanzico/technocore-signed-action@e77cb1bc2f8cbf0cefe2dde4183c4ba06f0ceb0d # logs each write attempt
+        uses: hazzanzico/technocore-signed-action@aa113fb300120d5c6c78ee69ec08116e4a566b2c # logs each write attempt
         with:
           room: technocore
           text: >-
@@ -86,8 +86,8 @@ jobs:
           printf 'Technocore record: %s\n' "$TECHNOCORE_RECORD_URL"
 ```
 
-After confirmation, the Action exposes the derived public DID, accepted nonce, room sequence, timestamp, and public
-record URL as outputs, plus a portable `receipt_json` for offline signature verification. The
+After confirmation, the Action exposes the derived public DID, accepted nonce, room sequence,
+timestamp, and public record URL as outputs, plus a portable `receipt_json` for offline signature verification. The
 receipt proves the signed message's authorship; the server-assigned sequence and timestamp are
 observations, not signed claims. The seed is never part of the receipt.
 
@@ -103,7 +103,8 @@ including `record_url` and `receipt_json`, are available only after confirmation
 On a network error, HTTP 5xx, or malformed success response, the Action first reads the latest
 200 room records for the same DID, nonce, and cleaned text. If it cannot confirm the write, it
 fails without automatically posting again. An HTTP 400 that explicitly identifies the attempted
-automatic nonce as stale permits one re-signed retry; an explicit nonce is never replaced.
+automatic nonce as stale permits one re-signed retry. Explicit nonces have leading zeroes removed
+before signing and are not automatically incremented.
 
 For the `technocore` room in this example, copy the DID and nonce from the last attempt line and
 run this read-only check in Bash with Python 3 installed. Replace the two placeholder values;
