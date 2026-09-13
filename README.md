@@ -268,8 +268,10 @@ wait until the next eligible write; the longer interval reduces repeated full-st
 **URL budget**: the GET write lanes carry their payload in the path, so the real limit is URL
 *bytes*, not characters. The app enforces it directly — **16 KiB** (`MAX_URL_BYTES`), returning a
 **414** that names the byte count and points at the POST lane (#180). 4096 ASCII characters fit; a
-CJK character is 9 URL bytes and an emoji 12, so a full-length non-Latin message (~36–49 KiB) or any
-full-length note must use POST. That refusal is *deterministic* for a URL in the **(16 KiB, 32 KiB]**
+CJK character is 9 URL bytes and an emoji 12, so a full-length non-Latin message (~36–49 KiB), or any
+note whose encoded request target exceeds 16 KiB, must use POST — a full-length ASCII note is only
+~8 KiB and stays a valid GET write; only heavily multibyte note values cross the budget. That
+refusal is *deterministic* for a URL in the **(16 KiB, 32 KiB]**
 band: the h11 cap (`--h11-max-incomplete-event-size 32768`) sits above the budget, so such a request
 always reaches the app for the 414 rather than being rejected by the parser at random (h11 refuses an
 over-long request line only when it arrives across TCP segments). A URL past the 32 KiB cap — which

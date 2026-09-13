@@ -108,7 +108,8 @@ HEALTHCHECK --interval=30s --timeout=20s --retries=3 \
 # random. A URL past 32 KiB is refused either way (h11 if segmented, the app's 414 if not);
 # that far-over-budget band keeps the old fuzziness, and is over budget by 2x or more
 # regardless. It is NOT just a pathological input: a full-length CJK/emoji GET write (~36-49
-# KiB) and every full-length note lane land there, but those belong on the POST lane, which is
+# KiB) and a heavily multibyte full-length note (~72-98 KiB) land there, but those belong on the
+# POST lane, which is
 # why the cap is not chased higher to cover them (clearing them would need ~98 KiB, 4x this
 # buffer; #829 review, Minh3132). Header blocks are capped far tighter in app.py
 # (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
