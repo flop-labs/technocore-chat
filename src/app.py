@@ -61,6 +61,28 @@ CLIENT_IP_HEADER = config.CLIENT_IP_HEADER
 MAX_HEADERS = 48
 MAX_HEADER_BYTES = 8192
 
+# The GET write lanes carry their whole payload in the URL (`{text:path}`, `{value:path}`),
+# so the binding limit there is URL *bytes*, not the character cap the schema advertises: a
+# value well inside `maxLength` can still blow the URL budget, because a code point costs up
+# to 4 bytes and each byte URL-encodes to 3 (#180) — 4096 CJK characters is a ~36 KiB URL,
+# 4096 emoji ~49 KiB, an 8192-char note up to ~98 KiB. Those payloads belong on the POST lane,
+# and the 414 body says so.
+#
+# What the budget buys on top of that is a *deterministic* refusal in the band just over it.
+# Measured on the live service, the uvicorn h11 parser rejects an over-long request line only
+# when it arrives across TCP segments and lets an identical one that lands in a single segment
+# through, so an over-budget URL 400s or 200s at random. The Dockerfile sets
+# --h11-max-incomplete-event-size ABOVE this budget (32 KiB vs 16 KiB), so a URL in the
+# (16 KiB, 32 KiB] band cannot be rejected by the parser and always reaches this app for a
+# clean 414 that names the bytes and the POST escape, instead of dying opaquely in the parser.
+# A URL past the 32 KiB parser cap — which includes a full-length CJK/emoji GET write and any
+# full-length note — is still refused every time, but as the parser's 400 or this 414
+# depending on segmentation (#829 review, Minh3132). Raising the cap to make those
+# deterministic too would have to clear ~98 KiB (a full-length emoji note) and so ~4x the
+# per-connection incomplete-line buffer, to cover inputs the API already routes to POST — so
+# it is not chased there; the proxy keeps its own URL cap for that far-over-budget band.
+MAX_URL_BYTES = 16 << 10
+
 # Body: big enough that the largest valid envelope is reachable in EVERY JSON encoding a
 # client may pick. A conditional note may carry two 8192-character values (`value` and
 # `if`); escaped by json.dumps' default ensure_ascii=True, astral characters cost 12 bytes
@@ -706,13 +728,20 @@ _REF = re.compile(rb"(?:^|&)ref=(422-[0-9a-f]{1,8}-[0-9a-f]{4})(?:&|$)")
 
 
 class HeaderLimits:
-    """Reject oversized header blocks at the app edge, precisely.
+    """Reject oversized header blocks and request URLs at the app edge, precisely.
 
     The parser cap (`--h11-max-incomplete-event-size`) is real but fuzzy: it bounds
     *buffered incomplete* data, so a block that arrives in one segment slips under it —
     measured, httptools returned 200 for a 256 KiB header. This is the deterministic
     bound, and it also documents the contract. It does not replace the parser cap, which
     is what stops the bytes being buffered in the first place.
+
+    The URL check is the same shape for the same reason (#180): the h11 cap bounds a
+    request line the same fuzzy way, so an over-budget URL 400s or 200s depending only on
+    how the kernel segmented it. Here the bound is exact and phrased in the app's voice —
+    a 414 that names the byte count and points at the POST body — and, because the parser
+    cap is deliberately set above `MAX_URL_BYTES`, a request just over the budget reaches
+    this check for that clean refusal rather than dying as a bare `Invalid HTTP request`.
 
     Also where a request carrying a duplicate 422's ref token is counted and logged,
     because this is the one point every request passes exactly once: the docs the 422
@@ -726,6 +755,25 @@ class HeaderLimits:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
+            # raw_path is the percent-encoded target uvicorn parsed (the URL as the client
+            # sent it); fall back to the decoded path. The request-target on the wire is
+            # `raw_path + b"?" + query_string` when a query is present, so `bool(qs)` adds the
+            # one `?` separator byte — without it the ceiling under-counts by 1 exactly at the
+            # boundary for a query-bearing lane (e.g. a conditional note write's `?if=`).
+            qs = scope.get("query_string", b"")
+            url_bytes = len(scope.get("raw_path") or scope["path"].encode()) + len(qs) + bool(qs)
+            if url_bytes > MAX_URL_BYTES:
+                # Runs before routing, so it fires on a read with an over-long query
+                # (`?since=<huge>`) too, not only a GET write lane's `:path` payload. Hence a
+                # conditional escape: a concrete `POST /r/<room>` here told an over-budget read
+                # to perform a write it never meant (#829 review, Minh3132); the write lanes get
+                # their correct POST targets from the handler (store.py) when the URL is smaller.
+                body = (
+                    f"414 URL too long: {url_bytes} bytes, over the {MAX_URL_BYTES}-byte budget. A "
+                    f"GET write lane can POST its payload as a body; a read just needs a shorter query.\n"
+                )
+                await text(body, 414)(scope, receive, send)
+                return
             headers = scope.get("headers", [])
             total = sum(len(k) + len(v) + 4 for k, v in headers)
             if len(headers) > MAX_HEADERS or total > MAX_HEADER_BYTES:
