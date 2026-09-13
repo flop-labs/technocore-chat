@@ -3,7 +3,8 @@ set -euo pipefail
 
 REPO_URL="https://github.com/flop-labs/technocore-chat.git"
 REPO_DIR="$HOME/technocore-chat"
-SEED_DIR="$HOME/.config/technocore"
+CONFIG_DIR="$HOME/.config"
+SEED_DIR="$CONFIG_DIR/technocore"
 SEED_FILE="$SEED_DIR/sign_seed"
 
 echo "Technocore safe onboarding helper"
@@ -102,8 +103,64 @@ verify_checkout() {
   done
 }
 
+prepare_config_dir() {
+  local perms owner uid
+  uid="$(id -u)"
+
+  # The parent controls whether the entire Technocore identity directory can be
+  # renamed or replaced. Validate it before trusting or creating SEED_DIR; do
+  # not chmod-and-trust a parent that was previously writable by other users.
+  if [[ -e "$CONFIG_DIR" || -L "$CONFIG_DIR" ]]; then
+    if [[ -L "$CONFIG_DIR" || ! -d "$CONFIG_DIR" ]]; then
+      echo "Error: existing config path is not a regular directory; refusing seed use." >&2
+      exit 1
+    fi
+    perms="$(stat -c '%a' -- "$CONFIG_DIR")"
+    owner="$(stat -c '%u' -- "$CONFIG_DIR")"
+    if [[ "$owner" != "$uid" ]]; then
+      echo "Error: config directory is not owned by the current user; refusing seed use." >&2
+      exit 1
+    fi
+    if (( (8#$perms & 0022) != 0 )); then
+      echo "Error: config directory permissions are $perms; it was group/world-writable." >&2
+      echo "Refusing to trust the seed parent because the Technocore identity directory may have been replaced." >&2
+      echo "Do not repair permissions and continue with this DID; rotate/recover explicitly instead." >&2
+      exit 1
+    fi
+    return
+  fi
+
+  # Create a private parent. If another onboarding process wins the mkdir race,
+  # validate what appeared before using it.
+  if mkdir -m 700 -- "$CONFIG_DIR" 2>/dev/null; then
+    return
+  fi
+
+  if [[ -L "$CONFIG_DIR" || ! -d "$CONFIG_DIR" ]]; then
+    echo "Error: config directory appeared in an unsafe form during setup; refusing seed use." >&2
+    exit 1
+  fi
+  perms="$(stat -c '%a' -- "$CONFIG_DIR")"
+  owner="$(stat -c '%u' -- "$CONFIG_DIR")"
+  if [[ "$owner" != "$uid" ]]; then
+    echo "Error: config directory is not owned by the current user; refusing seed use." >&2
+    exit 1
+  fi
+  if (( (8#$perms & 0022) != 0 )); then
+    echo "Error: config directory permissions are $perms; it was group/world-writable." >&2
+    echo "Refusing to trust the seed parent because the Technocore identity directory may have been replaced." >&2
+    echo "Do not repair permissions and continue with this DID; rotate/recover explicitly instead." >&2
+    exit 1
+  fi
+}
+
 prepare_seed_dir() {
   local perms
+
+  # Revalidate the parent immediately before touching the identity directory.
+  # Once it is user-owned and not group/world-writable, another unprivileged
+  # local user cannot rename or replace the technocore entry beneath it.
+  prepare_config_dir
 
   # An existing group/world-writable directory cannot be made trustworthy by
   # chmod after the fact: another local user may already have replaced the
@@ -125,10 +182,9 @@ prepare_seed_dir() {
     return
   fi
 
-  # Create the parent if needed, then create the identity directory itself with
-  # private permissions. If another onboarding process wins the mkdir race,
-  # validate what appeared before changing its mode or using any seed within it.
-  mkdir -p -- "$HOME/.config"
+  # Create the identity directory itself with private permissions. If another
+  # onboarding process wins the mkdir race, validate what appeared before
+  # changing its mode or using any seed within it.
   if mkdir -m 700 -- "$SEED_DIR" 2>/dev/null; then
     return
   fi
@@ -147,6 +203,9 @@ prepare_seed_dir() {
   chmod 700 -- "$SEED_DIR"
 }
 
+# Refuse an unsafe parent before dependency setup or any seed creation/use, then
+# re-check it again immediately before preparing the identity directory.
+prepare_config_dir
 verify_checkout
 cd "$REPO_DIR"
 
