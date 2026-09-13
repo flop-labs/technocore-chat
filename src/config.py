@@ -57,6 +57,7 @@ def _rate(name: str, default: str) -> int:
         raise SystemExit(
             f"FATAL: {name}={raw!r} is not an integer"
         ) from None
+    v = max(1, v)
     try:
         float(v)  # catch overflow at boot, not at request time
     except OverflowError:
@@ -65,7 +66,7 @@ def _rate(name: str, default: str) -> int:
             f"limit.py:take() calls float() on this value, so anything "
             f"above ~1.8e308 crashes every rate-limited route at runtime."
         ) from None
-    return max(1, v)
+    return v
 
 RATE_READ = _rate("CHAT_RATE_READ", "120")  # requests/min/IP
 RATE_WRITE = _rate("CHAT_RATE_WRITE", "30")
