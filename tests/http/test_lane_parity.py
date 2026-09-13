@@ -1,10 +1,11 @@
 """One logical write, performed three ways, asserting they land identically.
 
 The three lanes to a room write: store.append directly against the root, the HTTP GET
-say lane, and the MCP wrapper (whose say builds the same GET — see tests/test_mcp.py for
-the urlopen-into-TestClient trick that makes the wrapper drive the real app here). If
-the three ever disagree about what a record IS, the disagreement is invisible to every
-single-lane test: this file is the differential check.
+say lane, and the MCP wrapper (whose say goes over the service's POST lane — its
+`use_fetch` seam is what points it at the TestClient, so it drives the real app here).
+If the three ever disagree about what a record IS, the disagreement is invisible to
+every single-lane test: this file is the differential check — and with the wrapper on
+POST it now spans both write lanes of the HTTP surface, not two spellings of one.
 
 Seed of the §6.5 port gate: the assertions below are phrased against the protocol (one
 JSONL record per write, field-identical modulo the fields named in each test; one
@@ -16,15 +17,13 @@ Run: uv run --group dev python -m pytest tests
 
 from __future__ import annotations
 
-import email.message
-import io
 import re
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
+import anyio
 import pytest
+from mcp.types import CallToolResult
 from starlette.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,52 +52,28 @@ def lanes(tmp_path, monkeypatch):
 
         client = TestClient(app_module.app)
 
-        class _Body:
-            def __init__(self, text: str):
-                self._text = text
+        async def fetch(method, url, headers, body, timeout):
+            assert url.startswith(mcp_server.BASE_URL)
+            # TestClient drives the app on its own portal thread, so the blocking call is
+            # not blocking the loop this coroutine runs on.
+            response = client.request(
+                method, url[len(mcp_server.BASE_URL) :], content=body, headers=headers
+            )
+            return response.status_code, response.text
 
-            def read(self) -> bytes:
-                return self._text.encode()
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc) -> None:
-                return None
-
-        def fake_urlopen(request, timeout=None):
-            assert request.full_url.startswith(mcp_server.BASE_URL)
-            response = client.get(request.full_url[len(mcp_server.BASE_URL) :])
-            if response.status_code >= 400:
-                raise urllib.error.HTTPError(
-                    request.full_url,
-                    response.status_code,
-                    "error",
-                    email.message.Message(),
-                    io.BytesIO(response.text.encode()),
-                )
-            return _Body(response.text)
-
-        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(mcp_server, "_fetch", fetch)
         monkeypatch.setattr(mcp_server, "DEFAULT_NICK", "")
         yield tmp_path, client, mcp_server
 
 
-def call(server, name: str, arguments: dict) -> dict:
-    reply = server.handle(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        }
-    )
-    assert reply is not None and not reply["result"].get("isError"), reply
+def call(server, name: str, arguments: dict) -> CallToolResult:
+    reply = anyio.run(server.call_tool, name, arguments)
+    assert not reply.is_error, reply
     return reply
 
 
-def text_of(reply: dict) -> str:
-    return reply["result"]["content"][0]["text"]
+def text_of(reply: CallToolResult) -> str:
+    return "".join(block.text for block in reply.content if block.type == "text")
 
 
 def test_one_room_write_lands_identically_through_all_three_lanes(lanes):
@@ -120,7 +95,7 @@ def test_one_room_write_lands_identically_through_all_three_lanes(lanes):
     store.append(root, "parity", "bot", text)  # (a) the store, directly
     # (b) the HTTP GET lane — %20 proves the encoding path both lanes must share
     assert client.get("/r/parity/say/bot/hello%20parity").status_code == 200
-    # (c) the same write through the wrapper
+    # (c) the same write through the wrapper, which takes the POST lane
     call(mcp_server.server, "say", {"room": "parity", "text": text, "nick": "bot"})
 
     records = [
@@ -170,7 +145,7 @@ def test_one_note_write_lands_identically_through_all_three_lanes(lanes):
     value = "parity value"
     store.note_set(root, "zz-parity", "direct", value)  # (a) the store, directly
     assert client.get("/kv/zz-parity/http/set/parity%20value").status_code == 200  # (b)
-    call(  # (c) the wrapper's write_note, which builds the same GET with safe="" quoting
+    call(  # (c) the wrapper's write_note, over the service's POST lane
         mcp_server.server, "write_note", {"namespace": "zz-parity", "key": "mcp", "value": value}
     )
 
