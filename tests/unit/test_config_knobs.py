@@ -371,3 +371,14 @@ def test_rate_rooms_per_day_overflow_refuses_to_boot() -> None:
 
 def test_rate_rooms_per_day_large_float_representable_boots() -> None:
     assert boot(CHAT_RATE_ROOMS_PER_DAY="10000001")["config.RATE_ROOMS_PER_DAY"] == 10000001
+
+
+def test_rate_negative_oversized_does_not_block_boot() -> None:
+    """An oversized negative value is floored to 1, so it must boot rather than
+    fail on float() conversion (review feedback on PR #820)."""
+    for var, key in [
+        ("CHAT_RATE_READ", "config.RATE_READ"),
+        ("CHAT_RATE_WRITE", "config.RATE_WRITE"),
+        ("CHAT_RATE_ROOMS_PER_DAY", "config.RATE_ROOMS_PER_DAY"),
+    ]:
+        assert boot(**{var: "-" + "9" * 400})[key] == 1
