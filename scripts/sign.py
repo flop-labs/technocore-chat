@@ -44,8 +44,17 @@ Key material comes from --seed-file, --seed or $SIGN_SEED:
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
 On keygen, --seed-file PATH creates PATH exclusively with a fresh random seed
-and prints only the path and DID. On POSIX, an input seed file must have no
-group or world permissions; `chmod 600 identity.seed` is the normal setting.
+and prints only the path and DID. Creation stages and fsyncs the complete seed
+in the same directory before publishing it without replacement. POSIX then
+fsyncs that directory; Windows requests a write-through move. Use an existing
+private directory (restrict its ACLs first on Windows). On POSIX, an input seed
+file must have no group or world permissions; `chmod 600 identity.seed` is usual.
+
+If a failure follows publication, the complete final seed is preserved and
+keygen reports uncertain durability, never success. Preserve that identity and
+resolve the storage error before using it; do not generate a replacement key.
+Handled I/O failures remove staging files where possible. Abrupt termination
+can leave a private .seed-*.tmp file, which is not a generated identity to use.
 
 Usage:
   uv run scripts/sign.py keygen   [--seed-file PATH]
@@ -56,7 +65,7 @@ Usage:
   uv run scripts/sign.py delegate [--seed-file PATH|--seed ...] <agent-did> <scope> <days> [nonce]
   uv run scripts/sign.py check    <root-did> [file]
 
-'keygen' prints the seed and the did:key. 'did' prints the did:key. 'say' and
+'keygen' without --seed-file prints the seed and did:key. 'did' prints the did:key. 'say' and
 'set' print two lines — the did:key, then the 86-character base64url
 signature — ready for:
 
@@ -97,6 +106,7 @@ import re
 import secrets
 import stat
 import sys
+import tempfile
 import time
 import unicodedata
 from pathlib import Path
@@ -195,19 +205,65 @@ def read_seed_file(path: Path) -> str:
     return given
 
 
+def publish_seed_file(staging: Path, path: Path) -> None:
+    """Publish complete seed bytes without replacing a competing file or symlink."""
+    if os.name != "nt":
+        # rename/replace can overwrite an identity created after an existence check.
+        # A same-filesystem hard link gives us an atomic, create-only publication.
+        os.link(staging, path)
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    # Windows cannot fsync a directory through os.open. Request a write-through,
+    # same-volume move instead, with neither REPLACE_EXISTING nor COPY_ALLOWED.
+    move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    move.restype = wintypes.BOOL
+    if not move(str(staging), str(path.absolute()), 0x8):  # MOVEFILE_WRITE_THROUGH
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def write_seed_file(path: Path, seed: str) -> None:
-    """Create a private seed file without following or replacing an existing path."""
+    """Publish only a fully written, synced seed; never replace an existing identity."""
+    staging = None
+    published = False
     try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except OSError as exc:
-        raise SystemExit(f"cannot create seed file {path}: {exc}") from exc
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as destination:
+        descriptor, name = tempfile.mkstemp(prefix=".seed-", suffix=".tmp", dir=path.parent)
+        staging = Path(name)
+        try:
+            stream = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        except OSError:
+            os.close(descriptor)
+            raise
+        with stream as destination:
             destination.write(seed + "\n")
             destination.flush()
             os.fsync(destination.fileno())
+        publish_seed_file(staging, path)
+        published = True
+        staging.unlink(missing_ok=True)  # Windows moved it; POSIX still has the staging link.
+        if os.name != "nt":
+            # File fsync does not persist a new directory entry. Include publication
+            # and staging removal in the directory sync before keygen prints success.
+            directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     except OSError as exc:
-        raise SystemExit(f"cannot write seed file {path}: {exc}") from exc
+        detail = ""
+        if staging is not None:
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                detail += f"; could not remove private staging file {staging}"
+        if published:
+            # A reader may already be using this complete identity. Removing the final
+            # path here could discard it (or a replacement); report uncertainty instead.
+            detail += "; complete seed was published but durability is uncertain; preserve it"
+        raise SystemExit(f"cannot create seed file {path}: {exc}{detail}") from exc
 
 
 def load_key(seed_arg: str | None, seed_file: Path | None = None) -> tuple[Ed25519PrivateKey, str]:

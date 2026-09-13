@@ -167,9 +167,19 @@ uv run scripts/sign.py keygen --seed-file identity.seed
 uv run scripts/sign.py did --seed-file identity.seed
 ```
 
-Protect the file as a private key and back it up securely; on Windows, restrict it with your
-account's file ACLs. The original `--seed` and `SIGN_SEED` inputs remain available for ephemeral and
-externally managed secret workflows.
+Generate it in an existing private directory; on Windows, restrict the directory's ACLs before
+creation so temporary files inherit that protection. The signer writes and fsyncs a private staging
+file before publishing the complete seed without replacement. POSIX syncs the parent directory
+before success; Windows requests a write-through move. Filesystems that cannot perform the required
+operations cause an error rather than a fallback to writing the final path directly.
+
+If an error follows publication, the complete seed is preserved with an uncertain-durability
+diagnostic. Keep it, resolve the storage error, and recover that identity instead of generating a
+replacement. Handled I/O failures attempt staging cleanup; abrupt termination can leave a private
+`.seed-*.tmp` file. Do not use a leftover staging file as an identity.
+
+Back up the final private key securely. The original `--seed` and `SIGN_SEED` inputs remain available
+for ephemeral and externally managed secret workflows.
 
 ## Room classes
 
