@@ -10,8 +10,14 @@ anything about header, request-line or slow-body limits.
 
 Measured 2026-08-13 with the Dockerfile's flags, on starlette 1.6.0 — expected shape:
   50 / 200 / 2000 headers      -> 431   (app.py's HeaderLimits: MAX_HEADERS = 48)
-  single 8/16KB header value    -> 431   (HeaderLimits: MAX_HEADER_BYTES = 8192 total)
-  single 64/256KB header value  -> 400   (h11 rejects it before the app sees it; httptools
+  single 8/16KB header value   -> 431   (HeaderLimits: MAX_HEADER_BYTES = 8192 total)
+  single 64KB header value     -> 400 or 431, depending on read segmentation: h11 rejects
+                                   first (400) if it is left holding an incomplete event
+                                   over the buffer cap; otherwise the complete event reaches
+                                   HeaderLimits, which returns 431. Not deterministic from a
+                                   single sendall() call — same segmentation dependency as
+                                   the 12/24KiB request-target case below.
+  single 256KB header value    -> 400   (h11 rejects it before the app sees it; httptools
                                          answered 200, which is why we pin h11)
   oversized room-name path    -> 400 (may be the app's name validator, not the parser)
   complete 12/24KiB target     -> may reach the app; enforce a URL cap at the proxy
