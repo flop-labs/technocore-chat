@@ -20,6 +20,8 @@ bundle.log
 # part of a deploy and must never be part of a commit.
 .dev.vars
 /identity.seed
+# Private staging files can survive an interrupted keygen.
+.seed-*.tmp
 data/
 dist/
 node_modules/
