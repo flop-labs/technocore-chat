@@ -296,9 +296,15 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
 
     on_disk, _ = store._count_notes(root)
     assert on_disk == accepted, "every accepted write must be a note that exists"
-    assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
+    # Print the count file alongside on_disk on failure, so the next occurrence says whether
+    # the count file was ahead of the disk and by how much. That distinguishes a transient
+    # over-count from a create that was refused for some other reason.
+    count_file_value = store._note_count(root)
+    assert on_disk == cap, (
+        f"cap is {cap}, store holds {on_disk} notes on disk, count file reads {count_file_value}"
+    )
     # …and the file agrees with the disk, or the next process starts from a wrong number.
-    assert store._note_count(root) == cap
+    assert count_file_value == cap
 
 
 def test_a_refused_write_counts_nothing(tmp_path) -> None:

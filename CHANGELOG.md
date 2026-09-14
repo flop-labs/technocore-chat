@@ -16,6 +16,12 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The global cap race test now prints the count file value on failure**, distinguishing a
+  transient over-count from a create refused for another reason. Addresses the diagnostic need
+  identified in [#793](https://github.com/flop-labs/technocore-chat/issues/793).
+
 ## [0.13.0] - 2026-09-07
 
 ### Added
