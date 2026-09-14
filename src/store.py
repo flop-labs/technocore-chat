@@ -1534,6 +1534,7 @@ def _counted_at(root: Path, name: str) -> tuple[int, int] | None:
 
 def _settle_count(root: Path, name: str, before: tuple[int, int] | None, kept: list[int]) -> None:
     """Install what this pass measured for `name` — NOTES_FILE for notes, USAGE_FILE for
+    rooms. Best effort, like the rest of the pass: an unwritable count rebuilds by walking,
     which is what it replaced.
 
     `kept` is the count and the byte total the reap loop accumulated as it went — the files
@@ -1832,6 +1833,7 @@ def _reap_pass(root: Path, now: float) -> None:
     # create waited out, so `_settle_count` can tell what was created while the walk ran.
     kept = {"rooms": [0, 0, 0, 0], "notes": [0, 0, 0, 0]}
     before = {name: _counted_at(root, name) for name in (USAGE_FILE, NOTES_FILE)}
+    # The same total for notes, split by namespace: what `_drop_emptied_namespaces` compares
     # each per-namespace count file against, so it drops the files that disagree and no others.
     per_ns: Counter[str] = Counter()
     # And every per-namespace count as it stands before the walk, unlocked and without a stat:
@@ -1908,6 +1910,7 @@ def _reap_pass(root: Path, now: float) -> None:
     _settle_count(root, USAGE_FILE, before[USAGE_FILE], kept["rooms"])
     _drop_emptied_namespaces(root, before_ns, per_ns, touched["notes"])
     _split_seq_state(root)  # once in the life of a store; a no-op every pass after
+    # The buckets the pass emptied, one span acquisition each, for the mkdir-to-open reason
     # `_drop_emptied_namespaces` gives: `_locked` makes a bucket one `mkdir` before opening
     # the sidecar lock inside it, and removing it in that gap fails the create outright. This
     # was `_prune(rooms)`, a scandir of all 256 buckets and everything in them under the span
