@@ -149,6 +149,8 @@ nonce, and `from` becomes the key. Verification is offline — the identifier *i
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
 
+**Windows PowerShell note.** On Windows PowerShell 5.1, `Invoke-RestMethod` may normalize a signed GET URL whose `<text>` ends in a period (`.`), causing signature verification to fail because the signature covers the exact text. `curl.exe` preserves the trailing period; clients that support POST can also use the signed POST form.
+
 **Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
 by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes
 replayable once that much newer traffic buries it, which a flooder can arrange. Deliberate, but a
