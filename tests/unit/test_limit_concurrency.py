@@ -51,8 +51,13 @@ def test_concurrent_take_never_raises_keyerror(monkeypatch):
 
     monkeypatch.setattr(limit, "_buckets", gated)
 
-    class FakeRequest:
+    class FakeRequestOld:
         client = type("obj", (), {"host": "old"})()
+        scope = {}
+        headers = {}
+
+    class FakeRequestNew:
+        client = type("obj", (), {"host": "new"})()
         scope = {}
         headers = {}
 
@@ -60,13 +65,13 @@ def test_concurrent_take_never_raises_keyerror(monkeypatch):
 
     def take_parked():
         try:
-            results["parked"] = limit.take(FakeRequest(), "read", 60)
+            results["parked"] = limit.take(FakeRequestOld(), "read", 60)
         except KeyError as e:
             results["parked"] = e
 
     def take_evictor():
         if gated.parked.wait(timeout=2.0):
-            results["evictor"] = limit.take(FakeRequest(), "read", 60)
+            results["evictor"] = limit.take(FakeRequestNew(), "read", 60)
             gated.gate.set()
         else:
             results["evictor"] = "timeout"
@@ -90,37 +95,56 @@ def test_concurrent_take_conserves_the_budget(monkeypatch):
     """The lost-update path: two threads read the same balance, both spend a token, both
     write back, one write is lost. The bucket grants more than its capacity.
 
-    Without the lock this fails at default switchinterval on the test matrix. With it,
-    the sum of grants never exceeds the bucket's balance plus the refill that happened
-    during the test.
+    This test uses the lock itself as the discriminator: gate the first two get() calls
+    with a bounded wait. On the unfixed base, both threads enter get() and read the same
+    pre-spend balance; on the fixed head, thread 2 cannot reach get() while thread 1 holds
+    the lock, so thread 1's wait expires and only then can thread 2 read the updated balance.
     """
     limit._buckets.clear()
+
+    class _GatedForBudget(OrderedDict):
+        def __init__(self):
+            super().__init__()
+            self.first_get = threading.Event()
+            self.second_get = threading.Event()
+            self.get_count = 0
+
+        def get(self, key, default=None):
+            self.get_count += 1
+            if self.get_count == 1:
+                self.first_get.set()
+                self.second_get.wait(timeout=0.05)
+            elif self.get_count == 2:
+                self.second_get.set()
+            return super().get(key, default)
+
+    gated = _GatedForBudget()
+    gated[("racer", "read")] = (1.0, time.monotonic())
+    monkeypatch.setattr(limit, "_buckets", gated)
 
     class FakeRequest:
         client = type("obj", (), {"host": "racer"})()
         scope = {}
         headers = {}
 
-    cap = 10
     results = []
 
-    def hammer():
-        for _ in range(100):
-            left, wait = limit.take(FakeRequest(), "read", cap * 60, burst=cap)
-            if wait == 0.0:
-                results.append(left)
+    def take_once():
+        left, wait = limit.take(FakeRequest(), "read", 60, burst=1)
+        if wait == 0.0:
+            results.append(left)
 
-    started = time.monotonic()
-    threads = [threading.Thread(target=hammer) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    elapsed = time.monotonic() - started
+    thread1 = threading.Thread(target=take_once, name="thread1")
+    thread2 = threading.Thread(target=take_once, name="thread2")
+
+    thread1.start()
+    gated.first_get.wait(timeout=1.0)
+    thread2.start()
+    thread1.join(timeout=1.0)
+    thread2.join(timeout=1.0)
 
     grants = len(results)
-    refilled = elapsed * cap
-    assert grants <= cap + refilled, (
-        f"granted {grants} from a {cap}-token bucket with {refilled:.1f} refilled — "
-        "the read-modify-write is unguarded"
+    assert grants <= 1, (
+        f"granted {grants} tokens from a 1-token bucket with no refill — "
+        "the read-modify-write lost an update"
     )

@@ -306,11 +306,13 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
         _buckets.move_to_end((ip, kind))
         while len(_buckets) > max_buckets:
             _buckets.popitem(last=False)
-    # Counted at the one point every rate-limited route already funnels through, so a new
-    # route cannot forget to count itself. In-process, so these reset on restart — /stats
-    # reports them next to `uptime_seconds`, which is what makes them readable.
-    _requests[kind] = _requests.get(kind, 0) + 1
-    _requests["rate_limited"] += bool(wait)
+        # Counted at the one point every rate-limited route already funnels through, so a new
+        # route cannot forget to count itself. In-process, so these reset on restart — /stats
+        # reports them next to `uptime_seconds`, which is what makes them readable.
+        # Inside the lock so two concurrent requests cannot read the same count and overwrite
+        # each other, making /stats undercount traffic under concurrency (same race as _buckets).
+        _requests[kind] = _requests.get(kind, 0) + 1
+        _requests["rate_limited"] += bool(wait)
     config._dbg(1, "take", ip=ip, kind=kind, left=int(tokens), wait=round(wait, 3))
     return int(tokens), wait
 
