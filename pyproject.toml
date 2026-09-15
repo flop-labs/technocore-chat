@@ -21,6 +21,7 @@ dependencies = [
     # Still required: scripts/sign.py generates keys with it, and the docs examples
     # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
     "cryptography==50.0.0",
+    "base58>=2.1.1",
 ]
 
 # The image installs from uv.lock, so these are the only pins in the repo — the Dockerfile
