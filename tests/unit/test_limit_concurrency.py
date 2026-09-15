@@ -5,8 +5,7 @@ The lock added to _buckets serializes three operations that were racing in produ
 2. The KeyError from move_to_end on a key another thread just evicted
 3. The same pattern in refund()
 
-This file uses a gated OrderedDict to force the interleavings deterministically, matching
-the technique already used in tests/unit/test_memo_caches.py for _Gated.
+These tests replace _buckets with a gated OrderedDict that forces specific interleavings.
 """
 
 import threading
@@ -16,35 +15,35 @@ from collections import OrderedDict
 import limit
 
 
-class _GatedOrderedDict(OrderedDict):
-    """An OrderedDict that parks one thread after get() until another thread signals it.
-
-    Used to force the exact interleaving that reproduces issue #378: thread A reads a
-    bucket, thread B evicts it, thread A tries to move_to_end the now-absent key.
-    """
+class _GatedOrderedDictForKeyError(OrderedDict):
+    """An OrderedDict that parks the slow thread after __setitem__ before move_to_end,
+    giving the fast thread time to evict the key."""
 
     def __init__(self):
         super().__init__()
         self.gate = threading.Event()
         self.parked = threading.Event()
 
-    def get(self, key, default=None):
-        result = super().get(key, default)
-        if threading.current_thread().name == "parked":
-            self.parked.set()
-            self.gate.wait(timeout=2.0)
-        return result
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if threading.current_thread().name == "slow" and key[0] == "old":
+            self.parked.set()  # Signal we've written
+            self.gate.wait(timeout=2.0)  # Wait for fast thread to evict
 
 
 def test_concurrent_take_never_raises_keyerror(monkeypatch):
     """The KeyError path: move_to_end on a key another thread evicted between __setitem__
-    and move_to_end. Needs MAX_BUCKETS exceeded so popitem runs, and an existing key so
-    __setitem__ leaves it where it was (a new key goes to the end and cannot be evicted
-    before move_to_end runs).
+    and move_to_end.
 
-    Without the lock this raises KeyError in the parked thread. With it, both succeed.
+    Uses a gated OrderedDict where the slow thread parks after __setitem__, giving the
+    fast thread (with a DIFFERENT host) time to create a new key that triggers eviction
+    of the slow thread's key. On the unfixed base this raises KeyError when slow calls
+    move_to_end on the evicted key. With the lock, slow holds it through the whole
+    operation and fast waits.
     """
-    gated = _GatedOrderedDict()
+    gated = _GatedOrderedDictForKeyError()
+
+    # Fill to MAX_BUCKETS and add the key slow thread will update
     gated[("old", "read")] = (10.0, 0.0)
     for i in range(20_001):
         gated[(f"filler-{i}", "read")] = (10.0, 0.0)
@@ -63,63 +62,67 @@ def test_concurrent_take_never_raises_keyerror(monkeypatch):
 
     results = {}
 
-    def take_parked():
+    def take_slow():
         try:
-            results["parked"] = limit.take(FakeRequestOld(), "read", 60)
+            results["slow"] = limit.take(FakeRequestOld(), "read", 60)
         except KeyError as e:
-            results["parked"] = e
+            results["slow"] = e
 
-    def take_evictor():
-        if gated.parked.wait(timeout=2.0):
-            results["evictor"] = limit.take(FakeRequestNew(), "read", 60)
+    def take_fast():
+        gated.parked.wait(timeout=2.0)
+        try:
+            # This creates ("new", "read") which forces eviction since we're over MAX_BUCKETS
+            results["fast"] = limit.take(FakeRequestNew(), "read", 60)
+        except Exception as e:
+            results["fast"] = e
+        finally:
             gated.gate.set()
-        else:
-            results["evictor"] = "timeout"
 
-    parked_thread = threading.Thread(target=take_parked, name="parked")
-    evictor_thread = threading.Thread(target=take_evictor, name="evictor")
+    slow_thread = threading.Thread(target=take_slow, name="slow")
+    fast_thread = threading.Thread(target=take_fast, name="fast")
 
-    parked_thread.start()
-    evictor_thread.start()
-    parked_thread.join(timeout=3.0)
-    evictor_thread.join(timeout=3.0)
+    slow_thread.start()
+    fast_thread.start()
+    slow_thread.join(timeout=3.0)
+    fast_thread.join(timeout=3.0)
 
-    assert not isinstance(results.get("parked"), KeyError), (
-        "move_to_end raised KeyError — the lock is missing or does not cover the whole section"
+    assert not isinstance(results.get("slow"), KeyError), (
+        f"move_to_end raised KeyError: {results.get('slow')} — "
+        "the lock is missing or does not cover the whole section"
     )
-    assert isinstance(results.get("parked"), tuple), f"unexpected result: {results.get('parked')}"
-    assert isinstance(results.get("evictor"), tuple), f"evictor result: {results.get('evictor')}"
+    assert isinstance(results.get("slow"), tuple), f"slow: {results.get('slow')}"
+    assert isinstance(results.get("fast"), tuple), f"fast: {results.get('fast')}"
+
+
+class _GatedOrderedDictForBudget(OrderedDict):
+    """An OrderedDict that parks thread1 after get(), giving thread2 time to also read
+    the same balance before either writes."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = threading.Event()
+        self.first_read = threading.Event()
+
+    def get(self, key, default=None):
+        result = super().get(key, default)
+        if threading.current_thread().name == "thread1" and key == ("racer", "read"):
+            self.first_read.set()  # Signal we've read
+            self.gate.wait(timeout=0.15)  # Wait for thread2 to also read
+        return result
 
 
 def test_concurrent_take_conserves_the_budget(monkeypatch):
     """The lost-update path: two threads read the same balance, both spend a token, both
-    write back, one write is lost. The bucket grants more than its capacity.
+    write back, one write is lost.
 
-    This test uses the lock itself as the discriminator: gate the first two get() calls
-    with a bounded wait. On the unfixed base, both threads enter get() and read the same
-    pre-spend balance; on the fixed head, thread 2 cannot reach get() while thread 1 holds
-    the lock, so thread 1's wait expires and only then can thread 2 read the updated balance.
+    Uses a gated OrderedDict where thread1 parks after get(), giving thread2 time to also
+    call get() and read the same pre-spend balance. On the unfixed base both threads see
+    balance=1.0 and both grant (lost update). With the lock, thread2 waits for thread1 to
+    complete its entire take() before thread2's get() runs.
     """
-    limit._buckets.clear()
-
-    class _GatedForBudget(OrderedDict):
-        def __init__(self):
-            super().__init__()
-            self.first_get = threading.Event()
-            self.second_get = threading.Event()
-            self.get_count = 0
-
-        def get(self, key, default=None):
-            self.get_count += 1
-            if self.get_count == 1:
-                self.first_get.set()
-                self.second_get.wait(timeout=0.05)
-            elif self.get_count == 2:
-                self.second_get.set()
-            return super().get(key, default)
-
-    gated = _GatedForBudget()
+    gated = _GatedOrderedDictForBudget()
     gated[("racer", "read")] = (1.0, time.monotonic())
+
     monkeypatch.setattr(limit, "_buckets", gated)
 
     class FakeRequest:
@@ -134,11 +137,18 @@ def test_concurrent_take_conserves_the_budget(monkeypatch):
         if wait == 0.0:
             results.append(left)
 
-    thread1 = threading.Thread(target=take_once, name="thread1")
-    thread2 = threading.Thread(target=take_once, name="thread2")
+    def take_thread1():
+        take_once()
+
+    def take_thread2():
+        gated.first_read.wait(timeout=1.0)
+        take_once()
+        gated.gate.set()
+
+    thread1 = threading.Thread(target=take_thread1, name="thread1")
+    thread2 = threading.Thread(target=take_thread2, name="thread2")
 
     thread1.start()
-    gated.first_get.wait(timeout=1.0)
     thread2.start()
     thread1.join(timeout=1.0)
     thread2.join(timeout=1.0)

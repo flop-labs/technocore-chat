@@ -16,14 +16,6 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
-### Fixed
-
-- **The `_buckets` OrderedDict is now protected by a lock** to prevent race conditions in concurrent
-  `take()` and `refund()` calls. Without the lock, three symptoms occurred: `KeyError` from
-  `move_to_end` when another thread evicted a key, lost updates allowing budget overruns, and
-  unguarded refunds. The lock serializes the read-modify-write section, ensuring token accounting
-  remains accurate under load. ([#378](https://github.com/flop-labs/technocore-chat/issues/378))
-
 ## [0.13.0] - 2026-09-07
 
 ### Added
