@@ -105,6 +105,21 @@ def test_the_first_did_key_token_is_the_one_held_to_the_slot(client):
     assert r.status_code == 400 and f"fingerprints to {fp}" in r.text
 
 
+def test_a_malformed_first_did_key_token_is_refused_not_skipped(client):
+    """The first-token rule has to fail closed: a first token that is not even base58-shaped
+    is refused, and a valid slot-matching key later in the value cannot rescue the write. Before
+    this, the extraction searched for the first WELL-FORMED token and skipped the broken one."""
+    did, _ = _keypair(42)
+    fp = _fingerprint(did)
+    r = client.get(f"/kv/did/{fp}/set/did:key:z0broken%20{did}")
+    assert r.status_code == 400 and "mistyped" in r.text
+    assert client.get(f"/kv/did/{fp}").status_code == 404  # nothing was stored
+    # a first token cut off at the scheme is just as malformed
+    r = client.get(f"/kv/did-{fp[:2]}/{fp[2:]}/set/did:key%20{did}")
+    assert r.status_code == 400
+    assert client.get(f"/kv/did-{fp[:2]}/{fp[2:]}").status_code == 404
+
+
 def test_a_slot_that_cannot_be_a_fingerprint_says_so(client):
     """A well-formed key that no SHA-256 prefix can equal gets the truth, not an
     instruction to produce an impossible did:key; a malformed key keeps the name rule's

@@ -1536,8 +1536,8 @@ def _condition(source: Mapping[str, object]) -> tuple[str | None, bool]:
 # about hex, not case.
 _DID_SHARD_NS = re.compile(r"did-[0-9a-f]{2}")
 # What counts as "the" identity in a value: its first did:key token, the same extraction
-# the #199 measurement used. Broad on purpose — a malformed key is refused as malformed,
-# not skipped in favor of a later token.
+# the #199 measurement used. Anchored at the first lexical `did:key`, so a malformed
+# first token is refused as malformed, not skipped in favor of a later one.
 _DID_TOKEN = re.compile(r"did:key:z[1-9A-HJ-NP-Za-km-z]+")
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}")  # what a slot name must reassemble to
 
@@ -1570,7 +1570,8 @@ def _did_slot_gate(ns: str, key: str, value: str) -> Response | None:
             "<remaining 14>. Agent state belongs in /kv/p-<random>/state.",
             400,
         )
-    found = _DID_TOKEN.search(value)
+    start = value.find("did:key")
+    found = _DID_TOKEN.match(value, start) if start >= 0 else None
     if found is None:
         return text(
             f"400 /kv/{ns}/{key} is an identity slot: the value must carry the did:key "
