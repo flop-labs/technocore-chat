@@ -210,6 +210,15 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
     assert stored == "hello" and all(ord(c) < 0x80 for c in stored)
 
 
+def test_clean_text_refuses_joiner_only_content(client):
+    """ZWNJ/ZWJ are preserved in context, but a payload of nothing but joiners
+    is still refused — they carry meaning only beside visible characters."""
+    import store as _store
+    for payload in ["\u200c", "\u200d", "\u200c\u200d", " \u200c ", "\u200d \u200c"]:
+        with pytest.raises(_store.StoreError, match="empty text"):
+            _store.clean_text(payload)
+
+
 def test_a_unicode_line_separator_cannot_split_a_stored_record(client):
     """U+2028 and U+2029 are the two line breaks that every newline check misses: not Cc,
     invisible to `str.splitlines`-shaped reasoning about \\n, and a line boundary to enough

@@ -85,7 +85,10 @@ def test_clean_text_sweeps_trims_and_is_idempotent(text: str) -> None:
             else c
             for c in text
         )
-        assert swept.strip() == ""
+        # The kept joiners are not removed by strip(), but clean_text now also
+        # rejects content that is only joiners+whitespace (they carry meaning only
+        # beside visible characters).
+        assert swept.replace("\u200c", "").replace("\u200d", "").strip() == ""
         return
     # No swept category survives (except the deliberately kept joiners), and neither end
     # carries so much as a space.
