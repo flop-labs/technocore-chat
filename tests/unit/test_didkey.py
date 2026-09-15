@@ -177,5 +177,7 @@ def test_abbreviate_shows_eight_trailing_characters():
     assert len(suffix) == 8, f"marker must show 8 trailing chars, got {len(suffix)}: {abbrev!r}"
 
     # The suffix must match the last 8 characters of the did:key's multibase encoding
-    mb = did[len(didkey.PREFIX):]
-    assert suffix == mb[-8:], f"suffix must be the last 8 chars of the multibase: expected {mb[-8:]!r}, got {suffix!r}"
+    mb = did[len(didkey.PREFIX) :]
+    assert suffix == mb[-8:], (
+        f"suffix must be the last 8 chars of the multibase: expected {mb[-8:]!r}, got {suffix!r}"
+    )
