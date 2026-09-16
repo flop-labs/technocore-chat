@@ -47,7 +47,8 @@ PROBE = (
     "'app.DUPE_MIN_LENGTH': app.DUPE_MIN_LENGTH, "
     "'config.DUPE_MAX_COPIES': config.DUPE_MAX_COPIES, "
     "'app.DUPE_MAX_COPIES': app.DUPE_MAX_COPIES, "
-    "'config.WORKERS': config.WORKERS}))"
+    "'config.WORKERS': config.WORKERS, "
+    "'config.CLIENT_IP_HEADER': config.CLIENT_IP_HEADER}))"
 )
 
 
@@ -59,6 +60,18 @@ def boot(**env: str) -> dict:
         [sys.executable, "-c", PROBE], capture_output=True, text=True, env={**clean, **env}
     )
     assert run.returncode == 0, f"boot failed: {run.stderr}"
+    return json.loads(run.stdout)
+
+
+def _boot_any_env(**env: str) -> dict:
+    """Import the real chain in a fresh interpreter; return {key: value} or {key: None} on failure."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    clean.pop("WEB_CONCURRENCY", None)
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE], capture_output=True, text=True, env={**clean, **env}
+    )
+    if run.returncode != 0:
+        return {"config.CLIENT_IP_HEADER": None}
     return json.loads(run.stdout)
 
 
@@ -140,6 +153,28 @@ def test_the_floors_hold() -> None:
     assert boot(CHAT_MAX_NOTES_TOTAL="-5")["config.MAX_NOTES_TOTAL"] == 20480
     floored_total = boot(CHAT_MAX_ROOMS="99", CHAT_MAX_NOTES_TOTAL="10")
     assert floored_total["config.MAX_NOTES_TOTAL"] == 396  # follows MAX_ROOMS, not 20480
+
+
+def test_client_ip_header_accepts_empty_and_valid() -> None:
+    """Empty string is the opt-out; valid token values boot normally."""
+    assert boot()["config.CLIENT_IP_HEADER"] == ""
+    assert boot(CHAT_CLIENT_IP_HEADER="cf-connecting-ip")["config.CLIENT_IP_HEADER"] == "cf-connecting-ip"
+    assert boot(CHAT_CLIENT_IP_HEADER="x-forwarded-for")["config.CLIENT_IP_HEADER"] == "x-forwarded-for"
+
+
+def test_client_ip_header_refuses_non_ascii() -> None:
+    """Non-ASCII values are caught at boot, not at request time."""
+    result = _boot_any_env(CHAT_CLIENT_IP_HEADER="é")  # Latin-1 é
+    assert result["config.CLIENT_IP_HEADER"] is None, "é should be refused at boot"
+    result = _boot_any_env(CHAT_CLIENT_IP_HEADER="☃")  # non-Latin-1 non-ASCII
+    assert result["config.CLIENT_IP_HEADER"] is None, "☃ should be refused at boot"
+
+
+def test_client_ip_header_refuses_separator_chars() -> None:
+    """Colon, space and comma are not HTTP token characters (RFC 9110 §5.1)."""
+    assert _boot_any_env(CHAT_CLIENT_IP_HEADER="bad:header")["config.CLIENT_IP_HEADER"] is None
+    assert _boot_any_env(CHAT_CLIENT_IP_HEADER="bad header")["config.CLIENT_IP_HEADER"] is None
+    assert _boot_any_env(CHAT_CLIENT_IP_HEADER="bad,header")["config.CLIENT_IP_HEADER"] is None
 
 
 def test_the_stillborn_window_is_clamped_to_what_the_reaper_can_actually_honour() -> None:
