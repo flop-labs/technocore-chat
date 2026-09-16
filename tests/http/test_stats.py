@@ -275,7 +275,9 @@ def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_clien
 
     The walk is O(rooms) and at production size (239k rooms) outgrew the 45 s timeout of
     the digest this endpoint exists for. Blocking on it also meant each poll started
-    another walk, so misses arrived faster than they cleared.
+    another walk, so misses arrived faster than they cleared. The client is held open so
+    one event loop spans the requests: a refresh that outlives the request that began it
+    is the whole behaviour, and a loop torn down per request cancels it before it runs.
     """
     import app as app_module
     import config
@@ -289,12 +291,13 @@ def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_clien
         return fresh()
 
     headers = {"X-Stats-Token": "s3cret"}
-    with config.override(STATS_CACHE_SECONDS=60):
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
         app_module._stats_cache = None
-        first = stats_client.get("/stats", headers=headers).json()  # nothing to serve yet
+        app_module._stats_refresh = None
+        first = held.get("/stats", headers=headers).json()  # nothing to serve yet
         app_module._stats_cache = (config.ROOT, 0.0, first)  # …and now it is expired
         monkeypatch.setattr(app_module, "_stats_view", blocking)
-        stale = stats_client.get("/stats", headers=headers)
+        stale = held.get("/stats", headers=headers)
         assert started.wait(10), "the refresh must start"
         assert not released.is_set(), "and the answer must not have waited for it"
         assert stale.status_code == 200
