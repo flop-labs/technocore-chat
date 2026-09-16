@@ -1864,7 +1864,18 @@ async def healthz(request: Request) -> Response:
     return text("ok")
 
 
-_stats_cache: tuple[float, dict] = (0.0, {})
+# Stamped on ROOT for the reason _note_stats_cache is: a refresh started under one root
+# must not be served under another, and here the refresh outlives the request that began
+# it. At most one runs at a time, held in a global so it is not collected mid-walk.
+_stats_cache: tuple[Path, float, dict] | None = None
+_stats_refresh: asyncio.Task | None = None
+
+
+async def _refresh_stats() -> dict:
+    """Recompute the view off the request path and install it against its own root."""
+    global _stats_cache
+    _stats_cache = (config.ROOT, time.monotonic(), await run_in_threadpool(_stats_view))
+    return _stats_cache[2]
 
 
 def _stats_view() -> dict:
@@ -1882,8 +1893,18 @@ async def stats(request: Request) -> Response:
     and "how did we get here" together.
 
     Not rate limited: the gate is the token, and the one caller is a scheduled job. It is
-    cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
-    bounded tail reads of the engagement rollup — cheap per minute, not per request.
+    cached for STATS_CACHE_SECONDS instead, because the room walk is O(rooms) readdir plus
+    the bounded tail reads of the engagement rollup — cheap per window, not per request.
+
+    Stale while revalidating: an expired entry is served as it stands and the refresh runs
+    behind it, so a caller waits for the walk only when there is nothing at all to serve --
+    or when the window is 0, which asks for no cache at all and so has nothing to serve
+    either.
+    A blocking refresh made the cost of the walk the caller's: at 239k rooms the walk
+    outgrew the 45 s timeout of the digest this exists for, and because each poll started
+    another walk, the misses arrived faster than they cleared. One refresh runs at a time;
+    a failing one raises into whichever caller had nothing to serve, and is logged by the
+    loop for the rest, who keep the last good view until a later refresh succeeds.
     """
     # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
     # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
@@ -1901,14 +1922,14 @@ async def stats(request: Request) -> Response:
     # distinctive body would give that back — so the two must not drift apart.
     if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
         return text(NOT_FOUND, 404)
-    global _stats_cache
-    fresh_at, cached = _stats_cache
-    now = time.monotonic()
-    if cached and now - fresh_at < config.STATS_CACHE_SECONDS:
-        view = cached
+    global _stats_refresh
+    hit = _stats_cache if _stats_cache and _stats_cache[0] == config.ROOT else None
+    if hit and time.monotonic() - hit[1] < config.STATS_CACHE_SECONDS:
+        view = hit[2]
     else:
-        view = await run_in_threadpool(_stats_view)
-        _stats_cache = (now, view)
+        if _stats_refresh is None or _stats_refresh.done():
+            _stats_refresh = asyncio.create_task(_refresh_stats())
+        view = hit[2] if hit and config.STATS_CACHE_SECONDS else await _stats_refresh
     view = {
         **view,
         # Per *worker*, and labelled as such rather than summed. `_requests` is a plain

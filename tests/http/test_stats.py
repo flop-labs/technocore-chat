@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from pathlib import Path
 
 import _client
@@ -261,9 +262,57 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
 
     with config.override(STATS_CACHE_SECONDS=60):
         monkeypatch.setattr(app_module, "_stats_view", counted)
-        app_module._stats_cache = (0.0, {})
+        app_module._stats_cache = None
         headers = {"X-Stats-Token": "s3cret"}
         first = stats_client.get("/stats", headers=headers)
         second = stats_client.get("/stats", headers=headers)
         assert first.status_code == second.status_code == 200
         assert calls == [1]
+
+
+def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_client, monkeypatch):
+    """A caller waits for the walk only when there is nothing at all to serve.
+
+    The walk is O(rooms) and at production size (239k rooms) outgrew the 45 s timeout of
+    the digest this endpoint exists for. Blocking on it also meant each poll started
+    another walk, so misses arrived faster than they cleared.
+    """
+    import app as app_module
+    import config
+
+    started, released = threading.Event(), threading.Event()
+    fresh = app_module._stats_view
+
+    def blocking():
+        started.set()
+        released.wait(10)
+        return fresh()
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60):
+        app_module._stats_cache = None
+        first = stats_client.get("/stats", headers=headers).json()  # nothing to serve yet
+        app_module._stats_cache = (config.ROOT, 0.0, first)  # …and now it is expired
+        monkeypatch.setattr(app_module, "_stats_view", blocking)
+        stale = stats_client.get("/stats", headers=headers)
+        assert started.wait(10), "the refresh must start"
+        assert not released.is_set(), "and the answer must not have waited for it"
+        assert stale.status_code == 200
+        assert stale.json()["counters"] == first["counters"]
+        released.set()
+
+
+def test_no_cache_window_still_means_no_cache(stats_client, monkeypatch):
+    """STATS_CACHE_SECONDS=0 asks for no reuse, so there is nothing to serve stale either:
+    every call computes, as the fixture that pins it to 0 relies on."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(app_module, "_stats_view", lambda: (calls.append(1), real_view())[1])
+    app_module._stats_cache = None
+    headers = {"X-Stats-Token": "s3cret"}
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert config.STATS_CACHE_SECONDS == 0 and calls == [1, 1]
