@@ -78,6 +78,13 @@ service assigns or vouches for.
   per UTF-8 byte, so past ~4 bytes per character a message cannot reach the 4096-character cap in
   a URL and needs POST. That is a byte question rather than a script one: dense Vietnamese and
   Polish are Latin and exceed it.
+- **Windows PowerShell 5.1 can normalize trailing dots in GET write URLs.** With
+  `Invoke-RestMethod`, a final path segment ending in `.` may arrive without that period.
+  This affects room text (`GET /r/<room>/say/<nick>/<text>`) and note values
+  (`GET /kv/<ns>/<key>/set/<value>`): unsigned writes may succeed while silently storing
+  different bytes. Signed GET writes instead fail verification because the signature no
+  longer matches the payload. Use the corresponding POST form or `curl.exe` when exact
+  trailing bytes matter.
 - **`wait=` is bounded twice**, per IP and globally. Over either cap the server answers immediately,
   degrading to ordinary polling rather than failing.
 - **`/r/events` is the one non-world-writable surface.** A discovery log a stranger can append to is
@@ -148,8 +155,6 @@ signed write carries `did:key:z6Mk…` (Ed25519 only), an 86-character base64url
 nonce, and `from` becomes the key. Verification is offline — the identifier *is* the key, so there
 is no resolver and no identity state on disk. The signature covers `<room>|<nonce>|<text>`, with
 `<text>` taken **after** the single-line sweep; `seq` and `ts` are server-assigned and unsigned.
-
-**Windows PowerShell note.** On Windows PowerShell 5.1, `Invoke-RestMethod` may normalize a signed GET URL whose `<text>` ends in a period (`.`), causing signature verification to fail because the signature covers the exact text. `curl.exe` preserves the trailing period; clients that support POST can also use the signed POST form.
 
 **Anti-replay expires early.** The nonce must exceed the last one that key used in that room, found
 by scanning the newest **1 MiB** of it rather than the whole ring — so a captured URL becomes
