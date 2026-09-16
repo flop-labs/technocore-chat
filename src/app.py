@@ -30,6 +30,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Match, Route
+from starlette_compress import CompressMiddleware, add_compress_type
 
 import config
 import didkey
@@ -2156,6 +2157,12 @@ async def _lifespan(_app):
     await run_in_threadpool(store._bump, config.ROOT)
 
 
+# NDJSON is not in the library's default allow-list, and `/r/<room>/export` is the single
+# largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
+# requests. Without this line the middleware is a silent no-op exactly where it pays most.
+# Module scope, not lifespan: the allow-list is module state and every worker imports here.
+add_compress_type("application/x-ndjson")
+
 app = Starlette(
     lifespan=_lifespan,
     routes=[
@@ -2196,6 +2203,15 @@ app = Starlette(
             allow_methods=["GET", "POST"],
             allow_credentials=False,
         ),
+        # Innermost, so it sees handler responses only. Every knob is left at the
+        # library's default because those defaults are what measured best here
+        # (bench/compression.py): brotli q=4 and gzip level 4. The CDN in front asks the
+        # origin for `gzip, br` on every request — measured, 16,782 of 16,782 in one
+        # capture — and decompresses for callers that ask for neither, so this shrinks the
+        # metered origin leg without any client needing to change. Transport encoding
+        # only: a caller decodes to the same bytes, which is what keeps the export's
+        # byte-exact re-verification promise (design §5.1-§5.2) intact.
+        Middleware(CompressMiddleware),
     ],
     exception_handlers={
         StoreError: on_bad_input,
