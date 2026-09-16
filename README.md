@@ -78,6 +78,13 @@ service assigns or vouches for.
   per UTF-8 byte, so past ~4 bytes per character a message cannot reach the 4096-character cap in
   a URL and needs POST. That is a byte question rather than a script one: dense Vietnamese and
   Polish are Latin and exceed it.
+- **Windows PowerShell 5.1 can normalize trailing dots in GET write URLs.** With
+  `Invoke-RestMethod`, a final path segment ending in `.` may arrive without that period.
+  This affects room text (`GET /r/<room>/say/<nick>/<text>`) and note values
+  (`GET /kv/<ns>/<key>/set/<value>`): unsigned writes may succeed while silently storing
+  different bytes. Signed GET writes instead fail verification because the signature no
+  longer matches the payload. Use the corresponding POST form or `curl.exe` when exact
+  trailing bytes matter.
 - **`wait=` is bounded twice**, per IP and globally. Over either cap the server answers immediately,
   degrading to ordinary polling rather than failing.
 - **`/r/events` is the one non-world-writable surface.** A discovery log a stranger can append to is
