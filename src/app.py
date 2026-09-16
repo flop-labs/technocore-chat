@@ -1864,17 +1864,24 @@ async def healthz(request: Request) -> Response:
     return text("ok")
 
 
-# Stamped on ROOT for the reason _note_stats_cache is: a refresh started under one root
-# must not be served under another, and here the refresh outlives the request that began
-# it. At most one runs at a time, held in a global so it is not collected mid-walk.
+# Both stamped on ROOT for the reason _note_stats_cache is: a view walked under one root
+# must not be served under another. The refresh outlives the request that began it, so the
+# stamp has to ride with the task too — a caller with nothing to serve awaits it, and an
+# unfinished walk of the old root would otherwise answer the first request of the new one.
+# One runs at a time, held in a global so it is not collected mid-walk.
 _stats_cache: tuple[Path, float, dict] | None = None
-_stats_refresh: asyncio.Task | None = None
+_stats_refresh: tuple[Path, asyncio.Task] | None = None
 
 
 async def _refresh_stats() -> dict:
-    """Recompute the view off the request path and install it against its own root."""
+    """Recompute the view off the request path and install it against its own root.
+
+    The root is read before the walk, not after it: `config.ROOT` after an await is
+    whatever it is by then, which would stamp a view with a root it did not measure.
+    """
     global _stats_cache
-    _stats_cache = (config.ROOT, time.monotonic(), await run_in_threadpool(_stats_view))
+    root = config.ROOT
+    _stats_cache = (root, time.monotonic(), await run_in_threadpool(_stats_view))
     return _stats_cache[2]
 
 
@@ -1898,8 +1905,8 @@ async def stats(request: Request) -> Response:
 
     Stale while revalidating: an expired entry is served as it stands and the refresh runs
     behind it, so a caller waits for the walk only when there is nothing at all to serve --
-    or when the window is 0, which asks for no cache at all and so has nothing to serve
-    either.
+    or when the window is not positive, which asks for no reuse at all and so leaves
+    nothing to serve either.
     A blocking refresh made the cost of the walk the caller's: at 239k rooms the walk
     outgrew the 45 s timeout of the digest this exists for, and because each poll started
     another walk, the misses arrived faster than they cleared. One refresh runs at a time;
@@ -1927,9 +1934,10 @@ async def stats(request: Request) -> Response:
     if hit and time.monotonic() - hit[1] < config.STATS_CACHE_SECONDS:
         view = hit[2]
     else:
-        if _stats_refresh is None or _stats_refresh.done():
-            _stats_refresh = asyncio.create_task(_refresh_stats())
-        view = hit[2] if hit and config.STATS_CACHE_SECONDS else await _stats_refresh
+        run = _stats_refresh
+        if run is None or run[0] != config.ROOT or run[1].done():
+            run = _stats_refresh = (config.ROOT, asyncio.create_task(_refresh_stats()))
+        view = hit[2] if hit and config.STATS_CACHE_SECONDS > 0 else await run[1]
     view = {
         **view,
         # Per *worker*, and labelled as such rather than summed. `_requests` is a plain

@@ -316,3 +316,69 @@ def test_no_cache_window_still_means_no_cache(stats_client, monkeypatch):
     assert stats_client.get("/stats", headers=headers).status_code == 200
     assert stats_client.get("/stats", headers=headers).status_code == 200
     assert config.STATS_CACHE_SECONDS == 0 and calls == [1, 1]
+
+
+def test_a_refresh_of_another_root_is_never_the_answer_here(stats_client, monkeypatch, tmp_path):
+    """A refresh outlives its request, so the task carries its root like the entry does.
+
+    Without that, a walk still running for the old root is the one a cold request for the
+    new root awaits -- and answers with. The client is held open so one event loop spans
+    the requests, which is what lets a refresh outlive the request that began it here as
+    it does under a server.
+    """
+    import app as app_module
+    import config
+
+    first_root, second_root = config.ROOT, tmp_path / "second"
+    second_root.mkdir()
+    released = threading.Event()
+    fresh, refreshes = app_module._stats_view, []
+
+    def blocking_on_the_first_refresh():
+        refreshes.append(1)
+        if len(refreshes) == 1:  # the walk of the first root, still going when the next asks
+            released.wait(10)
+        return fresh()
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
+        primed = held.get("/stats", headers=headers).json()
+        assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
+        app_module._stats_cache = (first_root, 0.0, primed)  # expired: refreshes behind
+        monkeypatch.setattr(app_module, "_stats_view", blocking_on_the_first_refresh)
+        held.get("/stats", headers=headers)  # leaves a walk of the first root running
+        left_running = app_module._stats_refresh
+        assert left_running is not None
+        with config.override(ROOT=second_root):
+            answer = held.get("/stats", headers=headers)
+        now_running = app_module._stats_refresh
+        assert answer.json()["rooms"]["total"] == 0, "the empty second root, not the first"
+        assert not left_running[1].done(), "the first root's walk is still in flight"
+        assert now_running is not None and now_running[0] == second_root, "its own root"
+        assert now_running[1] is not left_running[1]
+        released.set()
+
+
+def test_a_window_that_is_not_positive_means_no_reuse(stats_client, monkeypatch):
+    """0 and any negative are the same instruction -- compute every time -- and config takes
+    a plain int, so the guard cannot be truthiness: -1 would serve every caller the previous
+    refresh's numbers while starting another."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(app_module, "_stats_view", lambda: (calls.append(1), real_view())[1])
+    headers = {"X-Stats-Token": "s3cret"}
+    with stats_client as held:
+        for window in (0, -1):
+            with config.override(STATS_CACHE_SECONDS=window):
+                app_module._stats_cache = None
+                app_module._stats_refresh = None
+                calls.clear()
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert calls == [1, 1], f"window {window} served a cached answer"
