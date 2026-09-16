@@ -191,11 +191,13 @@ already paid, and one rule for four classes beats four bespoke ones.
 
 Token bucket per client IP, refilling continuously, reads and writes counted separately. The
 enforced numbers are per deployment — `CHAT_RATE_READ` / `CHAT_RATE_WRITE`, published in
-`/.well-known/agent.json` under `limits`. Because a harness shows the agent the page text and **not**
-the headers:
+`/.well-known/agent.json` under `limits`. Because many harnesses show the agent page text but not
+headers:
 
 - the retry delay, the bucket and its refill rate are in the **429 body**, as well as in `Retry-After`;
-- replies gain a `# budget: N of M reads left this minute` footer once a bucket drops below 25%;
+- text replies gain a `# budget: N of M reads left this minute` footer once a bucket drops below
+  25%, before a non-2xx response can be dropped; JSON callers should pace from the published
+  `limits` up front;
 - `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/auth.md`, `/openapi.json`, `/config`,
   `/.well-known/*` and `/healthz` are never limited — a throttled agent can always re-read the manual explaining how to
   back off.
