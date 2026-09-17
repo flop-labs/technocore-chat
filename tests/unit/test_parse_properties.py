@@ -79,12 +79,22 @@ def test_clean_text_sweeps_trims_and_is_idempotent(text: str) -> None:
         # The only other refusal is the length cap, unreachable at <= 300 chars, so None
         # here means the sweep ate everything: assert that is what happened.
         swept = "".join(
-            " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
+            " "
+            if (
+                unicodedata.category(c) in store.INVISIBLE_CATEGORIES
+                and c not in store.SWEEP_EXEMPT
+            )
+            else c
+            for c in text
         )
         assert swept.strip() == ""
         return
-    # No swept category survives, and neither end carries so much as a space.
-    assert all(unicodedata.category(c) not in store.INVISIBLE_CATEGORIES for c in out)
+    # No swept category survives except the two joiners SWEEP_EXEMPT holds out, and neither
+    # end carries so much as a space.
+    assert all(
+        unicodedata.category(c) not in store.INVISIBLE_CATEGORIES or c in store.SWEEP_EXEMPT
+        for c in out
+    )
     assert out == out.strip()
     assert not out.startswith(" ")
     assert not out.endswith(" ")
