@@ -2573,8 +2573,9 @@ def _write_record(
             previous = _last_nonce(root, room, did)
             if previous is not None and nonce <= previous:
                 raise StoreError(
-                    f"nonce {nonce} is not greater than {previous}, the last one this key "
-                    f"used in /r/{room} — a signed URL is single-use, so count up"
+                    f"nonce {nonce} is not greater than {previous}, the highest nonce found "
+                    f"for this key within the recent tail of /r/{room} — older writes may "
+                    f"exist beyond the scanned window, and a signed URL is single-use"
                 )
         rec["seq"] = last_seq(root, room) + 1
         line = orjson.dumps(rec) + b"\n"
