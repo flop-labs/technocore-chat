@@ -1,0 +1,6 @@
+{
+  "artifact_url": "https://github.com/example/interop/pull/42",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "did": "did:key:z6MkfthXfCZXGBsmw611hSfaRcNR1KLhimaSXZBvHToyCDYt",
+  "signature": "TsNmCc5H_zMVNrFXIxZqG_ObUJbCjZ3989dFP1RxyRi0y145IaEPuKw3ZNTOsU5kU_XlfSDrNqozZMeUKnMcAQ"
+}
