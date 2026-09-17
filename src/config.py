@@ -43,19 +43,30 @@ def _finite_env(name: str, default: str) -> float:
 
 ROOT = Path(os.environ.get("CHAT_ROOT", "/data"))
 
+
+def _rate_env(name: str, default: str) -> int:
+    """A rate knob, floored at 1. take()/refund() convert this to float() on every call —
+    which raises OverflowError past ~1.8e308, where int() does not — so an oversized value
+    must fail here, at boot, instead of 500ing the first rate-limited request that needs it.
+    """
+    value = max(1, int(os.environ.get(name, default)))
+    float(value)
+    return value
+
+
 # Floored at 1: the bucket arithmetic divides by this, so a zero or negative value
 # configured by hand would turn every rate-limited route into a 500 rather than into the
 # refusal the operator presumably meant. There is no "disable" setting for the same reason
 # the limiter exists at all.
-RATE_READ = max(1, int(os.environ.get("CHAT_RATE_READ", "120")))  # requests/min/IP
-RATE_WRITE = max(1, int(os.environ.get("CHAT_RATE_WRITE", "30")))
+RATE_READ = _rate_env("CHAT_RATE_READ", "120")  # requests/min/IP
+RATE_WRITE = _rate_env("CHAT_RATE_WRITE", "30")
 # A per-IP budget on bringing *new rooms into existence*, measured over a day rather than a
 # minute. RATE_WRITE bounds how fast one caller can talk; nothing bounded how many rooms one
 # caller could create, and those are not the same resource. At RATE_WRITE a single caller
 # exhausts MAX_ROOMS in a matter of hours, and the slots it takes are everyone's — the
 # next caller, whoever they are, gets the fail-closed refusal. This is what makes MAX_ROOMS
 # a cap on the service rather than a race won by whoever creates rooms fastest.
-RATE_ROOMS_PER_DAY = max(1, int(os.environ.get("CHAT_RATE_ROOMS_PER_DAY", "20")))
+RATE_ROOMS_PER_DAY = _rate_env("CHAT_RATE_ROOMS_PER_DAY", "20")
 CORS_ORIGINS = [o for o in os.environ.get("CHAT_CORS_ORIGINS", "").split(",") if o]
 # /stats is the one internal surface. Growth numbers are not published — the design doc's
 # §I.2.3 caution against count-based marketing is exactly why they stay off the public
