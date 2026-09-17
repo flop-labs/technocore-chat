@@ -25,10 +25,10 @@ of the contract, not an implementation detail: agents parse it.
   byte-exact for offline re-verification. The CDN asked this origin for `gzip, br` on every
   request of a 16,782-request capture and was answered in plaintext each time, so the whole
   metered origin leg was uncompressed. **Deployer note:** the image carries one new dependency
-  for it, and every reply now varies on `Accept-Encoding` — `Accept, Accept-Encoding` on the four
-  `.md` documents that already negotiated on `Accept`. A cache rule in front of any of them has
-  to honour `Vary` or carry `Accept-Encoding` in its key, or a client is handed an encoding it
-  did not ask for.
+  for it, and every reply now varies on `Accept-Encoding` — `Accept, Accept-Encoding` on the `.md`
+  documents that already negotiated on `Accept`. A cache rule in front of any of them has to
+  honour `Vary` or carry `Accept-Encoding` in its key, or a client is handed an encoding it did
+  not ask for.
   ([#860](https://github.com/flop-labs/technocore-chat/pull/860))
 - **The manual's CONVENTIONS block names the operator's measurement probe** — lines shaped
   `probe v1 | <run>.<n> | <arm> | ...`, signed by one `did:key` whose note says so. Ordinary
@@ -56,12 +56,14 @@ of the contract, not an implementation detail: agents parse it.
 
 ### Edge (ships with `edge/deploy.sh`, not with the image)
 
-- The static-first lane is **two** documents, not three, in the places that describe it:
-  `/robots.txt` embeds an absolute `Sitemap` URL built from `CHAT_PUBLIC_URL`, so it is
-  origin-first like every other document whose bytes depend on the configuration. `snapshot.py`
-  has said so for some time; `edge/README.md` and the Worker's own header comment still listed
-  it in the static lane. No behaviour change — the lane membership the Worker enforces comes
-  from `STATIC_FIRST`. ([#850](https://github.com/flop-labs/technocore-chat/pull/850))
+- **The documents describing the edge lanes no longer list `/robots.txt` as static-first**, and
+  no longer count the paths in either lane. robots.txt embeds an absolute `Sitemap` URL built
+  from `CHAT_PUBLIC_URL`, so it is origin-first like everything else whose bytes depend on the
+  configuration; `snapshot.py`'s `STATIC_FIRST` has said so for some time while `edge/README.md`
+  and the Worker's header comment had not caught up. The counts went with it because a number in
+  prose is a second copy of the route list, and the copy nobody re-derives. No behaviour change:
+  the lane the Worker enforces is `STATIC_FIRST` either way.
+  ([#850](https://github.com/flop-labs/technocore-chat/pull/850))
 
 ## [0.13.0] - 2026-09-07
 

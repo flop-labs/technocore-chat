@@ -20,10 +20,10 @@
  * Why the split rather than origin-first for everything: origin-first already survives an
  * outage, so the static lane is not about the origin being *down* — it is about the origin
  * being *slow*. That outage spent hours degraded rather than dead, and origin-first waits
- * out its timeout before falling back, so the two documents a reader most needs in order
- * to back off and retry would each have cost a multi-second stall.
+ * out its timeout before falling back, so the documents a reader most needs in order to
+ * back off and retry would each have cost a multi-second stall.
  *
- * The cost, accepted: the static two change on a release, so a stored copy is stale until
+ * The cost, accepted: the static documents change on a release, so a stored copy is stale until
  * deploy.sh runs again. A release is a controlled moment; a compose edit is not.
  *
  * Not in front of /r/ or /kv/. Those are ~80% of traffic, are writes as often as reads, and
