@@ -232,7 +232,12 @@ _MESSAGE_SCHEMA = {
             ),
         },
         "text": {"type": "string", "description": "Single-line body, <= 4096 characters."},
-        "nonce": {"type": "integer", "description": "Present on signed messages only."},
+        "nonce": {
+            "type": "string",
+            "pattern": f"^{didkey.NONCE_PATTERN}$",
+            "description": "Present on signed messages only: the stored nonce as canonical decimal "
+            "text — nineteen digits do not survive a JSON number in JavaScript.",
+        },
         "sig": {
             **_SIG_SCHEMA,
             "description": (
