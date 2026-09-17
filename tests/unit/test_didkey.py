@@ -124,3 +124,60 @@ def test_b58_leading_zero_bytes_round_trip():
     assert decoded == payload, (
         f"leading zeros lost: encoded {len(payload)}B, decoded {len(decoded)}B"
     )
+
+
+def test_abbreviate_does_not_collide_two_honest_verified_signers():
+    """Issue #300: at 4 trailing characters, two honestly-generated keys collided in
+    production — 1,452 real collision pairs observed. This test uses the exact victim/forged
+    pair from the issue: they share the trailing 4 characters 'QAtx' but differ well before
+    that. At 8 characters they render distinctly.
+
+    The victim key is the issue author's real contributor identity from #177/#178.
+    The forged key was ground to match its 4-char marker in 175 seconds of search.
+    """
+    import didkey
+
+    victim = "did:key:z6MkmDkcrgAGa2DZ9qxfmMjNpwaKBXkDt3owfUPKyUxRQAtx"
+    forged = "did:key:z6MkhT9hrBzwZMLiYY22v9wEKyUDrgFWogmdZni9Z1EhQAtx"
+
+    # Premise: they are distinct keys
+    assert didkey.public_key(victim) != didkey.public_key(forged)
+
+    # At 4 trailing chars, they collided (this would pass on the unfixed code)
+    victim_last_4 = victim[-4:]
+    forged_last_4 = forged[-4:]
+    assert victim_last_4 == forged_last_4 == "QAtx", "premise: they share the last 4 chars"
+
+    # After the fix, the 8-char abbreviation must distinguish them
+    victim_abbrev = didkey.abbreviate(victim)
+    forged_abbrev = didkey.abbreviate(forged)
+    assert victim_abbrev != forged_abbrev, (
+        f"abbreviate() still collides on honest keys: {victim_abbrev!r} == {forged_abbrev!r}"
+    )
+
+
+def test_abbreviate_shows_eight_trailing_characters():
+    """Pin the marker width at 8 trailing characters so it cannot silently narrow again.
+
+    The constant 'z6Mk' prefix contributes no identity (every Ed25519 did:key starts with it),
+    so the marker's discriminating content is entirely in the trailing characters. At 4 chars
+    that was 23.4 bits; at 8 chars it is 46.9 bits, pushing the birthday collision from ~4k
+    identities out to ~10M.
+    """
+    import didkey
+
+    did, _ = _keypair()
+    abbrev = didkey.abbreviate(did)
+
+    # The marker must start with the fixed prefix
+    assert abbrev.startswith("z6Mk…"), f"marker must start 'z6Mk…', got {abbrev!r}"
+
+    # The suffix must be exactly 8 characters
+    suffix = abbrev.split("…")[-1]
+    assert len(suffix) == 8, f"marker must show 8 trailing chars, got {len(suffix)}: {abbrev!r}"
+
+    # The suffix must match the last 8 characters of the did:key's multibase encoding
+    mb = did[len(didkey.PREFIX) :]
+    assert suffix == mb[-8:], (
+        f"suffix must be the last 8 chars of the multibase: expected {mb[-8:]!r}, got {suffix!r}"
+    )

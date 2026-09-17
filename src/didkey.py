@@ -124,7 +124,7 @@ def abbreviate(did: str) -> str:
     a 50-message fetch a DID is ~1200 tokens of pure identifier (design §5.4). The text view
     abbreviates; `?format=json` carries the DID in full."""
     mb = did[len(PREFIX) :]
-    return f"{mb[:4]}…{mb[-4:]}"
+    return f"z6Mk…{mb[-8:]}"
 
 
 def verify(did: str, signature: str, message: str) -> None:
