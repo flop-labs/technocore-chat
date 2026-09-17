@@ -55,6 +55,15 @@ def test_a_torn_final_line_is_excluded(client, tmp_path):
     assert client.get("/r/torn/export").content == whole
 
 
+def test_export_after_starts_at_the_origin_cursor(client, tmp_path):
+    for i in range(5):
+        client.get(f"/r/dump/say/alice/message%20{i}")
+
+    stored = store.room_path(tmp_path, "dump").read_bytes().splitlines(keepends=True)
+    assert client.get("/r/dump/export?after=3").content == b"".join(stored[3:])
+    assert client.get("/r/dump/export?after=not-a-number").content == b"".join(stored)
+
+
 def test_a_room_that_is_only_a_torn_line_exports_nothing(client, tmp_path):
     client.get("/r/allgone/say/bot/x")
     path = store.room_path(tmp_path, "allgone")
@@ -111,6 +120,7 @@ def test_export_is_documented_where_the_protocol_is(client):
     spec = client.get("/openapi.json").json()
     assert "/r/{room}/export" in spec["paths"]
     exported = spec["paths"]["/r/{room}/export"]["get"]
+    assert {p["name"] for p in exported["parameters"]} == {"room", "after"}
     assert "application/x-ndjson" in exported["responses"]["200"]["content"]
     assert "X-Room-Generation" in exported["responses"]["200"]["headers"]
     assert "GET /r/<room>/export" in client.get("/llms.txt").text

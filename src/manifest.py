@@ -651,9 +651,24 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "every read. Parse `nonce` with a big-integer-safe reader or "
                         "keep it as digits: up to 19 digits is past 2^53, and a "
                         "float-rounded nonce fails good signatures. The ring forgets — "
-                        "this copies what is retained now. No query parameters."
+                        "this copies what is retained now. `after` starts the stream "
+                        "after a sequence number, so cursor-following clients do not "
+                        "download the retained prefix again."
                     ),
-                    "parameters": [{**_NAME_PARAM, "name": "room"}],
+                    "parameters": [
+                        {**_NAME_PARAM, "name": "room"},
+                        {
+                            "in": "query",
+                            "name": "after",
+                            "required": False,
+                            "schema": {"type": ["integer", "string"]},
+                            "description": (
+                                "Only export records with `seq` greater than this cursor. "
+                                "Invalid or negative values are ignored, like `since` on "
+                                "the room read lane."
+                            ),
+                        },
+                    ],
                     "responses": {
                         "200": {
                             "description": (

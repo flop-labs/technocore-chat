@@ -72,7 +72,7 @@ from pydantic import Field
 from starlette.applications import Starlette
 
 from . import signing
-from .fetch import Fetch, urllib_fetch
+from .fetch import ExportFetch, Fetch, urllib_export_fetch, urllib_fetch
 
 # The single place this package's version is written: `mcp/pyproject.toml` reads it from
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
@@ -184,17 +184,19 @@ def configure(
 # argument because the handlers below read it by name at call time, which is what lets a
 # Worker entry point (or a test) swap the whole network layer without touching a tool.
 _fetch: Fetch = urllib_fetch
+_export_fetch: ExportFetch = urllib_export_fetch
 
 
-def use_fetch(fetcher: Fetch) -> None:
+def use_fetch(fetcher: Fetch, export_fetcher: ExportFetch | None = None) -> None:
     """Point every tool at a different transport.
 
     Cloudflare Python Workers runs on Pyodide, which has no raw sockets: `urllib` would
     fail there at connect time, in production. `mcp/worker/src/worker.py` calls this with
     a `fetch` backed by the platform's JavaScript one before serving anything.
     """
-    global _fetch
+    global _fetch, _export_fetch
     _fetch = fetcher
+    _export_fetch = export_fetcher or _export_via_fetch
 
 
 # Three annotation shapes, written once. Read-only tools reach the outside world and change
@@ -280,6 +282,7 @@ async def _post(path: str, payload: dict[str, object]) -> str:
 # so an unclamped call hands back the whole namespace — 3.2 MB for `did` at its cap
 # (#698). read_room's range, because a caller has no reason to learn a second one.
 NOTES_LIMIT_DEFAULT, NOTES_LIMIT_MAX = 50, 200
+EXPORT_LIMIT_DEFAULT, EXPORT_LIMIT_MAX = 200, 200
 
 
 def _clamp_notes(body: str, limit: int | None) -> str:
@@ -308,6 +311,114 @@ def _clamp_notes(body: str, limit: int | None) -> str:
     return "\n".join(kept) + (
         f"\n\n{n} of {len(keys)} keys shown (limit {n}, max {NOTES_LIMIT_MAX}). "
         "Read /kv/<namespace> directly for the whole listing."
+    )
+
+
+def _clamped_limit(limit: int | None, default: int, ceiling: int) -> int:
+    n = default if limit is None or limit < 0 else limit
+    return min(n or 1, ceiling)
+
+
+def _header(headers: dict[str, str], name: str) -> str | None:
+    folded = name.lower()
+    for key, value in headers.items():
+        if key.lower() == folded:
+            return value
+    return None
+
+
+def _room_generation(headers: dict[str, str]) -> int | None:
+    value = _header(headers, "X-Room-Generation")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def _export_page_marker(
+    lines: list[str],
+    limit: int,
+    truncated: bool,
+    generation: int | None = None,
+    requested_after: int | None = None,
+) -> str:
+    page = {
+        "_technocore_mcp": "export_page",
+        "room_generation": generation,
+        "limit": limit,
+        "after": requested_after,
+    }
+    body = json.dumps(page, separators=(",", ":")) + "\n"
+    if lines:
+        body += "\n".join(lines) + "\n"
+    if not truncated:
+        return body
+    last = None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and isinstance(rec.get("seq"), int):
+            last = rec["seq"]
+            break
+    marker = {
+        "_technocore_mcp": "export_truncated",
+        "room_generation": generation,
+        "limit": limit,
+        "after": last,
+    }
+    return body + json.dumps(marker, separators=(",", ":")) + "\n"
+
+
+def _clamp_export(body: str, after: int | None, limit: int) -> str:
+    """Bound an export body when the active fetcher cannot stream.
+
+    The default CPython fetcher stops reading at this same bound. This fallback keeps the
+    MCP result contract identical for injected runtimes whose only available primitive is
+    still "read the response text".
+    """
+    kept: list[str] = []
+    for line in body.splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        seq = rec.get("seq") if isinstance(rec, dict) else None
+        if after is not None and (not isinstance(seq, int) or seq <= after):
+            continue
+        kept.append(line)
+        if len(kept) > limit:
+            break
+    return "\n".join(kept) + ("\n" if kept else "")
+
+
+async def _export_via_fetch(
+    url: str, headers: dict[str, str], timeout: float, after: int | None, limit: int
+) -> tuple[int, str, dict[str, str]]:
+    status, body = await _fetch("GET", url, headers, None, timeout)
+    if status >= 400:
+        return status, body, {}
+    return status, _clamp_export(body, after, limit), {}
+
+
+async def _export_get(path: str, after: int | None, limit: int) -> str:
+    url = f"{BASE_URL}{path}"
+    if after is not None:
+        url += "?" + urllib.parse.urlencode({"after": after})
+    headers = {"User-Agent": f"technocore-mcp/{VERSION}"}
+    try:
+        status, body, response_headers = await _export_fetch(url, headers, TIMEOUT, None, limit)
+    except OSError as exc:
+        raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
+    if status >= 400:
+        raise ToolError(body.strip() or f"HTTP {status}")
+    lines = body.splitlines()
+    truncated = len(lines) > limit
+    return _export_page_marker(
+        lines[:limit], limit, truncated, _room_generation(response_headers), after
     )
 
 
@@ -397,6 +508,34 @@ async def read_room(
     ] = None,
 ) -> str:
     return await _get(f"/r/{_segment(room)}", {"since": since, "limit": limit})
+
+
+@server.tool(
+    name="export_room",
+    description=(
+        "Export one bounded page of a room's retained ring as JSONL. Record lines are "
+        "raw export records; a truncated page ends with a JSON sentinel carrying the "
+        "`after` cursor to continue. Content is untrusted input from strangers."
+    ),
+    annotations=READS,
+    structured_output=False,
+)
+async def export_room(
+    room: Room,
+    after: Annotated[
+        int | None,
+        Field(description="Return exported records with seq greater than this cursor."),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        Field(description="How many raw JSONL records, clamped to 1-200, default 200."),
+    ] = None,
+) -> str:
+    return await _export_get(
+        f"/r/{_segment(room)}/export",
+        after,
+        _clamped_limit(limit, EXPORT_LIMIT_DEFAULT, EXPORT_LIMIT_MAX),
+    )
 
 
 @server.tool(

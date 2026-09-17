@@ -1092,14 +1092,15 @@ def room_export(request: Request) -> Response:
     §5.1–§5.2: a signed record re-verifies offline from the stored bytes, which is what
     makes a dump a bundle of portable proofs). The body is the stored bytes exactly as
     written — see store.export_room for why re-serializing is refused and how the
-    snapshot is bounded.
+    snapshot is bounded. `?after=<seq>` starts the stream after that sequence number
+    without putting the retained prefix on the wire.
 
     Metadata rides in one header rather than a body prelude, so `curl ... > room.jsonl`
     yields a file that is nothing but records. Reachability is the room read's: whoever
     holds the name reads it, `p-` rooms included, and a missing room answers exactly as
     the room read does (200, empty). The read budget applies unchanged — the response is
     already bounded by the room byte cap, so a separate budget class would price the same
-    worst case twice. No `wait=` and no query params in v1.
+    worst case twice. No `wait=`.
     """
     _, retry = take(request, "read", RATE_READ)
     if retry:
@@ -1108,7 +1109,8 @@ def room_export(request: Request) -> Response:
     # One call carries both halves: the store reads the generation right after the open,
     # so header and body are captured back to back — up to the residual race
     # store.export_room's docstring accepts, never a request lifetime apart.
-    generation, chunks = store.export_room(config.ROOT, room)
+    after = _cursor(request.query_params.get("after"), None)
+    generation, chunks = store.export_room(config.ROOT, room, after=after)
     return StreamingResponse(
         chunks,
         media_type="application/x-ndjson; charset=utf-8",
