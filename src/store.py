@@ -877,6 +877,24 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
+def _retained_floor(path: Path, cutoff: float | None) -> dict | None:
+    """Return the oldest readable record, not merely the oldest record in a response.
+
+    The tail reader is intentionally bounded by `limit`; exposing its first item cannot
+    tell a lagging consumer where the ring actually starts. This forward pass is bounded by
+    the room file and uses the same expiry rule as `read_messages`, so a small `limit` and an
+    expired room do not publish a misleading floor.
+    """
+    if not path.exists():
+        return None
+    with path.open("rb") as f:
+        for raw in f:
+            rec = _parse(raw)
+            if rec is not None and (cutoff is None or not _expired(rec, cutoff)):
+                return rec
+    return None
+
+
 def read_messages(
     root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
 ) -> dict:
@@ -889,6 +907,7 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    retained = _retained_floor(path, cutoff)
     if path.exists():
         with path.open("rb") as f:
             for raw in reverse_lines(f):
@@ -908,6 +927,8 @@ def read_messages(
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
         "last_seq": out[-1]["seq"] if out else (since or 0),
+        "first_retained_seq": retained["seq"] if retained else None,
+        "first_retained_ts": retained["ts"] if retained else None,
         "generation": room_generation(root, room),
         "messages": out,
     }
