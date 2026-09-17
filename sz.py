@@ -5,8 +5,9 @@
 # ///
 """Measure the size of the core, and only the core.
 
-Core is src/app.py, src/config.py, src/didkey.py and src/store.py; src/manifest.py is
-reported under an "extra" label and never counted in the core total. Two numbers per file:
+Core is src/app.py, src/config.py, src/didkey.py, src/limit.py and src/store.py;
+src/manifest.py is reported under an "extra" label and never counted in the core total.
+Two numbers per file:
 
 - code lines: lines carrying executable tokens, with docstrings and comments stripped.
   This is the only number --check guards — the core must not grow.
@@ -22,6 +23,8 @@ fails on growth past the baseline (naming the cap) and on any value past its cap
 when the baseline was raised to match; --caps prints the table against the caps. Every
 core label and core_total must have a cap — a missing entry is an error in the enforcing
 modes, not an exemption, so a file added to CORE_FILES cannot slip past the policy.
+The same rule one step earlier: every src/*.py must appear in CORE_FILES or EXTRA_FILES,
+so a file added to src/ cannot sit outside the policy unmeasured.
 
 Counting rules: a triple-quoted string literal is one token starting at one line, so an
 embedded prose document (app.py's MANUAL) counts as ~1 code line by design — embedded
@@ -152,6 +155,24 @@ def main():
     print(f"{'core total (code)':<24} {'':>6} {core_total:>6}")
 
     if args.check or args.caps:
+        # The hole one step before the missing-cap rule below: a src file absent from
+        # CORE_FILES/EXTRA_FILES is invisible to every mode — never measured, no cap
+        # demanded, --check green no matter how large it grows. Creating a src file
+        # means deciding where it sits in the policy, so the enforcing modes refuse to
+        # run until it is listed. The listing itself stays manual, deliberately.
+        listed = set(CORE_FILES) | set(EXTRA_FILES)
+        unlisted = sorted(
+            p.relative_to(root).as_posix()
+            for p in (root / "src").rglob("*.py")
+            if p.relative_to(root).as_posix() not in listed
+        )
+        if unlisted:
+            print(
+                "src files outside the size policy (list in CORE_FILES or EXTRA_FILES): "
+                + ", ".join(unlisted),
+                file=sys.stderr,
+            )
+            return 1
         # A core label missing from caps is a policy hole, not an exemption: a file added
         # to CORE_FILES without a cap entry would sit outside the per-file policy
         # entirely, its growth visible only to the (looser) aggregate — and a missing
