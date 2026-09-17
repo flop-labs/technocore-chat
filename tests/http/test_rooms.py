@@ -372,9 +372,13 @@ def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
     assert by_name["busy"]["idle_seconds"] < 60
     assert by_name["old"]["idle_seconds"] >= 3600
     assert view["total"] == 3 and view["capacity"] == store.MAX_ROOMS and view["bytes"] > 0
+    # Nothing unlisted here, so the two populations coincide — which is the case that
+    # hid the bug: every store a test builds looks like this one.
+    assert view["occupied"] == 3 and view["bytes_occupied"] > 0
 
     body = client.get("/rooms").text
-    assert "3 of 3 rooms" in body and "/r/busy" in body and "seq 2" in body and "ago" in body
+    assert "3 of 3 listed rooms" in body and f"3 of {store.MAX_ROOMS} slots used" in body
+    assert "/r/busy" in body and "seq 2" in body and "ago" in body
 
 
 def test_rooms_marks_the_caller_chosen_name_and_topic_as_untrusted(client):
@@ -467,8 +471,10 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
+        "occupied": 0,
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
+        "bytes_occupied": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
         "notes": {
             "total": 0,
@@ -490,6 +496,16 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     client.get("/r/p-secret/say/bot/hi")
     view = client.get("/rooms?format=json").json()
     assert view["total"] == 0 and view["rooms"] == []  # p- stays invisible in stats too
+    # Invisible in the listing, present in the gauge: the room is a slot the cap will
+    # refuse on, and a caller deciding whether to create one needs that number. Counting
+    # it names nothing, which is the line `service_stats` already draws for /stats.
+    assert view["occupied"] == 1
+    # The byte half is the reaper's total and reads 0 until a pass has run — the "no
+    # pressure" default `room_bytes_used` documents — and the listed sum it falls back to
+    # is 0 here because the only room is unlisted. Closing that in this walk would cost a
+    # stat per unlisted room on the most polled read; one reap interval of drift is the
+    # trade `note_stats` already documents making for a display gauge.
+    assert view["bytes_occupied"] == 0
 
 
 def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
