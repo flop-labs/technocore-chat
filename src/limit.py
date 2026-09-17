@@ -375,6 +375,18 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
     """
     wait = max(1, round(retry_after))
     other = "write" if kind == "read" else "read"
+    # CHAT_MAX_WAIT=0 disables long-polling; don't recommend &wait= then.
+    if max_wait > 0:
+        wait_advice = (
+            f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
+            f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
+            f"{max_wait:g}s instead of twenty."
+        )
+    else:
+        wait_advice = (
+            f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
+            f"the room."
+        )
     body = (
         f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
         f"retry after: {wait}s — the bucket refills continuously "
@@ -382,9 +394,7 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
         f"{per_min}.\n"
         f"still open: {other}s are a separate budget and are unaffected, and these paths "
         f"are never rate limited: {FREE_PATHS}.\n"
-        f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-        f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
-        f"{max_wait:g}s instead of twenty.\n"
+        f"{wait_advice}\n"
         f"the enforced numbers are also published at /.well-known/agent.json under "
         f"limits.{kind}s_per_minute_per_ip."
     )
