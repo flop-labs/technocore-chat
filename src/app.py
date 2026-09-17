@@ -1877,18 +1877,19 @@ _stats_refresh: tuple[Path, asyncio.Task] | None = None
 async def _refresh_stats() -> dict:
     """Recompute the view off the request path and install it against its own root.
 
-    The root is read before the walk, not after it: `config.ROOT` after an await is
-    whatever it is by then, which would stamp a view with a root it did not measure.
+    The root is read once and handed to the walk, not read again inside it: `config.ROOT`
+    after an await is whatever it is by then, and a view stamped with a root it did not
+    measure is served under that root by every later caller.
     """
     global _stats_cache
     root = config.ROOT
-    _stats_cache = (root, time.monotonic(), await run_in_threadpool(_stats_view))
+    _stats_cache = (root, time.monotonic(), await run_in_threadpool(_stats_view, root))
     return _stats_cache[2]
 
 
-def _stats_view() -> dict:
+def _stats_view(root: Path) -> dict:
     """Live aggregates plus the stored history, in one blocking call for the threadpool."""
-    return {**store.service_stats(config.ROOT), "history": store.snapshots(config.ROOT)}
+    return {**store.service_stats(root), "history": store.snapshots(root)}
 
 
 async def stats(request: Request) -> Response:
