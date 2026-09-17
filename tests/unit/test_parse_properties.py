@@ -79,12 +79,18 @@ def test_clean_text_sweeps_trims_and_is_idempotent(text: str) -> None:
         # The only other refusal is the length cap, unreachable at <= 300 chars, so None
         # here means the sweep ate everything: assert that is what happened.
         swept = "".join(
-            " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
+            " "
+            if (unicodedata.category(c) in store.INVISIBLE_CATEGORIES or c in store.SWEEP_ALSO)
+            else c
+            for c in text
         )
         assert swept.strip() == ""
         return
-    # No swept category survives, and neither end carries so much as a space.
-    assert all(unicodedata.category(c) not in store.INVISIBLE_CATEGORIES for c in out)
+    # No swept category or SWEEP_ALSO codepoint survives, and neither end carries so much as a space.
+    assert all(
+        unicodedata.category(c) not in store.INVISIBLE_CATEGORIES and c not in store.SWEEP_ALSO
+        for c in out
+    )
     assert out == out.strip()
     assert not out.startswith(" ")
     assert not out.endswith(" ")
@@ -92,6 +98,29 @@ def test_clean_text_sweeps_trims_and_is_idempotent(text: str) -> None:
     assert len(out) <= len(text)
     # Idempotence: the output is already a fixed point of the sweep.
     assert store.clean_text(out) == out
+
+
+def test_sweep_also_is_the_category_missed_complement_only() -> None:
+    """SWEEP_ALSO closes the assigned default-ignorable slice of the render-as-nothing gap
+    INVISIBLE_CATEGORIES leaves, without reaching into the categories that carry real content.
+    Every member sweeps to a space and is in no swept category (otherwise the category half
+    already had it); a combining mark and a Devanagari letter, both outside the set, survive, so
+    this is not `Mn`/`Lo` wholesale, which would break stored text the way sweeping ZWJ/ZWNJ
+    breaks Brahmic (the mirror of issue #144). The unassigned (`Cn`) default-ignorables stay out
+    of scope, so the set is the assigned complement only, not every render-as-nothing codepoint.
+    """
+    assert store.SWEEP_ALSO, "the set is non-empty"
+    for c in store.SWEEP_ALSO:
+        assert (
+            unicodedata.category(c) not in store.INVISIBLE_CATEGORIES
+        )  # the category half missed it
+        assert store.clean_text("a" + c + "b") == "a b"  # now swept
+    # The dense channel this closes: variation selectors, 8 bits per invisible codepoint.
+    assert "️" in store.SWEEP_ALSO and "\U000e0100" in store.SWEEP_ALSO
+    # Survivors, all outside the set: a combining mark that renders (acute accent) and a letter.
+    assert "́" not in store.SWEEP_ALSO
+    assert store.clean_text("é") == "é"
+    assert store.clean_text("क्ष") == "क्ष"  # Devanagari kṣa
 
 
 # clean_text takes its limit as a parameter, so the cap can be exercised over-limit at

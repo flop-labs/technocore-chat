@@ -123,13 +123,14 @@ def normalize_text(text: str) -> str:
     """The canonical form duplicate texts are keyed on: NFKC, invisibles to spaces,
     casefolded, whitespace collapsed.
 
-    Not store.clean_text, on purpose, though the two share one invisible-category list.
-    clean_text is a VALIDATOR: it raises on a text with nothing visible left, enforces
-    the character cap, and preserves case and internal whitespace because storage must
-    keep what the caller wrote. This is a KEY: it must never raise (a malformed text is
-    append's to refuse, in append's words), and it must fold exactly the things a copy
-    varies — case, spacing, Unicode compatibility forms. Storage keeps `A  b` and `a b`
-    distinct; the duplicate ring cannot, or upper-casing one letter defeats it.
+    Not store.clean_text, on purpose, though the two share one sweep
+    (`store.sweep_invisibles`). clean_text is a VALIDATOR: it raises on a text with
+    nothing visible left, enforces the character cap, and preserves case and internal
+    whitespace because storage must keep what the caller wrote. This is a KEY: it must
+    never raise (a malformed text is append's to refuse, in append's words), and it must
+    fold exactly the things a copy varies — case, spacing, Unicode compatibility forms.
+    Storage keeps `A  b` and `a b` distinct; the duplicate ring cannot, or upper-casing
+    one letter defeats it.
 
     The sweep rung is still here even though append sweeps too, because the unsigned
     lanes reach this BEFORE store.append runs clean_text — keying the unswept bytes
@@ -141,10 +142,7 @@ def normalize_text(text: str) -> str:
     duplicates caught by trailing-punctuation or digit masking). NFKC first, because
     compatibility forms must decompose before casefolding for the two to agree.
     """
-    text = unicodedata.normalize("NFKC", text)
-    text = "".join(
-        " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
-    )
+    text = store.sweep_invisibles(unicodedata.normalize("NFKC", text))
     # A duplicate 422's ref token (app._REF's shape, with the `&ref=` the body shows it
     # behind, and nothing else), pasted into the text instead of the query string, is cut
     # out so it can never be what makes a copy unique — neither on its own nor by taking
