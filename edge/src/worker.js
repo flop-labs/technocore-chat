@@ -93,6 +93,14 @@ function cacheKey(url, pathname) {
   for (const [name, wanted] of Object.entries(spec.match ?? {})) {
     if (url.searchParams.get(name) === wanted) keep.set(name, wanted);
   }
+  for (const [name, rule] of Object.entries(spec.enum ?? {})) {
+    const raw = url.searchParams.getAll(name);
+    if (raw.length === 0) continue;
+    if (raw.length !== 1) return null;
+    if (raw[0] === rule.default) continue;
+    if (!rule.values.includes(raw[0])) return null;
+    keep.set(name, raw[0]);
+  }
   for (const [name, rule] of Object.entries(spec.clamped ?? {})) {
     const raw = url.searchParams.get(name);
     // Absent means the origin's default: one extra entry, not unboundedly many.
