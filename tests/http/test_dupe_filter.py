@@ -144,9 +144,15 @@ def test_the_ref_token_is_handed_out_seen_again_and_never_a_way_past_the_filter(
     assert [ln for ln in lines if "ref=" + ref in ln] == lines and len(lines) == 3
     assert "path='/patterns.md'" in lines[1] and "forged" not in "".join(lines)
     with _filter_on(DUPE_MAX_COPIES=1):
-        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 422
-        assert _say(client, "lobby", "c", PHRASE + ref).status_code == 422  # glued to a word
         assert _say(client, "lobby", "c", "&ref=" + ref + " " + PHRASE).status_code == 422
+        assert _say(client, "lobby", "c", PHRASE + " &ref=" + ref).status_code == 422
+        assert _say(client, "lobby", "c", PHRASE + "&ref=" + ref).status_code == 422  # glued &ref=
+        # Bare token without ref= syntax remains distinct and is not falsely refused:
+        assert _say(client, "lobby", "c", PHRASE + " " + ref).status_code == 200
+        # Extended token shapes (5th trailing hex digit, hyphen suffix) are not over-stripped:
+        assert _say(client, "lobby", "c", PHRASE + " &ref=" + ref + "e").status_code == 200
+        assert _say(client, "lobby", "c", PHRASE + " &ref=" + ref + "9").status_code == 200
+        assert _say(client, "lobby", "c", PHRASE + " &ref=" + ref + "-extra").status_code == 200
 
 
 def test_the_threshold_itself_is_the_knob(client) -> None:
