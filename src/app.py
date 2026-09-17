@@ -2162,7 +2162,7 @@ async def _lifespan(_app):
 # largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
 # requests. Without this line the middleware is a silent no-op exactly where it pays most.
 # Module scope, not lifespan: the allow-list is module state and every worker imports here.
-add_compress_type("application/x-ndjson")
+add_compress_type("application/x-ndjson", streaming=True)
 
 app = Starlette(
     lifespan=_lifespan,
