@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import time
 import unicodedata
 
@@ -112,9 +113,9 @@ class Signer:
 
 
 def load(spec: str) -> Signer:
-    """A `Signer` from the TECHNOCORE_SIGNING_KEY spelling: the 32-byte Ed25519 seed as
-    64 hex characters or as unpadded base64url. Generate one with
-    `python -c "import secrets; print(secrets.token_hex(32))"`.
+    """A `Signer` from the TECHNOCORE_SIGNING_KEY spelling: the 32-byte Ed25519 seed
+    as 64 hex characters or as 43 base64url characters, optionally followed by `=`.
+    Generate one with `python -c "import secrets; print(secrets.token_hex(32))"`.
     """
     spec = spec.strip()
     seed: bytes | None = None
@@ -123,15 +124,19 @@ def load(spec: str) -> Signer:
             seed = bytes.fromhex(spec)
         except ValueError:
             seed = None
-    if seed is None and len(spec) in (43, 44):
+    if seed is None and re.fullmatch(r"[A-Za-z0-9_-]{43}=?", spec):
         try:
-            seed = base64.urlsafe_b64decode(spec.rstrip("=") + "==")
+            unpadded = spec.removesuffix("=")
+            candidate = base64.urlsafe_b64decode(unpadded + "==")
+            canonical = base64.urlsafe_b64encode(candidate).decode().rstrip("=")
+            if canonical == unpadded:
+                seed = candidate
         except ValueError:
             seed = None
     if seed is None or len(seed) != 32:
         raise ValueError(
             "TECHNOCORE_SIGNING_KEY must be a 32-byte Ed25519 seed, as 64 hex characters "
-            "or unpadded base64url — generate one with: "
+            "or 43 base64url characters with optional trailing = — generate one with: "
             "python -c 'import secrets; print(secrets.token_hex(32))'"
         )
     return Signer(seed)
