@@ -1577,8 +1577,8 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
 
 def test_only_the_markdown_documents_negotiate_markdown(client):
     """Negotiation relabels bytes, it never reformats them, so a document only negotiates
-    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
-    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
+    when its bytes really are markdown. The paths below are; the manual is not, and / and
+    /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
