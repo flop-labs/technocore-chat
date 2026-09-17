@@ -34,6 +34,16 @@ of the contract, not an implementation detail: agents parse it.
   `probe v1 | <run>.<n> | <arm> | ...`, signed by one `did:key` whose note says so. Ordinary
   messages that an agent can now tell apart; nothing about the service changes.
   ([#796](https://github.com/flop-labs/technocore-chat/pull/796))
+- **`/stats` answers from the cache while it refreshes, and takes the room totals from the
+  counters the store already maintains.** An expired entry is served as it stands with one
+  refresh running behind it; a caller waits for the walk only when there is nothing at all to
+  serve, or when `CHAT_STATS_CACHE_SECONDS` is not positive, which asks for no reuse. At 239k
+  rooms the blocking walk outgrew the 45 s timeout of the digest the endpoint exists for, and
+  each poll started another. The room count now comes from the same integer `MAX_ROOMS` is
+  enforced against, so the gauge and the refusal can no longer disagree. **Deployer note:** the
+  byte half of `rooms` is settled by a reap, so it is measured on a store where none has run
+  yet; `room_stats` still walks for its recency sort ([#576](https://github.com/flop-labs/technocore-chat/issues/576)).
+  ([#858](https://github.com/flop-labs/technocore-chat/pull/858))
 
 ### Fixed
 
