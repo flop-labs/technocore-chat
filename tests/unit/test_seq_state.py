@@ -236,10 +236,10 @@ def test_creates_in_different_shards_do_not_serialise_on_one_lock(tmp_path) -> N
     real_set = store._set_seq_entry
     failed = []
 
-    def wait_inside_the_seq_write(root, room, floor):
+    def wait_inside_the_seq_write(root, room, floor=None, *, bump=False):
         if room in rooms:
             together.wait(timeout=10)
-        return real_set(root, room, floor)
+        return real_set(root, room, floor, bump=bump)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(store, "_set_seq_entry", wait_inside_the_seq_write)
@@ -307,14 +307,30 @@ def test_the_shard_of_a_name_is_the_shard_of_its_room_bucket(tmp_path) -> None:
     assert store._seq_state_path(tmp_path).name == ".seqstate", "no room names the old map"
 
 
-def test_seq_state_survives_a_read_only_store(tmp_path) -> None:
-    """Best effort, like `_bump`: the caller's write has already succeeded by the time the
-    floor is recorded, so an unwritable shard must not turn that success into a 500."""
+def test_the_reaper_survives_an_unwritable_shard_though_the_write_now_propagates(
+    tmp_path,
+) -> None:
+    """`_set_seq_entry` propagates a write failure now — the create path makes its generation
+    bump a precondition of its commit (#734), so it must see the failure — and the best-effort
+    contract moved to the caller: the reaper `suppress(OSError)`s its floor write, whose room
+    is about to be unlinked whether or not the floor lands. So a reap over an unwritable shard
+    must still complete and still reap the room, while a direct write to that shard raises."""
+    import _client
+
     import store
 
-    store._write_record(tmp_path, "fine", "bot", "hi")
+    store._write_record(tmp_path, "nope", "bot", "hi")  # room + its shard, written normally
+    room_file = store.room_path(tmp_path, "nope")
     shard = tmp_path / f".seqstate.{store._shard('nope')}"
+    shard.unlink()
     shard.mkdir()  # a directory where the shard file goes: every write to it fails
-    store._set_seq_entry(tmp_path, "nope", 5)  # must not raise
-    assert store.last_seq(tmp_path, "nope") == 0
+
+    # The direct write surfaces the failure — the contract is no longer "swallow inside".
+    with pytest.raises(OSError):
+        store._set_seq_entry(tmp_path, "nope", 5)
+
+    # But a real reap over that same unwritable shard suppresses it and still unlinks the room.
+    _client._age(room_file, store.IDLE_SECONDS + 60)
+    _reap_now(tmp_path)  # must not raise
+    assert not room_file.exists(), "the reaper did not reap the room despite surviving the shard"
     assert os.path.isdir(shard)

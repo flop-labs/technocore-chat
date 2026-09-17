@@ -111,12 +111,90 @@ MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a d
 # deletes from the front while another thread may be inserting — which is an
 # `OrderedDict mutated during iteration` RuntimeError, or a KeyError on a key the other
 # thread just evicted, i.e. a 500 on exactly the write path the filter exists to protect.
-# It is a leaf lock: held for a hash, a tuple rebuild and at most nine dict operations,
-# never across the flock, the append or any I/O, so nothing can deadlock against it and
-# an uncontended acquire is cheaper than the digest it guards.
+# It is a leaf lock, and what it is held for is bounded by construction: two tuple
+# rebuilds (the live timestamps, and the room's ring), one scan of at most DUPE_RING
+# digests for the share count, and at most a dozen dict operations. Never across the
+# flock, the append or any I/O, so nothing can deadlock against it. Measured here over
+# 100k accepted writes against a full ring and a full key map, one critical section:
+# ~1.8us before the share cap, ~4.6us after — 2.6x, and the growth is the share scan and
+# the ring rebuild, both C-level over 64 items. Still bounded by DUPE_RING and
+# max_copies rather than by anything a caller controls, and the hash that precedes the
+# lock costs more than the section itself.
 MAX_DUPE_KEYS = 4096
 _dupes: OrderedDict[tuple[str, bytes], tuple[float, ...]] = OrderedDict()
 _dupes_lock = threading.Lock()
+
+# The share cap, and the reason there are two signals rather than one: a window is a RATE,
+# so a repeater beats it by posting a second outside it. Measured (issue #697, room
+# mb-jinken, /export): 67 byte-identical copies of one 83-character sentence from one
+# signed key over 10h, median gap 137s against a 120s window — only 21 of the 67 gaps were
+# inside it, so the filter almost never fired, and the copies still ended as 58% of the
+# room. `mb-` rooms cannot be owned, so no allow-list, mute or delete exists to fall back
+# on: the window is the only remedy there is, and this is the shape it cannot see.
+#
+# So a second signal that is deliberately not a time: per room, the DIGESTS of the last
+# DUPE_RING messages that reached the filter at all, and a refusal once one digest would
+# hold more than DUPE_SHARE of the ring's SLOTS. Share of capacity, not of the entries
+# present, so the cap bites at the same 32 copies in a room whose ring is a quarter full
+# as in one that is full — a repeater alone in a quiet room is exactly the case, and a
+# rule that waited for 64 accepted messages before it could speak would let that repeater
+# land 64. What it measures is composition, not rate: 137s apart, 4235s apart or once a
+# week all meet the same bar, because the bar is what the room READS like.
+#
+# A (reserved-at instant, digest) pair, so each ring slot carries the same identity the
+# window's timestamp already gives a _dupes entry. Nothing here reads that time — expiry is
+# the window's job and this rule has none — it exists ONLY so dupe_release matches the slot
+# its OWN reservation added, never a newer one. Bare digests could not do that: every copy
+# of a digest is interchangeable, so a stale release (the write it reserved for failed long
+# after a later copy of the same text landed and stuck) would `list.remove` that later,
+# successful slot and drop the room's live count of the phrase to zero. The instant breaks
+# the tie the digest cannot. An earlier draft stored the same pair but *filtered* on it
+# (dropping every equal entry), which wiped both slots when two reservations shared one
+# time.monotonic() float — the release below removes exactly one with `list.remove`, so a
+# collision costs one slot and the other copy survives, which is the whole point.
+#
+# Rejected: reading the room's own messages for a true denominator — that is a store read
+# inside the lock below, the one thing its critical section promises never to do.
+# Rejected: widening the window, which config.py's own sizing already rules out (the ring
+# hits MAX_DUPE_KEYS around 300s, so memory becomes the limiter, not the window) and which
+# any repeater beats by adding a second to its sleep. Rejected: a per-sender cap — the key
+# has no sender in it on purpose, 76% of measured duplicates come from a different sender
+# than the copy before them.
+#
+# Bounded exactly as _dupes is and for the same reason: at most MAX_RING_ROOMS rooms of at
+# most DUPE_RING digests, LRU-evicted, so a caller posting to every room in existence can
+# grow this to a fixed 32k digests (512 KiB) and no further. Only messages the filter could
+# refuse enter it — a text under DUPE_MIN_LENGTH never reaches the ring — so a room full of
+# "ok" neither dilutes a repeater's share nor earns one of its own. Guarded by _dupes_lock
+# rather than a second mutex: it is read and written in the same critical section as
+# _dupes, on the same call, and two leaf locks taken together are one lock with more ways
+# to get it wrong. Not an operator knob, for the same reason MAX_DUPE_KEYS and MAX_BUCKETS
+# are not: it is a bound, and the window's 0 remains the one opt-out — window <= 0
+# short-circuits before the key is built, so it turns this off with everything else.
+#
+# Per worker, like every other structure here, and it shards the same way the window does
+# (config.py sizes that loss for DUPE_FILTER_SECONDS): under --workers N a room's messages
+# are spread over N rings, each capping its own stream at DUPE_SHARE, so the share one text
+# can hold of what readers actually see is up to N x 32 of the last N x 64 — the ratio
+# survives an even split and only an uneven one moves it. The authoritative fix for that is
+# the same as for the rate limit: one worker, or a shared store in front of it.
+#
+# Keyed by (room, GENERATION), not by bare name, which is the one thing the window above does
+# not need and this does. The window's entries expire on their own — a stale timestamp is
+# swept `window` seconds after it lands — but a ring slot has no clock (the share cap is
+# composition, not rate; the block above says so), so a bare-name ring outlives the room it
+# describes forever. store._reap deletes a room's file and preserves only its seq floor and
+# generation; it never imports limit and cannot clear this map. So a room reaped and later
+# recreated under the SAME name would inherit the dead incarnation's slots and refuse a fresh
+# room's first, legitimate copy of a phrase the old room happened to leave at the cap (#734).
+# The generation — store.room_generation, bumped on every (re)create, read by the write path
+# from the SHARED sharded seq-state so every worker agrees on the incarnation without touching
+# each other's rings — makes the recreated room a different key; the dead one is consulted by
+# nothing and LRU-evicts under MAX_RING_ROOMS like any other idle room. The window needs no
+# such thing: reaping requires IDLE_SECONDS (days) of quiet, so any window entry is already
+# ancient and swept on first touch, and it can never be both a live rate and a reaped room.
+DUPE_RING, DUPE_SHARE, MAX_RING_ROOMS = 64, 0.5, 512
+_rings: OrderedDict[tuple[str, int], tuple[tuple[float, bytes], ...]] = OrderedDict()
 
 
 def normalize_text(text: str) -> str:
@@ -173,9 +251,17 @@ def dupe_refused(
     min_length: int = 16,
     max_copies: int = 5,
     cap: int = MAX_DUPE_KEYS,
+    *,
+    generation: int = 0,
 ) -> bool:
     """Whether this room should refuse `text` as the duplicate it now too obviously is,
     recording it as an accepted copy when it is not refused.
+
+    Two rules, and either one refuses. The window: more than `max_copies` copies of one
+    normalised text inside `window` seconds. The share cap: this copy would take more
+    than DUPE_SHARE of the room's DUPE_RING most recent filterable messages, however long
+    ago the last one landed — the window is a rate and a fixed-interval repeater simply
+    posts below it, which is issue #697 and the block above it.
 
     Check-and-record in one call, on purpose: the write lanes run in a threadpool, so a
     check that returned and a record that ran later would let two concurrent copies of
@@ -190,33 +276,64 @@ def dupe_refused(
     key = _dupe_key(room, text, min_length) if window > 0 else None
     if key is None:
         return False  # off, or a short conversational repeat: legitimate by nature
+    # The ring is keyed by the room's incarnation, not its bare name, so a reaped-and-
+    # recreated room does not inherit the dead one's slots (#734, and the block above _rings).
+    ring = (room, generation)
     with _dupes_lock:
-        seen = _dupes.get(key)
-        if seen is not None:
-            live = tuple(t for t in seen if now - t <= window)
-            if len(live) >= max_copies:
-                _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
-                return True
-            _dupes[key] = (live + (now,))[-max_copies:]
-        else:
-            _dupes[key] = (now,)
-        _dupes.move_to_end(key)
+        # A refused write is an access too. Refresh this ring's LRU slot on EVERY path
+        # through the lock — share-cap refusal, window refusal, accepted write — so a room
+        # under live duplicate attack is never mistaken for idle and evicted out from under
+        # the very cap that is refusing its copies (Minh3132, #734). Move-only, guarded by
+        # membership: the accepted write below stays the sole place a ring key is born, so
+        # this records no slot and creates no empty ring. Mirrors _dupes, whose pop+reinsert
+        # already refreshes it on the window's refusal path — _rings' two refusals both
+        # return above that pop, so only the accepted write refreshed the ring before, which
+        # let a room evicted while still under attack rebuild a fresh share allowance.
+        if ring in _rings:
+            _rings.move_to_end(ring)
+        # The share cap first, and before anything is recorded: a refusal here may no more
+        # extend a window than one below does, and the room's ring is the cheaper check.
+        if sum(d == key[1] for _, d in _rings.get(ring, ())) + 1 > DUPE_SHARE * DUPE_RING:
+            return True
+        # Three touches of the pre-existing window logic below are not the share cap and
+        # would not otherwise be in this change: `pop`-then-reinsert in place of `get` plus
+        # a trailing `move_to_end`, the merged `seen is not None` branches, and the sweep's
+        # `next(iter(...), None)`. They are here because core/limit.py sits ON its
+        # sz-baseline.json cap and the ring had to be paid for in the same file — a real
+        # constraint, not tidying. Each is behaviour-preserving with one exception, stated
+        # so a reviewer does not have to find it: `pop`-then-reinsert refreshes the LRU
+        # position on a REFUSAL, which the old `move_to_end` after the early return did
+        # not. Harmless — a key being hammered is by definition the hot one, the cap still
+        # holds the map, and no timestamp is added, so the window itself is untouched.
+        live = tuple(t for t in _dupes.pop(key, ()) if now - t <= window)
+        if len(live) >= max_copies:
+            _dupes[key] = live[-max_copies:]  # prune, but never extend on a refusal
+            return True
+        _dupes[key] = (live + (now,))[-max_copies:]
+        _rings[ring] = (_rings.pop(ring, ()) + ((now, key[1]),))[-DUPE_RING:]
         # Two bounds, because one is not enough under load: a per-call-capped sweep from
-        # the oldest so a burst cannot turn one write into a pause, and the hard cap that
-        # actually holds the memory whatever the sweep leaves behind.
+        # the oldest so a burst cannot turn one write into a pause, and the hard caps that
+        # actually hold the memory whatever the sweep leaves behind. `any` rather than the
+        # `max` an expiry check reaches for first: both are the negation of the original
+        # `all(now - t > window ...)` on a live entry, but `max(())` RAISES on an empty
+        # tuple where `all(())` and `any(())` do not. Nothing stores an empty tuple today
+        # (max_copies is floored at 1 in config, and release drops the key instead), which
+        # makes it exactly the kind of unreachable-until-it-is-not landmine to keep out of
+        # a write path whose predecessor was total.
         for _ in range(8):
-            if not _dupes:
-                break
-            oldest = next(iter(_dupes))
-            if not all(now - t > window for t in _dupes[oldest]):
+            oldest = next(iter(_dupes), None)
+            if oldest is None or any(now - t <= window for t in _dupes[oldest]):
                 break
             del _dupes[oldest]
-        while len(_dupes) > cap:
-            _dupes.popitem(last=False)
+        for mapping, bound in ((_dupes, cap), (_rings, MAX_RING_ROOMS)):
+            while len(mapping) > bound:
+                mapping.popitem(last=False)
     return False
 
 
-def dupe_release(room: str, text: str, now: float, window: float, min_length: int = 16) -> None:
+def dupe_release(
+    room: str, text: str, now: float, window: float, min_length: int = 16, *, generation: int = 0
+) -> None:
     """Give back the copy `dupe_refused` recorded at `now`, because the write it was
     reserved for never landed.
 
@@ -227,22 +344,41 @@ def dupe_release(room: str, text: str, now: float, window: float, min_length: in
     stored, and the next well-formed caller of that phrase would meet a 422 for copies
     that do not exist.
 
-    Removes exactly one timestamp, by value: releasing is per reserved copy, so a
-    concurrent accept of the same text at a different instant keeps its own. Silent when
-    the entry has already been swept or evicted — that is the same free window this would
-    have opened, arrived at by another route.
+    ONE entry from each of the two structures the reservation touched, which is why they
+    come back in one loop rather than two blocks: one timestamp from the window's tuple for
+    this text, one (instant, digest) slot from the room's share ring. Both are matched on
+    the reservation's OWN `now`, so a release only ever gives back the slot it added: a
+    stale release cannot remove a later, successful copy of the same text, because that copy
+    carries a different instant even though its digest is identical (the reviewer's race in
+    #734). `list.remove` in both cases, removing exactly one match, so two reservations that
+    collide on one time.monotonic() float cost one slot between them and the other survives.
+
+    `generation` must be the one the reservation was keyed under, which the caller gets for
+    free by reading it once and passing it to both calls — a release under a different
+    incarnation would look in the wrong ring and hand nothing back (see _dupe_slot).
+
+    Silent when either entry has already been swept or evicted — that is the same free
+    window this would have opened, arrived at by another route. The ring slot matters as
+    much as the timestamp because the share cap is cross-sender like everything else here:
+    without it, failed writes of one phrase would leave a stranger's identical phrase
+    refused against copies nothing ever stored. Re-inserted only when something is left,
+    so neither map gains a key or an empty container from this path — dupe_refused stays
+    the only place either one grows, and it is what holds them to their caps.
     """
     key = _dupe_key(room, text, min_length) if window > 0 else None
     if key is None:
         return
     with _dupes_lock:
-        live = list(_dupes.get(key, ()))
-        if now in live:
-            live.remove(now)
-        if live:
-            _dupes[key] = tuple(live)
-        else:
-            _dupes.pop(key, None)
+        # Annotated `list[tuple]` because the two maps have different key and value types
+        # and a checker reading the pair as a union rejects every line below it; the rule
+        # being applied is identical for both, which is the whole reason they share a loop.
+        both: list[tuple] = [(_dupes, key, now), (_rings, (room, generation), (now, key[1]))]
+        for mapping, slot, entry in both:
+            held = list(mapping.pop(slot, ()))
+            if entry in held:
+                held.remove(entry)
+            if held:
+                mapping[slot] = tuple(held)
 
 
 def client_ip(request: Request, ip_header: str = "") -> str:
