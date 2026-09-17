@@ -427,6 +427,19 @@ def test_a_path_whose_reply_varies_by_query_is_routed_with_a_wildcard():
         )
 
 
+def test_edge_owned_favicon_accepts_versioned_query_urls():
+    """The edge-only icon is pathname-selected, so cache-busting queries must stay routed."""
+    raw = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
+    patterns = {
+        r["pattern"] for r in json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))["routes"]
+    }
+    assert "technocore.chat/favicon.ico*" in patterns
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = _between(worker, "if (EDGE_ONLY.has(pathname))", "let originResponse")
+    assert "stored(request, env, pathname" in lane
+    assert "pathname" in lane
+
+
 def test_an_edge_owned_path_is_not_snapshotted_and_not_origin_first():
     """EDGE_ONLY is the one lane whose stored bytes are not a copy of anything. The origin
     serves nothing at these paths, so snapshotting one would fetch a 404 and fail the deploy,
