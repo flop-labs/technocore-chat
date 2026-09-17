@@ -437,6 +437,116 @@ def test_a_recreated_room_reports_a_new_generation(tmp_path):
     assert after == before + 1, "recreate must bump the generation"
 
 
+def test_a_created_room_never_exposes_messages_with_generation_zero(tmp_path, monkeypatch):
+    """A newly created room must not expose messages while still reporting generation 0."""
+    import store
+
+    observed = []
+    set_seq_entry = store._set_seq_entry
+
+    def observe_before_seq_entry_write(root, room, floor):
+        if room == "race-room" and floor is None:
+            observed.append(store.read_messages(root, room))
+        set_seq_entry(root, room, floor)
+
+    monkeypatch.setattr(store, "_set_seq_entry", observe_before_seq_entry_write)
+
+    store.append(tmp_path, "race-room", "alice", "hello")
+
+    assert observed, "premise: creation publishes generation metadata"
+    assert all(not (view["count"] > 0 and view["generation"] == 0) for view in observed), (
+        "a visible conversation must never report generation 0"
+    )
+
+
+def test_a_recreated_room_never_exposes_new_messages_with_old_generation(tmp_path, monkeypatch):
+    """A recreated room must not become readable before its new generation is published.
+
+    Otherwise a stateful reader can observe messages from the new conversation while the
+    read view still reports the old generation, defeating the discontinuity signal added
+    for #139.
+    """
+    import store
+
+    store.append(tmp_path, "race-room", "alice", "first conversation")
+    before = store.read_messages(tmp_path, "race-room")["generation"]
+
+    p = store.room_path(tmp_path, "race-room")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    observed = []
+    set_seq_entry = store._set_seq_entry
+
+    def observe_before_seq_entry_write(root, room, floor):
+        if room == "race-room" and floor is None:
+            observed.append(store.read_messages(root, room))
+        set_seq_entry(root, room, floor)
+
+    monkeypatch.setattr(store, "_set_seq_entry", observe_before_seq_entry_write)
+
+    store.append(tmp_path, "race-room", "bob", "second conversation")
+
+    assert observed, "premise: recreation publishes new generation metadata"
+    assert all(not (view["count"] > 0 and view["generation"] == before) for view in observed), (
+        "new-generation messages must never be visible with the old generation"
+    )
+
+
+def test_room_generation_smoke_for_absent_and_existing_room(tmp_path):
+    """Directly exercise the normal generation read path for absent and live rooms."""
+    import store
+
+    room = "generation-smoke"
+
+    assert store.room_generation(tmp_path, room) == 0
+
+    store.append(tmp_path, room, "alice", "hello")
+
+    assert store.room_generation(tmp_path, room) == 1
+
+
+def test_room_generation_does_not_mix_seq_state_snapshots(tmp_path, monkeypatch):
+    """Generation and floor used for one result must come from one seq-state snapshot."""
+    import store
+
+    room = "field-race"
+    store.append(tmp_path, room, "alice", "first conversation")
+    before = store.room_generation(tmp_path, room)
+
+    p = store.room_path(tmp_path, room)
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists()
+
+    set_seq_entry = store._set_seq_entry
+    monkeypatch.setattr(store, "_set_seq_entry", lambda root, name, floor: None)
+    store.append(tmp_path, room, "bob", "second conversation")
+    monkeypatch.setattr(store, "_set_seq_entry", set_seq_entry)
+
+    assert p.exists(), "premise: recreated room record is visible"
+
+    read_seq_state = store._read_seq_state
+    shard = store._seq_state_path(tmp_path, room)
+    raced = False
+
+    def publish_after_snapshot(path):
+        nonlocal raced
+        state = read_seq_state(path)
+        if path == shard and room in state and not raced:
+            raced = True
+            set_seq_entry(tmp_path, room, None)
+        return state
+
+    monkeypatch.setattr(store, "_read_seq_state", publish_after_snapshot)
+
+    assert store.room_generation(tmp_path, room) == before + 1
+    assert raced, "premise: recreation state was published after the old snapshot was read"
+
+
 def test_one_unreadable_file_does_not_abort_the_whole_pass(tmp_path, monkeypatch):
     """The reaper walks every room and note in one pass, and a racing writer or a
     permission blip on any one of them is ordinary. Skipping that entry costs nothing;
