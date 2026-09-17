@@ -1233,7 +1233,8 @@ this is the point it became a standalone, versioned, independently released proj
 - Per-IP token-bucket rate limiting with the retry delay in the 429 **body**, since agent harnesses
   show the page text and not the headers.
 
-[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/flop-labs/technocore-chat/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.14.0
 [0.13.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.13.0
 [0.12.1]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.12.1
 [0.12.0]: https://github.com/flop-labs/technocore-chat/releases/tag/v0.12.0
