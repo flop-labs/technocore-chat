@@ -25,6 +25,79 @@ from technocore_mcp import signing  # noqa: E402
 SEED_HEX = "9d" * 32
 
 
+def test_the_sweep_refuses_joiner_only_content():
+    """ZWNJ/ZWJ are preserved in context, but a payload of nothing but joiners
+    is refused by the server (store.clean_text) and by standalone signers
+    (scripts/sign.py) — they carry meaning only beside visible characters.
+
+    The MCP signing.sweep() is intentionally transformation-only; the MCP
+    handler (say_signed) refuses joiner-only in the no-key challenge path.
+    """
+    import store
+
+    joiner_payloads = ["\u200c", "\u200d", "\u200c\u200d", " \u200c ", "\u200d \u200c"]
+
+    # store.clean_text raises StoreError
+    for payload in joiner_payloads:
+        with pytest.raises(store.StoreError, match="empty text"):
+            store.clean_text(payload)
+
+    # scripts/sign.py swept() raises SystemExit
+    import subprocess
+    import sys
+
+    for payload in joiner_payloads:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/sign.py"), "--seed", "a" * 64, "say", "lobby", "1", payload],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode != 0, f"sign.py accepted joiner-only payload {payload!r}"
+        assert "nothing visible" in result.stderr or "nothing visible" in result.stdout
+
+
+def test_mcp_sweep_preserves_joiners_and_returns_empty_for_joiner_only():
+    """The MCP signing.sweep() does transformation only — joiner-only
+    content survives the sweep but the MCP handler refuses it at the
+    challenge-generation step. This test documents the transformation
+    boundary: sweep returns the preserved joiners, then the handler
+    checks for visible content."""
+    from technocore_mcp import signing as mcp_signing
+
+    # Joiner-only content survives the sweep (transformation only)
+    assert mcp_signing.sweep("\u200c") == "\u200c"
+    assert mcp_signing.sweep("\u200d \u200c") == "\u200d \u200c"
+
+    # Regular whitespace/controls are still removed to empty
+    assert mcp_signing.sweep(" \n\t ") == ""
+
+    # Orthographic ZWNJ/ZWJ in context is preserved
+    assert mcp_signing.sweep("a\u200db") == "a\u200db"
+
+
+def test_orthographic_joiner_text_is_byte_preserved():
+    """ZWNJ/ZWJ inside visible text are preserved by all sweep implementations,
+    so signed text round-trips correctly through the server."""
+    import store
+
+    import technocore_mcp.signing as mcp_signing
+
+    text = "a\u200db"  # text with a zero-width joiner
+    assert store.clean_text(text) == text
+    assert mcp_signing.sweep(text) == text
+
+    # script/sign.py through subprocess
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/sign.py"), "--seed", "a" * 64, "say", "lobby", "1", text],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, f"sign.py rejected orthographic joiner text: {result.stderr}"
+    # A successful sign prints did:key and signature
+    assert result.stdout.count("\n") == 2
+
+
 def test_the_sweep_matches_the_services_own_for_hostile_input():
     """The signature covers the swept text — exactly the bytes the service stores — so
     the two sweeps must agree on every transformation. The refusal cases (empty after

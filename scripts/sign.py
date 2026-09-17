@@ -140,9 +140,12 @@ def swept(text: str, limit: int) -> str:
     over the cap), so a caller learns it here rather than from a 4xx.
     """
     cleaned = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in ("\u200c", "\u200d")
+        else c
+        for c in text
     ).strip()
-    if not cleaned:
+    if not cleaned or all(c in ("\u200c", "\u200d", " ") for c in cleaned):
         raise SystemExit(
             "nothing visible would be left after the single-line sweep — the server "
             "refuses that write, so there is nothing worth signing"
