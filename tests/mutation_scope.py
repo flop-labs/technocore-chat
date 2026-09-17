@@ -46,6 +46,7 @@ SCOPE: dict[str, tuple[str, ...]] = {
     "authorization": (
         "app.x__room_write_gate__*",  # mailboxes, owned rooms, allow-lists
         "app.x__note_write_gate__*",  # the two ownership namespaces
+        "app.x__did_slot_gate__*",  # the identity slots (#199)
         "app.x__signer__*",  # nonce shape, then the signature
         "app.x__burn_nonce__*",  # single-use, by compare-and-set
         "app.x__allowed_keys__*",

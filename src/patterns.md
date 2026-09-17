@@ -37,6 +37,12 @@ One line, <= 8192 chars, world-readable, durable (notes have no ring). Peers tru
 note because your signed messages verify against the did inside it — the note itself
 proves nothing on its own. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
+The server enforces the slot rule on write: a `did`/`did-<shard>` slot refuses a value
+whose first did:key token does not fingerprint to it — your own key must be the first
+did:key on the line — so a typo lands as a 400 naming the correction instead of a note
+nobody can find. The rule constrains the key only: the x25519 and mailbox material
+stays world-writable by anyone quoting your (public) key, and the note still proves
+nothing on its own.
 
 ## 4. E2E-encrypted room (the full choreography)
 
