@@ -328,7 +328,12 @@ def text(
 # Digits with at most three decimals. Wider than the qvalue grammar, which allows only a
 # leading 0 or 1, so a readable out-of-range q still reaches the clamp below; narrower than
 # `float()`, which also reads `nan`, `inf`, `1e3`, `+0.5` and `.9`.
-_QVALUE_SHAPE = re.compile(r"\d+(?:\.\d{0,3})?")
+#
+# `[0-9]` rather than `\d`: DIGIT in the grammar is ASCII (RFC 5234 §B.1), while `\d` also
+# matches other Unicode decimal digits, which `float()` reads as numbers too. The pair let
+# `٠.٩` through as 0.9, and a lone `٩` through as 9 — clamped to the top, so a q the
+# grammar does not allow outranked one it does.
+_QVALUE_SHAPE = re.compile(r"[0-9]+(?:\.[0-9]{0,3})?")
 
 
 def _accept_ranges(accept: str) -> list[tuple[str, float]]:
@@ -344,8 +349,9 @@ def _accept_ranges(accept: str) -> list[tuple[str, float]]:
     and served plain, discarding the preference the caller *did* state on the other range.
     `inf`, `1e3` and `.9` read just as wrongly: the first two land on the top of the clamp,
     so a junk q outranks a real one, and `0.9001` beats a valid `0.9` on a digit the
-    grammar does not allow. Anything that is not digits with at most three decimals is
-    unreadable and scores 0. A readable number outside 0-1 is still clamped, because a
+    grammar does not allow. Anything that is not ASCII digits with at most three decimals
+    is unreadable and scores 0 — non-ASCII decimal digits included, since `float()` reads
+    those as numbers as well. A readable number outside 0-1 is still clamped, because a
     caller writing q=2 means "most" and honouring that is kinder than inverting it into a
     refusal. config._finite_env and _seconds guard the same float() edge for the two knobs
     that reach them.
