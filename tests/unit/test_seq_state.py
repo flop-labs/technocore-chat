@@ -296,6 +296,60 @@ def test_the_entry_carries_when_it_was_written(tmp_path) -> None:
     assert abs(entry["t"] - time.time()) < 60, "the stamp is not this write's own clock"
 
 
+def test_retirement_waits_for_a_room_create_already_in_flight(tmp_path, monkeypatch) -> None:
+    """An expired entry cannot disappear after a creator read its floor but before that
+    creator makes the room visible, or its generation and sequence both restart at one."""
+    import time
+
+    import seqstate
+    import store
+
+    store._write_record(tmp_path, "returning", "bot", "first")
+    path = store.room_path(tmp_path, "returning")
+    path.touch()
+    os.utime(path, (0, 0))
+    _reap_now(tmp_path)
+    shard = store._seq_state_path(tmp_path, "returning")
+    state = store._read_seq_state(shard)
+    state["returning"]["t"] = 0
+    store._replace(shard, orjson.dumps(state))
+    (tmp_path / ".reaped").touch()
+
+    inside_create, release_create, maintenance_done = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    real_count = store._count_new_room
+
+    def pause_inside_create(root, delta):
+        inside_create.set()
+        assert release_create.wait(10)
+        return real_count(root, delta)
+
+    monkeypatch.setattr(store, "_count_new_room", pause_inside_create)
+    creator = threading.Thread(
+        target=store._write_record, args=(tmp_path, "returning", "bot", "back")
+    )
+    creator.start()
+    assert inside_create.wait(10), "the create never entered its shared span"
+
+    def retire():
+        seqstate.maintain(tmp_path, time.time())
+        maintenance_done.set()
+
+    maintenance = threading.Thread(target=retire)
+    maintenance.start()
+    assert not maintenance_done.wait(0.1), "maintenance did not wait for the in-flight create"
+    release_create.set()
+    creator.join(10)
+    maintenance.join(10)
+
+    assert not creator.is_alive() and not maintenance.is_alive()
+    assert store.room_generation(tmp_path, "returning") == 2
+    assert store.last_seq(tmp_path, "returning") == 2
+
+
 def test_the_shard_of_a_name_is_the_shard_of_its_room_bucket(tmp_path) -> None:
     """One resolver for both, so a re-shard can never move a room's data without moving its
     floor with it. `_shard` is a frozen on-disk format; this is what pins the two together."""
