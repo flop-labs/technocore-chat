@@ -1372,3 +1372,26 @@ def test_service_stats_measures_room_bytes_until_a_reap_settles_them(tmp_path):
     store.append(tmp_path, "openroom", "nick", "hi")
     assert store.room_bytes_used(tmp_path) == 0  # nothing reaped yet
     assert store.service_stats(tmp_path)["bytes"]["rooms"] == store._count_rooms(tmp_path)[1] > 0
+
+
+@pytest.mark.parametrize(("nonce", "shown"), [(True, "True"), (False, "False")])
+def test_a_signed_write_refuses_a_bool_nonce(tmp_path, nonce, shown):
+    """A bool is an int subclass, but it cannot be a signed nonce (#810)."""
+    import store
+
+    did, _ = _keypair()
+    with pytest.raises(store.StoreError, match="non-negative integer nonce") as refused:
+        store.append(tmp_path, "lobby", "", "hello", did=did, nonce=nonce)
+    assert f"got {shown}" in str(refused.value)
+
+
+def test_a_refused_bool_nonce_does_not_burn_the_counter(tmp_path):
+    """A rejected boolean must not consume nonce 0 or 1."""
+    import store
+
+    did, _ = _keypair()
+    with pytest.raises(store.StoreError):
+        store.append(tmp_path, "lobby", "", "hello", did=did, nonce=True)
+    rec = store.append(tmp_path, "lobby", "", "hello", did=did, nonce=0, sig="x" * 86)
+    assert rec["nonce"] == 0
+    assert isinstance(rec["nonce"], int) and not isinstance(rec["nonce"], bool)
