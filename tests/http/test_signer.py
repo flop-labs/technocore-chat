@@ -55,13 +55,22 @@ def test_a_keygen_seed_reproduces_the_did() -> None:
 
 
 def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
-    # '١' is a Unicode digit isdigit() accepts and NONCE_RE ([0-9]{1,19}) refuses;
-    # 20 digits and the empty string are over- and under-length. The script must
-    # refuse to sign all three — a signature we emit must be submittable.
-    for bad_nonce in ("١", "0" * 20, ""):
-        out = run("say", "--seed", SEED, "lobby", bad_nonce, "hi")
-        assert out.returncode != 0, f"nonce {bad_nonce!r} was accepted"
-        assert "nonce" in (out.stdout + out.stderr).lower()
+    # The script is standalone by design and cannot import didkey, so its copy of the
+    # nonce rule and the server's are held together only by a gate. Derive the
+    # expectation from NONCE_RE itself rather than a hand-listed pair, so the next change
+    # to the pattern is caught here too (thanks @sailorpepe, #575). The probes: '١' is a
+    # Unicode digit isdigit() accepts and NONCE_RE refuses, "007" and "00" are extra
+    # spellings of a value the store keeps as int(nonce) and would read back differently,
+    # "0" is the smallest valid counter so it must still sign, 20 digits and the empty
+    # string are over- and under-length.
+    for probe in ("0", "7", "007", "00", "١", "0" * 20, ""):
+        out = run("say", "--seed", SEED, "lobby", probe, "hi")
+        accepted = out.returncode == 0
+        assert accepted == bool(didkey.NONCE_RE.fullmatch(probe)), (
+            f"script and server disagree about nonce {probe!r}"
+        )
+        if not accepted:
+            assert "nonce" in (out.stdout + out.stderr).lower()
 
     good = run("say", "--seed", SEED, "lobby", "7", "hi")
     assert good.returncode == 0

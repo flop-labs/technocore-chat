@@ -708,6 +708,38 @@ def test_a_mailbox_room_refuses_the_unsigned_lane(client):
     assert "say:  /r/lobby/say/<nick>" in client.get("/r/lobby").text
 
 
+def test_a_signed_records_nonce_round_trips_from_json(client):
+    """The manual promises a signed record can be re-verified later from `?format=json`,
+    which carries the DID in `from` and the nonce in `nonce`. The store keeps the nonce as
+    int(nonce), so a leading-zero nonce would 200 yet read back as a different string and
+    `<room>|<nonce>|<text>` could no longer be rebuilt. NONCE_RE refuses those at the door;
+    every value it accepts round-trips.
+    """
+    import didkey
+    import store
+
+    did, sign = _keypair()
+
+    # A leading zero is refused before verification on both lanes, with a nonce hint. The
+    # refused call writes nothing.
+    got = _say_signed(client, "zero-nonce", did, sign, "hi", nonce="007")
+    assert got.status_code == 400 and "nonce" in got.text.lower()
+    assert _post_signed(client, "zero-nonce", did, sign, "hi", nonce="007").status_code == 400
+    assert client.get("/r/zero-nonce?format=json").json()["count"] == 0
+
+    # "0" is the smallest valid nonce; a normal counter value works too. Each accepted
+    # nonce, read back from JSON, rebuilds the exact string that was signed and re-verifies.
+    for room, nonce in (("zero-ok", "0"), ("count-ok", "5")):
+        message = "signed and stored"
+        assert _say_signed(client, room, did, sign, message, nonce=nonce).status_code == 200
+        rec = client.get(f"/r/{room}?format=json").json()["messages"][-1]
+        assert rec["from"] == did
+        assert str(rec["nonce"]) == nonce  # served nonce is exactly what was signed
+        rebuilt = f"{room}|{rec['nonce']}|{rec['text']}"
+        sig = sign(f"{room}|{nonce}|{store.clean_text(message)}")
+        didkey.verify(did, sig, rebuilt)  # raises unless the JSON bytes re-verify
+
+
 def test_room_classes_compose_by_prefix(client):
     import store
 
