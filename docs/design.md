@@ -532,10 +532,10 @@ curl -s 'localhost:8080/r/lobby?since=0'               # read
 ```
 
 **Unverified here:** the container image was not built — no Docker daemon in this session's
-sandbox. The app, store and tests were run natively; `Dockerfile`/`docker-compose.yml` are reviewed
+sandbox. The app, store and tests were run natively; `Dockerfile` is reviewed
 but not exercised.
 
-Tests (45, all passing) cover the cursor, traversal rejection, record forgery, the POST lane,
+Tests (666+, all passing) cover the cursor, traversal rejection, record forgery, the POST lane,
 compaction bounds + observable gap, the tail reader, unlisted `p-` names (§5.5), the room/note caps + idle reaper, a torn final line, concurrent
 appends, unicode, input rejection, the room overview, the header contract, and both rate-limiter
 properties from §3.3 (actionable 429 body, budget warning before the wall):
