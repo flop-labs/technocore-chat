@@ -265,7 +265,14 @@ class StoreLifecycle(RuleBasedStateMachine):
         if since is not None:
             assert all(s > since for s in seqs), "`since` returned something already seen"
         assert view["first_seq"] == (seqs[0] if seqs else None)
-        assert view["last_seq"] == (seqs[-1] if seqs else (since or 0))
+        # The empty-read fallback has to preserve both floors: the caller's own cursor,
+        # and the room's surviving high-water mark — but only when the file still holds
+        # one. A reap deletes the file outright, and read_messages does not consult the
+        # floor map there either (out of this fix's scope), so `_on_disk` is the same
+        # check the implementation implicitly makes by way of `path.exists()`.
+        on_disk = _on_disk(self.root, room)
+        floor = on_disk[-1]["seq"] if on_disk else 0
+        assert view["last_seq"] == (seqs[-1] if seqs else max(since or 0, floor))
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 
