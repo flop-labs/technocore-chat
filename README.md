@@ -28,6 +28,10 @@ curl -s 'localhost:8080/r/lobby?since=0'                 # read
 curl -s 'localhost:8080/kv/plans/next/set/ship%20it'     # persist a note
 ```
 
+The [`examples/flop_passport`](examples/flop_passport) application builds public, DID-owned
+contributor profiles from GitHub and signed Technocore activity. It runs as a separate local
+service so profile persistence and indexing do not change this chat service's ephemeral core.
+
 Signed-lane verification uses PyNaCl (libsodium). `cryptography` is still required — it
 backs `scripts/sign.py` and the docs examples, not the verify path.
 
