@@ -720,6 +720,162 @@ def test_header_block_is_capped_far_below_the_edge_ceiling(client):
     assert "a plain GET with no custom headers" in r.text  # tells the client what to do
 
 
+def test_the_url_byte_budget_refuses_deterministically_at_the_boundary(client):
+    """#180: the GET write lanes carry their payload in the URL, so the binding limit is
+    URL *bytes*, not the character cap. It used to be enforced only by the h11 parser cap,
+    which fires by TCP segmentation — the same over-budget URL 200s or 400s at random. The
+    app now refuses it itself, exactly at MAX_URL_BYTES, in its own voice.
+
+    A URL one byte over the budget must 414 regardless of how it arrives; a URL at the
+    budget must not be refused by this check (it falls through to the app, which here 400s
+    on the character cap). The 414 must name the actual byte count and point at POST."""
+    import app as app_module
+
+    prefix = "/r/rr/say/bot/"
+    pad = app_module.MAX_URL_BYTES - len(prefix.encode())
+    at_budget = client.get(prefix + "a" * pad)  # URL == budget exactly
+    one_over = client.get(prefix + "a" * (pad + 1))  # one byte over
+
+    assert one_over.status_code == 414, "an over-budget URL must be refused deterministically"
+    assert "URL too long" in one_over.text
+    assert str(app_module.MAX_URL_BYTES) in one_over.text  # names the budget
+    assert str(app_module.MAX_URL_BYTES + 1) in one_over.text  # and the actual size
+    assert "POST" in one_over.text  # points at the escape hatch
+    assert at_budget.status_code != 414, "a URL at the budget is not refused by the URL check"
+    # The middleware runs before routing, so it refuses without the request touching a
+    # handler — a normal small write is untouched.
+    assert client.get("/r/rr/say/bot/hi").status_code == 200
+
+
+def test_the_url_budget_counts_the_query_string_separator(client):
+    """#829 review (yukkie3276): the wire request-target is `raw_path + b"?" + query_string`,
+    so the "?" separator counts against the budget. A target whose raw_path + query bytes
+    total exactly MAX_URL_BYTES is MAX_URL_BYTES+1 on the wire and must be refused — the
+    conditional note lanes legitimately carry `?if=...`, so the ceiling has to be exact for a
+    query-bearing target too, not just a path-only one. The size-cap compaction dropped this
+    +1 and let the over-the-wire-by-one request through; this pins it."""
+    import app as app_module
+
+    path = "/r/rr"
+    # raw_path + query == MAX_URL_BYTES exactly (ignoring the "?"): the separator makes the
+    # wire target one byte over, so the guard must refuse it.
+    query = "if=" + "a" * (app_module.MAX_URL_BYTES - len(path.encode()) - len("if="))
+    assert len(path.encode()) + len(query.encode()) == app_module.MAX_URL_BYTES
+    over = client.get(f"{path}?{query}")
+    assert over.status_code == 414, "the '?' separator must push the wire target one over"
+    assert "URL too long" in over.text
+    # One byte shorter query: wire target (path + "?" + query) == MAX_URL_BYTES exactly, so it
+    # is at the budget and passes the URL check.
+    at_budget = client.get(f"{path}?{query[:-1]}")
+    assert at_budget.status_code != 414, "a query-bearing target exactly at the budget passes"
+
+
+def test_the_middleware_refusals_are_published_on_every_operation(client):
+    """#829 review (Minh3132): HeaderLimits runs before routing, so the 414 (URL over budget)
+    and 431 (header block over limit) it raises are reachable on *every* operation, not only
+    the four GET write lanes whose `:path` target trips 414 most easily. A contract that lists
+    them on four operations and omits them from the rest leaves a generated client an
+    impossible-to-model status on all the others, which CONTRIBUTING treats as drift. Both
+    must appear on every operation the document publishes."""
+    ops = [
+        op
+        for p in client.get("/openapi.json").json()["paths"].values()
+        for op in p.values()
+        if isinstance(op, dict) and "responses" in op
+    ]
+    assert ops  # the walk found operations rather than silently passing on an empty list
+    for op in ops:
+        oid = op.get("operationId", "?")
+        assert "414" in op["responses"], f"{oid} does not document the 414 it can return"
+        assert "431" in op["responses"], f"{oid} does not document the 431 it can return"
+
+
+def test_an_over_budget_query_on_a_read_op_is_a_documented_414(client):
+    """#829 review (Minh3132): a normal room read such as `/r/<room>?since=<very long>` reaches
+    HeaderLimits before `_cursor()` and is refused 414, so the read operation's own contract
+    has to include it — the earlier fix left 414 on the write lanes only. This exercises the
+    non-write lane the write-lane tests never reach, and ties the observed status back to the
+    operation's published responses, so it stays honest whichever way a future change moves
+    the boundary: scoping the check off the read lane (no longer 414) or documenting it (414
+    published) both keep observed and documented in step; only leaving them out of step fails.
+    """
+    import app as app_module
+
+    huge = "1" * app_module.MAX_URL_BYTES  # a giant `since=` decimal, no route-level cap
+    got = client.get(f"/r/room?since={huge}")
+    assert got.status_code == 414, "an over-budget query must be refused before routing"
+    assert "URL too long" in got.text
+
+    responses = client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["responses"]
+    assert str(got.status_code) in responses, "readRoom returned a status its contract omits"
+
+
+def test_the_url_414_does_not_tell_a_read_to_post(client):
+    """#829 review (Minh3132): HeaderLimits runs before routing, so its 414 fires on an
+    over-budget read (`?since=<huge>`) just as on a GET write lane. The body used to say
+    "POST it in a body instead (e.g. POST /r/<room>)" unconditionally — but a read has no
+    payload to move, and POST /r/<room> is a write, so an agent following the refusal
+    literally could turn a failed read into an unintended message. The escape is now stated
+    conditionally; a read must not be steered into a state-changing POST. Anchored on the
+    imperative rather than the substring "POST", so the conditional write-lane guidance the
+    other 414 tests assert can still mention POST without tripping this."""
+    import app as app_module
+
+    huge = "1" * app_module.MAX_URL_BYTES  # a giant ?since= read: no payload to relocate
+    got = client.get(f"/r/room?since={huge}")
+    assert got.status_code == 414 and "URL too long" in got.text
+    assert "POST /r/<room>" not in got.text, "a read must not be told to POST to a write lane"
+    assert "POST it in a body" not in got.text, "the imperative that misreads on a read is gone"
+
+
+def test_full_length_cjk_say_is_refused_over_budget_and_post_carries_it(client):
+    """#180: a value under `maxLength: 4096` can still blow the URL budget — 4096 CJK
+    characters URL-encode to ~36 KiB — so the GET write lane refuses it and the POST lane
+    carries the identical text whole.
+
+    Scope of the GET assertion (#829 review, Minh3132): this exercises the app's HeaderLimits,
+    which returns 414 for the over-budget URL. TestClient hands the request straight to the
+    ASGI app and bypasses the h11 parser, so it does NOT prove determinism against the deployed
+    stack — and cannot, because ~36 KiB is above the 32 KiB h11 cap. Over a real socket this
+    URL is refused as EITHER the parser's 400 or this 414 depending on TCP segmentation: both
+    refusals, neither guaranteed. The genuinely deterministic 414 band, (16 KiB, 32 KiB], is
+    pinned by test_the_url_byte_budget_refuses_deterministically_at_the_boundary; real-socket
+    behaviour above the cap is observed by tests/http_hardening_probe.py, not asserted here."""
+    import json
+
+    import store
+
+    text = "あ" * store.MAX_TEXT_CHARS  # 4096 chars, ~36 KiB as a URL, under the char cap
+    got = client.get(f"/r/cjk/say/bot/{text}")
+    assert (
+        got.status_code == 414 and "POST" in got.text
+    )  # app refuses over-budget; names the POST escape
+
+    posted = client.post(
+        "/r/cjk",
+        content=json.dumps({"from": "bot", "text": text}, ensure_ascii=True).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert posted.status_code == 200
+    assert client.get("/r/cjk?format=json").json()["messages"][0]["text"] == text  # byte-exact
+
+
+def test_the_h11_parser_cap_is_set_above_the_url_budget(client):
+    """#180: the app's 414 is only deterministic for a just-over-budget request if that
+    request reaches the app — the h11 parser cap must sit ABOVE MAX_URL_BYTES, or the parser
+    rejects it first, and does so by TCP segmentation rather than by rule. Pin the deployment
+    so a later edit that equalises the two (reopening the coin flip at the boundary) fails
+    here. Raising the cap is a per-connection buffering trade-off, documented at the CMD."""
+    import re
+
+    import app as app_module
+
+    dockerfile = Path(app_module.__file__).resolve().parents[1] / "docker" / "Dockerfile"
+    m = re.search(r'--h11-max-incomplete-event-size", "(\d+)"', dockerfile.read_text())
+    assert m, "Dockerfile no longer sets --h11-max-incomplete-event-size"
+    assert int(m.group(1)) > app_module.MAX_URL_BYTES, "parser cap must exceed the URL budget"
+
+
 def test_a_full_length_message_is_postable_in_every_encoding(client):
     """The documented cap is in *characters*. json.dumps defaults to ensure_ascii=True,
     so astral characters cost 12 body bytes each as surrogate-pair escapes. The byte cap

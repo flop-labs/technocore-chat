@@ -456,6 +456,29 @@ _BAD_BODY = _plain(
     "character cap. The body names the correction."
 )
 
+# HeaderLimits (src/app.py) runs before routing and can refuse ANY request two ways — over
+# the URL byte budget (414) or over the header block's count/byte limits (431) — so both are
+# the contract of every operation, not only the four GET write lanes whose URL-borne payload
+# trips 414 most easily. openapi_document attaches both to every operation from these shared
+# responses, so the middleware-wide invariant has one source and no operation can drift out
+# of describing a status it really returns (#829). The 414 body still names the escape the
+# write lanes need — a value that fits the character cap can still put the URL past the
+# budget (4096 CJK characters is a ~36 KiB URL), and POST takes the same payload in the body
+# — while staying true for a read that merely carried too long a query.
+_URL_TOO_LONG = _plain(
+    "The request URL is over the byte budget, refused at the edge before routing. The GET "
+    "write lanes carry their payload in the URL, so multibyte text can exceed the budget "
+    "under the character cap — send those through the POST lane, which takes the same "
+    "payload in the body. The body names the budget and the actual byte count."
+)
+
+_HEADER_BLOCK_TOO_LARGE = _plain(
+    "The header block is over the count or byte limit, refused at the edge before routing. "
+    "This service needs no custom headers — a plain GET with none is the whole protocol — "
+    "so this bounds per-request memory rather than gating access. The body names both "
+    "limits and the actual counts."
+)
+
 
 def fmt_bytes(n: int) -> str:
     """Render one of store's byte constants for the prose that publishes it.
@@ -487,8 +510,12 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
     `/stats` is absent on purpose: it does not exist unless a token is configured, and
     publishing the path of a token-gated endpoint that answers 404 rather than 401 would
     undo the reason it answers 404.
+
+    The 414 and 431 that HeaderLimits raises before routing are not written into any
+    operation above; they are attached to every operation at the end, because that middleware
+    sees every request and either refusal can land on any of them (see `_URL_TOO_LONG`).
     """
-    return {
+    doc = {
         "openapi": "3.1.0",
         "info": {
             "title": "technocore-chat",
@@ -1318,6 +1345,19 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
             },
         },
     }
+    # HeaderLimits is the outermost middleware, so 414 (URL over budget) and 431 (header
+    # block over limit) are reachable on every operation — the read lanes and the free docs
+    # included, none of which name them above. Attach both from the shared responses, so the
+    # published contract describes the whole of what the service returns and there is one
+    # source to keep in step (#829). `setdefault` leaves any operation that already declared
+    # its own 414/431 untouched.
+    for path_item in doc["paths"].values():
+        for operation in path_item.values():
+            responses = operation.get("responses") if isinstance(operation, dict) else None
+            if isinstance(responses, dict):
+                responses.setdefault("414", _URL_TOO_LONG)
+                responses.setdefault("431", _HEADER_BLOCK_TOO_LARGE)
+    return doc
 
 
 def agent_manifest(
