@@ -9,6 +9,7 @@ those promises and anything a gate ran; these tests are the gate (issue #56).
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import sys
@@ -39,6 +40,14 @@ def test_both_documented_seed_orders_agree() -> None:
     assert before.returncode == 0 and after.returncode == 0
     assert before.stdout == after.stdout
     assert before.stdout.startswith("did:key:z6Mk")
+
+
+def test_nonce_guidance_distinguishes_the_two_signed_lanes() -> None:
+    guidance = ast.get_docstring(ast.parse(SIGNER.read_text()))
+    assert guidance is not None
+    assert "per signing key per room" in guidance
+    assert "/kv/room-nonce/<room>" in guidance
+    assert "shared by every signer" in guidance
 
 
 def test_a_keygen_seed_reproduces_the_did() -> None:

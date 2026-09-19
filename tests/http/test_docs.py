@@ -1096,7 +1096,7 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
 
 
 def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
-    """One definition, three places it is published. The room lane's `did` pattern ended in
+    """One definition, four places it is published. The room lane's `did` pattern ended in
     an unbounded `+`, so `did:key:z6Mk` satisfied it; the note lane's was a bare `string`;
     the POST body was prose no generator can read. A client is built against whichever copy
     it found, so the weakest one was the contract.
@@ -1113,11 +1113,21 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
 
     say = "/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}"
     note = "/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}"
-    body = doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"]["application/json"]["schema"]
+    room_body = doc["paths"]["/r/{room}"]["post"]["requestBody"]["content"]["application/json"][
+        "schema"
+    ]
+    note_body = doc["paths"]["/kv/{ns}/{key}"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
 
-    published = [param(say, "did"), param(note, "did"), body["properties"]["did"]]
+    published = [
+        param(say, "did"),
+        param(note, "did"),
+        room_body["properties"]["did"],
+        note_body["properties"]["did"],
+    ]
     assert len({json.dumps(schema, sort_keys=True) for schema in published}) == 1, (
-        "the two signed lanes and the POST body must publish one `did` shape"
+        "the two signed GET lanes and both POST bodies must publish one `did` shape"
     )
     for schema in published:
         # A real key satisfies it, and the truncated DID the old pattern accepted does not.
@@ -1126,25 +1136,71 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
         assert schema["minLength"] == schema["maxLength"] == len(did)
         assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
 
-    # The body's copies live under `dependentSchemas.did` rather than on the properties:
+    # The bodies' copies live under `dependentSchemas.did` rather than on the properties:
     # the handler reads `sig`/`nonce` only when a `did` is present, so a body without one
     # is an unsigned write and publishing their shapes unconditionally would be a
     # constraint nothing enforces (docs/design.md §3.5). Same shapes, stated where they
-    # actually hold — which is still one definition and still three publishing sites.
-    signed = body["dependentSchemas"]["did"]
-    for schema in (param(say, "sig"), param(note, "sig"), signed["properties"]["sig"]):
+    # actually hold — which is still one definition and still four publishing sites.
+    signed_bodies = [
+        room_body["dependentSchemas"]["did"],
+        note_body["dependentSchemas"]["did"],
+    ]
+    sig_schemas = [param(say, "sig"), param(note, "sig")] + [
+        signed["properties"]["sig"] for signed in signed_bodies
+    ]
+    for schema in sig_schemas:
         assert re.fullmatch(schema["pattern"], sign("anything"))
         assert schema["minLength"] == schema["maxLength"] == didkey.SIG_CHARS
-    for schema in (param(say, "nonce"), param(note, "nonce"), signed["properties"]["nonce"]):
+    nonce_schemas = [param(say, "nonce"), param(note, "nonce")] + [
+        signed["properties"]["nonce"] for signed in signed_bodies
+    ]
+    for schema in nonce_schemas:
         assert re.fullmatch(schema["pattern"], "1") and not re.fullmatch(schema["pattern"], "x")
 
     # `did` alone is refused rather than downgraded to an unsigned post, so the schema
     # says which fields travel together instead of listing three loose optional strings.
-    assert signed["required"] == ["sig", "nonce"]
+    for signed in signed_bodies:
+        assert signed["required"] == ["sig", "nonce"]
     assert client.post("/r/lobby", json={"text": "hi", "did": did}).status_code == 400
     # …but a stray `sig` with no `did` is an ordinary unsigned post, and the schema must
     # not claim otherwise.
     assert client.post("/r/lobby", json={"from": "b", "text": "hi", "sig": "x"}).status_code == 200
+
+
+def test_each_signed_lane_publishes_its_actual_nonce_scope(client):
+    """Message replay state belongs to one key's retained room tail. Ownership-note
+    replay state is different: one server-written room counter shared by every signer.
+    Publishing the message rule for both makes a new owner start at 1 and receive a
+    surprising 403.
+    """
+    doc = client.get("/openapi.json").json()
+
+    def path_nonce(path):
+        operation = doc["paths"][path]["get"]
+        return next(p for p in operation["parameters"] if p["name"] == "nonce")["schema"]
+
+    def post_nonce(path):
+        return doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+
+    room_body = post_nonce("/r/{room}")
+    note_body = post_nonce("/kv/{ns}/{key}")
+    message_descriptions = [
+        path_nonce("/r/{room}/say-signed/{did}/{sig}/{nonce}/{text}")["description"],
+        room_body["properties"]["nonce"]["description"],
+        room_body["dependentSchemas"]["did"]["properties"]["nonce"]["description"],
+    ]
+    ownership_descriptions = [
+        path_nonce("/kv/{ns}/{key}/set-signed/{did}/{sig}/{nonce}/{value}")["description"],
+        note_body["properties"]["nonce"]["description"],
+        note_body["dependentSchemas"]["did"]["properties"]["nonce"]["description"],
+    ]
+
+    for description in message_descriptions:
+        assert "this key" in description
+        assert "shared by every signer" not in description
+    for description in ownership_descriptions:
+        assert "/kv/room-nonce/<room>" in description
+        assert "shared by every signer" in description
 
 
 def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
@@ -1375,6 +1431,9 @@ def test_the_manifest_carries_enough_to_sign_without_reading_prose(client):
     assert identity["message_signature_payload"] == "<room>|<nonce>|<text>"
     assert identity["note_signature_payload"] == "<namespace>|<key>|<nonce>|<value>"
     assert identity["algorithms"] == ["Ed25519"]
+    assert "For a message" in identity["nonce"] and "that key" in identity["nonce"]
+    assert "/kv/room-nonce/<room>" in identity["nonce"]
+    assert "shared by every signer" in identity["nonce"]
     assert "mb-" in " ".join(identity["required_for"])
     assert doc["documentation"]["patterns"].endswith("/patterns.md")
 
