@@ -265,7 +265,9 @@ def _seconds(value: str | None) -> float:
 _ABSENT = manifest.IF_ABSENT
 
 
-def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) -> str:
+def _field(
+    source: Mapping[str, object], name: str, *, required: bool = False, is_name: bool = False
+) -> str:
     """A field the schema publishes as a string, or a 400 that names that field.
 
     The other half of the input doctrine (docs/design.md §3.5) from `_cursor`/`_seconds`
@@ -283,8 +285,14 @@ def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) ->
     `valid_name` as a nick and came back quoting the shared `<room>`/`<nick>`/`<ns>`/
     `<key>` rule (#373). Either way the caller was told a parameter it had got right was
     the wrong one, which is the failure the doctrine's last clause names.
+
+    `required=True` is the free-form field each POST body must carry — `text`, `value`.
+    Absent, it also became `""`, and `clean_text` then refused it as swept to nothing: a
+    diagnosis of characters the caller never sent, whose correction ("send at least one
+    visible character") is aimed at a different mistake. The credentials keep the `""`
+    default on purpose: absent is their ordinary state, and it means "unsigned".
     """
-    value = source.get(name, None if is_name else "")
+    value = source.get(name, None if required or is_name else "")
     if not isinstance(value, str):
         raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
     if is_name and not store.NAME_RE.fullmatch(value):
@@ -1451,7 +1459,7 @@ async def room_post(request: Request) -> Response:
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
     # were `str()`-coerced here for the same reason `from`/`text` were (#427).
-    did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    did, sent = _field(payload, "did").strip(), _field(payload, "text", required=True)
     signer = None
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
@@ -1733,7 +1741,7 @@ async def note_post(request: Request) -> Response:
         return payload
     p = request.path_params
     ns, key = p["ns"], p["key"]
-    value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
+    value = store.clean_text(_field(payload, "value", required=True), store.MAX_VALUE_CHARS)
     did = _field(payload, "did").strip()
     signer = None
     if did:

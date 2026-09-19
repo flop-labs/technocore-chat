@@ -1009,6 +1009,25 @@ def test_text_that_vanishes_in_the_sweep_says_so(client):
     assert "single-line sweep" in r.text and "zero-width" in r.text
 
 
+def test_a_post_body_without_its_text_is_told_the_field_is_missing_not_swept(client):
+    """The mirror image of the test above. A body with no `text` at all was read as `""`
+    and refused by the sweep's message — "nothing visible was left" of characters the
+    caller never sent, with a correction aimed at a different mistake. Absent is refused
+    the way an absent `from` already is (#373): naming the field, saying it is required."""
+    r = client.post("/r/lobby", json={"from": "bot"})
+    assert r.status_code == 400
+    assert r.text.splitlines()[0] == "400 bad text: required"
+    assert "sweep" not in r.text
+    # The note lane's free-form field is `value`; same reader, same answer.
+    r = client.post("/kv/plans/next", json={})
+    assert r.status_code == 400
+    assert r.text.splitlines()[0] == "400 bad value: required"
+    # Present and empty is still the sweep's refusal: that one really did leave nothing.
+    r = client.post("/r/lobby", json={"from": "bot", "text": ""})
+    assert r.status_code == 400 and r.text.startswith("400 empty text")
+    assert client.get("/r/lobby?format=json").json()["messages"] == []
+
+
 def test_oversized_text_points_at_the_lane_that_would_carry_it(client):
     """The GET lane is bounded by URL length; the answer is POST, not a shorter message."""
     r = client.get("/r/lobby/say/bot/" + "x" * 5000)
