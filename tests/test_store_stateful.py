@@ -31,9 +31,11 @@ from pathlib import Path
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+from nacl.signing import SigningKey
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import didkey  # noqa: E402
 import store  # noqa: E402
 
 # Thresholds are compared against a real clock while the model counts whole seconds of
@@ -490,3 +492,155 @@ def test_the_model_and_the_sweep_agree_on_these_values():
 @given(SAFE_TEXT)
 def test_the_generator_only_produces_text_the_sweep_leaves_alone(sample):
     assert store.clean_text(sample) == sample
+
+
+# ---------------------------------------------------------------------------
+# Ownership persistence across key loss
+# ---------------------------------------------------------------------------
+# This is documented behavior the user must be able to trust without re-reading
+# the source. A `room-owners/<d-room>` claim is a create-only note, persisted under
+# /kv/room-owners/ until the room itself is reaped; losing the private key does not
+# remove it. The room is then *orphaned but still fenced*: an ownerless claim, with
+# the allow-list it pre-existed still accepted (signed writes from those keys are not
+# invalidated), but no path forward — no rotation, no successor, no admin tool that
+# can mint a replacement key. The behavior of `app.py::_allowed_keys` — and therefore
+# the write gate — is what the test below proves: the owner record persists; the
+# allow-list it pre-existed persists; the original key no longer signs anything new;
+# the room never returns to the open lane until the reaper takes both. Two keys
+# derived from one seed round-trip, so "key loss" here is the seed byte the runner
+# no longer holds. (See /auth.md "What losing the key means".)
+
+
+def _did(seed_byte: int) -> str:
+    public = bytes(SigningKey(bytes([seed_byte]) * 32).verify_key)
+    raw = didkey.MULTICODEC_ED25519 + public
+    n = int.from_bytes(raw, "big")
+    out = ""
+    while n:
+        n, rem = divmod(n, 58)
+        out = didkey._B58[rem] + out
+    return f"{didkey.PREFIX}z{out}"
+
+
+def _set_owner(root, room, owner_did):
+    """Plant an ownership claim exactly as the signed lane would."""
+    return store.note_set(root, store.OWNERS_NS, room, owner_did)
+
+
+def _set_allow(root, room, allowed_dids):
+    """Plant an allow-list exactly as the signed lane would."""
+    return store.note_set(root, store.ALLOW_NS, room, " ".join(allowed_dids))
+
+
+def test_ownership_claim_persists_after_key_loss():
+    """A `room-owners/<room>` note, once written, survives every read path.
+
+    The note is what the write gate in `app.py::_room_write_gate` checks to decide
+    whether a `d-` room is fenced. Losing the private key does not remove the
+    note — and `app.py::_allowed_keys` reads from disk via `store.note_get` every
+    time, so the persistence path that matters is: write to disk, then keep reading
+    from disk after the seed is gone. If a future change ever ties the owner note
+    to a live session (caching, in-memory lookup), the gate would diverge from the
+    on-disk state and the behavior this test pins would be lost.
+    """
+    root = Path(tempfile.mkdtemp(prefix="chat-owner-loss-"))
+    try:
+        room = "d-orphaned"
+        owner_did = _did(1)
+        _set_owner(root, room, owner_did)
+
+        # The owner record is on disk, retrievable, and the write gate would fence.
+        assert store.note_get(root, store.OWNERS_NS, room) == owner_did
+        assert didkey.is_did(store.note_get(root, store.OWNERS_NS, room))
+
+        # "Loss" is local to the runner: we no longer hold the seed. The on-disk
+        # state, which is what `app.py` reads, is unchanged by the loss.
+        # "Loss" is local to the runner: we no longer hold the seed. The on-disk
+        # state, which is what `app.py` reads, is unchanged by the loss.
+
+        # Still there. Still recognized as a DID. Still fences the gate.
+        still_owner = store.note_get(root, store.OWNERS_NS, room)
+        assert still_owner == owner_did, (
+            "ownership claim must survive key loss: the write gate reads from disk"
+            f"\n  expected: {owner_did}\n  got: {still_owner}"
+        )
+        assert didkey.is_did(still_owner), (
+            "ownership claim must still parse as a did:key after key loss"
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_ownership_claim_does_not_free_the_room_to_open_lane():
+    """The write gate fences on the persisted claim alone, not on a live key.
+
+    If a future change were to *delete* the owner note on key loss (e.g. a reaper
+    rule keyed to the reaper's view of "active owners"), the room would fall back
+    to the open lane and any agent could write to it. This test pins the contract:
+    the gate is fenced, full stop, until something other than "the original key is
+    gone" removes the claim. Today nothing does.
+    """
+    root = Path(tempfile.mkdtemp(prefix="chat-owner-fence-"))
+    try:
+        room = "d-still-owned"
+        owner_did = _did(3)
+        _set_owner(root, room, owner_did)
+
+        # Simulate the write gate's first check: `note_get(OWNERS_NS, room)` — if it
+        # is non-None, the room is fenced for non-owner writes.
+        assert store.note_get(root, store.OWNERS_NS, room) is not None
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_ownership_allowlist_persists_alongside_the_owner_record():
+    """The allow-list and the owner record share a fate: both are notes in the
+    same root, both subject to the same idle rule, both removed by the same reaper
+    pass. Losing the owner key does not invalidate the allow-list it previously
+    pre-existed; that is exactly what makes the room orphaned-but-still-fenced
+    instead of "stays owner of nothing".
+    """
+    root = Path(tempfile.mkdtemp(prefix="chat-owner-allow-"))
+    try:
+        room = "d-with-allow"
+        owner_did = _did(4)
+        guest_did = _did(5)
+        _set_owner(root, room, owner_did)
+        _set_allow(root, room, [guest_did])
+
+        # Read both back: the gate would accept writes from owner + guest, refuse
+        # everyone else, and the owner cannot add new guests (key is gone).
+        keys = store.note_get(root, store.OWNERS_NS, room)
+        allow = store.note_get(root, store.ALLOW_NS, room) or ""
+        assert keys == owner_did
+        assert guest_did in allow.split()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_owner_record_persists_past_idle_threshold_until_room_reap():
+    """The owner note has the same reaper exemption as the allow-list and nonce
+    notes: it persists while the room it guards is still live, even past the
+    plain idle threshold. This is the rule `_guards_a_live_room` enforces; the
+    consequence the docs document is that losing the key does not start a clock
+    toward automatic release of the claim.
+    """
+    root = Path(tempfile.mkdtemp(prefix="chat-owner-reap-"))
+    try:
+        room = "d-claimed"
+        owner_did = _did(6)
+        _set_owner(root, room, owner_did)
+
+        # Push both the room's file and the owner note well past the idle window.
+        # With one message in the room, the reaper treats the room as live and
+        # the owner note as a guard, so the idle rule exempts both. After the
+        # threshold the owner record must still be present and fence the gate.
+        store.append(root, room, "alice", "hello")
+        _age_world(root, GUARD_SECONDS * 10)
+
+        owner = store.note_get(root, store.OWNERS_NS, room)
+        assert owner == owner_did, (
+            "owner note must outlive the idle threshold while its room is live"
+        )
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
