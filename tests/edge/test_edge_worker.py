@@ -388,6 +388,30 @@ def test_a_head_request_can_never_become_the_stored_body():
     )
 
 
+def test_a_head_reply_never_carries_a_body():
+    """The other half of test_a_head_request_can_never_become_the_stored_body: that test
+    protects the shared cache from a HEAD's empty body landing in it. This protects the HEAD
+    caller itself -- stored() and revalidating() both build their reply from a GET's body
+    regardless of the request's own method (stored() always does env.ASSETS.fetch(new
+    URL(...)), a GET by construction; revalidating() serves the shared copy, which is always
+    a GET's), so without one central strip, a HEAD to any static-first, edge-only or
+    revalidating path would answer with content a HEAD must never carry -- most concretely
+    HEAD /rooms, the one EDGE_REVALIDATE_SECONDS path today, which would otherwise return
+    the full listing body on every HEAD.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    handler = _between(worker, "async fetch(request, env, ctx) {", "\n};")
+    assert 'request.method === "HEAD"' in handler, (
+        "the top-level handler must check for HEAD once, after route() decides what to serve"
+    )
+    assert "new Response(null" in handler, "a HEAD reply must be rebuilt with a null body"
+    # And the check has to run on every lane's output, not one: asserted by position, since
+    # a check placed only inside one branch of route() would silently miss the others.
+    assert handler.index("await route(") < handler.index('request.method === "HEAD"'), (
+        "the HEAD strip must apply to whatever route() returned, not pre-empt it"
+    )
+
+
 def test_the_snapshot_script_needs_nothing_but_the_standard_library():
     """deploy.sh runs it as `python3 snapshot.py`, not through uv. An import of the service's
     own modules drags the whole dependency chain in with it and the deploy dies at the
