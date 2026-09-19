@@ -133,10 +133,10 @@ jobs:
       - name: Smoke the image
         run: |
           docker run -d --name technocore-chat-ci -e CHAT_ROOT=/tmp/chat -p 8080:8080 technocore-chat:ci
-          for _ in $(seq 30); do
-            curl -fsS localhost:8080/healthz && break
-            sleep 1
-          done
+          if ! bash scripts/wait-for-health.sh http://localhost:8080/healthz 30 container; then
+            docker logs technocore-chat-ci
+            exit 1
+          fi
           # `~` marks a self-asserted nickname: an unsigned write can never render as a
           # bare <bot>, so the smoke asserts the unverified form the signed lane guarantees.
           curl -fsS 'localhost:8080/r/ci/say/bot/hello%20ci' | grep -q '<~bot> hello ci'
@@ -179,10 +179,9 @@ jobs:
           CHAT_MAX_WAIT=1 \
           CHAT_RATE_READ=1000000 CHAT_RATE_WRITE=1000000 CHAT_RATE_ROOMS_PER_DAY=1000000 \
             uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
-          for _ in $(seq 30); do
-            curl -fsS localhost:8099/healthz && break
-            sleep 1
-          done
+          if ! bash scripts/wait-for-health.sh http://localhost:8099/healthz 30 contract-service; then
+            exit 1
+          fi
 
       # Deterministic: --generation-deterministic fixes the generation (superseding
       # --seed, which the CLI then ignores) and the pinned schemathesis fixes the generator,
