@@ -1024,60 +1024,32 @@ def test_reap_pass_skips_held_room_without_deadlock(tmp_path):
     assert not r_path.exists()
 
 
-def test_protected_note_write_does_not_reap_under_room_lock_deadlocking_create_gate(tmp_path):
-    """Writing a protected note must not invoke _reap while holding the room lock, which
-
-    would deadlock with an in-flight room creation waiting on the room lock while holding
-    the create lock shared.
-    """
+def test_protected_write_never_reaps_under_the_room_lock(client, tmp_path, monkeypatch):
     import store
 
-    room = "d-regress-reap-lock"
-    r_path = store.room_path(tmp_path, room)
-    create_lock = (tmp_path / store.USAGE_FILE).with_suffix(".create")
+    owner, owner_sign = _keypair()
+    successor, _ = _keypair(seed=2)
+    room = "d-reap-wiring"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+    r_path, real_reap, held = store.room_path(tmp_path, room), store._reap, []
 
-    # Room is claimed via note, but no .jsonl message file yet
-    store.note_set(
-        tmp_path,
-        "room-owners",
-        room,
-        "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-    )
+    def probing_reap(root):
+        def probe():
+            try:
+                with store._locked(r_path, nb=True):
+                    held.append(False)
+            except BlockingIOError:
+                held.append(True)
 
-    # Simulate in-flight create: holds create lock shared, waiting on room lock
-    create_held = threading.Event()
-    create_done = threading.Event()
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join(5)
+        return real_reap(root)
 
-    def simulate_create_gate():
-        with store._locked(create_lock, shared=True):
-            create_held.set()
-            # Wait for room lock (simulating _create_gate trying to acquire room lock)
-            with store._locked(r_path):
-                pass
-        create_done.set()
-
-    t = threading.Thread(target=simulate_create_gate, daemon=True)
-    t.start()
-    assert create_held.wait(5), "create gate failed to take shared create lock"
-
-    # Now verify that note_set with reap=False inside room lock completes without deadlocking
-    note_done = threading.Event()
-
-    def write_note_under_lock():
-        with store._locked(r_path):
-            store.note_set(
-                tmp_path,
-                "room-owners",
-                room,
-                "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
-                reap=False,
-            )
-        note_done.set()
-
-    writer = threading.Thread(target=write_note_under_lock, daemon=True)
-    writer.start()
-    assert note_done.wait(5), "note write deadlocked under room lock"
-    assert create_done.wait(5), "create gate deadlocked waiting on room lock"
+    monkeypatch.setattr(store, "_reap", probing_reap)
+    r = _set_signed(client, store.OWNERS_NS, room, owner, owner_sign, successor, nonce=2)
+    assert r.status_code == 200
+    assert held and True not in held, held
 
 
 def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_sweep(
