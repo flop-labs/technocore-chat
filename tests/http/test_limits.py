@@ -183,6 +183,16 @@ def test_the_429_names_the_budget_the_manual_deliberately_does_not(client, monke
             assert "writes are a separate budget" in read.text
             assert "limits.reads_per_minute_per_ip" in read.text
 
+        # A zero ceiling disables long-poll pacing, so recommending wait=0 would send the
+        # caller straight back into the bucket this response is asking it to leave alone.
+        with config.override(MAX_WAIT=0, RATE_READ=1):
+            app_module._buckets.clear()
+            client.get("/rooms")
+            zero = client.get("/rooms")
+            assert zero.status_code == 429
+            assert "wait for Retry-After before polling again" in zero.text
+            assert "&wait=0" not in zero.text and "one request per 0s" not in zero.text
+
 
 def test_a_zero_rate_limit_refuses_rather_than_crashing(monkeypatch, tmp_path):
     """The bucket arithmetic divides by the limit, so CHAT_RATE_WRITE=0 turned every write
