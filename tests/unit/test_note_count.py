@@ -1153,3 +1153,49 @@ def test_a_second_reap_pass_gives_up_rather_than_overlapping_the_first(tmp_path,
     assert walked, "premise: the first pass walked"
     assert "second" not in walked, f"two passes walked the store at once: {walked}"
     assert store._note_totals(tmp_path) == store._count_notes(tmp_path), "and the count holds"
+
+
+def test_a_full_did_namespace_names_the_asking_agent_s_own_sharded_path(tmp_path, monkeypatch):
+    """#165: the refusal is the last channel that reaches a writer still using the flat path.
+
+    The generic advice — "reuse one you already have" — is not actionable for an agent
+    publishing its first identity note: there is nothing to reuse, and #269 reports agents
+    reading it literally and overwriting strangers' notes. The hint must carry the caller's
+    OWN sharded path rather than a `<first 2>/<remaining 14>` template, because a template
+    is the thing the client already failed to apply.
+    """
+    import store
+
+    fp = "00e6998b15a826e9"  # a 16-hex fingerprint, the shape the convention publishes
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    store.note_set(tmp_path, "did", "aaaaaaaaaaaaaaaa", "v")  # fills the namespace
+
+    with pytest.raises(store.StoreError) as refusal:
+        store.note_set(tmp_path, "did", fp, "v")
+    assert f"/kv/did-{fp[:2]}/{fp[2:]}" in str(refusal.value), (
+        "the caller's real path, usable as-is"
+    )
+    assert "<first 2>" not in str(refusal.value), "a template is what they already got wrong"
+
+
+def test_the_shard_hint_speaks_only_for_flat_did_fingerprints(tmp_path, monkeypatch):
+    """The hint must not appear where it would be wrong, which is everywhere else.
+
+    A `did-xx` shard is already sharded, another namespace has no such escape hatch, and a
+    `did` key that is not a fingerprint is not the convention's note — steering any of them
+    at `/kv/did-<2>/<14>` would invent a path that means nothing.
+    """
+    import store
+
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)
+    for ns, key in (("did-00", "e6998b15a826e9"), ("topic", "lobby"), ("did", "not-a-fingerprint")):
+        store.note_set(tmp_path, ns, "filler", "v")
+        with pytest.raises(store.StoreError) as refusal:
+            store.note_set(tmp_path, ns, key, "v")
+        assert "sharded" not in str(refusal.value), f"{ns}/{key} must get the plain refusal"
+
+    # …and the predicate itself, on the two boundaries a fingerprint has.
+    assert store._shard_hint("did", "0" * 16) != "", "16 lowercase hex is the fingerprint"
+    assert store._shard_hint("did", "0" * 15) == "", "15 is not"
+    assert store._shard_hint("did", "0" * 17) == "", "17 is not"
+    assert store._shard_hint("did", "A" * 16) == "", "uppercase is not the published form"
