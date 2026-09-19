@@ -91,6 +91,10 @@ def public_base(scheme: str, host: str, configured: str = "") -> str:
     if configured:
         return configured.rstrip("/")
     if host and _HOST_RE.fullmatch(host.lower()) and scheme in ("http", "https"):
+        if ":" in host:
+            port = int(host.rsplit(":", 1)[1])
+            if not (1 <= port <= 65535):
+                return ""
         return f"{scheme}://{host.lower()}"
     return ""
 
