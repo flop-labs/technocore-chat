@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import urllib.error
@@ -189,6 +190,13 @@ def main() -> int:
         "--quiet", action="store_true", help="print only WARN lines, not the full digest"
     )
     args = parser.parse_args()
+
+    if not math.isfinite(args.warn_pct) or not (0.0 <= args.warn_pct <= 100.0):
+        print(
+            f"error: --warn-pct must be a finite number between 0 and 100, got {args.warn_pct!r}",
+            file=sys.stderr,
+        )
+        return 2
 
     if not args.token:
         print("error: no stats token given (--token or $CHAT_STATS_TOKEN)", file=sys.stderr)

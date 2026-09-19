@@ -118,6 +118,24 @@ def test_a_custom_warn_pct_moves_the_threshold() -> None:
     assert warns.returncode == 1 and "WARN  rooms:" in warns.stdout
 
 
+def test_a_non_finite_warn_pct_is_refused_before_any_request() -> None:
+    # nan makes every `pct >= warn_pct` comparison false, so a WARN can never fire --
+    # an exhausted deployment would silently report all-clear. The URL is deliberately
+    # unreachable: refusing must happen before any request is attempted, not just
+    # before the digest is built.
+    for args in (("--warn-pct", "nan"), ("--warn-pct", "inf"), ("--warn-pct=-inf",)):
+        result = run("http://127.0.0.1:1", *args)
+        assert result.returncode == 2, args
+        assert "--warn-pct" in result.stderr and "finite" in result.stderr, (args, result.stderr)
+
+
+def test_an_out_of_domain_warn_pct_is_also_refused() -> None:
+    for bad in ("-1", "150"):
+        result = run("http://127.0.0.1:1", "--warn-pct", bad)
+        assert result.returncode == 2, bad
+        assert "between 0 and 100" in result.stderr, bad
+
+
 def test_the_misconfigured_proxy_header_pattern_is_named_exactly() -> None:
     """The pattern README.md's CHAT_CLIENT_IP_HEADER section describes: proxied requests
     ignored, distinct_identities stuck near 1, header unset."""
