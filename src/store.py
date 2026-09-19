@@ -2737,6 +2737,7 @@ def note_set(
     value: str,
     expect: str | None = None,
     expect_absent: bool = False,
+    reap: bool = True,
 ) -> dict:
     """Write a note, optionally only if it still holds what the caller last read.
 
@@ -2754,7 +2755,8 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
-    _reap(root)
+    if reap:
+        _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
     # Reap first: the sweep can remove an idle note that existed at request entry.

@@ -1679,9 +1679,7 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             "ownership URL is single-use — count up and sign again.",
             403,
         )
-    store.note_set(
-        config.ROOT, store.NONCE_NS, room, nonce, expect=current, expect_absent=current is None
-    )
+    store.note_set(config.ROOT, store.NONCE_NS, room, nonce, current, current is None, False)
     return None
 
 
@@ -1689,13 +1687,15 @@ def _write_protected_note(
     ns: str, key: str, value: str, signer: str | None, nonce: str | None, condition: tuple
 ) -> dict | Response:
     if ns in store.ROOM_GUARD_NS:
+        store._reap(config.ROOT)
         with store._locked(store.room_path(config.ROOT, key)):
             denied = _note_write_gate(ns, key, value, signer) or (
                 _burn_nonce(key, nonce) if signer is not None and nonce is not None else None
             )
-            return denied or store.note_set(config.ROOT, ns, key, value, *condition)
-    denied = _note_write_gate(ns, key, value, signer)
-    return denied or store.note_set(config.ROOT, ns, key, value, *condition)
+            return denied or store.note_set(config.ROOT, ns, key, value, *condition, reap=False)
+    return _note_write_gate(ns, key, value, signer) or store.note_set(
+        config.ROOT, ns, key, value, *condition
+    )
 
 
 def note_write_signed(request: Request) -> Response:
