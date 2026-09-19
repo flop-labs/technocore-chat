@@ -10,6 +10,7 @@ docs/design.md §3.5 — advisory parameters clamp, semantic ones refuse naming 
 from __future__ import annotations
 
 import _client
+import pytest
 
 client = _client.client  # the shared TestClient fixture
 
@@ -63,6 +64,69 @@ def test_427_a_non_string_from_is_refused_rather_than_str_coerced(client):
     # The same rule on the other free-form field, and on both POST lanes' shared reader.
     assert client.post("/r/type-check", json={"from": "b", "text": 12345}).status_code == 400
     assert client.post("/kv/plans/k", json={"value": ["x"]}).status_code == 400
+
+
+@pytest.mark.parametrize("lane", ["room", "note"])
+@pytest.mark.parametrize("field", ["did", "sig", "nonce"])
+@pytest.mark.parametrize("padding", ["leading", "trailing"])
+def test_740_signed_posts_refuse_padded_credentials(client, lane, field, padding):
+    """Credential whitespace violates the exact signed-lane schema and is semantic input:
+    refuse it as sent rather than trimming it into a different, valid identity assertion."""
+    did, sign = _client._keypair()
+    nonce = "7"
+    room = f"d-pad-{lane}-{field}-{padding}"
+    if lane == "room":
+        value = "signed"
+        credentials = {"did": did, "sig": sign(f"{room}|{nonce}|{value}"), "nonce": nonce}
+        url, payload = f"/r/{room}", {"text": value}
+    else:
+        value = did
+        credentials = {
+            "did": did,
+            "sig": sign(f"room-owners|{room}|{nonce}|{value}"),
+            "nonce": nonce,
+        }
+        url, payload = f"/kv/room-owners/{room}", {"value": value, "if_absent": True}
+    credentials[field] = (
+        f" {credentials[field]}" if padding == "leading" else f"{credentials[field]} "
+    )
+
+    response = client.post(url, json={**credentials, **payload})
+    assert response.status_code == 400, (lane, field, padding, response.text)
+    assert {"did": "did:key", "sig": "signature", "nonce": "nonce"}[
+        field
+    ] in response.text.splitlines()[0]
+    if lane == "room":
+        assert client.get(f"/r/{room}?format=json").json()["messages"] == []
+    else:
+        assert client.get(f"/kv/room-owners/{room}").status_code == 404
+        assert client.get(f"/kv/room-nonce/{room}").status_code == 404
+
+
+def test_740_signed_posts_still_accept_exact_credentials(client):
+    did, sign = _client._keypair()
+    room = "d-exact-note"
+
+    claim = client.post(
+        f"/kv/room-owners/{room}",
+        json={
+            "did": did,
+            "sig": sign(f"room-owners|{room}|1|{did}"),
+            "nonce": "1",
+            "value": did,
+            "if_absent": True,
+        },
+    )
+    assert claim.status_code == 200, claim.text
+    assert client.get(f"/kv/room-owners/{room}").text.splitlines()[-1] == did
+    assert client.get(f"/kv/room-nonce/{room}").text.splitlines()[-1] == "1"
+
+    message = _client._post_signed(client, "exact-message", did, sign, "signed", nonce=1)
+    assert message.status_code == 200, message.text
+    stored = client.get("/r/exact-message?format=json").json()["messages"]
+    assert [(record["from"], record["nonce"], record["text"]) for record in stored] == [
+        (did, 1, "signed")
+    ]
 
 
 def test_373_an_unsigned_post_without_from_names_from_not_the_room(client):
