@@ -1006,10 +1006,17 @@ def test_reap_pass_skips_held_room_without_deadlock(tmp_path):
     # Make room reapable by aging it past stillborn/idle threshold
     now = time.time() + store.STILLBORN_SECONDS + 10
 
+    done = threading.Event()
+
+    def run_reap():
+        store._reap_pass(tmp_path, now)
+        done.set()
+
     # Hold the room lock as a writer does during note_write_signed
     with store._locked(r_path):
-        # A reap pass must complete immediately without deadlocking on the held lock
-        store._reap_pass(tmp_path, now)
+        worker = threading.Thread(target=run_reap, daemon=True)
+        worker.start()
+        assert done.wait(5), "reap pass deadlocked waiting on a held room lock"
         assert r_path.exists(), "held room was unlinked while locked"
 
     # Once unlocked, a subsequent reap pass cleanly unlinks the reapable room
