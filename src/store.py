@@ -1559,11 +1559,12 @@ def _settle_count(root: Path, name: str, before: tuple[int, int] | None, kept: l
     back. Both readings wait every create out, so the window between them holds whole creates
     and nothing part-done: a reservation given back (a `?if=` refusal on a fresh key counts
     -1) is bracketed by the same two readings as its own `+1`, and `after - before` is exactly
-    the number that landed. Each of those is either in `kept` or missed by the walk, so the
-    figure written is the truth plus however many of them the walk happened to see — never
-    below the disk, exact on a quiet store, and re-established from a fresh walk on the next
-    pass, so the error never accumulates. `_reap` runs one pass at a time service-wide, which
-    is what keeps this a window and not an interleaving of two.
+    the number of creates that landed. Each of those is either in `kept` or missed by the walk;
+    reconciled against deleted files and bounded by `after` so creates seen by the walk do not
+    inflate the total past the counter — never below the disk, exact on a quiet store, and
+    re-established from a fresh walk on the next pass, so the error never accumulates. `_reap`
+    runs one pass at a time service-wide, which is what keeps this a window and not an
+    interleaving of two.
 
     A `before` that did not parse — a lost or pre-format counter file, the case `_note_totals`
     answers by walking — offers no window at all. The walk is then the whole answer, except
@@ -1580,8 +1581,14 @@ def _settle_count(root: Path, name: str, before: tuple[int, int] | None, kept: l
             if before is None:
                 total, size = max(kept[0], after[0]), kept[1]
             else:
-                total = kept[0] + max(0, after[0] - before[0])
-                size = kept[1] + max(0, after[1] - before[1])
+                reaped_c = kept[2] if len(kept) > 2 else 0
+                reaped_s = kept[3] if len(kept) > 3 else 0
+                total = max(
+                    kept[0], min(after[0] - reaped_c, kept[0] + max(0, after[0] - before[0]))
+                )
+                size = max(
+                    kept[1], min(after[1] - reaped_s, kept[1] + max(0, after[1] - before[1]))
+                )
             _write_note_count(root, total, size, name=name)
     except OSError:
         pass
@@ -1834,7 +1841,7 @@ def _reap_pass(root: Path, now: float) -> None:
     # counter files are rewritten from, taken from the stat this pass makes anyway rather than
     # from a second walk of the same tree under a lock. `before` is each file read with every
     # create waited out, so `_settle_count` can tell what was created while the walk ran.
-    kept = {"rooms": [0, 0], "notes": [0, 0]}
+    kept = {"rooms": [0, 0, 0, 0], "notes": [0, 0, 0, 0]}
     before = {name: _counted_at(root, name) for name in (USAGE_FILE, NOTES_FILE)}
     # The same total for notes, split by namespace: what `_drop_emptied_namespaces` compares
     # each per-namespace count file against, so it drops the files that disagree and no others.
@@ -1892,6 +1899,8 @@ def _reap_pass(root: Path, now: float) -> None:
                         p.unlink(missing_ok=True)
                         held[0] -= 1
                         held[1] -= st.st_size
+                        held[2] += 1
+                        held[3] += st.st_size
                         emptied.add(d := _emptied(base, entry.path, by_ns))
                         if by_ns:
                             per_ns[d] -= 1
