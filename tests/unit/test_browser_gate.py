@@ -29,8 +29,17 @@ Run: uv run --group dev python -m pytest tests/unit/test_browser_gate.py
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("MUTANT_UNDER_TEST") is not None,
+    reason="reads .github/workflows/humans.yml, not src/; a mutmut copy carries no .github so "
+    "this would measure the copy, not a mutant",
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "humans.yml"
