@@ -655,13 +655,20 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
-    with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
-        config._dbg(2, "flock", path=target.name)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    while True:
+        with open(lock, "a+b") as lf:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+            try:
+                try:
+                    match = os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino
+                except OSError:
+                    match = False
+                if match:
+                    config._dbg(2, "flock", path=target.name)
+                    yield
+                    return
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -1672,8 +1679,13 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                 data = entry.path[: -len(".lock")]
                 if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
-                os.unlink(entry.path)
-                touched[sub].add(_emptied(base, entry.path, sub == "notes"))
+                with open(entry.path, "a+b") as s_lf:
+                    try:
+                        fcntl.flock(s_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except OSError:
+                        continue
+                    os.unlink(entry.path)
+                    touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue
 
@@ -1875,7 +1887,7 @@ def _reap_pass(root: Path, now: float) -> None:
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 # It re-stats by path, never through the entry — see _reapable.
-                with _locked(p):
+                with _locked(p, nb=True):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
                         if stillborn_rule:
