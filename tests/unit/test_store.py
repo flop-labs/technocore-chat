@@ -1551,3 +1551,38 @@ def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
 
     texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
     assert texts == ["first", "second"], "the healed record and the new one both survive"
+
+
+def test_service_stats_counts_rooms_from_the_maintained_totals(tmp_path, monkeypatch):
+    """The room count is the integer the cap is enforced against, not a fresh walk.
+
+    Statting every room file was 71% of this pass at the live size (238,983 rooms: 3.26 s
+    with it, 0.94 s without), for two numbers one file already holds.
+    """
+    import store
+
+    for room in ("openroom", "p-secret", "d-owned"):
+        store.append(tmp_path, room, "nick", "hi")
+    walked = store._count_rooms(tmp_path)  # the three above plus the service's own events room
+
+    store._write_note_count(tmp_path, 41, 4100, name=store.USAGE_FILE)
+    view = store.service_stats(tmp_path)
+    assert walked[0] != 41, "the fixture must be able to tell the two apart"
+    assert view["rooms"]["total"] == 41, "the maintained count, not the walk's"
+    assert view["bytes"]["rooms"] == 4100
+    # The class decomposition still comes from the names on disk, which only a walk has.
+    assert (view["rooms"]["unlisted"], view["rooms"]["ownable"]) == (1, 1)
+
+
+def test_service_stats_measures_room_bytes_until_a_reap_settles_them(tmp_path):
+    """A create carries the count but not the bytes, so an unreaped store has none on file.
+
+    0 there means "no pressure" on the append path, where the figure gates a compaction.
+    Here it is the gauge itself, and a store that can see its rooms must not report zero
+    bytes against them.
+    """
+    import store
+
+    store.append(tmp_path, "openroom", "nick", "hi")
+    assert store.room_bytes_used(tmp_path) == 0  # nothing reaped yet
+    assert store.service_stats(tmp_path)["bytes"]["rooms"] == store._count_rooms(tmp_path)[1] > 0
