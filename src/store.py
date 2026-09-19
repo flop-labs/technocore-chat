@@ -1887,7 +1887,7 @@ def _reap_pass(root: Path, now: float) -> None:
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 # It re-stats by path, never through the entry — see _reapable.
-                with _locked(p):
+                with _locked(p, nb=True):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
                         if stillborn_rule:
