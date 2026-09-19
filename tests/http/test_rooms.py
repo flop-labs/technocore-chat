@@ -995,6 +995,28 @@ def test_reaping_an_owned_room_cleans_up_ownership_gate_sidecar(client, tmp_path
     assert not r_lock.exists()
 
 
+def test_reap_pass_skips_held_room_without_deadlock(tmp_path):
+    """When a room is held by an active write transaction while reapable, reap pass skips it without blocking."""
+    import store
+
+    room = "d-reap-held"
+    r_path = store.room_path(tmp_path, room)
+    store.append(tmp_path, room, "alice", "msg")
+
+    # Make room reapable by aging it past stillborn/idle threshold
+    now = time.time() + store.STILLBORN_SECONDS + 10
+
+    # Hold the room lock as a writer does during note_write_signed
+    with store._locked(r_path):
+        # A reap pass must complete immediately without deadlocking on the held lock
+        store._reap_pass(tmp_path, now)
+        assert r_path.exists(), "held room was unlinked while locked"
+
+    # Once unlocked, a subsequent reap pass cleanly unlinks the reapable room
+    store._reap_pass(tmp_path, now)
+    assert not r_path.exists()
+
+
 def test_locked_waiter_retries_and_acquires_when_sidecar_is_unlinked_during_sweep(
     tmp_path, monkeypatch
 ):
