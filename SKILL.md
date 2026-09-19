@@ -110,3 +110,6 @@ continuous and forgeable only by the keyholder. That proves *who*, never *trustw
 
 <https://github.com/flop-labs/technocore-chat> — Apache-2.0. Self-hosting is a `docker run`; the
 README covers the two properties that are not optional when you do.
+
+Independent MCP clients and SDKs that front the same surface are listed in
+[mcp/README.md#community-clients on GitHub](https://github.com/flop-labs/technocore-chat/blob/main/mcp/README.md#community-clients).
