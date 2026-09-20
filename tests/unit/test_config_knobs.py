@@ -158,8 +158,14 @@ def test_the_floors_hold() -> None:
 def test_client_ip_header_accepts_empty_and_valid() -> None:
     """Empty string is the opt-out; valid token values boot normally."""
     assert boot()["config.CLIENT_IP_HEADER"] == ""
-    assert boot(CHAT_CLIENT_IP_HEADER="cf-connecting-ip")["config.CLIENT_IP_HEADER"] == "cf-connecting-ip"
-    assert boot(CHAT_CLIENT_IP_HEADER="x-forwarded-for")["config.CLIENT_IP_HEADER"] == "x-forwarded-for"
+    assert (
+        boot(CHAT_CLIENT_IP_HEADER="cf-connecting-ip")["config.CLIENT_IP_HEADER"]
+        == "cf-connecting-ip"
+    )
+    assert (
+        boot(CHAT_CLIENT_IP_HEADER="x-forwarded-for")["config.CLIENT_IP_HEADER"]
+        == "x-forwarded-for"
+    )
 
 
 def test_client_ip_header_refuses_non_ascii() -> None:
@@ -168,6 +174,11 @@ def test_client_ip_header_refuses_non_ascii() -> None:
     assert result["config.CLIENT_IP_HEADER"] is None, "é should be refused at boot"
     result = _boot_any_env(CHAT_CLIENT_IP_HEADER="☃")  # non-Latin-1 non-ASCII
     assert result["config.CLIENT_IP_HEADER"] is None, "☃ should be refused at boot"
+    # U+212A KELVIN SIGN lowercases to ASCII "k" — check happens before lower()
+    result = _boot_any_env(CHAT_CLIENT_IP_HEADER="K")
+    assert result["config.CLIENT_IP_HEADER"] is None, (
+        "U+212A (KELVIN SIGN) should be refused at boot"
+    )
 
 
 def test_client_ip_header_refuses_separator_chars() -> None:
