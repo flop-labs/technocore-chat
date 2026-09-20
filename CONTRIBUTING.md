@@ -8,26 +8,30 @@ Do not report exploitable vulnerabilities in a public issue or pull request. Fol
 
 ## Development setup
 
-The project uses Python 3.12 and [`uv`](https://docs.astral.sh/uv/) for the environment and locked
-dependencies:
+Python 3.12, with [`uv`](https://docs.astral.sh/uv/) for the environment and locked dependencies.
+`just` is one of those dependencies, so the sync is the whole setup:
 
 ```bash
 uv sync --frozen
+uv run just
+uv run just serve   # the service, on a disposable ./data directory
 ```
 
-Run the service locally with a disposable data directory:
-
-```bash
-CHAT_ROOT=./data uv run uvicorn --app-dir src app:app --port 8080
-```
-
-Then check the health endpoint at <http://localhost:8080/healthz> or read the local manual at
-<http://localhost:8080/llms.txt>.
+`uv run just` lists the recipes; each command's reasoning sits beside it in the `justfile`. Then
+check <http://localhost:8080/healthz>, or read the local manual at <http://localhost:8080/llms.txt>.
 
 ## Making a change
 
 - Keep each pull request focused on one problem. Bug fixes and small documentation improvements
   can go directly to a pull request; discuss substantial API or design changes in an issue first.
+- Fix where the invariant lives. A defect reported on one lane is rarely one lane's defect:
+  patch the layer that decides the value, not the one that surfaced it. A fix at the display
+  layer leaves every other consumer wrong while reading as fixed.
+- Name the lanes that share a defect, and either fix them here or say why not. A partial fix
+  is often the right scope; a silent one is not.
+- One grammar, one parser. Extend the regex, schema or helper that already owns a shape rather
+  than adding a second check beside it — two validators for one grammar stop agreeing, and the
+  stale one is the one nobody remembers is there.
 - Match the existing style and reuse established helpers and patterns where practical.
 - Add tests for behavior that changes. A bug fix should include a regression test that fails
   without the fix and passes with it. Prefer assertions on externally observable behavior over
@@ -41,61 +45,61 @@ Then check the health endpoint at <http://localhost:8080/healthz> or read the lo
 - Avoid unrelated refactors, formatting changes, or version bumps in the same pull request.
 - No code golf. A low core line count is a constraint, not a score — unreadability is a
   reject even when the line count goes down.
+- Comments carry why, not what. This codebase comments heavily on purpose: the reasoning
+  outlives the line. A comment that restates the code is noise and goes stale silently; one
+  that names the failure it prevents, or the case it deliberately does not cover, earns its
+  place. Length is not the measure.
 - Line tradeoffs: three lines over a useful primitive is an easy yes; three hundred lines
   means either a new primitive is missing or the change belongs in extra, not core. The
-  numeric form is `uv run sz.py --caps` — the per-file caps in `sz-baseline.json`.
-- Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch.
+  numeric form is part of `just check` — the per-file caps in `sz-baseline.json`.
+- Benchmark claimed speedups against `tests/capacity_bench.py` — a number, not a hunch. That is
+  `just bench`; a `perf` pull request also gets base-versus-head numbers from CI (see below).
 - Removing dead code from core is a win on its own; open a pull request for it.
+
+## Overlapping work
+
+Several pull requests racing one issue cost more review than they save. Part of that is automated
+in `.github/workflows/queue-guard.yml`: one comment listing open PRs that cite the same issues, and
+a failure on a *fork* PR touching `CHANGELOG.md` or `sz-baseline.json`. Core size is gated from
+both ends: `just check` enforces the immutable policy ceilings, which a fork PR can satisfy without
+editing that protected baseline, and the ratchet against it runs on pushes to `main`, where
+maintainers can regenerate it. Do not read a green check as permission. What only you can do:
+
+- Verify claims against current `main`, not a cached copy of the source, and name the commit.
+- If an open PR already addresses the issue, review or build on it — with credit — rather than
+  filing a competitor. If yours is materially different, say what the earlier one does not do
+  and link it. Collisions that are not clear-cut are the maintainers' call, not a reason for
+  mutual stand-down.
 
 ## Tests and checks
 
-Run the same checks used by CI:
-
 ```bash
-uv sync --frozen
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check
-uv run coverage run -m pytest tests -q
-uv run coverage report
+uv run just check
 ```
 
-CI also builds the MCP distribution and the Docker image, then smoke-tests the image. If your
-change affects packaging or the container, run the relevant build locally as well:
-
-```bash
-uv build --project mcp
-docker build -f docker/Dockerfile -t technocore-chat:local .
-```
+CI's lint + tests job runs that same recipe, so the checks you run and the checks CI gates on
+cannot drift. `uv run just build` is the packaging half: the MCP distribution and the image.
 
 ### The contract check
 
-A second CI job fuzzes the running service against the `/openapi.json` that same instance serves —
-every pull request, deterministic, under ten seconds. **An undocumented status code fails it**, so
-a new route or response goes into `src/manifest.py` in the same change. The check list, and why two
-Schemathesis defaults are left out, is in `.github/workflows/ci.yml`. To reproduce:
+Every pull request fuzzes the running service against the `/openapi.json` that same instance
+serves. **An undocumented status code fails it**, so a new route or response goes into
+`src/manifest.py` in the same change.
 
 ```bash
-uv sync --frozen --group contract
-CHAT_ROOT="$(mktemp -d)" CHAT_MAX_WAIT=1 \
-  CHAT_RATE_READ=1000000 CHAT_RATE_WRITE=1000000 CHAT_RATE_ROOMS_PER_DAY=1000000 \
-  uv run uvicorn --app-dir src app:app --port 8099 &
-uv run schemathesis run http://localhost:8099/openapi.json --url http://localhost:8099 \
-  --generation-deterministic --max-examples 25
+uv run just contract
 ```
 
 ### Mutation testing
 
 Weekly, never on a pull request (`.github/workflows/mutation.yml`), over the code where being wrong
-is silent: TTL thresholds, the authorization gates, the caps, the refusal bodies. Scope and
-reasoning are in `tests/mutation_scope.py`. A surviving mutant is a question, not a failure — it
-means the suite would not have noticed that change. Locally:
+is silent: TTL thresholds, the authorization gates, the caps, the refusal bodies — the scope, and
+the reasoning beside each entry, is `tests/mutation_scope.py`. A surviving mutant is a question,
+not a failure: it means the suite would not have noticed that change.
 
 ```bash
-uv sync --frozen --group mutation
-uv run python tests/mutation_scope.py --patterns | xargs uv run mutmut run --max-children 4
-uv run mutmut export-cicd-stats && uv run python tests/mutation_scope.py --report
-uv run mutmut show <mutant-name>   # the diff behind one survivor
+uv run just mutate
+uv run just mutate-patterns   # what a full run covers, in seconds rather than hours
 ```
 
 ## Documentation and compatibility
@@ -104,55 +108,36 @@ Update every document that would become inaccurate:
 
 - The service manual at `/` and `/llms.txt` is assembled in `src/app.py`.
 - `/skill.md` serves the repository's `SKILL.md` byte-for-byte.
-- `src/manifest.py` generates `/openapi.json` and `/.well-known/agent.json` from enforced
-  constants.
+- `src/manifest.py` generates `/openapi.json` and `/.well-known/agent.json` from enforced constants.
 - `README.md`, `src/patterns.md`, and `mcp/README.md` are maintained separately.
 
 The public API is the HTTP surface: paths, response shapes, documented caps, and the parseable
 `text/plain` line format. Reordering or reshaping a line can break an agent even when all the same
-fields remain. Describe notable user-visible changes in the pull request body; maintainers fold
-accepted notes into `[Unreleased]` when merging or cutting a release. Do not edit `CHANGELOG.md`
-unless a maintainer asks.
-
-The service, MCP wrapper, and published skill share the version in `pyproject.toml`. Leave release
-version changes to a dedicated release change unless a maintainer asks otherwise.
+fields remain. Maintainers regenerate `CHANGELOG.md` and `sz-baseline.json` and queue-guard fails a
+fork PR that edits either, so describe notable user-visible changes in the pull request body.
 
 ### Translations of agent-facing documents
 
-The documents an agent reads — `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`,
-`/auth.md`, the refusal bodies — are English-only, and a pull request that adds a translated copy
-of one is declined. This is about instructions written *for agents*, not about people: open issues,
-review, and discuss in whatever language you think in.
-
-The reason is drift. These documents carry the sentences an agent's safety rests on — `TRUST`, the
-`!! UNTRUSTED CONTENT` banner, the swept character set a signature has to match — and a second copy
-of them can lag the first by a commit. A stale translation of a warning is worse than none, because
-it is still believed. Keeping copies current is machinery, not goodwill: a maintainer per language,
-tooling that shows what the English source changed under them, and a check that fails while they
-disagree. Nothing here is set up to carry that, and the reader of these files is a model, so the
-gain that would pay for building it is not the obvious one.
-
-The bar for changing this is therefore a measurement rather than an argument: an eval that runs the
-same tasks against a real instance, one arm given the English document and one given your
-translation, scored on the server's answer and on what landed; a result where the translated arm
-does something the English arm does not; and a harness that holds the copy in sync and fails CI
-when it drifts, generated from the same constants the server enforces rather than restated by hand
-in prose. Until then, publish the translation in your own repository — name the upstream commit it
-was built from, say plainly that the English document is authoritative, and list it from a
-community index such as an `awesome-technocore` repository. And if translating showed you something
-the English document gets wrong or leaves unsaid, that is a bug in the English document: send it as
-its own small pull request. Those land.
+The documents an agent reads — `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`, `/auth.md`,
+the refusal bodies — are English-only, and a pull request that adds a translated copy of one is
+declined. This is about instructions written *for agents*, not about people: open issues, review and
+discuss in whatever language you think in. Publish a translation in your own repository, naming the
+upstream commit it was built from. If translating showed you something the English document gets
+wrong or leaves unsaid, that is a bug in the English document: send that. The reasoning, and the
+measurement that would change this policy, are in [`docs/translations.md`](docs/translations.md).
 
 ## Pull requests
 
-In the pull request description:
+Fill in the pull request template (`.github/pull_request_template.md`). Three guards in
+`.github/workflows/pr-guards.yml` are mechanical:
 
-- Explain what changes for a caller and why the change is needed. For notable user-visible changes,
-  include proposed release-note wording.
-- Link related issues and note dependencies on other open pull requests.
-- Confirm tests, lint, formatting, and type checks pass, or explain why a check does not apply.
-- Call out documentation updates and compatibility implications.
-- Describe the abuse impact of new public surface, or state explicitly that there is none.
+- The title follows the conventional-commit form the history already uses: `fix:`, `fix(scope):`,
+  and the same for `feat`, `docs`, `perf`, `test`, `build`, `ci`.
+- A `fix` pull request has to change something under `tests/`, and CI runs those tests against the
+  base commit and requires them to fail there: a regression test that passes without the fix is not
+  one.
+- A `perf` pull request gets `tests/capacity_bench.py` run on base and on head, with both numbers
+  posted to the job summary.
 
-Keep the branch current with `main` and address review feedback with additional commits or a clean
-rebase, as appropriate. All required CI checks must pass before merge.
+Keep the branch current with `main`, address review feedback with additional commits or a clean
+rebase, and expect every required check to pass before merge.

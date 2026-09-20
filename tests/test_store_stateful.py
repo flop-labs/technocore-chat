@@ -27,6 +27,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -183,7 +184,10 @@ class StoreLifecycle(RuleBasedStateMachine):
         — which, with REAP_EVERY at zero, is before every append and every note write."""
         for room in ROOMS:
             if self._room_verdict(room) == "gone":
-                self.seq[room] = 0
+                # #139: a reaped room leaves its high-water mark in a floor map so a
+                # recreated room continues the sequence instead of restarting at 1. The
+                # counter no longer resets to 0 when the file goes away (unless the room
+                # was reaped empty); _resync adopts whatever last_seq() now reports.
                 self.said[room].clear()
                 self.record_age[room].clear()
         for key in NOTES:
@@ -217,9 +221,10 @@ class StoreLifecycle(RuleBasedStateMachine):
             self.said[room] = {s: v for s, v in self.said[room].items() if s in kept}
             self.record_age[room] = {s: a for s, a in self.record_age[room].items() if s in kept}
             if not seqs and not store.room_path(self.root, room).exists():
-                # The file is gone, so the store's counter is gone with it: the next write
-                # starts this room over at 1. Nothing else in the store restarts.
-                self.seq[room] = 0
+                # The file is gone. With #139, last_seq() reports the floor — the previous
+                # generation's high-water mark left behind on reap — or 0 when the room was
+                # reaped empty. Adopt that, so a recreated room continues the sequence.
+                self.seq[room] = store.last_seq(self.root, room)
         for key in list(self.notes):
             if store.note_get(self.root, *key) is None:
                 del self.notes[key]
@@ -294,6 +299,26 @@ class StoreLifecycle(RuleBasedStateMachine):
         rewrites the file. It restarts only when the file is gone — expiry hiding every
         record is not that, which is why `_compact` keeps the newest one regardless."""
         assert store.last_seq(self.root, room) == self.seq[room]
+
+    @rule(room=st.sampled_from(ROOMS))
+    def read_seq_during_reap(self, room: str) -> None:
+        """Reaping between path resolution and open must preserve the sequence floor."""
+        target = store.room_path(self.root, room)
+        if not target.exists():
+            return
+        real_open = Path.open
+        fired = False
+
+        def open_after_reap(path, *args, **kwargs):
+            nonlocal fired
+            if path == target and not fired:
+                fired = True
+                self.reap()
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", open_after_reap):
+            self.last_seq_never_goes_backwards(room)
+        assert fired
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
     def write_note(self, key: tuple[str, str], value: str) -> None:

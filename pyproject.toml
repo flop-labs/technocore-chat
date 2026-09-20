@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.10.0"
+version = "0.14.0"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -21,6 +21,18 @@ dependencies = [
     # Still required: scripts/sign.py generates keys with it, and the docs examples
     # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
     "cryptography==50.0.0",
+    # Response compression. The CDN asks this origin for `gzip, br` on every request
+    # (measured: 16,782 of 16,782 in one 25s capture) and the service answered every one
+    # uncompressed, so the whole metered origin leg was plaintext. Brotli rather than the
+    # stdlib GZipMiddleware because on this service's own payloads it wins on BOTH axes,
+    # which is the only reason to take a dependency here: streamed in store.EXPORT_CHUNK
+    # blocks, br q=4 is 2.62x at 162 MB/s against gzip-6's 2.35x at 66 MB/s and gzip-4's
+    # 2.30x at 79 MB/s (bench/compression.py). It also negotiates and sets `Vary` for the
+    # three encodings, which is the part worth not hand-rolling on a public origin.
+    # Cost, stated plainly: this is the first dependency that brings its own (brotli,
+    # zstandard, typing-extensions). Dropping to `GZipMiddleware(compresslevel=4)` is a
+    # three-line swap that keeps ~88% of the win and adds nothing.
+    "starlette-compress==1.8.0",
 ]
 
 # The image installs from uv.lock, so these are the only pins in the repo — the Dockerfile
@@ -32,15 +44,25 @@ dev = [
     "httpx2>=2.10.0",
     "ruff>=0.16.1",
     "ty>=0.0.71",
+    # The task runner behind the repo-root justfile, from PyPI rather than a system package
+    # so `uv sync --frozen` is still the whole setup story — CI, a fresh clone and a
+    # container all get the same `just` without a second installer to keep in step.
+    "rust-just>=1.58.0",
     # The store's lifecycle rules only conflict in *sequences*; tests/test_store_stateful.py
     # generates the orderings.
     "hypothesis>=6.165.10",
-]
-
-# Its own group, not `dev`: one job's tool, eighteen packages, nothing else imports it, so
-# day-to-day `uv sync --frozen` stays small. Pinned exactly because the job's whole claim
-# is that a failure is a change here and not in the generator that found it.
-contract = [
+    # Dev-only, and only for tests/test_mcp.py: the separately-published wrapper in mcp/
+    # declares this itself (mcp/pyproject.toml), and the service in src/ neither imports
+    # nor ships it. The root suite imports `technocore_mcp` off mcp/src via sys.path, so
+    # the SDK has to be importable *here* for those tests to run — it is not a runtime
+    # dependency of technocore-chat and must never become one.
+    "mcp>=2.1,<3",
+    # In `dev` rather than its own group since tests/test_contract.py — the generative half
+    # of the input doctrine (docs/design.md §3.5) — runs inside pytest, so the ordinary
+    # `uv sync --frozen` has to be enough to run the suite. Pinned exactly, not `>=` like
+    # the rest: the test's whole claim is that a failure is a change in this service and
+    # not in the generator that found it. The out-of-process CLI run in .github/workflows
+    # /ci.yml uses this same pin.
     "schemathesis==4.25.0",
 ]
 
@@ -98,8 +120,9 @@ source_paths = ["src"]
 only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # mutmut runs the suite in a copy of the project, so anything the tests read from the repo
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
-# asserted against, and app.py reads SKILL.md at import.
-also_copy = ["SKILL.md", "docker", "mcp"]
+# asserted against, app.py reads SKILL.md at import, and tests/unit/test_contributing_recipes.py
+# resolves the names CONTRIBUTING.md spends against the justfile that defines them.
+also_copy = ["SKILL.md", "docker", "mcp", "CONTRIBUTING.md", "justfile"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same

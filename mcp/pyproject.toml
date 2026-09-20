@@ -8,9 +8,27 @@ description = "MCP server for technocore-chat: shared rooms, durable notes and r
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-# Empty, and that is the point: the service it wraps needs no client library, so neither
-# does this. `uvx technocore-mcp` resolves nothing and starts immediately.
-dependencies = []
+# One dependency, and it is the protocol itself. This package used to declare none and
+# implement the MCP wire by hand, on the argument that a wrapper for a service whose
+# premise is "you need nothing to reach it" should not need a framework. What that bought
+# was a second, private implementation of a moving spec, and the bill came in as
+# conformance bugs against it: an accepted envelope with no `jsonrpc` member (#436), a
+# published schema its own validator contradicted (#105), a documented name grammar that
+# was never checked (#488), no tool annotations at all (#206). None of those are in this
+# tree any more, because none of them is ours to get wrong. The SDK also brings the
+# transport a remote deployment needs — streamable HTTP, stateless — which is the other
+# thing not worth re-implementing by hand.
+#
+# Floored, not pinned: a floor on the current major takes spec-currency fixes as they
+# land, which is the whole reason for depending on it, while `<3` keeps the next rename
+# (FastMCP -> MCPServer happened in 2.0) out of an unattended `uvx` run.
+dependencies = [
+    "mcp>=2.1,<3",
+    # The signed lane's Ed25519 (signing.py). Effectively free: the SDK already pulls
+    # cryptography in through pyjwt[crypto], and it ships a Pyodide wheel, so declaring
+    # what we import adds nothing to an install on either platform.
+    "cryptography>=42",
+]
 keywords = ["mcp", "agent", "chat", "rendezvous", "coordination", "multi-agent"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
@@ -35,3 +53,25 @@ path = "src/technocore_mcp/server.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/technocore_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# An allowlist, for the same reason the wheel above uses one: the sdist is this package's
+# source, not a copy of this directory. Without it hatchling sweeps in `worker/`, which is
+# the Cloudflare adapter — deployed from the repo, never installed from PyPI — and which is
+# where `pywrangler dev` leaves two virtual environments and a vendored wheel set.
+#
+# That is not a tidiness point, it breaks the build outright on any checkout where the
+# Worker has been run:
+#
+#   Caused by: failed to unpack `.../worker/.venv-workers/bin/python`
+#   Caused by: symlink path `/opt/homebrew/...` is absolute, but external symlinks are not
+#              allowed
+#
+# and if it did pack, a venv carries dozens of its own LICENSE files into an archive whose
+# legal files tests/verify_mcp_dist.py checks by exact path. CI never saw either failure
+# because it builds from a fresh checkout where `worker/` holds only source — so this is a
+# gate that can only fail for a human, which is the kind worth closing in config.
+# `only-include`, not `include`: `include` adds to hatchling's default sweep of the whole
+# directory, which is how the first attempt at this still shipped `worker/`. `only-include`
+# is the strict allowlist the comment above describes.
+only-include = ["src", "README.md", "LICENSE", "NOTICE", "server.json"]
