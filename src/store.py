@@ -10,7 +10,6 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import re
@@ -24,6 +23,11 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import orjson
 
@@ -652,16 +656,38 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     count from a walk or removing a directory a create is entering — takes the same file
     exclusively and waits them out. A read/write open is deliberate and safe: flock locks the
     open file description, not a byte range, so LOCK_SH on a writable fd is ordinary.
+
+    Windows has no flock; `msvcrt.locking` locks a byte range from the file position
+    instead, and reports a busy non-blocking lock as OSError rather than BlockingIOError —
+    that edge is normalised here so `_bump` and `_reap` keep their existing catch.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+        if os.name == "nt":
+            lf.seek(0)
+            mode = (
+                (msvcrt.LK_NBRLCK if nb else msvcrt.LK_RLCK)
+                if shared
+                else (msvcrt.LK_NBLCK if nb else msvcrt.LK_LOCK)
+            )
+            try:
+                msvcrt.locking(lf.fileno(), mode, 1)
+            except OSError as e:
+                if nb:
+                    raise BlockingIOError(e.errno or 11, e.strerror) from e
+                raise
+        else:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            if os.name == "nt":
+                lf.seek(0)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
