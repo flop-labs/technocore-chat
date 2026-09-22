@@ -359,7 +359,7 @@ def _plain(description: str) -> dict:
 def _prose(description: str) -> dict:
     """A document that negotiates: text/plain by default, text/markdown on request.
 
-    Only the three that pass `markdown=True` — the manual is deliberately not one of them,
+    Only the documents that pass `markdown=True` — the manual is deliberately not one of them,
     because the transport is lossy and plain text survives it.
     """
     return {
@@ -436,7 +436,7 @@ _RESERVED_NAMESPACE = _plain(
     "writes. The body names the lane that would work."
 )
 
-# The last path segment of the four URL write lanes is `{text:path}` / `{value:path}`, and
+# The last path segment of the URL write lanes is `{text:path}` / `{value:path}`, and
 # Starlette's path convertor is `.*` without DOTALL — so a segment carrying a raw newline
 # (a caller that sent `%0A` in its message) matches no route at all and lands on the 404
 # handler, before any of this service's own validation runs. That is deliberate: the say
