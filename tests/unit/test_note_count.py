@@ -845,6 +845,61 @@ def test_a_create_the_walk_could_not_see_leaves_the_count_at_or_above_the_disk(
     assert store._note_totals(tmp_path) == on_disk, "and the create is counted exactly once"
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="#793: settle count double-counts a create already in kept",
+)
+def test_a_create_the_walk_already_counted_is_not_also_added_by_the_delta(
+    tmp_path, monkeypatch
+) -> None:
+    """The over-count #793 names, pinned as the invariant it breaks.
+
+    `_settle_count` reads the counter before the walk (`before`), accumulates what the walk
+    keeps (`kept`), then reads the counter again after (`after`) and writes
+    `kept[0] + max(0, after[0] - before[0])`. A create that lands at the entrance to the
+    notes walk is counted twice: the walk sees its file and folds it into `kept`, and its
+    reservation also moved the counter, so `after - before` adds the same create the walk
+    already held. The stored count then sits one above the notes on disk.
+
+    That is the direction that refuses a create with room left. The count reads 64 while 63
+    notes exist, and the global cap turns the 64th create away — the mode #793 reports and
+    #246 does not cover. The `test_a_create_the_walk_could_not_see_...` case above is the
+    opposite race, a create the walk missed, and it is correct on main; this one, a create
+    the walk *counted*, is not.
+
+    Driven from the notes-walk entrance rather than timed, so the create really is one the
+    walk goes on to count. The invariant asserted is the one the cap depends on: the cached
+    count it reads equals the notes actually on disk.
+    """
+    import store
+
+    store.note_set(tmp_path, "seed-ns", "k", "v")  # the before-read sees exactly one note
+    (tmp_path / ".reaped").unlink(missing_ok=True)  # make the next pass due
+
+    real_walk = store._walk
+    injected = []
+
+    def walk_but_create_at_the_notes_entrance(d, suffix):
+        # The notes walk, before it has counted anything: the create lands, writes its note
+        # and moves the counter, and the walk below then folds that same note into `kept`.
+        # The rooms walk (".jsonl") passes straight through.
+        if suffix == ".txt" and not injected:
+            injected.append(suffix)
+            store.note_set(tmp_path, "raced-ns", "k", "v")
+        return real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_but_create_at_the_notes_entrance)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    assert injected, "premise: the create landed at the entrance to the notes walk"
+    on_disk = store._count_notes(tmp_path)[0]
+    assert on_disk == 2, "premise: the seed and the raced create are both on disk"
+    assert store._note_count(tmp_path) == on_disk, (
+        "the cached count the cap reads must equal the notes on disk"
+    )
+
+
 def _exclusive_takes(monkeypatch, name: str, work) -> int:
     """How many times `work` takes `<name>.create` exclusively. The unit that matters for this
     lock: shared holders coexist, so it is the exclusive acquisitions that every create in the
