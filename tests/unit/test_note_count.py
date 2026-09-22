@@ -847,6 +847,7 @@ def test_a_create_the_walk_could_not_see_leaves_the_count_at_or_above_the_disk(
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="#793: settle count double-counts a create already in kept",
 )
 def test_a_create_the_walk_already_counted_is_not_also_added_by_the_delta(
@@ -892,9 +893,17 @@ def test_a_create_the_walk_already_counted_is_not_also_added_by_the_delta(
     store._reap(tmp_path)
     monkeypatch.undo()
 
-    assert injected, "premise: the create landed at the entrance to the notes walk"
+    # The premises fail through pytest.fail and the marker pins raises=AssertionError, so a
+    # premise that stops holding (the seam moves, _walk's signature changes) reports a real
+    # failure rather than being absorbed as the expected xfail. Failed is not an
+    # AssertionError, so it escapes the marker. Only the invariant below, a plain assert, is
+    # the failure this test is allowed to expect, which is what lets it flip to a pass the
+    # moment a bound on the settle arithmetic lands.
+    if not injected:
+        pytest.fail("premise: the create landed at the entrance to the notes walk")
     on_disk = store._count_notes(tmp_path)[0]
-    assert on_disk == 2, "premise: the seed and the raced create are both on disk"
+    if on_disk != 2:
+        pytest.fail(f"premise: the seed and the raced create are both on disk (got {on_disk})")
     assert store._note_count(tmp_path) == on_disk, (
         "the cached count the cap reads must equal the notes on disk"
     )
