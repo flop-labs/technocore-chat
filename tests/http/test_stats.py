@@ -436,6 +436,25 @@ def _the_next_entry(app_module, previous, timeout=10.0):
     raise AssertionError("the refresh never installed an entry")
 
 
+def test_distinct_identities_counts_every_separate_caller(stats_client):
+    """The other half of the per-IP evidence: behind a shared proxy distinct_identities is 1
+    (pinned above), and when the forwarded header IS trusted every real caller must show up.
+    `_identities.add(ip)` is what feeds this, so dropping it leaves the metric stuck low and
+    an operator reading `distinct_identities` can no longer tell one busy caller from many.
+    The shared-proxy case only ever exercises the ==1 side.
+    """
+    import config
+
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        for i in range(5):
+            stats_client.get("/r/lobby", headers={"cf-connecting-ip": f"198.51.100.{i}"})
+        # /stats itself reuses the first caller's IP, so it adds no sixth identity.
+        ident = stats_client.get(
+            "/stats", headers={"X-Stats-Token": "s3cret", "cf-connecting-ip": "198.51.100.0"}
+        ).json()["client_identity"]
+        assert ident["distinct_identities"] == 5
+
+
 def test_a_window_that_is_not_positive_means_no_reuse(stats_client, monkeypatch):
     """0 and any negative are the same instruction -- compute every time -- and config takes
     a plain int, so the guard cannot be truthiness: -1 would serve every caller the previous
