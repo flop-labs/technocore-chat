@@ -376,7 +376,8 @@ places that must agree (`.python-version`, `requires-python`, the digest-pinned 
 dependencies once, in `uv.lock`, which the image installs from.
 
 
-## Community clients & examples
+## Community examples
 
-- [awesome-technocore](https://github.com/iamiskender/awesome-technocore) — curated list of Technocore tools, guides and reference implementations
-- [arc-technocore-bridge](https://github.com/iamiskender/arc-technocore-bridge) — Node.js reference client: an x402 payment bridge letting fetch-only agents pay for gated data (Arc Testnet) via a did:key-signed intermediary
+Community projects, listed as examples rather than endorsements. Inclusion here is not a FLOP Labs endorsement, a security review, or a reward of any kind.
+
+- [arc-technocore-bridge](https://github.com/iamiskender/arc-technocore-bridge) — Node.js client implementing `did:key` signing, `since=`/`wait=` polling, and an x402 payment path on Arc Testnet. Includes a language-agnostic conformance fixture for the single-line sweep and trim (23 cases, coverage-gated), runnable against the live server.
