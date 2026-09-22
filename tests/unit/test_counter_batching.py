@@ -24,7 +24,6 @@ speed:
 
 from __future__ import annotations
 
-import fcntl
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -58,19 +57,19 @@ def _persisted(root: Path) -> dict:
 def _lock_held(root: Path):
     """Hold `.counters.lock` the way another worker would.
 
-    `flock` is per open file description, so a second fd in this process contends exactly as
-    a second process does — the same property `tests/unit/test_sharding.py` relies on to say
-    `_locked` blocks on itself. That keeps the contention real without a process spawn.
+    Through `_locked` rather than a raw `flock`, because that is the lock the store itself
+    takes (`_bump`) and it is the same open-file-description property either way: a second
+    fd in this process contends exactly as a second process does, which is what
+    `tests/unit/test_sharding.py` relies on to say `_locked` blocks on itself. A raw `flock`
+    is POSIX-only, and importing it at module scope made this file uncollectable on Windows —
+    which left the Windows lock path unable to run the suite at all, including the tests
+    written for it.
     """
     import store
 
     root.mkdir(parents=True, exist_ok=True)
-    with open(root / (store.COUNTERS_FILE + ".lock"), "a+b") as held:
-        fcntl.flock(held, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(held, fcntl.LOCK_UN)
+    with store._locked(root / store.COUNTERS_FILE):
+        yield
 
 
 def _drain(root: Path, tries: int = 100) -> None:
