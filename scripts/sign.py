@@ -106,6 +106,10 @@ B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # this script must run with only 'cryptography' beside it.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
+_NON_RENDERING_BUT_KEPT = frozenset(
+    {"\u200c", "\u200d"} | {chr(c) for c in range(0xFE00, 0xFE0F + 1)}
+)
+
 MAX_TEXT_CHARS = 4096  # messages
 MAX_VALUE_CHARS = 8192  # notes
 
@@ -145,7 +149,7 @@ def swept(text: str, limit: int) -> str:
         else c
         for c in text
     ).strip()
-    if not cleaned or all(c in ("\u200c", "\u200d", " ") for c in cleaned):
+    if not cleaned or all(c in _NON_RENDERING_BUT_KEPT | {" "} for c in cleaned):
         raise SystemExit(
             "nothing visible would be left after the single-line sweep — the server "
             "refuses that write, so there is nothing worth signing"

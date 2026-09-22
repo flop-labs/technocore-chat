@@ -43,6 +43,11 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 # Cf characters kept rather than replaced, mirroring store._INVISIBLE_BUT_KEEP.
 _INVISIBLE_BUT_KEEP: frozenset[str] = frozenset({"\u200c", "\u200d"})
+# Characters that, even though they survive the sweep, do not produce visible
+# text on their own. Mirrors store._NON_RENDERING_BUT_KEPT.
+_NON_RENDERING_BUT_KEPT: frozenset[str] = frozenset(
+    {"\u200c", "\u200d"} | {chr(c) for c in range(0xFE00, 0xFE0F + 1)}
+)
 
 _last_nonce = 0
 

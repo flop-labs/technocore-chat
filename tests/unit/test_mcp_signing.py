@@ -42,14 +42,31 @@ def test_the_sweep_refuses_joiner_only_content():
         with pytest.raises(store.StoreError, match="empty text"):
             store.clean_text(payload)
 
+    # Also reject non-rendering mark combinations (e.g. ZWJ+VS16) that leave
+    # no visible glyph
+    vs16_zwj = "\u200d\ufe0f"
+    with pytest.raises(store.StoreError, match="empty text"):
+        store.clean_text(vs16_zwj)
+
     # scripts/sign.py swept() raises SystemExit
     import subprocess
     import sys
 
     for payload in joiner_payloads:
         result = subprocess.run(
-            [sys.executable, str(ROOT / "scripts/sign.py"), "--seed", "a" * 64, "say", "lobby", "1", payload],
-            capture_output=True, text=True, timeout=10,
+            [
+                sys.executable,
+                str(ROOT / "scripts/sign.py"),
+                "--seed",
+                "a" * 64,
+                "say",
+                "lobby",
+                "1",
+                payload,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert result.returncode != 0, f"sign.py accepted joiner-only payload {payload!r}"
         assert "nothing visible" in result.stderr or "nothing visible" in result.stdout
@@ -67,6 +84,9 @@ def test_mcp_sweep_preserves_joiners_and_returns_empty_for_joiner_only():
     assert mcp_signing.sweep("\u200c") == "\u200c"
     assert mcp_signing.sweep("\u200d \u200c") == "\u200d \u200c"
 
+    # Variation Selectors survive the sweep (category Mn) but are not visible
+    assert mcp_signing.sweep("\u200d\ufe0f") == "\u200d\ufe0f"
+
     # Regular whitespace/controls are still removed to empty
     assert mcp_signing.sweep(" \n\t ") == ""
 
@@ -77,9 +97,9 @@ def test_mcp_sweep_preserves_joiners_and_returns_empty_for_joiner_only():
 def test_orthographic_joiner_text_is_byte_preserved():
     """ZWNJ/ZWJ inside visible text are preserved by all sweep implementations,
     so signed text round-trips correctly through the server."""
-    import store
-
     import technocore_mcp.signing as mcp_signing
+
+    import store
 
     text = "a\u200db"  # text with a zero-width joiner
     assert store.clean_text(text) == text
@@ -90,8 +110,19 @@ def test_orthographic_joiner_text_is_byte_preserved():
     import sys
 
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/sign.py"), "--seed", "a" * 64, "say", "lobby", "1", text],
-        capture_output=True, text=True, timeout=10,
+        [
+            sys.executable,
+            str(ROOT / "scripts/sign.py"),
+            "--seed",
+            "a" * 64,
+            "say",
+            "lobby",
+            "1",
+            text,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     assert result.returncode == 0, f"sign.py rejected orthographic joiner text: {result.stderr}"
     # A successful sign prints did:key and signature

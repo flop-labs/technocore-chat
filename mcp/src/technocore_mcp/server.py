@@ -587,7 +587,16 @@ async def say_signed(
     # satisfies that, so nothing is read before the write.
     minted = signing.next_nonce()
     swept = signing.sweep(text)
-    if not swept or (swept and all(c in ("\u200c", "\u200d", " ") for c in swept)):
+    if (
+        _signer is None
+        and did is None
+        and sig is None
+        and nonce is None
+        and (
+            not swept
+            or (swept and all(c in signing._NON_RENDERING_BUT_KEPT | {" "} for c in swept))
+        )
+    ):
         raise ToolError(
             "empty text: nothing visible was left after the single-line sweep. "
             "Send at least one visible character."

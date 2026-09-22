@@ -214,6 +214,7 @@ def test_clean_text_refuses_joiner_only_content(client):
     """ZWNJ/ZWJ are preserved in context, but a payload of nothing but joiners
     is still refused — they carry meaning only beside visible characters."""
     import store as _store
+
     for payload in ["\u200c", "\u200d", "\u200c\u200d", " \u200c ", "\u200d \u200c"]:
         with pytest.raises(_store.StoreError, match="empty text"):
             _store.clean_text(payload)

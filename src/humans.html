@@ -1352,7 +1352,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
   function swept(s) {
     var out = s.replace(INVISIBLE, function(m) { return m === '\u200c' || m === '\u200d' ? m : ' '; }).trim();
-    if (!out || /^[\u200c\u200d ]+$/.test(out)) throw new Error('nothing visible after sweep — ZWNJ/ZWJ preserved but not visible themselves');
+    if (!out || /^[\u200c\u200d\ufe00-\ufe0f ]+$/.test(out)) throw new Error('nothing visible after sweep — ZWNJ/ZWJ preserved but not visible themselves');
     return out;
   }
 

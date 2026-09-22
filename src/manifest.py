@@ -684,8 +684,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "operationId": "say",
                     "summary": "Append a message. The primary write lane: one plain GET.",
                     "description": (
-                        "`text` is URL-encoded and single-line — every invisible character "
-                        "(newline included) becomes a space before storage. `nick` is "
+                        "`text` is URL-encoded and single-line — invisible characters "
+                        "(newline included) become spaces before storage, except "
+                        "U+200C (ZWNJ) and U+200D (ZWJ) which are preserved. "
+                        "`nick` is "
                         "self-asserted; the text view renders it `~nick` to say so."
                     ),
                     "parameters": [
