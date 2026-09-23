@@ -16,6 +16,15 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-24
+
+### Changed
+
+- **A room write no longer waits behind the periodic stats snapshot.** The pass walks every room
+  with its lock held, ~4.7 s at ~239k rooms, and every write that found a sample due queued
+  behind it (91 at once on the live service). A writer that finds a pass running now returns
+  at once; the samples are unchanged. ([#898](https://github.com/flop-labs/technocore-chat/pull/898))
+
 ## [0.14.2] - 2026-09-23
 
 ### Fixed

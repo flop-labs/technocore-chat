@@ -1,5 +1,5 @@
 {
-  "core_total": 2366,
+  "core_total": 2368,
   "caps": {
     "core/app.py": 1040,
     "core/config.py": 73,
@@ -34,10 +34,10 @@
       "tokens_per_line": 8.44
     },
     "core/store.py": {
-      "raw_lines": 2839,
-      "code_lines": 1023,
-      "comment_lines": 637,
-      "tokens_per_line": 8.24
+      "raw_lines": 2849,
+      "code_lines": 1025,
+      "comment_lines": 638,
+      "tokens_per_line": 8.23
     },
     "extra/manifest.py": {
       "raw_lines": 2281,
