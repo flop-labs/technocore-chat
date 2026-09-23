@@ -913,6 +913,16 @@ def read_messages(
     }
 
 
+def room_stamp(root: Path, room: str) -> tuple[int, int, int, int] | None:
+    """The room file's (inode, size, mtime, ctime), or None when there is no room. Anything
+    `read_messages` could answer differently moves it: an append grows the file, and a
+    compaction or a recreate is a new inode. Expiry only ever removes messages."""
+    try:
+        return _stamp(room_path(root, room).stat())
+    except FileNotFoundError:
+        return None
+
+
 # One chunk of an export in flight at a time, so a slow reader holds 64 KiB and never the
 # room: the body itself is already bounded by MAX_ROOM_BYTES.
 EXPORT_CHUNK = 65536
@@ -1053,7 +1063,7 @@ def _read_seq_state(path: Path) -> dict:
 _SEQ_CHECKED: dict[Path, tuple[int, int, int, int]] = {}
 
 
-def _seq_stamp(st: os.stat_result) -> tuple[int, int, int, int]:
+def _stamp(st: os.stat_result) -> tuple[int, int, int, int]:
     return st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
 
@@ -1086,8 +1096,8 @@ def _seq_entry(path: Path, room: str) -> object:
             before, raw, after = os.fstat(f.fileno()), f.read(), os.fstat(f.fileno())
     except OSError:
         return None
-    seen = _seq_stamp(before)
-    stable = seen == _seq_stamp(after)
+    seen = _stamp(before)
+    stable = seen == _stamp(after)
     if stable and _SEQ_CHECKED.get(path) == seen and NAME_RE.match(room):
         key = b'"' + room.encode() + b'":{'
         at = raw.find(key)
