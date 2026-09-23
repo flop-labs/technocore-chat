@@ -1718,8 +1718,7 @@ def note_write_signed(request: Request) -> Response:
     denied = _burn_nonce(key, nonce)
     if denied:
         return denied
-    if first and expect is None and not expect_absent:
-        expect_absent = True
+    expect_absent = expect_absent or (first and expect is None)
     meta = store.note_set(config.ROOT, ns, key, value, expect, expect_absent)
     return respond(
         request,
@@ -1764,8 +1763,7 @@ async def note_post(request: Request) -> Response:
             if burned:
                 return burned
         expect, expect_absent = condition
-        if first and expect is None and not expect_absent:
-            expect_absent = True
+        expect_absent = expect_absent or (first and expect is None)
         meta = store.note_set(config.ROOT, ns, key, value, expect, expect_absent)
         return respond(
             request,
