@@ -1,7 +1,10 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import asyncio
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import _client
@@ -255,15 +258,203 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
     real_view = app_module._stats_view
     calls = []
 
-    def counted():
+    def counted(root):
         calls.append(1)
-        return real_view()
+        return real_view(root)
 
     with config.override(STATS_CACHE_SECONDS=60):
         monkeypatch.setattr(app_module, "_stats_view", counted)
-        app_module._stats_cache = (0.0, {})
+        app_module._stats_cache = None
         headers = {"X-Stats-Token": "s3cret"}
         first = stats_client.get("/stats", headers=headers)
         second = stats_client.get("/stats", headers=headers)
         assert first.status_code == second.status_code == 200
         assert calls == [1]
+
+
+def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_client, monkeypatch):
+    """A caller waits for the walk only when there is nothing at all to serve.
+
+    The walk is O(rooms) and at production size (239k rooms) outgrew the 45 s timeout of
+    the digest this endpoint exists for. Blocking on it also meant each poll started
+    another walk, so misses arrived faster than they cleared. The client is held open so
+    one event loop spans the requests: a refresh that outlives the request that began it
+    is the whole behaviour, and a loop torn down per request cancels it before it runs.
+    """
+    import app as app_module
+    import config
+
+    started, released = threading.Event(), threading.Event()
+    fresh = app_module._stats_view
+
+    def blocking(root):
+        started.set()
+        released.wait(10)
+        return fresh(root)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        first = held.get("/stats", headers=headers).json()  # nothing to serve yet
+        app_module._stats_cache = (config.ROOT, 0.0, first)  # …and now it is expired
+        monkeypatch.setattr(app_module, "_stats_view", blocking)
+        stale = held.get("/stats", headers=headers)
+        assert started.wait(10), "the refresh must start"
+        assert not released.is_set(), "and the answer must not have waited for it"
+        assert stale.status_code == 200
+        assert stale.json()["counters"] == first["counters"]
+        released.set()
+
+
+def test_no_cache_window_still_means_no_cache(stats_client, monkeypatch):
+    """STATS_CACHE_SECONDS=0 asks for no reuse, so there is nothing to serve stale either:
+    every call computes, as the fixture that pins it to 0 relies on."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(
+        app_module, "_stats_view", lambda root: (calls.append(1), real_view(root))[1]
+    )
+    app_module._stats_cache = None
+    headers = {"X-Stats-Token": "s3cret"}
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert config.STATS_CACHE_SECONDS == 0 and calls == [1, 1]
+
+
+def test_a_refresh_of_another_root_is_never_the_answer_here(stats_client, monkeypatch, tmp_path):
+    """A refresh outlives its request, so the task carries its root like the entry does.
+
+    Without that, a walk still running for the old root is the one a cold request for the
+    new root awaits -- and answers with. The client is held open so one event loop spans
+    the requests, which is what lets a refresh outlive the request that began it here as
+    it does under a server.
+    """
+    import app as app_module
+    import config
+
+    first_root, second_root = config.ROOT, tmp_path / "second"
+    second_root.mkdir()
+    released = threading.Event()
+    fresh, refreshes = app_module._stats_view, []
+
+    def blocking_on_the_first_refresh(root):
+        refreshes.append(1)
+        if len(refreshes) == 1:  # the walk of the first root, still going when the next asks
+            released.wait(10)
+        return fresh(root)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
+        primed = held.get("/stats", headers=headers).json()
+        assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
+        app_module._stats_cache = (first_root, 0.0, primed)  # expired: refreshes behind
+        monkeypatch.setattr(app_module, "_stats_view", blocking_on_the_first_refresh)
+        held.get("/stats", headers=headers)  # leaves a walk of the first root running
+        left_running = app_module._stats_refresh
+        assert left_running is not None
+        with config.override(ROOT=second_root):
+            answer = held.get("/stats", headers=headers)
+        now_running = app_module._stats_refresh
+        assert answer.json()["rooms"]["total"] == 0, "the empty second root, not the first"
+        assert not left_running[1].done(), "the first root's walk is still in flight"
+        assert now_running is not None and now_running[0] == second_root, "its own root"
+        assert now_running[1] is not left_running[1]
+        released.set()
+
+
+def test_a_view_is_never_stamped_with_a_root_it_did_not_measure(
+    stats_client, monkeypatch, tmp_path
+):
+    """The stamp binds the numbers, so the root reaches the walk as an argument.
+
+    Keying the in-flight task by root stops a *different* request being answered from
+    another root's walk; this is the race inside one refresh. `config.ROOT` read a second
+    time in the worker is whatever it is by then, so a rebind between the capture and the
+    walk would install the new root's numbers under the old root's stamp -- and a later
+    request for the old root accepts them, because the stamp matches.
+
+    The gate is on `run_in_threadpool` rather than on the walk, which is what makes this
+    fail on a handler that does not pass the root: the interval it forces -- captured, not
+    yet walking -- is unreachable by scheduling alone.
+    """
+    import app as app_module
+    import config
+
+    first_root, second_root = config.ROOT, tmp_path / "second"
+    second_root.mkdir()
+    walking, released = threading.Event(), threading.Event()
+    real_threadpool, gated = app_module.run_in_threadpool, []
+
+    async def gate_the_first_walk(fn, *args):
+        if fn is app_module._stats_view and not gated:
+            gated.append(1)
+            walking.set()  # the root is captured; the walk has not looked at anything yet
+            await asyncio.to_thread(released.wait, 10)
+        return await real_threadpool(fn, *args)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
+        primed = held.get("/stats", headers=headers).json()
+        assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
+        expired = (first_root, 0.0, primed)
+        app_module._stats_cache = expired  # expired: the next call refreshes behind it
+        monkeypatch.setattr(app_module, "run_in_threadpool", gate_the_first_walk)
+        held.get("/stats", headers=headers)
+        assert walking.wait(10), "the refresh must reach the walk"
+        with config.override(ROOT=second_root):  # rebound mid-refresh, before the walk runs
+            released.set()
+            installed = _the_next_entry(app_module, expired)
+    assert installed[0] == first_root, "the entry is stamped with the root that was captured"
+    assert installed[2]["rooms"]["total"] == primed["rooms"]["total"], (
+        "and holds that root's numbers: the walk took the captured root, not the live knob"
+    )
+
+
+def _the_next_entry(app_module, previous, timeout=10.0):
+    """The cache entry the refresh installs, waited for rather than slept on.
+
+    The install happens on the loop after the worker returns, so there is no event the
+    test can hold instead -- the task itself is not reachable once `_stats_refresh` is
+    replaced by the next one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = app_module._stats_cache
+        if current is not None and current is not previous:
+            return current
+        time.sleep(0.01)
+    raise AssertionError("the refresh never installed an entry")
+
+
+def test_a_window_that_is_not_positive_means_no_reuse(stats_client, monkeypatch):
+    """0 and any negative are the same instruction -- compute every time -- and config takes
+    a plain int, so the guard cannot be truthiness: -1 would serve every caller the previous
+    refresh's numbers while starting another."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(
+        app_module, "_stats_view", lambda root: (calls.append(1), real_view(root))[1]
+    )
+    headers = {"X-Stats-Token": "s3cret"}
+    with stats_client as held:
+        for window in (0, -1):
+            with config.override(STATS_CACHE_SECONDS=window):
+                app_module._stats_cache = None
+                app_module._stats_refresh = None
+                calls.clear()
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert calls == [1, 1], f"window {window} served a cached answer"

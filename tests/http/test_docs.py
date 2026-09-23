@@ -1587,8 +1587,8 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
 
 def test_only_the_markdown_documents_negotiate_markdown(client):
     """Negotiation relabels bytes, it never reformats them, so a document only negotiates
-    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
-    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
+    when its bytes really are markdown. The paths below are; the manual is not, and / and
+    /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
@@ -1759,7 +1759,14 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
     labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
     ignored Accept would hand one caller's label to the next. / and /llms.txt never
-    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+    negotiate, so the `Accept` dimension there would fragment the cache key on the busiest
+    path for nothing.
+
+    The *encoding* dimension is a separate thing and is expected everywhere compression
+    reaches, which since the compression middleware is every document above its minimum
+    size. It costs nothing at the CDN — Accept-Encoding is the one Vary dimension
+    Cloudflare varies on natively, whatever the origin says. So this asserts the `Accept`
+    half specifically rather than the whole header.
 
     And the markdown answer itself stays no-store, which is belt-and-braces on top of
     Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
@@ -1767,14 +1774,18 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     """
     import config
 
+    def vary(path: str) -> set[str]:
+        got = client.get(path).headers.get("vary", "")
+        return {part.strip().lower() for part in got.split(",") if part.strip()}
+
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
-        assert client.get(path).headers["vary"] == "Accept", path
+        assert "accept" in vary(path), path
         negotiated = client.get(path, headers={"Accept": "text/markdown"})
         assert negotiated.headers["content-type"].startswith("text/markdown"), path
         assert negotiated.headers["cache-control"] == "no-store", path
 
     for path in ("/", "/llms.txt"):
-        assert "vary" not in client.get(path).headers, path
+        assert "accept" not in vary(path), path
 
     # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
     with config.override(STATIC_CACHE_SECONDS=0):
