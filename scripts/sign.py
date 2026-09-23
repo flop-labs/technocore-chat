@@ -1,12 +1,15 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = ">=3.11"
 # dependencies = ["cryptography"]
 # ///
 """A minimal Ed25519 did:key signer for technocore-chat's signed lane.
 
 Standalone on purpose: 'uv run scripts/sign.py ...' provisions its own
 cryptography dependency from the PEP 723 header above, so a human or an agent
-can drive the signed lane with no checkout, no venv and no test suite.
+can drive the signed lane with no checkout, no venv and no test suite. If a
+fixed Python runtime cannot install packages, invoke 'python3 scripts/sign.py
+...' directly; the dependency-free RFC 8032 backend beside this file takes
+over automatically when cryptography cannot be imported.
 
 The whole point of this file is the canonical string. The server verifies a
 signature over exactly what it stores:
@@ -37,7 +40,7 @@ be re-verified later against the bytes on disk.
 Key material comes from --seed or $SIGN_SEED:
   * 64 hex characters   -> used directly as the 32-byte Ed25519 seed
   * anything else       -> SHA-256 of it (so a passphrase works; weaker than
-                           randomness, fine for a demo, not for a identity you
+                           randomness, fine for a demo, not for an identity you
                            care about)
   * neither given       for 'keygen': 32 random bytes, printed so you can reuse
 
@@ -93,17 +96,50 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
+from typing import Any
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+try:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey as _CryptoPrivateKey,
+    )
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PublicKey,
+    )
+except BaseException as exc:  # noqa: BLE001 - broken pyo3 wheels can raise outside Exception
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+        raise
+    _CryptoPrivateKey = None  # ty: ignore[invalid-assignment]
+    Ed25519PublicKey = None
+
+    class InvalidSignature(Exception):  # noqa: N818 - mirrors cryptography.exceptions
+        pass
+
+
+if __package__:
+    from .stdlib_ed25519 import Ed25519PrivateKey as _StdlibPrivateKey
+else:
+    try:
+        from stdlib_ed25519 import Ed25519PrivateKey as _StdlibPrivateKey
+    except ModuleNotFoundError:
+        import importlib.util
+
+        _spec = importlib.util.spec_from_file_location(
+            "stdlib_ed25519", Path(__file__).resolve().parent / "stdlib_ed25519.py"
+        )
+        if _spec is None or _spec.loader is None:
+            raise
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _StdlibPrivateKey = _mod.Ed25519PrivateKey
 
 PREFIX = "did:key:z6Mk"  # multibase 'z' + the fixed ed25519-pub prefix base58-encodes to z6Mk
 MULTICODEC_ED25519 = b"\xed\x01"  # varint ed25519-pub, the two bytes every z6Mk key decodes from
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
-# The sweep, mirrored from src/store.py clean_text: these are the categories it
+# The sweep is mirrored from src/store.py clean_text: these are the categories it
 # replaces with a space. Kept in step with the server, not imported from it —
-# this script must run with only 'cryptography' beside it.
+# this script must run with only cryptography or its sibling stdlib backend.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
 MAX_TEXT_CHARS = 4096  # messages
@@ -164,29 +200,51 @@ def multibase(raw: bytes) -> str:
     return out
 
 
-def load_key(seed_arg: str | None) -> tuple[Ed25519PrivateKey, str]:
+def _new_key(seed: bytes) -> Any:
+    """Prefer native Ed25519, falling back when its wheel cannot load or construct."""
+    if _CryptoPrivateKey is not None:
+        try:
+            return _CryptoPrivateKey.from_private_bytes(seed)
+        except BaseException as exc:  # noqa: BLE001 - broken pyo3 wheels can fail this way too
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+    return _StdlibPrivateKey.from_private_bytes(seed)
+
+
+def load_key(seed_arg: str | None) -> tuple[Any, str]:
     """The Ed25519 key for --seed / $SIGN_SEED, plus a human-readable provenance."""
     given = seed_arg or os.environ.get("SIGN_SEED")
     if given is None:
         raise SystemExit("no key: pass --seed <hex|passphrase> or set $SIGN_SEED")
     if len(given) == 64:
         try:
-            return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(given)), given
+            return _new_key(bytes.fromhex(given)), given
         except ValueError:
             pass  # 64 chars but not hex — fall through and hash it like any passphrase
     digest = hashlib.sha256(given.encode()).hexdigest()
-    return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(digest)), f"sha256({given!r})"
+    return _new_key(bytes.fromhex(digest)), f"sha256({given!r})"
 
 
-def did_of(key: Ed25519PrivateKey) -> str:
-    raw = key.public_key().public_bytes_raw()
+def _raw_public(pub: Any) -> bytes:
+    """The 32 raw public-key bytes. public_bytes_raw() is cryptography >= 40; an older
+    native key still serializes through the long-standing Raw/Raw pair. Imported here
+    rather than at module scope so the fallback path never needs cryptography at all."""
+    if hasattr(pub, "public_bytes_raw"):
+        return pub.public_bytes_raw()
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    return pub.public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def did_of(key: Any) -> str:
+    raw = _raw_public(key.public_key())
     mb = "z" + multibase(MULTICODEC_ED25519 + raw)  # multibase tag + base58btc; fixed 'z6Mk' head
     if len(mb) != 48:  # 2 codec bytes + 32 key bytes base58-encode to 48 chars, always
         raise SystemExit(f"internal: bad multibase length {len(mb)}")
     return "did:key:" + mb
 
 
-def signature(key: Ed25519PrivateKey, message: str) -> str:
+def signature(key: Any, message: str) -> str:
     """86 unpadded base64url characters, the encoding the server's SIG_RE expects."""
     raw = key.sign(message.encode("utf-8"))
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -207,7 +265,18 @@ def unbase58(raw: str) -> bytes:
     return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
 
 
-def public_key(did: str) -> Ed25519PublicKey:
+class _FallbackPublicKey:
+    def __init__(self, raw: bytes) -> None:
+        self._raw = raw
+
+    def public_bytes_raw(self) -> bytes:
+        return self._raw
+
+    def verify(self, signature: bytes, data: bytes) -> None:
+        raise SystemExit("delegation verification requires cryptography")
+
+
+def public_key(did: str) -> Any:
     """The Ed25519 public key inside a did:key, or exit. Mirrors src/didkey.py public_key:
     same length check, same multicodec check, same refusal of everything that is not
     ed25519-pub."""
@@ -219,7 +288,13 @@ def public_key(did: str) -> Ed25519PublicKey:
     decoded = unbase58(mb[1:])
     if len(decoded) != 34 or not decoded.startswith(MULTICODEC_ED25519):
         raise SystemExit("bad did:key: only ed25519-pub (z6Mk...) keys are accepted")
-    return Ed25519PublicKey.from_public_bytes(decoded[2:])
+    if Ed25519PublicKey is not None:
+        try:
+            return Ed25519PublicKey.from_public_bytes(decoded[2:])
+        except BaseException as exc:  # noqa: BLE001 - the same broken-wheel guard as _new_key
+            if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+                raise
+    return _FallbackPublicKey(decoded[2:])
 
 
 def note_path(did: str) -> str:
@@ -291,7 +366,8 @@ def check_note(root: str, body: str) -> int:
 
     Prints one line per delegation and never raises on a bad one: the whole point of a
     self-certifying record in a world-writable note is that garbage is *expected* and is
-    supposed to be visibly inert rather than fatal.
+    supposed to be visibly inert rather than fatal. Requires cryptography for offline
+    signature verification.
     """
     key, live, now = public_key(root), 0, int(time.time())
     records = delegations(body)
@@ -370,7 +446,7 @@ def main() -> None:
 
     if args.cmd == "keygen":
         seed = secrets.token_hex(32)
-        key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed))
+        key = _new_key(bytes.fromhex(seed))
         print(f"seed: {seed}")
         print(f"did:  {did_of(key)}")
         return
