@@ -13,10 +13,11 @@ Measured 2026-08-13 with the Dockerfile's flags, on starlette 1.6.0 — expected
   single 8/16/64KB header value-> 431   (HeaderLimits: MAX_HEADER_BYTES = 8192 total)
   single 256KB header value    -> 400   (h11 rejects it before the app sees it; httptools
                                          answered 200, which is why we pin h11)
-  8KB+ request line            -> 400
+  oversized room-name path    -> 400 (may be the app's name validator, not the parser)
+  complete 12/24KiB target     -> may reach the app; enforce a URL cap at the proxy
   declared 100MB body          -> 413   (Content-Length refused before buffering)
-  chunked, no declared length  -> held open until the body arrives; read_json caps it
-  partial headers, then idle   -> held open; --limit-concurrency is what bounds these
+  chunked, no declared length  -> 408 after the total body deadline (10 seconds)
+  partial headers, then idle   -> held open; requires a proxy deadline and connection cap
 
 The 431s are the app's bound, not the parser's, and that is the point: the parser cap bounds
 only *buffered incomplete* data, so the deterministic limit has to live in the app. An earlier
@@ -58,6 +59,11 @@ for kb in (8, 16, 64, 256):
 print("request line:")
 for kb in (8, 64):
     send(b"GET /r/" + b"a" * (kb * 1024) + b" HTTP/1.1\r\nHost: x\r\n\r\n", f"{kb}KB request line")
+for kb in (12, 24):
+    send(
+        b"GET /healthz?" + b"a" * (kb * 1024) + b" HTTP/1.1\r\nHost: x\r\n\r\n",
+        f"{kb}KB target, valid route",
+    )
 
 print("body handling:")
 send(
@@ -69,6 +75,7 @@ send(
     b"POST /r/lobby HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
     b"Transfer-Encoding: chunked\r\n\r\n" + b"1000\r\n" + b"x" * 4096 + b"\r\n",
     "chunked, no declared length",
+    read_timeout=12,
 )
 
 print("slowloris (headers never completed):")
@@ -80,7 +87,7 @@ try:
     print(f"  {'partial headers, then idle':38} -> {r.split(chr(13).encode())[0] or '<closed>'}")
 except TimeoutError:
     print(
-        f"  {'partial headers, then idle':38} -> still open after 8s (keep-alive timeout applies)"
+        f"  {'partial headers, then idle':38} -> still open after 8s (keep-alive timeout does not apply)"
     )
 finally:
     s.close()

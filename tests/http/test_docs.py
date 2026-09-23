@@ -644,6 +644,46 @@ def test_every_documented_response_declares_the_body_it_returns(client):
     assert "text/markdown" in doc["paths"]["/skill.md"]["get"]["responses"]["200"]["content"]
 
 
+def test_every_negotiable_response_publishes_the_switch_that_negotiates_it(client):
+    """A 200 that declares both `text/plain` and `application/json` is a promise the caller
+    can choose — and `?format=json` is the only way to choose it. Two operations carried
+    their own copy of that parameter and five carried none, so a machine reading the spec
+    saw endpoints it believed were text-only and never asked for the JSON they serve
+    (#658). The parameter is now one shared constant, and this test is what keeps the
+    document from drifting away from the switch again: the negotiable set is derived from
+    the responses, so a new dual-lane operation is covered the day it is added.
+    """
+    doc = client.get("/openapi.json").json()
+    negotiable = [
+        (verb, path, op)
+        for path, operations in doc["paths"].items()
+        for verb, op in operations.items()
+        if {"text/plain", "application/json"}
+        <= set(op["responses"].get("200", {}).get("content", {}))
+    ]
+    assert negotiable, "no negotiable operation found — this test would pass on nothing"
+
+    silent = [
+        f"{verb.upper()} {path}"
+        for verb, path, op in negotiable
+        if "format" not in {p.get("name") for p in op.get("parameters", [])}
+    ]
+    assert not silent, f"negotiable but the switch is undocumented: {silent}"
+
+    # One description, not per-operation prose that drifts: the same text everywhere.
+    described = {
+        next(p["description"] for p in op["parameters"] if p.get("name") == "format")
+        for _, _, op in negotiable
+    }
+    assert len(described) == 1, f"{len(described)} spellings of the same parameter"
+
+    # And the switch it documents is the one the server honours, on a lane that had none.
+    assert client.get("/r/events").headers["content-type"].startswith("text/plain")
+    assert (
+        client.get("/r/events?format=json").headers["content-type"].startswith("application/json")
+    )
+
+
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
     value is published. A non-finite ceiling reaches /openapi.json and
@@ -1537,8 +1577,8 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
 
 def test_only_the_markdown_documents_negotiate_markdown(client):
     """Negotiation relabels bytes, it never reformats them, so a document only negotiates
-    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
-    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
+    when its bytes really are markdown. The paths below are; the manual is not, and / and
+    /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
@@ -1634,13 +1674,17 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
     So the disabled setting is asserted here for both halves of the document set together.
     The prose side has always been right; the JSON side was not until the header was seeded
-    before `_static_cacheable` could decline to overwrite it.
+    before `_static_cacheable` could decline to overwrite it. /humans joined them when it
+    stopped minting a per-response nonce and became cacheable, and it arrived with the same
+    defect for the same reason — a bare `Response` whose explicit `no-store` had been
+    removed along with the nonce that required it.
     """
     import config
 
     both = (
         "/llms.txt",
         "/robots.txt",
+        "/humans",
         "/.well-known/security.txt",
         "/openapi.json",
         "/config",
@@ -1657,17 +1701,21 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
 
 def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
-    """The three that would each be a real defect if held at the edge.
+    """The two that would each be a real defect if held at the edge.
 
-    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
-    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
-    rollback probe reads — a cached `ok` would let a broken release pass its own health
-    gate. /stats is token-gated and counts one worker's requests.
+    /healthz is what the autoupdate rollback probe reads — a cached `ok` would let a broken
+    release pass its own health gate. /stats is token-gated and counts one worker's requests.
+
+    /humans used to be the third, because a per-response CSP nonce meant a cached copy
+    pinned one nonce for every visitor and defeated the mechanism it existed for. The pin
+    is a `sha256-` of each inline block now, so the page is byte-identical between requests
+    and there is nothing per-caller left in it to leak. It is deliberately cacheable, and
+    tests/http/test_humans.py asserts that half — a 60 KiB document a reader most needs
+    when the origin is down is the wrong thing to make origin-only.
     """
     import config
 
-    for path in ("/humans", "/healthz"):
-        assert client.get(path).headers["cache-control"] == "no-store", path
+    assert client.get("/healthz").headers["cache-control"] == "no-store"
 
     # With no token configured /stats is a 404, so the gated response has to be provoked
     # or this asserts no-store on a path that was never routed.
@@ -1701,7 +1749,14 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
     labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
     ignored Accept would hand one caller's label to the next. / and /llms.txt never
-    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+    negotiate, so the `Accept` dimension there would fragment the cache key on the busiest
+    path for nothing.
+
+    The *encoding* dimension is a separate thing and is expected everywhere compression
+    reaches, which since the compression middleware is every document above its minimum
+    size. It costs nothing at the CDN — Accept-Encoding is the one Vary dimension
+    Cloudflare varies on natively, whatever the origin says. So this asserts the `Accept`
+    half specifically rather than the whole header.
 
     And the markdown answer itself stays no-store, which is belt-and-braces on top of
     Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
@@ -1709,14 +1764,18 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     """
     import config
 
+    def vary(path: str) -> set[str]:
+        got = client.get(path).headers.get("vary", "")
+        return {part.strip().lower() for part in got.split(",") if part.strip()}
+
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
-        assert client.get(path).headers["vary"] == "Accept", path
+        assert "accept" in vary(path), path
         negotiated = client.get(path, headers={"Accept": "text/markdown"})
         assert negotiated.headers["content-type"].startswith("text/markdown"), path
         assert negotiated.headers["cache-control"] == "no-store", path
 
     for path in ("/", "/llms.txt"):
-        assert "vary" not in client.get(path).headers, path
+        assert "accept" not in vary(path), path
 
     # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
     with config.override(STATIC_CACHE_SECONDS=0):
