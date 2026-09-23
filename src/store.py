@@ -1048,52 +1048,61 @@ def _read_seq_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
-# Shard -> the (inode, size, mtime) of the last copy a whole-map parse found to be exactly what
-# the writers write. A verdict about the file's form, never a copy of its data: every read
-# still reads the bytes, so nothing held here can go stale. See `_seq_entry`.
-_SEQ_CHECKED: dict[Path, tuple[int, int, int]] = {}
+# Shard -> identity of the last copy verified to be in the writers' exact form. A verdict
+# about the file, never its data: every read still reads the bytes. See `_seq_entry`.
+_SEQ_CHECKED: dict[Path, tuple[int, int, int, int]] = {}
+
+
+def _seq_stamp(st: os.stat_result) -> tuple[int, int, int, int]:
+    return st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def _writer_form(raw: bytes, state: dict) -> bool:
+    """Whether `raw` is exactly what `_set_seq_entry` writes: compact, NAME_RE keys, no
+    duplicates, every value a flat map of ints. In such a file `"<name>":{` occurs once,
+    as that room's key, so a byte search answers exactly what the parse would."""
+    return (
+        not any(ws in raw for ws in b" \t\n\r")
+        and raw.count(b'":{') == len(state)
+        and all(NAME_RE.match(k) and isinstance(v, dict) for k, v in state.items())
+        and all(type(x) is int for v in state.values() for x in v.values())
+    )
 
 
 def _seq_entry(path: Path, room: str) -> object:
-    """`room`'s entry in one shard, found in the file's bytes rather than by parsing all of it.
+    """`room`'s entry in one shard. Parsing a whole ~200 KB shard per room read cost ~3 ms and
+    most of the service's CPU, so each version of a shard is parsed once; if it is in the
+    writers' form (`_writer_form`) later reads search its bytes instead. Anything else is
+    parsed in full on every read, exactly as before.
 
-    A shard holds a few thousand rooms (~200 KB at a live deployment), and every room read
-    and every long-poll tick asks for one of them through `room_generation`. Building the
-    whole map to answer — thousands of dicts, keys and ints, allocated, collected and freed —
-    measured 3.2 ms per ask on the live box and 71% of all GIL time. The search is ~0.15 ms
-    including the read, and half the asks are misses (rooms older than the map, lobby among
-    them), so a miss had to be as cheap as a hit.
-
-    Exact because the search only runs on a copy already proven to be what the writers write.
-    The first read of each version of a shard parses it whole, as every read used to, and
-    records its identity if it is a compact map of NAME_RE names to maps of ints — all that
-    `_set_seq_entry` and `_split_seq_state` produce. In such a file `"<name>":{` occurs only
-    as that room's key, so a hit is the entry and a miss is the absence. The bytes alone
-    cannot prove that: an intact entry beside a broken one would be read where the whole-map
-    parse reads nothing. Anything that fails the check — spaced, hand-edited, torn — is parsed
-    whole on every read exactly as before, so it still reads as no state. A rewrite through
-    `_replace` is a new inode and an edit in place moves the size or mtime, so either is
-    checked again; a verdict can only outlive its file onto a same-size copy made within the
-    same clock tick, which from the writers is well formed anyway.
+    A version is (inode, size, mtime, ctime), taken before and after the read so a copy that
+    changes underneath is never trusted. `_replace` gives each rewrite a new inode, and any
+    in-place write or utime() moves the ctime, which userspace cannot set back. The residual
+    blind spot is a same-size in-place rewrite within one kernel clock tick; the writers
+    never write in place.
     """
     try:
         with path.open("rb") as f:
-            st, raw = os.fstat(f.fileno()), f.read()
+            before, raw, after = os.fstat(f.fileno()), f.read(), os.fstat(f.fileno())
     except OSError:
         return None
-    seen = (st.st_ino, st.st_size, st.st_mtime_ns)
-    if _SEQ_CHECKED.get(path) == seen and NAME_RE.match(room):
-        at = raw.find(key := b'"' + room.encode() + b'":{')
-        return orjson.loads(raw[at + len(key) - 1 : raw.find(b"}", at) + 1]) if at >= 0 else None
+    seen = _seq_stamp(before)
+    stable = seen == _seq_stamp(after)
+    if stable and _SEQ_CHECKED.get(path) == seen and NAME_RE.match(room):
+        key = b'"' + room.encode() + b'":{'
+        at = raw.find(key)
+        if at < 0:
+            return None
+        return orjson.loads(raw[at + len(key) - 1 : raw.find(b"}", at) + 1])
     try:
         state = orjson.loads(raw)
     except orjson.JSONDecodeError:
         return None
-    named = isinstance(state, dict) and b" " not in raw and all(map(NAME_RE.match, state))
-    maps = named and all(isinstance(v, dict) for v in state.values())
-    if maps and all(type(x) is int for v in state.values() for x in v.values()):
+    if not isinstance(state, dict):
+        return None
+    if stable and _writer_form(raw, state):
         _SEQ_CHECKED[path] = seen
-    return state.get(room) if isinstance(state, dict) else None
+    return state.get(room)
 
 
 def _seq_field(root: Path, room: str, key: str) -> int:
