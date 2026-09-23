@@ -1053,9 +1053,9 @@ async def _await_messages(
     "nothing" cannot tell which — see `limit.waiter_note`.
 
     Polling rather than watching: inotify would need a per-room watch table and a wakeup
-    fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
-    two tail reads a second per waiter, bounded by MAX_WAITERS_TOTAL — cheaper in total
-    than the busy-polling it replaces, which is the entire point.
+    fan-out, which is state this service does not otherwise keep. A tick costs one stat;
+    the tail read runs only when the room file changed since the last read, which is exact
+    because messages come from that file alone (`store.room_stamp`).
 
     It is also what makes ?wait= work under --workers N, which is not obvious and has been
     read as a bug more than once. The poll re-reads the room *file*, so a write from any
@@ -1071,11 +1071,17 @@ async def _await_messages(
         if not granted:
             return None, waiter_note(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP, wait)
         deadline = time.monotonic() + wait
+        last: object = object()  # the stamp the last read saw; none yet, so the first reads
         while time.monotonic() < deadline:
             await asyncio.sleep(min(WAIT_POLL, max(0.0, deadline - time.monotonic())))
             # Stop burning tail reads on a caller that has already hung up.
             if await request.is_disconnected():
                 return None, ""
+            # Taken before the read, so a write racing it moves the next tick's stamp.
+            stamp = await run_in_threadpool(store.room_stamp, config.ROOT, room)
+            if stamp == last:
+                continue
+            last = stamp
             view = await run_in_threadpool(
                 store.read_messages, config.ROOT, room, limit=limit, since=since
             )
@@ -2162,7 +2168,7 @@ async def _lifespan(_app):
 # largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
 # requests. Without this line the middleware is a silent no-op exactly where it pays most.
 # Module scope, not lifespan: the allow-list is module state and every worker imports here.
-add_compress_type("application/x-ndjson")
+add_compress_type("application/x-ndjson", streaming=True)
 
 app = Starlette(
     lifespan=_lifespan,
