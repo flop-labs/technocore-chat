@@ -30,6 +30,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Match, Route
+from starlette_compress import CompressMiddleware, add_compress_type
 
 import config
 import didkey
@@ -360,7 +361,7 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    Only consulted for the documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
@@ -571,7 +572,7 @@ def _document(doc: dict, media_type: str = "application/json") -> Response:
     the origin is briefly unwell rather than passing on a 503. **The CDN needs a rule making
     these paths cache-eligible for any of that to happen** — without one this only adds
     revalidations. These are the safer half of the document set to put behind such a rule:
-    unlike the four `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
+    unlike the `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
     a cache key to get wrong.
 
     `media_type` is for the one document that is JSON under a more specific label
@@ -1864,12 +1865,31 @@ async def healthz(request: Request) -> Response:
     return text("ok")
 
 
-_stats_cache: tuple[float, dict] = (0.0, {})
+# Both stamped on ROOT for the reason _note_stats_cache is: a view walked under one root
+# must not be served under another. The refresh outlives the request that began it, so the
+# stamp has to ride with the task too — a caller with nothing to serve awaits it, and an
+# unfinished walk of the old root would otherwise answer the first request of the new one.
+# One runs at a time, held in a global so it is not collected mid-walk.
+_stats_cache: tuple[Path, float, dict] | None = None
+_stats_refresh: tuple[Path, asyncio.Task] | None = None
 
 
-def _stats_view() -> dict:
+async def _refresh_stats() -> dict:
+    """Recompute the view off the request path and install it against its own root.
+
+    The root is read once and handed to the walk, not read again inside it: `config.ROOT`
+    after an await is whatever it is by then, and a view stamped with a root it did not
+    measure is served under that root by every later caller.
+    """
+    global _stats_cache
+    root = config.ROOT
+    _stats_cache = (root, time.monotonic(), await run_in_threadpool(_stats_view, root))
+    return _stats_cache[2]
+
+
+def _stats_view(root: Path) -> dict:
     """Live aggregates plus the stored history, in one blocking call for the threadpool."""
-    return {**store.service_stats(config.ROOT), "history": store.snapshots(config.ROOT)}
+    return {**store.service_stats(root), "history": store.snapshots(root)}
 
 
 async def stats(request: Request) -> Response:
@@ -1882,8 +1902,18 @@ async def stats(request: Request) -> Response:
     and "how did we get here" together.
 
     Not rate limited: the gate is the token, and the one caller is a scheduled job. It is
-    cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
-    bounded tail reads of the engagement rollup — cheap per minute, not per request.
+    cached for STATS_CACHE_SECONDS instead, because the room walk is O(rooms) readdir plus
+    the bounded tail reads of the engagement rollup — cheap per window, not per request.
+
+    Stale while revalidating: an expired entry is served as it stands and the refresh runs
+    behind it, so a caller waits for the walk only when there is nothing at all to serve --
+    or when the window is not positive, which asks for no reuse at all and so leaves
+    nothing to serve either.
+    A blocking refresh made the cost of the walk the caller's: at 239k rooms the walk
+    outgrew the 45 s timeout of the digest this exists for, and because each poll started
+    another walk, the misses arrived faster than they cleared. One refresh runs at a time;
+    a failing one raises into whichever caller had nothing to serve, and is logged by the
+    loop for the rest, who keep the last good view until a later refresh succeeds.
     """
     # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
     # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
@@ -1901,14 +1931,15 @@ async def stats(request: Request) -> Response:
     # distinctive body would give that back — so the two must not drift apart.
     if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
         return text(NOT_FOUND, 404)
-    global _stats_cache
-    fresh_at, cached = _stats_cache
-    now = time.monotonic()
-    if cached and now - fresh_at < config.STATS_CACHE_SECONDS:
-        view = cached
+    global _stats_refresh
+    hit = _stats_cache if _stats_cache and _stats_cache[0] == config.ROOT else None
+    if hit and time.monotonic() - hit[1] < config.STATS_CACHE_SECONDS:
+        view = hit[2]
     else:
-        view = await run_in_threadpool(_stats_view)
-        _stats_cache = (now, view)
+        run = _stats_refresh
+        if run is None or run[0] != config.ROOT or run[1].done():
+            run = _stats_refresh = (config.ROOT, asyncio.create_task(_refresh_stats()))
+        view = hit[2] if hit and config.STATS_CACHE_SECONDS > 0 else await run[1]
     view = {
         **view,
         # Per *worker*, and labelled as such rather than summed. `_requests` is a plain
@@ -2127,6 +2158,12 @@ async def _lifespan(_app):
     await run_in_threadpool(store._bump, config.ROOT)
 
 
+# NDJSON is not in the library's default allow-list, and `/r/<room>/export` is the single
+# largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
+# requests. Without this line the middleware is a silent no-op exactly where it pays most.
+# Module scope, not lifespan: the allow-list is module state and every worker imports here.
+add_compress_type("application/x-ndjson")
+
 app = Starlette(
     lifespan=_lifespan,
     routes=[
@@ -2167,6 +2204,15 @@ app = Starlette(
             allow_methods=["GET", "POST"],
             allow_credentials=False,
         ),
+        # Innermost, so it sees handler responses only. Every knob is left at the
+        # library's default because those defaults are what measured best here
+        # (bench/compression.py): brotli q=4 and gzip level 4. The CDN in front asks the
+        # origin for `gzip, br` on every request — measured, 16,782 of 16,782 in one
+        # capture — and decompresses for callers that ask for neither, so this shrinks the
+        # metered origin leg without any client needing to change. Transport encoding
+        # only: a caller decodes to the same bytes, which is what keeps the export's
+        # byte-exact re-verification promise (design §5.1-§5.2) intact.
+        Middleware(CompressMiddleware),
     ],
     exception_handlers={
         StoreError: on_bad_input,
