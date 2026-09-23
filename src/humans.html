@@ -1350,7 +1350,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // U+0085, JavaScript takes U+FEFF — and it does not matter, because the sweep has turned
   // every one of those into a space before either one runs.
   var INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
-  function swept(s) { return s.replace(INVISIBLE, ' ').trim(); }
+  // The two joiners store.py holds out of the sweep (SWEEP_EXEMPT): U+200C ZWNJ and U+200D
+  // ZWJ. Both are Cf, so INVISIBLE would take them, but the server keeps them so a Brahmic
+  // conjunct spells and round-trips. This copy has to hold them out too, or a signed-in
+  // reader typing an Indic word signs the respelled form while the server stores the word as
+  // sent, and the signature over one is checked against the other.
+  var SWEEP_EXEMPT = '\u200c\u200d';
+  function swept(s) { return s.replace(INVISIBLE, function (c) { return SWEEP_EXEMPT.indexOf(c) < 0 ? ' ' : c; }).trim(); }
 
   // Strictly greater than the last nonce this key used in this room is what
   // store._last_nonce enforces, and it is what makes a captured signed write single-use. A
