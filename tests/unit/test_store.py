@@ -1209,6 +1209,22 @@ def test_a_json_escaped_did_is_the_one_record_the_nonce_scan_cannot_see(tmp_path
     assert store._last_nonce(tmp_path, "lobby", did) is None
 
 
+def test_a_bool_nonce_is_refused(tmp_path):
+    """Issue #810: `bool` is an `int` subclass, so `True`/`False` slip past the
+    `isinstance(nonce, int)` guard in `_write_record` and are stored as a JSON boolean.
+    The signed lane publishes the nonce as a `^[0-9]{1,19}$` string, so a boolean nonce
+    violates the contract — and `True == 1` burns nonces 0 and 1 as a side effect."""
+    import store
+
+    did, _ = _keypair()
+    for bad in (True, False):
+        with pytest.raises(store.StoreError, match="non-negative integer nonce"):
+            store.append(tmp_path, "lobby", "", "hi", did=did, nonce=bad, sig="x" * 86)
+    # A genuine integer nonce still works.
+    rec = store.append(tmp_path, "lobby", "", "hi", did=did, nonce=2, sig="x" * 86)
+    assert rec["nonce"] == 2
+
+
 def test_a_room_idle_for_exactly_the_threshold_is_not_reapable_yet(tmp_path):
     """The retention promise is four comparisons, and this pins two of their boundaries.
 
