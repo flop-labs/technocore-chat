@@ -16,6 +16,19 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-23
+
+### Changed
+
+- **A room read no longer parses a whole seq-state shard to find the room's generation.** Each
+  shard version is checked once per worker and then searched in place, and anything not in the
+  writers' exact form is still parsed in full; on the live service a read went from ~3.9 ms to
+  ~0.23 ms, where the parse had been 71% of all worker CPU.
+  ([#890](https://github.com/flop-labs/technocore-chat/pull/890))
+- **A `?wait=` long-poll rereads its room only when the room file changed**, so an idle tick
+  costs one `stat`. Delivery is unchanged: a write is still seen within one `CHAT_WAIT_POLL`.
+  ([#890](https://github.com/flop-labs/technocore-chat/pull/890))
+
 ## [0.14.0] - 2026-09-17
 
 ### Changed
