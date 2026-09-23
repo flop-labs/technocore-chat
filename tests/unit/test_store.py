@@ -1,7 +1,9 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import fcntl
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 
@@ -1112,6 +1114,37 @@ def test_snapshots_survive_a_torn_line(tmp_path, monkeypatch):
     path = tmp_path / store.SNAPSHOTS_FILE
     path.write_text(path.read_text() + '{"t": 1, "coun')
     assert len(store.snapshots(tmp_path)) == 1
+
+
+def test_a_writer_never_waits_for_a_snapshot_pass_in_another_worker(tmp_path):
+    """A pass walks every room — ~4.7 s at ~239k rooms on the live box — and every writer that
+    found it due used to queue behind it on the lock, holding a threadpool token while it did:
+    91 at once, measured on 0.14.2. A writer that cannot have the lock is one whose sample is
+    already being taken, so it returns, exactly as a second reap pass does.
+
+    The lock is held here the way another worker's pass holds it: `flock` is per open file
+    description, so a second fd contends exactly as a second process does. Joined with a bound,
+    and released in `finally`, so a writer that queues fails here rather than hanging the suite.
+    """
+    import store
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path / (store.SNAPSHOTS_FILE + ".lock"), "a+b") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            writer = threading.Thread(
+                target=store.append, args=(tmp_path, "lobby", "bot", "hi"), daemon=True
+            )
+            writer.start()  # no marker yet, so the sample is due
+            writer.join(5)
+            assert not writer.is_alive(), "the append queued behind the snapshot pass"
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    writer.join(10)
+    assert store.read_messages(tmp_path, "lobby")["last_seq"] == 1, "the write itself landed"
+    assert store.snapshots(tmp_path) == [], "the sample is the running pass's to take"
+    store.append(tmp_path, "lobby", "bot", "again")
+    assert len(store.snapshots(tmp_path)) == 1, "and the next writer takes it once it is free"
 
 
 def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path):

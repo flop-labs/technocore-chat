@@ -642,9 +642,9 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     later writer can carry instead; everything else here is holding the lock to make a
     decision that has to be made, and would have to wait again anyway.
 
-    `nb` is also how `_reap` keeps one pass running at a time: it takes its own marker file
-    that way and gives up rather than queueing, because a caller that cannot get it is one
-    whose work is already being done.
+    `nb` is also how `_reap` and `_snapshot` keep one pass running at a time: each takes its
+    own marker file that way and gives up rather than queueing, because a caller that cannot
+    get it is one whose work is already being done.
 
     `shared` takes LOCK_SH instead, which is what lets a lock mean "a create is in flight"
     without meaning "one create at a time" (see `_create_gate`): any number of holders
@@ -2024,6 +2024,14 @@ def _snapshot(root: Path) -> None:
     older than the interval, which is why every sample carries its own timestamp instead of
     the reader assuming a fixed cadence.
 
+    Locked like `_reap` too, non-blocking, and for the same reason: a writer that cannot have
+    the lock is one whose sample is already being taken. Waiting for it bought nothing but
+    latency — the pass walks every room with the lock held, ~4.7 s at ~239k rooms on 0.14.2,
+    and every writer that found the sample due queued behind it holding a threadpool token (91
+    at once, measured), only to find the marker fresh when it got in. Unlike `_reap` nothing
+    is touched before the pass: the marker is the data, so it is replaced at the end or not at
+    all, and the re-check under the lock still turns away a writer that stat'ed it just before.
+
     Best effort, like `_log_event` and `_bump`: the caller's write has already succeeded.
     """
     marker = root / SNAPSHOTS_FILE
@@ -2036,7 +2044,7 @@ def _snapshot(root: Path) -> None:
     except OSError:
         return
     try:
-        with _locked(marker):
+        with _locked(marker, nb=True):
             # Re-check under the lock: two writers racing the stat above would otherwise
             # both take a sample, and the file is the throttle as well as the data.
             try:
@@ -2052,6 +2060,8 @@ def _snapshot(root: Path) -> None:
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
+    except BlockingIOError:
+        return  # a pass is already running in another worker; nothing here waits for it
     except OSError:
         pass
 
