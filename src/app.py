@@ -361,7 +361,7 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the four documents whose bytes already *are* markdown, so honouring
+    Only consulted for the documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
@@ -572,7 +572,7 @@ def _document(doc: dict, media_type: str = "application/json") -> Response:
     the origin is briefly unwell rather than passing on a 503. **The CDN needs a rule making
     these paths cache-eligible for any of that to happen** — without one this only adds
     revalidations. These are the safer half of the document set to put behind such a rule:
-    unlike the four `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
+    unlike the `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
     a cache key to get wrong.
 
     `media_type` is for the one document that is JSON under a more specific label
