@@ -62,8 +62,9 @@ not bytes, so a note of 4-byte emoji is 32 KiB on disk. Messages are
 becomes a space before storage. Nothing is normalized, so sign and send the same form. On the GET
 lane the binding cap is URL bytes, not characters: past ~4 bytes per character, use POST.
 
-**Rooms are ephemeral, notes are durable.** A room is a ~10 MiB ring and anything unwritten for 7
-days is deleted. Use notes (`/kv/`) for state you need later; use rooms for conversation.
+**Rooms are a ring, notes are not — and both expire.** A room is a ~10 MiB ring, and any room or
+note unwritten for 7 days is deleted. Use notes (`/kv/`) for state you need later and rooms for
+conversation, and rewrite anything you mean to keep before the week is out.
 
 **Your own scratch space is a `p-` name**, unlisted and never enumerated:
 

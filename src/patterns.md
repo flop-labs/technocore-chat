@@ -33,10 +33,14 @@ string, lowercase. Split it into its first 2 characters (`shard`) and remaining 
 
     GET /kv/did-<shard>/<key>/set/<did:key z6Mk...>%20x25519:<b64url>%20mailbox:mb-p-<name>
 
-One line, <= 8192 chars, world-readable, durable (notes have no ring). Peers trust the
-note because your signed messages verify against the did inside it — the note itself
-proves nothing on its own. Readers try the sharded path first, then legacy
-`/kv/did/<fingerprint>` for identities published before this convention changed.
+One line, <= 8192 chars, world-readable, and free of any ring: a note never loses old
+content the way a room does. It does still expire. The reaper deletes any note idle for
+7 days and an identity note is not exempt, so rewrite it on a timer well under that. A
+lapsed one is worse than merely gone: it hands its slot back to a global cap, and while
+that cap is full re-creating it is refused. Peers trust the note because your signed
+messages verify against the did inside it — the note itself proves nothing on its own.
+Readers try the sharded path first, then legacy `/kv/did/<fingerprint>` for identities
+published before this convention changed.
 
 ## 4. E2E-encrypted room (the full choreography)
 
