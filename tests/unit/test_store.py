@@ -1,7 +1,9 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import fcntl
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 
@@ -758,6 +760,43 @@ def test_torn_final_line_costs_only_that_record(tmp_path):
     assert store.read_messages(tmp_path, "crash", limit=1)["messages"][0]["text"] == "after"
 
 
+@pytest.mark.parametrize(
+    ("kind", "reader", "empty"),
+    (
+        ("room", lambda store, root: store.read_messages(root, "gone")["messages"], []),
+        ("room", lambda store, root: store.last_seq(root, "gone"), 0),
+        ("room", lambda store, root: store.room_window(root, "gone"), (0, [])),
+        ("note", lambda store, root: store.note_get(root, "plans", "gone"), None),
+    ),
+)
+def test_readers_tolerate_a_reap_between_path_resolution_and_open(
+    tmp_path, monkeypatch, kind, reader, empty
+):
+    """A concurrent reaper may unlink after a reader chose the path but before open().
+
+    That state is externally indistinguishable from an already-absent room or note, so it
+    must return the ordinary empty result instead of turning an idle cleanup into a 500.
+    """
+    import store
+
+    if kind == "room":
+        store.append(tmp_path, "gone", "bot", "hi")
+        target = store.room_path(tmp_path, "gone")
+    else:
+        store.note_set(tmp_path, "plans", "gone", "hi")
+        target = store.note_path(tmp_path, "plans", "gone")
+    path_type = type(target)
+    real_open = path_type.open
+
+    def open_after_reap(self, *args, **kwargs):
+        if self == target:
+            target.unlink(missing_ok=True)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "open", open_after_reap)
+    assert reader(store, tmp_path) == empty
+
+
 def test_concurrent_appends_never_duplicate_a_seq(tmp_path):
     import threading
 
@@ -1075,6 +1114,37 @@ def test_snapshots_survive_a_torn_line(tmp_path, monkeypatch):
     path = tmp_path / store.SNAPSHOTS_FILE
     path.write_text(path.read_text() + '{"t": 1, "coun')
     assert len(store.snapshots(tmp_path)) == 1
+
+
+def test_a_writer_never_waits_for_a_snapshot_pass_in_another_worker(tmp_path):
+    """A pass walks every room — ~4.7 s at ~239k rooms on the live box — and every writer that
+    found it due used to queue behind it on the lock, holding a threadpool token while it did:
+    91 at once, measured on 0.14.2. A writer that cannot have the lock is one whose sample is
+    already being taken, so it returns, exactly as a second reap pass does.
+
+    The lock is held here the way another worker's pass holds it: `flock` is per open file
+    description, so a second fd contends exactly as a second process does. Joined with a bound,
+    and released in `finally`, so a writer that queues fails here rather than hanging the suite.
+    """
+    import store
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path / (store.SNAPSHOTS_FILE + ".lock"), "a+b") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            writer = threading.Thread(
+                target=store.append, args=(tmp_path, "lobby", "bot", "hi"), daemon=True
+            )
+            writer.start()  # no marker yet, so the sample is due
+            writer.join(5)
+            assert not writer.is_alive(), "the append queued behind the snapshot pass"
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    writer.join(10)
+    assert store.read_messages(tmp_path, "lobby")["last_seq"] == 1, "the write itself landed"
+    assert store.snapshots(tmp_path) == [], "the sample is the running pass's to take"
+    store.append(tmp_path, "lobby", "bot", "again")
+    assert len(store.snapshots(tmp_path)) == 1, "and the next writer takes it once it is free"
 
 
 def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path):

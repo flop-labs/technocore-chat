@@ -27,6 +27,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -298,6 +299,26 @@ class StoreLifecycle(RuleBasedStateMachine):
         rewrites the file. It restarts only when the file is gone — expiry hiding every
         record is not that, which is why `_compact` keeps the newest one regardless."""
         assert store.last_seq(self.root, room) == self.seq[room]
+
+    @rule(room=st.sampled_from(ROOMS))
+    def read_seq_during_reap(self, room: str) -> None:
+        """Reaping between path resolution and open must preserve the sequence floor."""
+        target = store.room_path(self.root, room)
+        if not target.exists():
+            return
+        real_open = Path.open
+        fired = False
+
+        def open_after_reap(path, *args, **kwargs):
+            nonlocal fired
+            if path == target and not fired:
+                fired = True
+                self.reap()
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", open_after_reap):
+            self.last_seq_never_goes_backwards(room)
+        assert fired
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
     def write_note(self, key: tuple[str, str], value: str) -> None:

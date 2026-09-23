@@ -802,6 +802,33 @@ def test_long_poll_surfaces_a_message_that_arrives_after_the_request(client, mon
     assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
 
 
+def test_a_long_poll_rereads_the_room_only_when_its_file_changes(client, monkeypatch):
+    """Messages come only from the room file, so an unchanged file is an unchanged answer:
+    a waiter on a quiet room reads it once, not once per CHAT_WAIT_POLL."""
+    import app as app_module
+    import store
+
+    client.get("/r/quiet/say/bot/first")
+    reads = []
+    real = store.read_messages
+    monkeypatch.setattr(store, "read_messages", lambda *a, **k: reads.append(1) or real(*a, **k))
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0.01)
+    assert client.get("/r/quiet?since=1&wait=0.3&format=json").json()["messages"] == []
+    assert len(reads) == 2, f"{len(reads)} reads: the handler's and the first tick's, then none"
+
+
+def test_a_long_poll_wakes_when_its_room_is_created(client, monkeypatch):
+    """No file is a stamp too: creating the room is the change that ends the wait."""
+    import threading
+
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0.01)
+    threading.Timer(0.2, client.get, args=("/r/newborn/say/bot/hello",)).start()
+    held = client.get("/r/newborn?since=0&wait=3&format=json").json()
+    assert [m["text"] for m in held["messages"]] == ["hello"]
+
+
 def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(client, monkeypatch):
     """Both exits are resource-safety paths: an attacker gets no unbounded parked sockets,
     and a caller that vanished stops causing tail reads before its timeout expires.

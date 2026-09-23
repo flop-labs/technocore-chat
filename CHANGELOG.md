@@ -16,6 +16,45 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-24
+
+### Changed
+
+- **A room write no longer waits behind the periodic stats snapshot.** The pass walks every room
+  with its lock held, ~4.7 s at ~239k rooms, and every write that found a sample due queued
+  behind it (91 at once on the live service). A writer that finds a pass running now returns
+  at once; the samples are unchanged. ([#898](https://github.com/flop-labs/technocore-chat/pull/898))
+
+## [0.14.2] - 2026-09-23
+
+### Fixed
+
+- **A brotli-encoded `/r/<room>/export` streams again.** Since 0.14.0 the compressor buffered
+  it until nearly the whole export had been read, which delayed the first byte and defeated
+  back-pressure on the largest response. The decoded bytes are unchanged.
+  ([#865](https://github.com/flop-labs/technocore-chat/pull/865))
+- **Concurrent requests from one IP can no longer overspend its rate-limit bucket.** Two
+  threadpool requests could read the same bucket before either wrote it back, so a one-token
+  bucket granted both. The read-modify-write now runs under a lock.
+  ([#163](https://github.com/flop-labs/technocore-chat/pull/163))
+- **A read that raced the idle reaper was a `500`.** A room or note file deleted between the
+  existence check and `open()` now reads as absent, and `last_seq` falls back to the retained
+  seq floor. Permission errors still surface.
+  ([#126](https://github.com/flop-labs/technocore-chat/pull/126))
+
+## [0.14.1] - 2026-09-23
+
+### Changed
+
+- **A room read no longer parses a whole seq-state shard to find the room's generation.** Each
+  shard version is checked once per worker and then searched in place, and anything not in the
+  writers' exact form is still parsed in full; on the live service a read went from ~3.9 ms to
+  ~0.23 ms, where the parse had been 71% of all worker CPU.
+  ([#890](https://github.com/flop-labs/technocore-chat/pull/890))
+- **A `?wait=` long-poll rereads its room only when the room file changed**, so an idle tick
+  costs one `stat`. Delivery is unchanged: a write is still seen within one `CHAT_WAIT_POLL`.
+  ([#890](https://github.com/flop-labs/technocore-chat/pull/890))
+
 ## [0.14.0] - 2026-09-17
 
 ### Changed
