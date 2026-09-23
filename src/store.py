@@ -1391,36 +1391,46 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
 
     Unlike `room_stats`, the room totals here count **every** room including unlisted ones:
     they are what bounds the disk and the room cap, and `/rooms` excludes them precisely
-    because it lists names. Cost is one stat per room (O(cap)) plus the bounded tail scans
-    `room_stats` already does for the engagement rollup, so this is cached in app.py.
+    because it lists names.
+
+    The count and the byte total are the maintained ones — the same two integers the room
+    cap is enforced against, so the gauge and the refusal cannot disagree, and the walk
+    below no longer stats what one file already says. That stat was 71% of this pass at
+    the live size (238,983 rooms: 3.26 s with it, 0.94 s without). What is left is a
+    readdir for the class decomposition, which needs the names; it is still O(rooms), and
+    the engagement rollup's own walk still stats every room -- see #576, which proposes the
+    recency index that would retire both.
+
+    The byte half is measured only when no reap has settled it yet (`_count_new_room`
+    carries it through untouched, so a store reaps into it). Reading 0 as "no pressure" is
+    right on the append path, where the figure gates a compaction and failing open costs
+    one reap interval; here it is the gauge itself, and a fresh store that reported zero
+    bytes against rooms it can see would be reporting something it knows to be false. That
+    walk is the one this pass just dropped, so it is bounded by the same thing that bounds
+    an unreaped store: appends run reaps.
     """
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
     # counting the class as owned would overstate adoption.
     keys = ("total", "listed", "unlisted", "open", "mailbox", "ownable", "ephemeral")
     rooms = dict.fromkeys(keys, 0)
-    room_bytes = 0
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
         if not NAME_RE.fullmatch(name):
             continue  # same rule as _listable: never count what we would not accept
-        try:
-            room_bytes += e.stat().st_size
-        except OSError:
-            continue  # reaped between the readdir and the stat
         classes = room_classes(name)
-        rooms["total"] += 1
         rooms["unlisted" if "p" in classes else "listed"] += 1
         for marker, key in (("mb", "mailbox"), ("d", "ownable"), ("e", "ephemeral")):
             if marker in classes:
                 rooms[key] += 1
         if not classes:
             rooms["open"] += 1
+    rooms["total"], room_bytes = _note_totals(root, _count_rooms, name=USAGE_FILE)
     notes = note_stats(root)
     return {
         "rooms": {**rooms, "capacity": MAX_ROOMS},
         "bytes": {
-            "rooms": room_bytes,
+            "rooms": room_bytes or _count_rooms(root)[1],
             "notes": notes["bytes"],
             # The worst case a deployment budgets its disk against, exposed so a reader can
             # see headroom without knowing the constants. MAX_TOTAL_ROOM_BYTES rather than
