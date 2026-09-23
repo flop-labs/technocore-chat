@@ -1,14 +1,41 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import asyncio
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import _client
+import httpx2 as httpx  # the declared dependency; starlette.testclient aliases it the same way
 import pytest
 from starlette.testclient import TestClient
 
 client = _client.client  # the shared TestClient fixture
+
+
+def test_a_graceful_shutdown_flushes_the_batched_counters(client):
+    """A rolling deploy is a SIGTERM, not a kill.
+
+    A plain message bump rides in memory until something structural, the message bound or a
+    snapshot flushes it (#588) — so without a shutdown hook every ordinary restart would drop
+    what each worker was still holding, which is a much larger and much more frequent loss
+    than the hard-kill window these counters actually document. `TestClient` runs the lifespan
+    only as a context manager, and that is the same startup/shutdown pair uvicorn drives.
+    """
+    import config
+    import store
+
+    client.get("/r/lobby/say/bot/one")  # creates the room: structural, so it lands at once
+    client.get("/r/lobby/say/bot/two")
+    assert store._PENDING[config.ROOT] == {"messages": 1}, "the second message should be riding"
+
+    with client:  # enter and leave: the ASGI lifespan, startup through shutdown
+        pass
+
+    assert store.counters(config.ROOT)["messages"] == 2, "the shutdown dropped the batch"
+    assert config.ROOT not in store._PENDING
 
 
 def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
@@ -68,6 +95,101 @@ def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     assert stats_client.get("/stats").status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def _token_bytes(raw: bytes) -> httpx.Headers:
+    """`X-Stats-Token` as bytes, through the client stack. `headers=` is typed `Mapping[str, str]`
+    and httpx encodes a str value as ASCII, so neither can carry a byte above 0x7F — which is
+    why no existing test ever reached the compare. `httpx.Headers` built from byte pairs is a
+    Mapping for the checker; on the wire it keeps valid UTF-8 as sent but re-encodes a lone
+    high byte (0xF6 arrives as C3 B6). Either way the handler sees non-ASCII latin-1 text, which
+    is what raised. The exact malformed-byte round trip is pinned by the raw-ASGI test below."""
+    return httpx.Headers([(b"x-stats-token", raw)])
+
+
+def test_a_non_ascii_token_gets_the_same_404_as_an_unrouted_path(stats_client):
+    """`secrets.compare_digest` refuses non-ASCII *strings* with a TypeError, and Starlette
+    hands the handler the header as latin-1 text, so any byte above 0x7F in `X-Stats-Token`
+    raised — a 500. That is the one answer that tells a prober the route exists: a path
+    that was never routed does not 500 on a header. The 404 must stay byte-identical for
+    a high byte exactly as it does for a wrong ASCII token, and the right token must still
+    open the door."""
+    missing = stats_client.get("/definitely-not-a-route")
+    for raw in (b"t\xf6ken", b"\xe2\x9c\x93", b"\xff", b"s3cret\xc3\xa9"):
+        probe = stats_client.get("/stats", headers=_token_bytes(raw))
+        assert probe.status_code == missing.status_code, raw
+        assert probe.text == missing.text, raw
+    assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def _raw_asgi_get(app, path: str, token: bytes | None) -> tuple[int, bytes]:
+    """One GET straight into the ASGI app with the header bytes EXACTLY as given — no client
+    stack in between to re-encode them. This is the only way to put a lone high byte on the
+    wire, and a lone high byte is the malformed case the latin-1 round trip exists for."""
+    import asyncio
+
+    headers = [(b"host", b"t")] + ([(b"x-stats-token", token)] if token is not None else [])
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "server": ("t", 80),
+        "client": ("127.0.0.1", 1),
+        "headers": headers,
+    }
+    out: dict = {"body": b""}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            out["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            out["body"] += message.get("body", b"")
+
+    asyncio.run(app(scope, receive, send))
+    return out["status"], out["body"]
+
+
+def test_a_lone_high_byte_reaches_the_compare_as_latin_1_and_still_404s(stats_client):
+    """The client-stack tests above send bytes that arrive as valid UTF-8. A *malformed* header
+    — a single byte above 0x7F with no UTF-8 sequence around it — is the case the latin-1
+    round trip is for, and no client will send one, so it goes straight into the ASGI app.
+    Starlette decodes it as latin-1 (0xF6 -> U+00F6); encoding it back is the same byte; the
+    compare then runs on bytes and returns the byte-identical 404, where it used to raise."""
+    app = stats_client.app
+    missing_status, missing_body = _raw_asgi_get(app, "/definitely-not-a-route", None)
+    for raw in (bytes.fromhex("f6"), bytes.fromhex("ff"), b"s3cret" + bytes.fromhex("f6")):
+        status, body = _raw_asgi_get(app, "/stats", raw)
+        assert status == missing_status == 404, raw
+        assert body == missing_body, raw
+    assert _raw_asgi_get(app, "/stats", b"s3cret")[0] == 200
+
+
+def test_a_non_ascii_configured_token_can_be_presented(tmp_path, monkeypatch):
+    """The same TypeError fired on the *configured* side: a token an operator set to
+    non-ASCII made the endpoint a 500 for every caller, the right one included, because the
+    string compare could never run. Both sides are bytes now — UTF-8 on the wire, its
+    latin-1 round-trip in the header — so the operator's token is simply a token."""
+    import app as app_module
+    import config
+
+    monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
+    app_module._buckets.clear()
+    app_module._rooms_walk.cache_clear()
+    with config.override(ROOT=tmp_path, STATS_TOKEN="t\u00f6k\u00e9n", STATS_CACHE_SECONDS=0):
+        client = TestClient(app_module.app)
+        right = "t\u00f6k\u00e9n".encode("utf-8")
+        assert client.get("/stats", headers=_token_bytes(right)).status_code == 200
+        assert client.get("/stats", headers=_token_bytes(b"t\xc3\xb6k\xc3\xa9x")).status_code == 404
+        assert client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
 
 
 def test_stats_counts_every_room_class_and_names_none_of_them(stats_client):
@@ -136,15 +258,203 @@ def test_stats_cache_avoids_repeating_the_expensive_store_walk(stats_client, mon
     real_view = app_module._stats_view
     calls = []
 
-    def counted():
+    def counted(root):
         calls.append(1)
-        return real_view()
+        return real_view(root)
 
     with config.override(STATS_CACHE_SECONDS=60):
         monkeypatch.setattr(app_module, "_stats_view", counted)
-        app_module._stats_cache = (0.0, {})
+        app_module._stats_cache = None
         headers = {"X-Stats-Token": "s3cret"}
         first = stats_client.get("/stats", headers=headers)
         second = stats_client.get("/stats", headers=headers)
         assert first.status_code == second.status_code == 200
         assert calls == [1]
+
+
+def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_client, monkeypatch):
+    """A caller waits for the walk only when there is nothing at all to serve.
+
+    The walk is O(rooms) and at production size (239k rooms) outgrew the 45 s timeout of
+    the digest this endpoint exists for. Blocking on it also meant each poll started
+    another walk, so misses arrived faster than they cleared. The client is held open so
+    one event loop spans the requests: a refresh that outlives the request that began it
+    is the whole behaviour, and a loop torn down per request cancels it before it runs.
+    """
+    import app as app_module
+    import config
+
+    started, released = threading.Event(), threading.Event()
+    fresh = app_module._stats_view
+
+    def blocking(root):
+        started.set()
+        released.wait(10)
+        return fresh(root)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        first = held.get("/stats", headers=headers).json()  # nothing to serve yet
+        app_module._stats_cache = (config.ROOT, 0.0, first)  # …and now it is expired
+        monkeypatch.setattr(app_module, "_stats_view", blocking)
+        stale = held.get("/stats", headers=headers)
+        assert started.wait(10), "the refresh must start"
+        assert not released.is_set(), "and the answer must not have waited for it"
+        assert stale.status_code == 200
+        assert stale.json()["counters"] == first["counters"]
+        released.set()
+
+
+def test_no_cache_window_still_means_no_cache(stats_client, monkeypatch):
+    """STATS_CACHE_SECONDS=0 asks for no reuse, so there is nothing to serve stale either:
+    every call computes, as the fixture that pins it to 0 relies on."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(
+        app_module, "_stats_view", lambda root: (calls.append(1), real_view(root))[1]
+    )
+    app_module._stats_cache = None
+    headers = {"X-Stats-Token": "s3cret"}
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert stats_client.get("/stats", headers=headers).status_code == 200
+    assert config.STATS_CACHE_SECONDS == 0 and calls == [1, 1]
+
+
+def test_a_refresh_of_another_root_is_never_the_answer_here(stats_client, monkeypatch, tmp_path):
+    """A refresh outlives its request, so the task carries its root like the entry does.
+
+    Without that, a walk still running for the old root is the one a cold request for the
+    new root awaits -- and answers with. The client is held open so one event loop spans
+    the requests, which is what lets a refresh outlive the request that began it here as
+    it does under a server.
+    """
+    import app as app_module
+    import config
+
+    first_root, second_root = config.ROOT, tmp_path / "second"
+    second_root.mkdir()
+    released = threading.Event()
+    fresh, refreshes = app_module._stats_view, []
+
+    def blocking_on_the_first_refresh(root):
+        refreshes.append(1)
+        if len(refreshes) == 1:  # the walk of the first root, still going when the next asks
+            released.wait(10)
+        return fresh(root)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
+        primed = held.get("/stats", headers=headers).json()
+        assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
+        app_module._stats_cache = (first_root, 0.0, primed)  # expired: refreshes behind
+        monkeypatch.setattr(app_module, "_stats_view", blocking_on_the_first_refresh)
+        held.get("/stats", headers=headers)  # leaves a walk of the first root running
+        left_running = app_module._stats_refresh
+        assert left_running is not None
+        with config.override(ROOT=second_root):
+            answer = held.get("/stats", headers=headers)
+        now_running = app_module._stats_refresh
+        assert answer.json()["rooms"]["total"] == 0, "the empty second root, not the first"
+        assert not left_running[1].done(), "the first root's walk is still in flight"
+        assert now_running is not None and now_running[0] == second_root, "its own root"
+        assert now_running[1] is not left_running[1]
+        released.set()
+
+
+def test_a_view_is_never_stamped_with_a_root_it_did_not_measure(
+    stats_client, monkeypatch, tmp_path
+):
+    """The stamp binds the numbers, so the root reaches the walk as an argument.
+
+    Keying the in-flight task by root stops a *different* request being answered from
+    another root's walk; this is the race inside one refresh. `config.ROOT` read a second
+    time in the worker is whatever it is by then, so a rebind between the capture and the
+    walk would install the new root's numbers under the old root's stamp -- and a later
+    request for the old root accepts them, because the stamp matches.
+
+    The gate is on `run_in_threadpool` rather than on the walk, which is what makes this
+    fail on a handler that does not pass the root: the interval it forces -- captured, not
+    yet walking -- is unreachable by scheduling alone.
+    """
+    import app as app_module
+    import config
+
+    first_root, second_root = config.ROOT, tmp_path / "second"
+    second_root.mkdir()
+    walking, released = threading.Event(), threading.Event()
+    real_threadpool, gated = app_module.run_in_threadpool, []
+
+    async def gate_the_first_walk(fn, *args):
+        if fn is app_module._stats_view and not gated:
+            gated.append(1)
+            walking.set()  # the root is captured; the walk has not looked at anything yet
+            await asyncio.to_thread(released.wait, 10)
+        return await real_threadpool(fn, *args)
+
+    headers = {"X-Stats-Token": "s3cret"}
+    with config.override(STATS_CACHE_SECONDS=60), stats_client as held:
+        app_module._stats_cache = None
+        app_module._stats_refresh = None
+        held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
+        primed = held.get("/stats", headers=headers).json()
+        assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
+        expired = (first_root, 0.0, primed)
+        app_module._stats_cache = expired  # expired: the next call refreshes behind it
+        monkeypatch.setattr(app_module, "run_in_threadpool", gate_the_first_walk)
+        held.get("/stats", headers=headers)
+        assert walking.wait(10), "the refresh must reach the walk"
+        with config.override(ROOT=second_root):  # rebound mid-refresh, before the walk runs
+            released.set()
+            installed = _the_next_entry(app_module, expired)
+    assert installed[0] == first_root, "the entry is stamped with the root that was captured"
+    assert installed[2]["rooms"]["total"] == primed["rooms"]["total"], (
+        "and holds that root's numbers: the walk took the captured root, not the live knob"
+    )
+
+
+def _the_next_entry(app_module, previous, timeout=10.0):
+    """The cache entry the refresh installs, waited for rather than slept on.
+
+    The install happens on the loop after the worker returns, so there is no event the
+    test can hold instead -- the task itself is not reachable once `_stats_refresh` is
+    replaced by the next one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = app_module._stats_cache
+        if current is not None and current is not previous:
+            return current
+        time.sleep(0.01)
+    raise AssertionError("the refresh never installed an entry")
+
+
+def test_a_window_that_is_not_positive_means_no_reuse(stats_client, monkeypatch):
+    """0 and any negative are the same instruction -- compute every time -- and config takes
+    a plain int, so the guard cannot be truthiness: -1 would serve every caller the previous
+    refresh's numbers while starting another."""
+    import app as app_module
+    import config
+
+    real_view = app_module._stats_view
+    calls = []
+    monkeypatch.setattr(
+        app_module, "_stats_view", lambda root: (calls.append(1), real_view(root))[1]
+    )
+    headers = {"X-Stats-Token": "s3cret"}
+    with stats_client as held:
+        for window in (0, -1):
+            with config.override(STATS_CACHE_SECONDS=window):
+                app_module._stats_cache = None
+                app_module._stats_refresh = None
+                calls.clear()
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert held.get("/stats", headers=headers).status_code == 200
+                assert calls == [1, 1], f"window {window} served a cached answer"
