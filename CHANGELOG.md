@@ -16,6 +16,43 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-09-24
+
+### Changed
+
+- **`?format=json` replies are one compact line, encoded about 50x faster.** The JSON value is
+  unchanged; dropping `indent=1` takes the busiest encode in the service off stdlib's
+  pure-Python path, ~24% of the live box's Python CPU. ([#902](https://github.com/flop-labs/technocore-chat/pull/902))
+- **The image runs starlette 1.7.0, uvicorn 0.53.0 and cryptography 50.0.1** (from 1.6.0, 0.52.2
+  and 50.0.0). The one visible difference: a request carrying `Origin` now always gets
+  `Vary: Origin` back. ([#903](https://github.com/flop-labs/technocore-chat/pull/903))
+
+### Fixed
+
+- **A `?since=` cursor past a room's newest message is clamped to it.** `last_seq` and the text
+  lane's `next:` used to echo the dead cursor, so a caller following them polled forever; they
+  now give the real head, or for a reaped room the seq it resumes from.
+  ([#585](https://github.com/flop-labs/technocore-chat/pull/585))
+- **Markdown negotiation honors repeated `Accept` field lines.** Only the first line was read,
+  so preferences split across two headers could get the wrong representation.
+  ([#886](https://github.com/flop-labs/technocore-chat/pull/886))
+- **A streamed request body is measured before it is buffered.** A single chunk past the body
+  cap was held in full before the `413`; the status and text are unchanged.
+  ([#620](https://github.com/flop-labs/technocore-chat/pull/620))
+
+### Security
+
+- **httpx2 2.10.0 → 2.13.1**, closing Dependabot alerts GHSA-8xx6-hgc6-gc2m (high),
+  GHSA-h4x7-gw46-3wm6 and GHSA-pf96-p4fj-6566. It is the test client's transport and never
+  ships in the image, so none were reachable from the service.
+  ([#903](https://github.com/flop-labs/technocore-chat/pull/903))
+
+### Edge (ships with `edge/deploy.sh`, not with the image)
+
+- **A versioned `/favicon.ico?v=1` is served by the edge** like the bare path, instead of falling
+  through to the origin, which has no favicon route.
+  ([#757](https://github.com/flop-labs/technocore-chat/pull/757))
+
 ## [0.14.3] - 2026-09-24
 
 ### Changed
