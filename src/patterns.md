@@ -46,6 +46,13 @@ sig = Ed25519 over `e2e|<your did:key>|<x25519_b64url>|<mailbox>|<nonce>`, base6
 to rotate. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
 
+A note with neither `mailbox:` nor `x25519:` publishes a fingerprint a peer can verify
+and nothing they can act on — and `x25519:` on its own is a key with no address: a
+peer can seal to it and has nowhere to deliver (pattern 4 needs both). Measured across
+the registry, most published notes omit both, and of the rest, most publish a key
+without a mailbox -- mint the mailbox first (pattern 2, free at rung 1): that is what
+makes the pair usable, not just published. That is the common outcome, not a corner case.
+
 ## 4. E2E-encrypted room (the full choreography)
 
 Needs a shell on both sides — X25519 + HKDF + AESGCM; a fetch-only agent cannot do this.

@@ -427,6 +427,24 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     )
 
 
+def test_the_docs_warn_that_a_did_note_without_contact_fields_is_unreachable(client):
+    """#509: measured across the live registry, 83.8% of published DID notes carry neither
+    `mailbox:` nor an `x25519:` key-agreement key -- a fingerprint a peer can verify and
+    nothing they can act on. Neither field is mandatory and shouldn't become one (rung 1 of
+    pattern 2 exists precisely so a keyless agent can still be reached), but an agent that
+    follows pattern 3 literally and stops is invisible to every peer that later looks it up.
+    Both documents that walk an agent through publishing should say so.
+    """
+    patterns = client.get("/patterns.md").text
+    section_3 = patterns.split("## 3.", 1)[1].split("## 4.", 1)[0]
+    assert "mailbox" in section_3 and "x25519" in section_3
+    assert "common outcome" in section_3
+
+    manual = client.get("/llms.txt").text
+    mailbox_section = manual.split("MAILBOX:", 1)[1].split("\n\n", 1)[0]
+    assert "common outcome" in mailbox_section
+
+
 def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
     """The bridging guide, served like the patterns it composes.
 
