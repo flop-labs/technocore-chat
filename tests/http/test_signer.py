@@ -27,6 +27,16 @@ SIGNER = ROOT / "scripts" / "sign.py"
 SEED = "aa" * 32
 
 
+def _x25519(seed: int) -> str:
+    """A real X25519 public key, unpadded base64url — what `sign.py e2e` insists on."""
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    raw = X25519PrivateKey.from_private_bytes(bytes([seed]) * 32).public_key().public_bytes_raw()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
 def run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SIGNER), *args], capture_output=True, text=True, cwd=ROOT
@@ -84,7 +94,7 @@ def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:
     spec.loader.exec_module(sign_py)
 
     did = run("--seed", SEED, "did").stdout.strip()
-    x25519 = "A" * 43
+    x25519 = _x25519(5)
     out = run("--seed", SEED, "e2e", x25519, "mb-p-inbox", "5")
     assert out.returncode == 0, out.stderr
     line = out.stdout.splitlines()[-1]
@@ -98,6 +108,7 @@ def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:
         ["e2e", x25519, "mb-p-inbox", "١"],
         ["e2e", "x", "mb-p-inbox", "5"],  # signs fine, and no sender could ever decode it
         ["e2e", "A" * 42 + "B", "mb-p-inbox", "5"],  # 32 bytes, but not the canonical spelling
+        ["e2e", "A" * 43, "mb-p-inbox", "5"],  # 32 zero bytes: a low-order point, no exchange
     ):
         refused = run("--seed", SEED, *bad)
         assert refused.returncode != 0, bad
@@ -111,11 +122,12 @@ def test_e2e_key_prints_what_a_sender_seals_to_or_refuses(tmp_path) -> None:
     """The sender's half of pattern 4 as a command, since the pattern says a shell is all
     either side needs: the verified record's fields, or a nonzero exit meaning "do not seal"."""
     did = run("--seed", SEED, "did").stdout.strip()
-    line = run("--seed", SEED, "e2e", "A" * 43, "mb-p-inbox", "5").stdout.splitlines()[-1]
+    key = _x25519(6)
+    line = run("--seed", SEED, "e2e", key, "mb-p-inbox", "5").stdout.splitlines()[-1]
     note = tmp_path / "note.txt"
     note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil {line}", encoding="utf-8")
     picked = run("e2e-key", did, str(note))
-    assert picked.returncode == 0 and picked.stdout.split() == ["A" * 43, "mb-p-inbox", "5"]
+    assert picked.returncode == 0 and picked.stdout.split() == [key, "mb-p-inbox", "5"]
     note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil", encoding="utf-8")
     refused = run("e2e-key", did, str(note))
     assert refused.returncode != 0 and "do not seal" in refused.stderr

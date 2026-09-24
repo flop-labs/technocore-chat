@@ -1416,6 +1416,18 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
         assert ran.pop()["transport_security"] is mcp_server.LOCAL_SECURITY, host
+    # Loopback by meaning, not spelling: the rest of 127/8 is as reachable from the browser,
+    # so it is protected too, with its own address added to what a client may send.
+    from technocore_mcp import signing
+
+    monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))  # and may hold a key
+    for host in ("127.0.0.2", "127.255.255.254"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        other = ran.pop()["transport_security"]
+        assert other.enable_dns_rebinding_protection is True, host
+        assert f"{host}:*" in other.allowed_hosts and f"http://{host}:*" in other.allowed_origins
+        assert set(mcp_server.LOCAL_SECURITY.allowed_hosts) < set(other.allowed_hosts)
     monkeypatch.setattr(mcp_server, "_signer", None)
     monkeypatch.setenv("HOST", "0.0.0.0")
     mcp_server.main()
