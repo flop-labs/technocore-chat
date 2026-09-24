@@ -1428,6 +1428,13 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
         assert other.enable_dns_rebinding_protection is True, host
         assert f"{host}:*" in other.allowed_hosts and f"http://{host}:*" in other.allowed_origins
         assert set(mcp_server.LOCAL_SECURITY.allowed_hosts) < set(other.allowed_hosts)
+    # A literal is no resolver's to move, so its spelling as typed is allowed too — the Host
+    # a client that keeps it (Python's urllib) sends.
+    monkeypatch.setenv("HOST", "0:0:0:0:0:0:0:1")
+    mcp_server.main()
+    served = ran.pop()
+    assert served["host"] == "0:0:0:0:0:0:0:1"
+    assert {"[0:0:0:0:0:0:0:1]:*", "[::1]:*"} <= set(served["transport_security"].allowed_hosts)
     # Shorthand the socket layer binds as 127.0.0.1 is loopback too — protected, and reached
     # at 127.0.0.1 (as browsers rewrite it), not at the spelling itself.
     for host in ("127.1", "0x7f.1"):
