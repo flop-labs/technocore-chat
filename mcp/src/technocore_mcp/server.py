@@ -795,31 +795,38 @@ LOCAL_SECURITY = TransportSecuritySettings(
 )
 
 
-def _loopback_names(host: str) -> list[str] | None:
-    """What a client of this bind may send as Host, or None when the bind is not loopback.
+def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
+    """Where to bind and what a client may send as Host, or None when `host` is not loopback.
 
     Loopback by what the name binds, not how it is spelled: the addresses the socket layer
     resolves it to — `127.1`, `0x7f.1`, `127.0.0.2`, a system alias such as `ip6-loopback` —
     must all be loopback, or the bind is treated as remote. Classed as remote, such a bind
     was served with the rebinding check off.
 
-    Only the resolved addresses are returned, never the name as typed. A name that resolved
-    to loopback at startup is one whose DNS someone else may control: allowed as Host, it
-    would let them serve a page from that name, rebind it here, and pass this very check.
-    A client of such a bind connects by address (or `localhost`), which browsers already do
-    for shorthand like `127.1`.
+    A name that went through a resolver is bound at the address just validated, never passed
+    on to be resolved a second time: an answer that changed in between would put the key on
+    whatever the name pointed at by then. And only the resolved addresses are allowed as
+    Host, never the name as typed — its DNS may be someone else's, who could serve a page
+    from it, rebind it here, and pass this very check. A client connects by address (or
+    `localhost`), which browsers already do for shorthand like `127.1`. The fixed names and
+    literal addresses involve no resolver and are passed through unchanged.
     """
     bare = host.strip("[]").lower()
     if bare in _LOOPBACK:
-        return [f"[{bare}]" if ":" in bare else bare]
+        return host, [f"[{bare}]" if ":" in bare else bare]
     try:
         infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
     except (OSError, UnicodeError):
         return None
-    addrs = {ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}
+    addrs = sorted({ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}, key=str)
     if not addrs or not all(addr.is_loopback for addr in addrs):
         return None
-    return [f"[{addr}]" if addr.version == 6 else str(addr) for addr in sorted(addrs, key=str)]
+    try:
+        ipaddress.ip_address(bare)
+        bind = host
+    except ValueError:
+        bind = str(addrs[0])
+    return bind, [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
 
 
 def _local_security(names: list[str]) -> TransportSecuritySettings:
@@ -897,8 +904,8 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        names = _loopback_names(host)
-        if _signer is not None and names is None:
+        loopback = _loopback_bind(host)
+        if _signer is not None and loopback is None:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "
@@ -906,13 +913,14 @@ def main() -> None:
                 "oracle. Bind loopback (the default) and put your own authenticated proxy "
                 "in front, or unset the key to serve the anonymous tools openly."
             )
+        bind, names = loopback or (host, [])
         server.run(
             "streamable-http",
-            host=host,
+            host=bind,
             port=int(os.environ.get("PORT", "8000")),
             streamable_http_path="/mcp",
             stateless_http=True,
-            transport_security=_local_security(names) if names else REMOTE_SECURITY,
+            transport_security=_local_security(names) if loopback else REMOTE_SECURITY,
         )
     elif not argv:
         server.run()

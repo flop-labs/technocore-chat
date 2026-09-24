@@ -1433,7 +1433,9 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     for host in ("127.1", "0x7f.1"):
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
-        assert ran.pop()["transport_security"] is mcp_server.LOCAL_SECURITY, host
+        served = ran.pop()
+        assert served["transport_security"] is mcp_server.LOCAL_SECURITY, host
+        assert served["host"] == "127.0.0.1", "bound at the address that was validated"
     # A name is loopback when everything it resolves to is: a system alias for ::1 is local,
     # one that also resolves somewhere else is not (and so cannot hold the key).
     real = mcp_server.socket.getaddrinfo
@@ -1447,7 +1449,11 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     monkeypatch.setattr(mcp_server.socket, "getaddrinfo", resolve)
     monkeypatch.setenv("HOST", "loop-alias")
     mcp_server.main()
-    alias = ran.pop()["transport_security"]
+    served = ran.pop()
+    # Bound at the address that was checked, not handed back to a resolver whose next answer
+    # could be anywhere — with the key allowed on the strength of the first one.
+    assert served["host"] == "::1"
+    alias = served["transport_security"]
     assert alias.enable_dns_rebinding_protection is True
     # Its resolved address only: the name's DNS may belong to someone else, and allowing it
     # as Host would hand them the rebinding this check exists to stop.
