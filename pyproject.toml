@@ -72,7 +72,7 @@ dev = [
 # Same reasoning, and it never runs on a pull request — see
 # .github/workflows/mutation.yml and tests/mutation_scope.py.
 mutation = [
-    "mutmut==3.7.0",
+    "mutmut==3.8.0",
 ]
 
 [tool.ruff]

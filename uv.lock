@@ -963,7 +963,7 @@ wheels = [
 
 [[package]]
 name = "mutmut"
-version = "3.7.0"
+version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -973,9 +973,9 @@ dependencies = [
     { name = "setproctitle" },
     { name = "textual" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/f9/a63500696f3f35c443ef566528e55630bf7e064436416278927f7bc9c408/mutmut-3.7.0.tar.gz", hash = "sha256:dc93260fabb3a6fd3693aa8d1746825885cb6f9e66c7f9cc1a0f34fc6388e14a", size = 63735, upload-time = "2026-07-31T10:52:58.876Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/30/b334a22184026d92a7549c8a76ad1d397ea65a6f8534ef486556ab861c70/mutmut-3.8.0.tar.gz", hash = "sha256:bc670276518f893ab356f1d28826c49b7e606e7cf89c300e3888c0b52fc1d2ed", size = 83631, upload-time = "2026-09-12T16:53:58.138Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/93/16/93e3e6aa30e5bc4141724463ae9d9bcc283d08b02aa85dbf5a2b665f3108/mutmut-3.7.0-py3-none-any.whl", hash = "sha256:1d2f9a1bfa4a474b2213df6b17223150b492bf4a85af0eda4fb322297337fb32", size = 59070, upload-time = "2026-07-31T10:53:00.005Z" },
+    { url = "https://files.pythonhosted.org/packages/66/2a/a9904a45804c1de50c0c3baad1512b78d5b66d2befd841104b8a62bf0f35/mutmut-3.8.0-py3-none-any.whl", hash = "sha256:4c0abcef6b8d1116f2adfaad19df12e1c621e4a402d4367ef15bf8cba497b91d", size = 81469, upload-time = "2026-09-12T16:53:56.906Z" },
 ]
 
 [[package]]
@@ -1741,7 +1741,7 @@ dev = [
     { name = "schemathesis", specifier = "==4.25.0" },
     { name = "ty", specifier = ">=0.0.71" },
 ]
-mutation = [{ name = "mutmut", specifier = "==3.7.0" }]
+mutation = [{ name = "mutmut", specifier = "==3.8.0" }]
 
 [[package]]
 name = "textual"
