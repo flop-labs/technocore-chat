@@ -1428,6 +1428,25 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
         assert other.enable_dns_rebinding_protection is True, host
         assert f"{host}:*" in other.allowed_hosts and f"http://{host}:*" in other.allowed_origins
         assert set(mcp_server.LOCAL_SECURITY.allowed_hosts) < set(other.allowed_hosts)
+    # A name is loopback when everything it resolves to is: a system alias for ::1 is local,
+    # one that also resolves somewhere else is not (and so cannot hold the key).
+    real = mcp_server.socket.getaddrinfo
+    aliases = {"loop-alias": ["::1"], "split-alias": ["127.0.0.1", "10.0.0.1"]}
+
+    def resolve(name, *args, **kwargs):
+        if name not in aliases:
+            return real(name, *args, **kwargs)
+        return [(0, 0, 0, "", (address, 0)) for address in aliases[name]]
+
+    monkeypatch.setattr(mcp_server.socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("HOST", "loop-alias")
+    mcp_server.main()
+    alias = ran.pop()["transport_security"]
+    assert alias.enable_dns_rebinding_protection is True
+    assert "loop-alias:*" in alias.allowed_hosts and "[::1]:*" in alias.allowed_hosts
+    monkeypatch.setenv("HOST", "split-alias")
+    with pytest.raises(SystemExit):
+        mcp_server.main()
     monkeypatch.setattr(mcp_server, "_signer", None)
     monkeypatch.setenv("HOST", "0.0.0.0")
     mcp_server.main()
