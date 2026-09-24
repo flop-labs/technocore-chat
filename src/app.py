@@ -512,7 +512,14 @@ def _static_cacheable(resp: Response) -> Response:
     30 minutes of worst-case edge staleness, which is *past* the 15-minute autoupdate poll —
     the manual could then outlive the deploy that changed it, which is the one thing this
     window exists to prevent. 60 caps the total at 360s, comfortably under the poll.
+
+    Without CHAT_PUBLIC_URL the documents print this origin's URLs from the request's own
+    Host, so they vary on it and must say so: a shared cache that forwards the caller's Host
+    but keys only on the path would otherwise hand everyone the copy made for whichever Host
+    arrived first — `Host: evil.example` included. With it set, nothing here reads Host.
     """
+    if not config.PUBLIC_URL:
+        resp.headers.add_vary_header("Host")
     return _edge_cacheable(resp, config.STATIC_CACHE_SECONDS, 60)
 
 

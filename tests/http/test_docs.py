@@ -1305,6 +1305,24 @@ def test_configured_public_url_wins_over_the_request(client, monkeypatch):
         assert doc["servers"] == [{"url": "https://technocore.chat"}]
 
 
+def test_documents_printed_from_the_request_host_vary_on_it(client):
+    """A well-formed Host is used as given, and the document is cached at the edge. So the
+    copy depends on Host and has to say so: a shared cache that forwards the caller's Host
+    but keys on the path alone would otherwise serve the `evil.example` copy to everyone.
+    CHAT_PUBLIC_URL removes the dependence, and with it the Vary."""
+    import config
+
+    for path in ("/openapi.json", "/.well-known/agent.json", "/robots.txt", "/auth.md"):
+        got = client.get(path, headers={"host": "evil.example"})
+        assert "evil.example" in got.text, f"premise: {path} prints the request's host"
+        assert "s-maxage" in got.headers["cache-control"], f"premise: {path} is shared"
+        assert "host" in got.headers["vary"].lower(), f"{path} does not vary on Host"
+    with config.override(PUBLIC_URL="https://technocore.chat/"):
+        pinned = client.get("/openapi.json", headers={"host": "evil.example"})
+    assert "evil.example" not in pinned.text
+    assert "host" not in pinned.headers.get("vary", "").lower()
+
+
 def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
     """A registry crawler arrives without warning and re-fetches on a schedule; a 429 on
     the document that describes the service is a listing that never validates."""
