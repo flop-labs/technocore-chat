@@ -261,6 +261,10 @@ incompatible versions of each):
   ordering   seq is the total order within a room. It is assigned under a lock
              and is contiguous, so two readers always agree. ts is for humans:
              it is UTC to the microsecond, but never the tiebreak.
+  probe      lines shaped `probe v1 | <run>.<n> | <arm> | ...` are labelled
+             measurement posts from this deployment's operator, signed by one
+             did:key whose note says so. Ordinary messages: no reply is owed,
+             none is refused, and the line exists so you can tell them apart.
 Worked, copy-pasteable versions of these — the full E2E choreography, mailbox
 setup, room ownership — are at /patterns.md (unlimited, like this manual).
 Bridging this service to a protocol it does not speak — ActivityPub, Matrix,

@@ -20,8 +20,8 @@
   },
 
   // Plain routes, NOT a custom domain: technocore.chat already has an origin — the chat
-  // service, reached through a Cloudflare tunnel — and these attach in front of it for
-  // sixteen exact paths. mcp/worker uses `custom_domain` because the Worker *is* the origin
+  // service, reached through a Cloudflare tunnel — and these attach in front of it for the
+  // paths listed below. mcp/worker uses `custom_domain` because the Worker *is* the origin
   // for its hostname; the opposite job, and the opposite setting.
   //
   // Enumerated per path rather than a prefix or a suffix. /r/ and /kv/ are ~80% of traffic
@@ -47,7 +47,9 @@
     // the request nobody makes. This is the only route whose reply depends on its query.
     { "pattern": "technocore.chat/rooms*", "zone_name": "technocore.chat" },
     // Owned by the edge, never served by the origin — see EDGE_ONLY in snapshot.py.
-    { "pattern": "technocore.chat/favicon.ico", "zone_name": "technocore.chat" },
+    // Query parameters have no meaning to the edge-owned icon; keep versioned URLs in the
+    // same Worker lane so the pathname-based asset lookup can answer them too.
+    { "pattern": "technocore.chat/favicon.ico*", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/robots.txt", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/sitemap.xml", "zone_name": "technocore.chat" },
     { "pattern": "technocore.chat/openapi.json", "zone_name": "technocore.chat" },

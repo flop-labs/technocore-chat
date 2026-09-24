@@ -23,6 +23,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `room_classes(name: str) -> frozenset[str]` — The leading `<class>-` markers on a name, so classes compose by prefix.
 - `room_generation(root: pathlib.Path, room: str) -> int` — The conversation epoch of a room, bumping each time it is (re)created (#139 dir #3).
 - `room_path(root: pathlib.Path, room: str) -> pathlib.Path` — Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`.
+- `room_stamp(root: pathlib.Path, room: str) -> tuple[int, int, int, int] | None` — The room file's (inode, size, mtime, ctime), or None when there is no room. Anything
 - `room_stats(root: pathlib.Path, limit: int = 50) -> dict` — Recency-sorted room summaries for the overview.
 - `room_window(root: pathlib.Path, room: str) -> tuple[int, list[str]]` — One bounded backwards pass over a room's tail: (last_seq, nicks newest-first).
 - `service_stats(root: pathlib.Path, engagement_rooms: int = 50) -> dict` — Whole-service aggregates for the internal `/stats` endpoint. Counters only.
