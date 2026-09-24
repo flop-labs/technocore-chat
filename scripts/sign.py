@@ -300,6 +300,22 @@ def e2e_record(root: str, x25519: str, mailbox: str, nonce: str) -> str:
     return f"e2e|{root}|{x25519}|{mailbox}|{nonce}"
 
 
+def x25519_bytes(value: str) -> bytes | None:
+    """The 32 key bytes of a canonical, unpadded base64url X25519 public key, else None.
+
+    Strict on purpose: a record's signature covers the string, so a typo like `x` signs
+    perfectly well and would then win as the newest record while no sender could decode it.
+    Refused when signing, and skipped when choosing, so a bad record is inert rather than
+    the one that bricks the identity.
+    """
+    try:
+        raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except ValueError:
+        return None
+    canonical = base64.urlsafe_b64encode(raw).decode().rstrip("=") == value
+    return raw if len(raw) == 32 and canonical else None
+
+
 def e2e_key(root: str, body: str) -> tuple[str, str, int] | None:
     """The `e2e:` record in `body` a sender may seal to: `(x25519, mailbox, nonce)` of the
     highest-nonce record that `root` really signed, or None when there is none.
@@ -316,6 +332,8 @@ def e2e_key(root: str, body: str) -> tuple[str, str, int] | None:
         if token != E2E_TOKEN or len(record) != E2E_FIELDS or not DIGITS_RE.fullmatch(record[2]):
             continue
         x25519, mailbox, nonce, sig = record
+        if x25519_bytes(x25519) is None or not re.fullmatch(NAME, mailbox):
+            continue
         try:
             key.verify(
                 base64.urlsafe_b64decode(sig + "=="),
@@ -409,6 +427,9 @@ def main() -> None:
     seal.add_argument("x25519", help="your static X25519 public key, base64url")
     seal.add_argument("mailbox", help="the mailbox room senders deliver to, e.g. mb-p-<name>")
     seal.add_argument("nonce", nargs="?", help="defaults to a millisecond clock")
+    pick = sub.add_parser("e2e-key", help="the e2e: record in a note a sender may seal to")
+    pick.add_argument("root", help="the recipient's full did:key")
+    pick.add_argument("file", nargs="?", help="note text; reads stdin when absent")
     audit = sub.add_parser("check", help="verify the delegation lines in a note")
     audit.add_argument("root", help="the root did:key the note belongs to")
     audit.add_argument("file", nargs="?", help="note text; reads stdin when absent")
@@ -426,6 +447,14 @@ def main() -> None:
     # load_key is ever reached so that they work with no --seed and no $SIGN_SEED.
     if args.cmd == "note":
         print(note_path(args.did))
+        return
+
+    if args.cmd == "e2e-key":
+        body = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+        found = e2e_key(args.root, body)
+        if found is None:
+            raise SystemExit("no e2e: record here verifies against that did:key; do not seal")
+        print(*found)  # x25519 mailbox nonce
         return
 
     if args.cmd == "check":
@@ -468,6 +497,8 @@ def main() -> None:
             raise SystemExit(f"nonce must be 1-19 ASCII digits, got {nonce!r}")
         if not re.fullmatch(NAME, args.mailbox):
             raise SystemExit(f"bad mailbox {args.mailbox!r}: it must be a room name")
+        if x25519_bytes(args.x25519) is None:
+            raise SystemExit(f"bad x25519 {args.x25519!r}: 32 bytes as unpadded base64url")
         key, _ = load_key(seed)
         root = did_of(key)
         sig = signature(key, e2e_record(root, args.x25519, args.mailbox, nonce))

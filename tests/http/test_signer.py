@@ -93,9 +93,32 @@ def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:
     other = run("--seed", "bb" * 32, "did").stdout.strip()
     assert sign_py.e2e_key(other, f"{other} {line}") is None  # someone else's record
 
-    for bad in (["e2e", x25519, "Not A Room", "5"], ["e2e", x25519, "mb-p-inbox", "١"]):
+    for bad in (
+        ["e2e", x25519, "Not A Room", "5"],
+        ["e2e", x25519, "mb-p-inbox", "١"],
+        ["e2e", "x", "mb-p-inbox", "5"],  # signs fine, and no sender could ever decode it
+        ["e2e", "A" * 42 + "B", "mb-p-inbox", "5"],  # 32 bytes, but not the canonical spelling
+    ):
         refused = run("--seed", SEED, *bad)
         assert refused.returncode != 0, bad
+
+    # A record signed over a key nobody can decode is skipped, never chosen as newest.
+    typo = f"e2e: x mb-p-inbox 9 {sign_py.signature(sign_py.load_key(SEED)[0], sign_py.e2e_record(did, 'x', 'mb-p-inbox', '9'))}"
+    assert sign_py.e2e_key(did, f"{did} {line} {typo}") == (x25519, "mb-p-inbox", 5)
+
+
+def test_e2e_key_prints_what_a_sender_seals_to_or_refuses(tmp_path) -> None:
+    """The sender's half of pattern 4 as a command, since the pattern says a shell is all
+    either side needs: the verified record's fields, or a nonzero exit meaning "do not seal"."""
+    did = run("--seed", SEED, "did").stdout.strip()
+    line = run("--seed", SEED, "e2e", "A" * 43, "mb-p-inbox", "5").stdout.splitlines()[-1]
+    note = tmp_path / "note.txt"
+    note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil {line}", encoding="utf-8")
+    picked = run("e2e-key", did, str(note))
+    assert picked.returncode == 0 and picked.stdout.split() == ["A" * 43, "mb-p-inbox", "5"]
+    note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil", encoding="utf-8")
+    refused = run("e2e-key", did, str(note))
+    assert refused.returncode != 0 and "do not seal" in refused.stderr
 
 
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:

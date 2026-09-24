@@ -930,6 +930,32 @@ def test_a_first_claim_does_not_inherit_an_allow_list_left_by_a_reaped_owner(cli
     assert _say_signed(client, "d-bait", victim, victim_sign, "mine").status_code == 200
 
 
+def test_a_claimant_that_read_no_owner_cannot_unlink_the_winners_allow_list(client, monkeypatch):
+    """The clean-up above must not reach state created after its own observation. Two first
+    claims can both read "no owner"; if the one that loses then drops the allow-list, it
+    drops the list the winner has since published. Replayed here: the winner has claimed and
+    published, and the gate runs as the other claimant saw the room — unowned."""
+    import app as app_module
+    import store
+
+    winner, winner_sign = _keypair(24)
+    friend, _ = _keypair(25)
+    loser, _ = _keypair(26)
+    assert _claim(client, "d-race", winner, winner_sign).status_code == 200
+    listed = _set_signed(client, "room-allow", "d-race", winner, winner_sign, friend, 2)
+    assert listed.status_code == 200
+
+    real = store.note_get
+    monkeypatch.setattr(
+        store,
+        "note_get",
+        lambda root, ns, key: None if ns == store.OWNERS_NS else real(root, ns, key),
+    )
+    assert app_module._note_write_gate(store.OWNERS_NS, "d-race", loser, loser) is None
+    monkeypatch.setattr(store, "note_get", real)
+    assert client.get("/kv/room-allow/d-race").status_code == 200, "the winner's list survives"
+
+
 def test_signed_note_writes_are_scoped_to_the_two_ownership_namespaces(client):
     did, sign = _keypair()
     r = _set_signed(client, "plans", "next", did, sign, "ship")

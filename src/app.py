@@ -1649,8 +1649,13 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
         # kept for good once their room is live. Unlinked, not rewritten: the note count it
         # leaves one high is the safe direction, and the next reap re-counts. The room's
         # nonce is left alone, because counters only move forward.
-        if current is None:
-            store.note_path(config.ROOT, store.ALLOW_NS, key).unlink(missing_ok=True)
+        #
+        # Under the owner note's own lock, re-checked: a claim that raced this one and won
+        # writes its owner note under that lock, and can only write a list after it, so a
+        # claimant that read "no owner" before losing can never unlink the winner's list.
+        with store._locked(owner := store.note_path(config.ROOT, store.OWNERS_NS, key)):
+            if not owner.exists():
+                store.note_path(config.ROOT, store.ALLOW_NS, key).unlink(missing_ok=True)
         return None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
