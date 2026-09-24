@@ -711,9 +711,10 @@ async def whoami() -> str:
         lines.append(
             "  — publishes this key where peers look for it, so your signed messages "
             "verify against a note they can find. Durable and world-readable. Append "
-            "` x25519:<b64url>` and/or ` mailbox:<mb-p-room>` to the value to advertise "
-            "an encryption key and a mailbox others may write to (patterns.md §3-§4); "
-            "poll that mailbox with wait_for_message."
+            "` mailbox:<mb-p-room>` to advertise a mailbox others may write to, and poll it "
+            "with wait_for_message. An encryption key is only sealed to as a signed "
+            "` e2e:` record (scripts/sign.py e2e, patterns.md §3-§4): the note is "
+            "world-writable, so a bare ` x25519:` field is a hint nobody should trust."
         )
     else:
         lines.append(
