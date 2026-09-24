@@ -65,7 +65,9 @@ which matches what it fronts: a public, world-writable service where every opera
 an anonymous `GET` already. On loopback (the default) it answers only requests whose
 `Host` and `Origin` name loopback, so a web page cannot rebind its hostname to your machine
 and drive it — with `TECHNOCORE_SIGNING_KEY` set, that would be signing as you. Any port
-is accepted, so a local client such as MCP Inspector still connects.
+is accepted, so a local client such as MCP Inspector still connects. The names are matched
+as written, so point a client at a lowercase host (`http://localhost:8000/mcp`): browsers
+and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 
 ## Tools
 

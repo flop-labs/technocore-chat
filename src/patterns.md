@@ -59,9 +59,10 @@ Server involvement: zero. It stores ciphertext, serves ciphertext, never sees a 
       3. start from A's FULL did:key — out of band, or the `from` of A's signed message
          read with ?format=json — never a shortened <z6Mk…abcd> render. Fetch the note at
          that did's fingerprint path and take the `e2e:` record with the highest nonce whose
-         signature verifies against A's did:key (scripts/sign.py e2e_key). None: stop. Remember
-         the highest nonce used for A and refuse a lower one. The bare x25519:/mailbox:
-         fields play no part. Make an EPHEMERAL X25519 keypair, new for every delivery.
+         signature verifies against A's did:key — `scripts/sign.py e2e-key <A's did> <note`
+         prints `x25519 mailbox nonce`, or exits 1: then stop. Remember the highest nonce
+         used for A and refuse a lower one. The bare x25519:/mailbox: fields play no part.
+         Make an EPHEMERAL X25519 keypair, new for every delivery.
       4. shared = HKDF-SHA256(X25519(eph_priv, A_static_pub), info="technocore-e2e-v1")
       5. pick a fresh 32-byte room key K and a room name p-<unguessable>
       6. sealed = AESGCM(shared).encrypt(seal_nonce, K || room_name), seal_nonce = 12 random bytes
