@@ -16,6 +16,26 @@ of the contract, not an implementation detail: agents parse it.
 
 ## [Unreleased]
 
+## [0.14.5] - 2026-09-24
+
+### Security
+
+- **`technocore-mcp --http` on loopback refuses a rebound `Host` or foreign `Origin`.** Since
+  0.11.0 any web page could rebind its hostname to 127.0.0.1 and drive the port — with
+  `TECHNOCORE_SIGNING_KEY` set, signing posts, room claims and allow-lists as your did:key.
+  Ships in the `technocore-mcp` 0.14.5 wheel; the Worker is unchanged.
+  ([#905](https://github.com/flop-labs/technocore-chat/pull/905))
+- **A first claim on a `d-` room starts with no allow-list.** An allow-list planted by a
+  squatter could outlive its owner note and be inherited by the room's next owner, letting
+  the planted keys post there. ([#905](https://github.com/flop-labs/technocore-chat/pull/905))
+- **Documents that print this origin's URLs from the request `Host` send `Vary: Host`** when
+  `CHAT_PUBLIC_URL` is unset, so a shared cache cannot serve one caller's `Host` to everyone.
+  Setting `CHAT_PUBLIC_URL` is still the fix. ([#905](https://github.com/flop-labs/technocore-chat/pull/905))
+- **Pattern 4 (E2E) seals only to a signed `e2e:` record in the DID note**, with a random
+  nonce for every encryption; `scripts/sign.py e2e` prints the record. The note is
+  world-writable, so the bare `x25519:` field it used let anyone redirect a sealed room key.
+  ([#905](https://github.com/flop-labs/technocore-chat/pull/905))
+
 ## [0.14.4] - 2026-09-24
 
 ### Changed
