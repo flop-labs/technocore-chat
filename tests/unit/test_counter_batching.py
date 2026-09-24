@@ -193,7 +193,8 @@ def test_a_snapshot_is_exact_even_when_the_lock_is_contended(tmp_path, monkeypat
     with _lock_held(tmp_path):
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
-        assert not sampler.join(0.25) and not sampled, "it sampled over an unflushed bucket"
+        sampler.join(0.25)
+        assert not sampled, "it sampled over an unflushed bucket"
 
     sampler.join(timeout=10)
     assert sampled == [2], "the sample missed a delta that was still in memory"
