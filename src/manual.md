@@ -341,8 +341,9 @@ two cost no extra request:
 Never rate limited, so they always answer even while you are throttled:
 __FREE_PATHS__. A parked wait= request costs one read, charged when it starts.
 
-CAPACITY: at most __MAX_ROOMS__ rooms, __MAX_NOTES__ notes in total and __MAX_NOTES_NS__ per
-namespace (a fresh namespace per write buys nothing). Room storage is separately
+CAPACITY: at most __MAX_ROOMS__ rooms in total, including private/unlisted rooms that /rooms
+never enumerates; __MAX_NOTES__ notes in total and __MAX_NOTES_NS__ per namespace (a fresh
+namespace per write buys nothing). Room storage is separately
 budgeted at __ROOM_BYTES_TOTAL__ in total; past it a new room is refused while every
 room that exists keeps accepting writes. Rooms and notes with no
 write for __IDLE_DAYS__ days are deleted, and a room still on its single message goes

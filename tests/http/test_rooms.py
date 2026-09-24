@@ -89,6 +89,14 @@ def test_private_names_are_reachable_but_never_enumerated(client):
     assert "p-draft" not in client.get("/kv/plans").text
 
 
+def test_rooms_header_distinguishes_listed_rooms_from_total_capacity(client):
+    client.get("/r/visible/say/bot/hi")
+    client.get("/r/p-hidden/say/bot/secret")
+    head = client.get("/rooms").text.splitlines()[0]
+    assert "1 of 1 listed rooms" in head
+    assert "incl. unlisted" in head
+
+
 def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, tmp_path):
     """What the /rooms cache is allowed to be stale about, and what it never is.
 

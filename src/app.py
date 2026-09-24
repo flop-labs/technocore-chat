@@ -962,8 +962,8 @@ def rooms(request: Request) -> Response:
         head = (
             # Both caps, because either can be the one that refuses the next room and an
             # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
+            f"# {len(view['rooms'])} of {view['total']} listed rooms "
+            f"(cap {view['capacity']} incl. unlisted, {_size(view['bytes'])} of "
             f"{_size(view['bytes_capacity'])} stored), newest first"
         )
         # Second line, exactly where render() puts BANNER and for the same reason: a
