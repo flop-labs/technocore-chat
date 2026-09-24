@@ -72,6 +72,32 @@ def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
     assert re.fullmatch(didkey.SIG_PATTERN, sig)
 
 
+def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:
+    """patterns.md pattern 4 tells a recipient to publish what `sign.py e2e` prints and a
+    sender to trust only a record `e2e_key` accepts, so the two have to agree — and the
+    record must verify only against the key that signed it, whatever DID a note puts first."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sign", SIGNER)
+    assert spec is not None and spec.loader is not None
+    sign_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sign_py)
+
+    did = run("--seed", SEED, "did").stdout.strip()
+    x25519 = "A" * 43
+    out = run("--seed", SEED, "e2e", x25519, "mb-p-inbox", "5")
+    assert out.returncode == 0, out.stderr
+    line = out.stdout.splitlines()[-1]
+    assert line.startswith("e2e: ")
+    assert sign_py.e2e_key(did, f"{did} {line}") == (x25519, "mb-p-inbox", 5)
+    other = run("--seed", "bb" * 32, "did").stdout.strip()
+    assert sign_py.e2e_key(other, f"{other} {line}") is None  # someone else's record
+
+    for bad in (["e2e", x25519, "Not A Room", "5"], ["e2e", x25519, "mb-p-inbox", "١"]):
+        refused = run("--seed", SEED, *bad)
+        assert refused.returncode != 0, bad
+
+
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     text = "hello from the signer"
     out = run("say", "--seed", SEED, "signerroom", "3", text)
