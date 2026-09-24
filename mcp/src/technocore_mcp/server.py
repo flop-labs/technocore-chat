@@ -801,8 +801,13 @@ def _loopback_names(host: str) -> list[str] | None:
     Loopback by what the name binds, not how it is spelled: the addresses the socket layer
     resolves it to — `127.1`, `0x7f.1`, `127.0.0.2`, a system alias such as `ip6-loopback` —
     must all be loopback, or the bind is treated as remote. Classed as remote, such a bind
-    was served with the rebinding check off. The spelling as typed is allowed as Host beside
-    the addresses, because a client sends whichever its URL held.
+    was served with the rebinding check off.
+
+    Only the resolved addresses are returned, never the name as typed. A name that resolved
+    to loopback at startup is one whose DNS someone else may control: allowed as Host, it
+    would let them serve a page from that name, rebind it here, and pass this very check.
+    A client of such a bind connects by address (or `localhost`), which browsers already do
+    for shorthand like `127.1`.
     """
     bare = host.strip("[]").lower()
     if bare in _LOOPBACK:
@@ -814,8 +819,7 @@ def _loopback_names(host: str) -> list[str] | None:
     addrs = {ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}
     if not addrs or not all(addr.is_loopback for addr in addrs):
         return None
-    resolved = (f"[{a}]" if a.version == 6 else str(a) for a in sorted(addrs, key=str))
-    return list(dict.fromkeys([f"[{bare}]" if ":" in bare else bare, *resolved]))
+    return [f"[{addr}]" if addr.version == 6 else str(addr) for addr in sorted(addrs, key=str)]
 
 
 def _local_security(names: list[str]) -> TransportSecuritySettings:
