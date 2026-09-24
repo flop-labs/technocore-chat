@@ -1442,3 +1442,36 @@ def test_service_stats_measures_room_bytes_until_a_reap_settles_them(tmp_path):
     store.append(tmp_path, "openroom", "nick", "hi")
     assert store.room_bytes_used(tmp_path) == 0  # nothing reaped yet
     assert store.service_stats(tmp_path)["bytes"]["rooms"] == store._count_rooms(tmp_path)[1] > 0
+
+
+def test_a_cursor_past_the_room_head_clamps_so_text_polling_can_progress(tmp_path):
+    """A future cursor must settle on the room's actual head, or the text lane keeps
+    printing a dead next: URL forever (#565)."""
+    import store
+
+    store.append(tmp_path, "cursor", "bot", "one")
+
+    view = store.read_messages(tmp_path, "cursor", since=999)
+
+    assert view["count"] == 0
+    assert view["last_seq"] == 1
+
+
+def test_a_cursor_on_a_reaped_room_clamps_to_its_floor_not_to_zero(tmp_path):
+    """A reaped room has no file, but its head is not 0: the next write continues from the
+    floor the reaper left (#139). Clamping to the newest line on disk would rewind a caller
+    who is exactly caught up to `last_seq: 0` — the rewind #287 is about — and hand the text
+    lane a `next:` that no longer matches the cursor it was given."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice", f"msg {i}")
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    assert store.read_messages(tmp_path, "d-talk", since=6)["last_seq"] == 6, "caught up: kept"
+    assert store.read_messages(tmp_path, "d-talk", since=999)["last_seq"] == 6, "past it: clamped"
+    assert store.read_messages(tmp_path, "d-talk")["last_seq"] == 0, "no cursor: as before"
