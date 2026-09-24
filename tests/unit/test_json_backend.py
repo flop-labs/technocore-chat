@@ -90,11 +90,12 @@ def test_a_room_written_by_both_encoders_reads_back_whole(tmp_path) -> None:
 
 
 def test_a_json_reply_carries_the_widest_record_exactly_on_one_line(client) -> None:
-    """`?format=json` replies are compact now: `indent=1` put stdlib on its pure-Python
-    encoder, on the busiest path in the service. The whitespace moved; the JSON value must
-    not — every key, in order, raw UTF-8 rather than \\u escapes, and the widest integer a
-    record can hold, a 19-digit nonce (didkey.NONCE_PATTERN) past int64. The room is written
-    by hand with the old line encoder, like every room already on disk."""
+    """`?format=json` replies are orjson too, compact rather than stdlib's `indent=1`, which
+    put the busiest path in the service on the pure-Python encoder. The whitespace moved; the
+    JSON value must not — every key, in order, raw UTF-8 rather than \\u escapes, and the
+    widest integer a record can hold: a 19-digit nonce (didkey.NONCE_PATTERN), past int64,
+    which orjson only encodes because it goes to unsigned 64-bit. The room is written by hand
+    with the old line encoder, like every room already on disk."""
     import config
     import store
 

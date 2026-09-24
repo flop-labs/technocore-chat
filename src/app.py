@@ -455,15 +455,16 @@ def render(view: dict) -> str:
 
 def respond(request: Request, view: dict, body_text: str | None = None, note: str = "") -> Response:
     if request.query_params.get("format") == "json":
-        # Compact, not `indent=1`: any indent drops stdlib onto its pure-Python encoder, and
-        # this is the hottest encode in the service (every JSON read, long-poll and write
-        # reply) — ~24% of GIL-held Python on the live box at 711 req/s. Without an indent it
-        # stays on the C encoder: the same JSON value, escaping and number repr, fewer bytes.
-        # Not orjson: a caller's own `?since=` comes back as `last_seq` and may be past 64
-        # bits, which orjson refuses (test_numeric_inputs_cannot_overflow_or_amplify). The
-        # published documents keep indent=1 (`read_json` says why).
+        # orjson, compact, not stdlib `indent=1`: any indent drops stdlib onto its pure-Python
+        # encoder, and this is the hottest encode in the service (every JSON read, long-poll
+        # and write reply) — ~24% of GIL-held Python on the live box at 711 req/s. The same
+        # JSON value in fewer bytes. Safe here because nothing in these views is wider than
+        # 64 bits: records are what orjson wrote, and `last_seq` is clamped to the room's head
+        # (#565) — it used to echo any `?since=`, which orjson would refuse with a 500. A new
+        # caller-supplied integer in a view must be clamped the same way. The published
+        # documents keep stdlib and indent=1 (`read_json` says why).
         return Response(
-            json.dumps(view, ensure_ascii=False, separators=(",", ":")) + "\n",
+            orjson.dumps(view, option=orjson.OPT_APPEND_NEWLINE),
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
