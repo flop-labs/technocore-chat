@@ -1421,7 +1421,7 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     from technocore_mcp import signing
 
     monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))  # and may hold a key
-    for host in ("127.0.0.2", "127.255.255.254"):
+    for host in ("127.0.0.2", "127.255.255.254", "127.1", "0x7f.1"):
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
         other = ran.pop()["transport_security"]

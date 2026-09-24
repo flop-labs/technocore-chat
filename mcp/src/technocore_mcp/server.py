@@ -61,6 +61,7 @@ import ipaddress
 import json
 import os
 import secrets
+import socket
 import sys
 import urllib.parse
 from typing import Annotated, Literal
@@ -794,30 +795,51 @@ LOCAL_SECURITY = TransportSecuritySettings(
 )
 
 
-def _is_loopback(host: str) -> bool:
-    """Loopback by meaning, not spelling: every 127.0.0.0/8 address and ::1, or one of the
-    names in _LOOPBACK. `127.0.0.2` is as reachable from the user's browser as `127.0.0.1`,
-    and classing it as remote served it with the rebinding check off."""
+def _loopback_names(host: str) -> list[str] | None:
+    """What a client of this bind may send as Host, or None when the bind is not loopback.
+
+    Loopback by meaning, not spelling: every 127.0.0.0/8 address and ::1 — in any form the
+    socket layer binds, so `127.1` and `0x7f.1` count as the 127.0.0.1 they are — or one of
+    the names in _LOOPBACK. Classed as remote, such a bind was served with the rebinding
+    check off. The canonical address and the spelling as typed are both returned, because a
+    client sends whichever its URL held.
+    """
+    bare = host.strip("[]").lower()
+    if bare in _LOOPBACK:
+        return [f"[{bare}]" if ":" in bare else bare]
     try:
-        return ipaddress.ip_address(host.strip("[]")).is_loopback
+        ip = ipaddress.ip_address(bare)
     except ValueError:
-        return host.lower() in _LOOPBACK
+        # inet_aton also takes trailing junk (`127.1 evil`), so only digits, dots and hex.
+        if not bare.replace(".", "").isalnum():
+            return None
+        try:
+            ip = ipaddress.ip_address(socket.inet_aton(bare))  # 127.1, 0x7f.1, 2130706433
+        except OSError:
+            return None
+    if not ip.is_loopback:
+        return None
+    return list(dict.fromkeys(f"[{n}]" if ip.version == 6 else n for n in (str(ip), bare)))
 
 
-def _local_security(host: str) -> TransportSecuritySettings:
-    """LOCAL_SECURITY, plus the bind address itself when it is a loopback address the list
-    does not already name (the rest of 127/8): a client of that listener sends it as Host,
-    and refusing it would make the bind unusable rather than safe."""
-    name = f"[{host.strip('[]')}]" if ":" in host else host.lower()
-    if name in _LOCAL_HOSTS:
+def _local_security(names: list[str]) -> TransportSecuritySettings:
+    """LOCAL_SECURITY, plus whichever of `names` it does not already allow (the rest of
+    127/8, a shorthand spelling): refusing the Host a client of this listener sends would
+    make the bind unusable rather than safe."""
+    extra = [name for name in names if name not in _LOCAL_HOSTS]
+    if not extra:
         return LOCAL_SECURITY
     return LOCAL_SECURITY.model_copy(
         update={
-            "allowed_hosts": [*LOCAL_SECURITY.allowed_hosts, name, f"{name}:*"],
+            "allowed_hosts": [
+                *LOCAL_SECURITY.allowed_hosts,
+                *(h for name in extra for h in (name, f"{name}:*")),
+            ],
             "allowed_origins": [
                 *LOCAL_SECURITY.allowed_origins,
                 *(
                     f"{scheme}://{name}{port}"
+                    for name in extra
                     for scheme in ("http", "https")
                     for port in ("", ":*")
                 ),
@@ -875,7 +897,8 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        if _signer is not None and not _is_loopback(host):
+        names = _loopback_names(host)
+        if _signer is not None and names is None:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "
@@ -889,7 +912,7 @@ def main() -> None:
             port=int(os.environ.get("PORT", "8000")),
             streamable_http_path="/mcp",
             stateless_http=True,
-            transport_security=_local_security(host) if _is_loopback(host) else REMOTE_SECURITY,
+            transport_security=_local_security(names) if names else REMOTE_SECURITY,
         )
     elif not argv:
         server.run()
