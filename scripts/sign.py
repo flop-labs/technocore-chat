@@ -96,6 +96,7 @@ from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 
 PREFIX = "did:key:z6Mk"  # multibase 'z' + the fixed ed25519-pub prefix base58-encodes to z6Mk
 MULTICODEC_ED25519 = b"\xed\x01"  # varint ed25519-pub, the two bytes every z6Mk key decodes from
@@ -306,14 +307,21 @@ def x25519_bytes(value: str) -> bytes | None:
     Strict on purpose: a record's signature covers the string, so a typo like `x` signs
     perfectly well and would then win as the newest record while no sender could decode it.
     Refused when signing, and skipped when choosing, so a bad record is inert rather than
-    the one that bricks the identity.
+    the one that bricks the identity. The same goes for a low-order point (32 zero bytes is
+    one): every exchange with it is all zeros, which `exchange()` refuses and a laxer
+    implementation turns into a secret anyone can compute. One trial exchange finds them.
     """
     try:
         raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
     except ValueError:
         return None
-    canonical = base64.urlsafe_b64encode(raw).decode().rstrip("=") == value
-    return raw if len(raw) == 32 and canonical else None
+    if len(raw) != 32 or base64.urlsafe_b64encode(raw).decode().rstrip("=") != value:
+        return None
+    try:
+        X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(raw))
+    except ValueError:
+        return None
+    return raw
 
 
 def e2e_key(root: str, body: str) -> tuple[str, str, int] | None:
