@@ -1412,7 +1412,7 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     ran = []
     monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k))
     monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--http"])
-    for host in ("127.0.0.1", "localhost", "LOCALHOST", "::1", "ip6-localhost"):
+    for host in ("127.0.0.1", "localhost", "LOCALHOST", "::1"):
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
         assert ran.pop()["transport_security"] is mcp_server.LOCAL_SECURITY, host
@@ -1439,7 +1439,11 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     # A name is loopback when everything it resolves to is: a system alias for ::1 is local,
     # one that also resolves somewhere else is not (and so cannot hold the key).
     real = mcp_server.socket.getaddrinfo
-    aliases = {"loop-alias": ["::1"], "split-alias": ["127.0.0.1", "10.0.0.1"]}
+    aliases = {
+        "loop-alias": ["::1"],
+        "split-alias": ["127.0.0.1", "10.0.0.1"],
+        "ip6-localhost": ["::1"],
+    }
 
     def resolve(name, *args, **kwargs):
         if name not in aliases:
@@ -1458,6 +1462,13 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     # Its resolved address only: the name's DNS may belong to someone else, and allowing it
     # as Host would hand them the rebinding this check exists to stop.
     assert alias is mcp_server.LOCAL_SECURITY and "loop-alias:*" not in alias.allowed_hosts
+    # ip6-localhost is an alias like any other, not a reserved name: resolved, pinned, and
+    # never itself allowed as Host.
+    monkeypatch.setenv("HOST", "ip6-localhost")
+    mcp_server.main()
+    served = ran.pop()
+    assert served["host"] == "::1" and served["transport_security"] is mcp_server.LOCAL_SECURITY
+    assert "ip6-localhost:*" not in mcp_server.LOCAL_SECURITY.allowed_hosts
     monkeypatch.setenv("HOST", "split-alias")
     with pytest.raises(SystemExit):
         mcp_server.main()
