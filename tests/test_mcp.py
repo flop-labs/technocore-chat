@@ -1421,13 +1421,19 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     from technocore_mcp import signing
 
     monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))  # and may hold a key
-    for host in ("127.0.0.2", "127.255.255.254", "127.1", "0x7f.1"):
+    for host in ("127.0.0.2", "127.255.255.254"):
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
         other = ran.pop()["transport_security"]
         assert other.enable_dns_rebinding_protection is True, host
         assert f"{host}:*" in other.allowed_hosts and f"http://{host}:*" in other.allowed_origins
         assert set(mcp_server.LOCAL_SECURITY.allowed_hosts) < set(other.allowed_hosts)
+    # Shorthand the socket layer binds as 127.0.0.1 is loopback too — protected, and reached
+    # at 127.0.0.1 (as browsers rewrite it), not at the spelling itself.
+    for host in ("127.1", "0x7f.1"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        assert ran.pop()["transport_security"] is mcp_server.LOCAL_SECURITY, host
     # A name is loopback when everything it resolves to is: a system alias for ::1 is local,
     # one that also resolves somewhere else is not (and so cannot hold the key).
     real = mcp_server.socket.getaddrinfo
@@ -1443,7 +1449,9 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     mcp_server.main()
     alias = ran.pop()["transport_security"]
     assert alias.enable_dns_rebinding_protection is True
-    assert "loop-alias:*" in alias.allowed_hosts and "[::1]:*" in alias.allowed_hosts
+    # Its resolved address only: the name's DNS may belong to someone else, and allowing it
+    # as Host would hand them the rebinding this check exists to stop.
+    assert alias is mcp_server.LOCAL_SECURITY and "loop-alias:*" not in alias.allowed_hosts
     monkeypatch.setenv("HOST", "split-alias")
     with pytest.raises(SystemExit):
         mcp_server.main()
