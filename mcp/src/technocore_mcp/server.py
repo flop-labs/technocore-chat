@@ -823,12 +823,15 @@ def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
     addrs = sorted({ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}, key=str)
     if not addrs or not all(addr.is_loopback for addr in addrs):
         return None
+    # A literal is kept as typed, for the bind and as an allowed Host: no resolver is
+    # involved, so nobody else can move it (`0:0:0:0:0:0:0:1` is the ::1 it spells).
     try:
         ipaddress.ip_address(bare)
-        bind = host
+        bind, typed = host, [f"[{bare}]" if ":" in bare else bare]
     except ValueError:
-        bind = str(addrs[0])
-    return bind, [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
+        bind, typed = str(addrs[0]), []
+    resolved = [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
+    return bind, list(dict.fromkeys([*typed, *resolved]))
 
 
 def _local_security(names: list[str]) -> TransportSecuritySettings:
