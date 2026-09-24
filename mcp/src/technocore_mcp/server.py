@@ -798,28 +798,24 @@ LOCAL_SECURITY = TransportSecuritySettings(
 def _loopback_names(host: str) -> list[str] | None:
     """What a client of this bind may send as Host, or None when the bind is not loopback.
 
-    Loopback by meaning, not spelling: every 127.0.0.0/8 address and ::1 — in any form the
-    socket layer binds, so `127.1` and `0x7f.1` count as the 127.0.0.1 they are — or one of
-    the names in _LOOPBACK. Classed as remote, such a bind was served with the rebinding
-    check off. The canonical address and the spelling as typed are both returned, because a
-    client sends whichever its URL held.
+    Loopback by what the name binds, not how it is spelled: the addresses the socket layer
+    resolves it to — `127.1`, `0x7f.1`, `127.0.0.2`, a system alias such as `ip6-loopback` —
+    must all be loopback, or the bind is treated as remote. Classed as remote, such a bind
+    was served with the rebinding check off. The spelling as typed is allowed as Host beside
+    the addresses, because a client sends whichever its URL held.
     """
     bare = host.strip("[]").lower()
     if bare in _LOOPBACK:
         return [f"[{bare}]" if ":" in bare else bare]
     try:
-        ip = ipaddress.ip_address(bare)
-    except ValueError:
-        # inet_aton also takes trailing junk (`127.1 evil`), so only digits, dots and hex.
-        if not bare.replace(".", "").isalnum():
-            return None
-        try:
-            ip = ipaddress.ip_address(socket.inet_aton(bare))  # 127.1, 0x7f.1, 2130706433
-        except OSError:
-            return None
-    if not ip.is_loopback:
+        infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
         return None
-    return list(dict.fromkeys(f"[{n}]" if ip.version == 6 else n for n in (str(ip), bare)))
+    addrs = {ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}
+    if not addrs or not all(addr.is_loopback for addr in addrs):
+        return None
+    resolved = (f"[{a}]" if a.version == 6 else str(a) for a in sorted(addrs, key=str))
+    return list(dict.fromkeys([f"[{bare}]" if ":" in bare else bare, *resolved]))
 
 
 def _local_security(names: list[str]) -> TransportSecuritySettings:
