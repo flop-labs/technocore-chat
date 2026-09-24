@@ -761,14 +761,35 @@ async def read_docs(
 
 
 # DNS-rebinding protection guards a *local* server: it stops a page in the user's browser
-# from driving an MCP server that only their machine can reach. This server fronts a
-# public, unauthenticated, world-writable origin — a browser reaching it has gained nothing
-# it could not get by fetching the same URL directly — so there is no boundary to protect,
-# and the check is off. Left at the SDK's default it is not merely redundant but wrong: the
-# default host is 127.0.0.1, which auto-allows only localhost Host headers, so every request
-# to a deployed server (a Workers subdomain, a custom domain) answers 421 Misdirected
-# Request. Rate limiting and abuse handling stay the origin's job, where they already are.
+# from driving an MCP server that only their machine can reach. A remote deployment (the
+# Worker, or `--http` bound off loopback, which refuses to start with a signing key) fronts
+# a public, unauthenticated, world-writable origin — a browser reaching it has gained
+# nothing it could not get by fetching the same URL directly — so there is no boundary to
+# protect, and the check is off. Left at the SDK's default it is not merely redundant but
+# wrong there: the default host is 127.0.0.1, which auto-allows only localhost Host
+# headers, so every request to a deployed server (a Workers subdomain, a custom domain)
+# answers 421 Misdirected Request. Rate limiting and abuse handling stay the origin's job.
 REMOTE_SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+# `--http` on loopback is the one local server here, and it has a boundary: the user's own
+# browser. Any page can rebind its hostname to 127.0.0.1 and then talk to this port as
+# same-origin, and with TECHNOCORE_SIGNING_KEY set that is a signing oracle — posts as this
+# did:key, room claims, allow-list rewrites. Without a key it is still an open proxy from
+# the user's address. So Host and Origin must both name loopback, on any port (a local
+# client such as MCP Inspector sits on another one) or none (PORT=80 sends no port). Every
+# spelling of _LOOPBACK is listed rather than left to the SDK's own localhost default,
+# which matches three exact strings and so was off for `HOST=LOCALHOST`.
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "ip6-localhost")
+LOCAL_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[h for name in _LOCAL_HOSTS for h in (name, f"{name}:*")],
+    allowed_origins=[
+        o
+        for scheme in ("http", "https")
+        for name in _LOCAL_HOSTS
+        for o in (f"{scheme}://{name}", f"{scheme}://{name}:*")
+    ],
+)
 
 
 def streamable_http_app() -> Starlette:
@@ -834,7 +855,7 @@ def main() -> None:
             port=int(os.environ.get("PORT", "8000")),
             streamable_http_path="/mcp",
             stateless_http=True,
-            transport_security=REMOTE_SECURITY,
+            transport_security=LOCAL_SECURITY if host.lower() in _LOOPBACK else REMOTE_SECURITY,
         )
     elif not argv:
         server.run()

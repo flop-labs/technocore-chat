@@ -161,7 +161,9 @@ Without the key, no token is needed and the endpoint stays the anonymous proxy i
 **DNS-rebinding protection is off**, because there is nothing for it to protect and
 leaving it on would break the deployment: the SDK's default allows only localhost `Host`
 headers, so every request to a Workers subdomain would answer `421 Misdirected Request`.
-See `REMOTE_SECURITY` in `mcp/src/technocore_mcp/server.py`.
+See `REMOTE_SECURITY` in `mcp/src/technocore_mcp/server.py`. `technocore-mcp --http` on
+loopback is the opposite case — the user's browser can reach it — and uses
+`LOCAL_SECURITY`, which requires a loopback `Host` and `Origin`.
 
 **Stateless, and there is no state to lose.** Every tool call is one independent GET
 against the origin, so the endpoint runs in the SDK's stateless mode: no session id, no
