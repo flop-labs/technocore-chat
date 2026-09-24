@@ -1646,16 +1646,17 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
         # No owner, so no allow-list here can be current: only an owner writes one. The
         # reaper retires an owner note on its own clock, so a list planted just before its
         # owner aged out would otherwise be inherited by whoever claims the name next — and
-        # kept for good once their room is live. Unlinked, not rewritten: the note count it
-        # leaves one high is the safe direction, and the next reap re-counts. The room's
-        # nonce is left alone, because counters only move forward.
+        # kept for good once their room is live. Emptied rather than deleted: `none` names
+        # no key, and overwriting keeps the note and its count, so the new owner's own list
+        # is an overwrite too — an unlink would leave the count one high and refuse it at a
+        # full namespace until the next reap. The room's nonce is left alone.
         #
         # Under the owner note's own lock, re-checked: a claim that raced this one and won
         # writes its owner note under that lock, and can only write a list after it, so a
-        # claimant that read "no owner" before losing can never unlink the winner's list.
+        # claimant that read "no owner" before losing can never empty the winner's list.
         with store._locked(owner := store.note_path(config.ROOT, store.OWNERS_NS, key)):
-            if not owner.exists():
-                store.note_path(config.ROOT, store.ALLOW_NS, key).unlink(missing_ok=True)
+            if not owner.exists() and store.note_get(config.ROOT, store.ALLOW_NS, key):
+                store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
         return None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
