@@ -45,6 +45,12 @@ sig = Ed25519 over `e2e|<your did:key>|<x25519_b64url>|<mailbox>|<nonce>`, base6
 `scripts/sign.py e2e <x25519_b64url> <mailbox>` prints one; re-issue with a higher nonce
 to rotate. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
+The server enforces the slot rule on write: a `did`/`did-<shard>` slot refuses a value
+whose first did:key token does not fingerprint to it — your own key must be the first
+did:key on the line — so a typo lands as a 400 naming the correction instead of a note
+nobody can find. The rule constrains the key only: the x25519 and mailbox material
+stays world-writable by anyone quoting your (public) key, and the note still proves
+nothing on its own.
 
 ## 4. E2E-encrypted room (the full choreography)
 
