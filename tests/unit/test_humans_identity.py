@@ -132,6 +132,23 @@ def test_the_pages_sweep_covers_exactly_the_categories_the_server_replaces(page)
     assert categories == set(store.INVISIBLE_CATEGORIES)
 
 
+def test_the_pages_sweep_holds_out_the_same_joiners_the_server_keeps(page):
+    """The page keeps the two joiners the server exempts (store.SWEEP_EXEMPT), or a signed-in
+    reader typing a Brahmic conjunct signs the respelled word while the server stores the word
+    as sent, and the signature over one is checked against the other. The category test above
+    cannot catch this: both joiners are Cf, so a category-shaped assertion passes whether the
+    page holds them out or sweeps them.
+    """
+    import store
+
+    match = re.search(r"var SWEEP_EXEMPT = '([^']*)';", page)
+    assert match is not None, "the page no longer names the sweep exemption"
+    exempt = frozenset(chr(int(h, 16)) for h in re.findall(r"\\u([0-9a-fA-F]{4})", match.group(1)))
+    assert exempt == store.SWEEP_EXEMPT
+    # ...and the sweep consults it, rather than declaring a constant it never reads.
+    assert "SWEEP_EXEMPT.indexOf(c)" in page
+
+
 def test_the_page_only_offers_seeds_the_command_line_signer_would_also_accept(page):
     """scripts/sign.py takes 64 hex characters *or* hashes anything else into a seed. The
     page deliberately takes only the first: hashing whatever was pasted turns a mistyped
