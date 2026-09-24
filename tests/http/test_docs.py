@@ -820,6 +820,7 @@ def test_every_refusal_is_provoked_and_every_provoked_refusal_is_documented(clie
     # (openapi path, method, expected status, the request that produces it)
     cases = [
         # Reads.
+        ("/rooms", "get", 400, lambda: client.get("/rooms?kind=unknown")),
         ("/r/{room}", "get", 400, lambda: client.get("/r/UPPER")),
         ("/r/{room}/export", "get", 400, lambda: client.get("/r/UPPER/export")),
         ("/kv/{ns}", "get", 400, lambda: client.get("/kv/UPPER")),
@@ -1044,6 +1045,12 @@ def test_every_published_limit_is_one_the_server_actually_honours(client, monkey
 
         # (the bound as published, a request using it at its extreme)
         checks = [
+            (
+                '{"enum": ["discussion", "mailbox", "all"]}',
+                lambda: [
+                    _ok(client, f"/rooms?kind={kind}") for kind in ("discussion", "mailbox", "all")
+                ],
+            ),
             (
                 '{"pattern": "^[a-z0-9][a-z0-9_-]{0,47}$"}',
                 lambda: _ok(client, f"/r/{longest_name}"),

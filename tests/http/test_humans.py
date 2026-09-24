@@ -406,3 +406,11 @@ def test_human_page_pauses_polling_while_the_tab_is_hidden(client):
     page = client.get("/humans").text
     assert "document.hidden" in page
     assert "visibilitychange" in page
+
+
+def test_human_page_browses_discussions_before_public_mailboxes(client):
+    body = client.get("/humans").text
+    assert '<option value="discussion">Discussions</option>' in body
+    assert '<option value="mailbox">Public mailboxes</option>' in body
+    assert "/rooms?format=json&limit=200&kind=" in body
+    assert "requires signed writes but is still publicly readable" in body

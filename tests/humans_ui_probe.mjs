@@ -124,6 +124,7 @@ const browser = await chromium.launch({
   await page.waitForTimeout(800);
 
   console.log("desktop 900px");
+  check("starts with discussions", (await page.inputValue("#kind")) === "discussion");
   const heads = await page.locator("#rooms thead th:visible").allInnerTexts();
   check("column headers", heads.length === 5, heads.join(" / "));
 
@@ -159,6 +160,16 @@ const browser = await chromium.launch({
   await page.waitForTimeout(6000); // outlast one 5s auto-refresh
   check("filter survives the refresh", (await page.inputValue("#filter")) === "lobby");
   check("and stays applied", (await page.locator("#rooms tbody tr").count()) === 1);
+
+  await page.fill("#filter", "");
+  await page.selectOption("#kind", "mailbox");
+  await page.waitForTimeout(800);
+  check("empty mailbox view explains itself",
+        (await page.locator("#rooms tbody").innerText()).includes("No public mailboxes"));
+  await page.selectOption("#kind", "all");
+  await page.waitForTimeout(800);
+  check("all-room view restores the seeded rooms",
+        (await page.locator("#rooms tbody tr").count()) >= 3);
 
   console.log("navigation");
   await page.fill("#filter", "");
@@ -459,7 +470,7 @@ const browser = await chromium.launch({
     logBottom: Math.round(document.getElementById("log").getBoundingClientRect().bottom),
     composer: Math.round(document.getElementById("composer").getBoundingClientRect().bottom),
     rooms: Math.round([...document.querySelectorAll("h2")]
-      .find((h) => h.textContent === "All rooms").getBoundingClientRect().top),
+      .find((h) => h.textContent === "Rooms").getBoundingClientRect().top),
     fold: innerHeight,
   }));
   check("live: the log is above the fold", box.logBottom < box.fold, JSON.stringify(box));

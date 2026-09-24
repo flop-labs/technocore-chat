@@ -1375,8 +1375,13 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dict:
     """Recency-sorted room summaries for the overview.
+
+    `kind` partitions the already-listable population before `limit`: discussion includes
+    every public non-mailbox room (including `events`), mailbox includes every public room
+    carrying the `mb` class, and all preserves the original population. An unlisted
+    composed class is excluded before that choice and therefore cannot leak through it.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
@@ -1387,7 +1392,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     entries = []
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
-        if not _listable(name):
+        if not _listable(name) or ((kind == "mailbox") != is_mailbox(name) and kind != "all"):
             continue
         try:
             st = e.stat()
