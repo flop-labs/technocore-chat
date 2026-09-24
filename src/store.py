@@ -952,7 +952,7 @@ def _snapshot_bytes(f) -> int:
     return 0
 
 
-def _export_start(f, cutoff: float | None, end: int) -> int:
+def _export_start(f, cutoff: float | None, end: int, after: int | None = None) -> int:
     """Where the export begins: 0, or just past an `e-` room's expired prefix.
 
     Ephemeral expiry is drop-on-read and a raw dump is a read: streaming records the class
@@ -961,21 +961,45 @@ def _export_start(f, cutoff: float | None, end: int) -> int:
     starts at the first line whose record is still readable — judged by the same `_expired`
     the tail read uses, unparsable `ts` failing closed with it. Costs one forward parse of
     the bytes being dropped, on the `e-` class only; every other room starts at 0 for free.
+
+    `after` applies the same prefix skip to an ordinary retained-ring export. Durable
+    rooms use a binary seek over monotonic seqs so a late cursor does not parse the
+    retained prefix on every page; ephemeral rooms still walk only while applying their
+    TTL prefix rule. The bytes that remain are still the stored records as written; the
+    cursor only chooses the first byte to stream.
     """
-    if cutoff is None:
+    if cutoff is None and after is None:
         return 0
-    f.seek(0)
     pos = 0
+    if cutoff is None and after is not None:
+        lo, hi, seq = 0, end, None
+        for _ in range(max(1, end.bit_length() + 1)):
+            mid = (lo + hi) // 2
+            f.seek(max(0, mid - 1))
+            if mid:
+                f.readline()
+            start, line = f.tell(), f.readline()
+            rec = _parse(line) if line else None
+            seq = rec.get("seq") if rec is not None else None
+            if not isinstance(seq, int):
+                break
+            lo, hi = (f.tell(), hi) if seq <= after else (lo, start)
+        if isinstance(seq, int):
+            pos = lo
+    f.seek(pos)
     while pos < end:
         line = f.readline()
         rec = _parse(line)
-        if rec is not None and not _expired(rec, cutoff):
+        seq = rec.get("seq") if rec is not None else None
+        expired = cutoff is not None and (rec is None or _expired(rec, cutoff))
+        before_cursor = after is not None and (not isinstance(seq, int) or seq <= after)
+        if not expired and not before_cursor:
             return pos
         pos += len(line)
     return end
 
 
-def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
+def export_room(root: Path, room: str, after: int | None = None) -> tuple[int, Iterator[bytes]]:
     """The room's stored JSONL, bytes as written, snapshotted at open — and the room
     generation that snapshot belongs to.
 
@@ -984,8 +1008,9 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
     round trip through the same encoder — is a way to corrupt proofs, not a formatting
     choice. The bound is one fstat when the file is opened, truncated to the last complete
     line (`_snapshot_bytes`), so an append landing mid-export is simply outside the
-    snapshot rather than a torn record inside it. An `e-` room's expired prefix is outside
-    it too (`_export_start`): expiry is drop-on-read, and export is a read.
+    snapshot rather than a torn record inside it. An `e-` room's expired prefix, and any
+    records at or below `after`, are outside it too (`_export_start`): expiry is
+    drop-on-read, and export is a read.
 
     Opened HERE, not when the first chunk is pulled, because two things must be settled
     while an error can still become a status code: a room that exists but cannot be read
@@ -1013,7 +1038,7 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
         return room_generation(root, room), iter(())
     try:
         end = _snapshot_bytes(f)
-        start = _export_start(f, _cutoff(room), end)
+        start = _export_start(f, _cutoff(room), end, after)
         generation = room_generation(root, room)
     except BaseException:
         f.close()

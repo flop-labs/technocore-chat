@@ -5,10 +5,10 @@ nothing else. Four things differ from the stdio build, and only four.
 
 **The fetch.** Python Workers run on Pyodide, which has no raw sockets — `urllib` there
 does not fail at import, it fails at connect, in production. Outbound HTTP is the
-platform's JavaScript `fetch`, reached over Pyodide's FFI, so `use_fetch` swaps the one
-function in the package that touches the network. Everything above it — URL building,
-which query keys survive, how an error body becomes a tool result — is shared code, so
-the two deployments cannot disagree about what a tool answers.
+platform's JavaScript `fetch`, reached over Pyodide's FFI, so `use_fetch` swaps in the
+Worker transports where the package touches the network. Everything above them — URL
+building, which query keys survive, how an error body becomes a tool result — is shared
+code, so the two deployments cannot disagree about what a tool answers.
 
 **The configuration.** A Worker has no process environment. `[vars]` and `wrangler
 secret` arrive on the entrypoint's `env` binding, per request, so `TECHNOCORE_URL`,
@@ -40,7 +40,9 @@ would guard a door that has no wall beside it. Rate limiting stays the origin's 
 where it already is. The one thing worth a wall is a signing key — see `Default`.
 """
 
+import codecs
 import hmac
+import json
 from typing import Any
 
 # `workers` is the runtime SDK Cloudflare injects; it exists only inside a Python Worker
@@ -165,6 +167,84 @@ async def workers_fetch(
     return response.status, await response.text()
 
 
+def _chunk_bytes(chunk: Any) -> bytes:
+    """Return bytes from the JS stream chunk shape Pyodide exposes."""
+    if hasattr(chunk, "to_bytes"):
+        return chunk.to_bytes()
+    return bytes(chunk)
+
+
+def _export_seq(line: str) -> int | None:
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return None
+    value = record.get("seq") if isinstance(record, dict) else None
+    return value if isinstance(value, int) else None
+
+
+async def workers_export_fetch(
+    url: str, headers: dict[str, str], timeout: float, after: int | None, limit: int
+) -> tuple[int, str, dict[str, str]]:
+    """Stream one bounded export page through the Worker transport.
+
+    `workers_fetch()` must keep returning whole response bodies for ordinary tool calls,
+    but `/export` can be much larger than one MCP result should materialize. This mirrors
+    the stdio export fetcher: read JSONL chunks from the platform stream, keep at most the
+    requested page plus one continuation probe record, then stop consuming the origin body.
+
+    `timeout` is accepted for the shared `ExportFetch` signature; Cloudflare bounds the
+    subrequest lifetime.
+    """
+    try:
+        response = await fetch(url, method="GET", headers=headers)
+    except OSError:
+        raise
+    except Exception as exc:
+        raise OSError(str(exc)) from None
+    response_headers = {}
+    generation = response.headers.get("X-Room-Generation")
+    if generation is not None:
+        response_headers["X-Room-Generation"] = generation
+    if response.status >= 400:
+        return response.status, await response.text(), response_headers
+
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buffer = ""
+    lines: list[str] = []
+    stream = getattr(response, "body", None)
+    if stream is None:
+        return response.status, "", response_headers
+
+    reader = stream.getReader()
+    try:
+        while True:
+            chunk = await reader.read()
+            if chunk.done:
+                break
+            buffer += decoder.decode(_chunk_bytes(chunk.value))
+            while "\n" in buffer:
+                line, _, buffer = buffer.partition("\n")
+                seq = _export_seq(line)
+                if after is not None and (seq is None or seq <= after):
+                    continue
+                lines.append(line + "\n")
+                if len(lines) > limit:
+                    await reader.cancel()
+                    return response.status, "".join(lines), response_headers
+    finally:
+        reader.releaseLock()
+
+    tail = decoder.decode(b"", final=True)
+    if tail:
+        buffer += tail
+    if buffer:
+        seq = _export_seq(buffer)
+        if after is None or (seq is not None and seq > after):
+            lines.append(buffer)
+    return response.status, "".join(lines), response_headers
+
+
 class Default(WorkerEntrypoint):
     """The Worker. Configured once per isolate, on the first request that reaches it.
 
@@ -233,6 +313,6 @@ class Default(WorkerEntrypoint):
                 nick=getattr(self.env, "TECHNOCORE_NICK", None),
                 signing_key=key,
             )
-            technocore.use_fetch(workers_fetch)
+            technocore.use_fetch(workers_fetch, workers_export_fetch)
             Default._configured = True
         return await asgi.fetch(technocore.streamable_http_app(), request, self.env, self.ctx)

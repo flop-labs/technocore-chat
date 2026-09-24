@@ -120,6 +120,29 @@ def test_the_generation_is_captured_beside_the_snapshot(tmp_path):
     b"".join(chunks)
 
 
+def test_a_late_after_cursor_seeks_without_parsing_the_retained_prefix(tmp_path, monkeypatch):
+    """A late export page must not rescan every retained record before the cursor."""
+    for i in range(1000):
+        store.append(tmp_path, "archive", "bot", f"line {i}")
+
+    parse_count = 0
+    real_parse = store._parse
+
+    def counted_parse(raw):
+        nonlocal parse_count
+        parse_count += 1
+        return real_parse(raw)
+
+    monkeypatch.setattr(store, "_parse", counted_parse)
+
+    _, chunks = store.export_room(tmp_path, "archive", after=800)
+    first = next(chunks)
+
+    assert b'"seq":801' in first
+    assert b'"seq":800' not in first
+    assert parse_count < 30
+
+
 def test_a_bad_name_refuses_before_the_stream_starts(tmp_path):
     """valid_name runs at the call, not at the first chunk: a refusal must become a 400,
     which is only possible while no bytes of a 200 have been promised yet."""
