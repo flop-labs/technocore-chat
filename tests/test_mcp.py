@@ -1069,6 +1069,37 @@ def test_configured_key_leaves_empty_text_refusal_to_the_service(mcp, monkeypatc
     assert mcp.sent, "configured-signing mode must reach the service"
 
 
+def test_no_key_does_not_issue_an_unusable_empty_allow_list_challenge(mcp, monkeypatch):
+    """Whitespace/control-only input is rejected before challenge generation.
+
+    The service refuses the swept-empty body. Returning a challenge ending in an empty
+    allow-list field would ask an external signer to sign a request that cannot succeed
+    when retried unchanged.
+    """
+    monkeypatch.setattr(mcp.module, "_signer", None)
+
+    reply = mcp.call("set_room_allow", {"room": "d-room", "dids": " \n\t "})
+
+    assert reply.is_error is True
+    message = text_of(reply)
+    assert "empty allow-list" in message
+    assert "nothing visible was left" in message
+    assert "room-allow|" not in message
+
+
+def test_configured_key_leaves_empty_allow_list_refusal_to_the_service(mcp, monkeypatch):
+    """Only challenge mode rejects swept-empty input locally; a configured signer still
+    sends the request so the service remains the authority for its semantic refusal."""
+    with_key(mcp, monkeypatch)
+    mcp.call("claim_room", {"room": "d-room"})
+
+    reply = mcp.call("set_room_allow", {"room": "d-room", "dids": " \n\t "})
+
+    assert reply.is_error is True
+    assert "empty text" in text_of(reply)
+    assert mcp.sent, "configured-signing mode must reach the service"
+
+
 def test_whoami_reports_the_identity_without_touching_the_network(mcp, monkeypatch):
     async def never(method, url, headers, body, timeout):
         raise AssertionError(f"the network was reached: {url}")
