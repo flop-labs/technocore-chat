@@ -87,10 +87,12 @@ DEFAULT_URL = "https://technocore.chat"
 # tuned to 60 would silently serve a sixth of the wait the service would have held — the
 # advisory-parameter mistake the input doctrine exists to stop. The service clamps; this
 # forwards.
-# `--http` refuses to serve a configured signing key on anything but these. Names as well
-# as addresses: `HOST=localhost` is the same bind as `HOST=127.0.0.1` and should not be
-# the difference between refusing and not.
-_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
+# The binds `--http` takes as loopback without asking a resolver. `localhost` is here
+# because RFC 6761 reserves it and browsers resolve it locally, never through DNS — which
+# is also why `ip6-localhost` is not: it is an /etc/hosts convention, and on a system
+# without that entry a search domain can hand it to a DNS server someone else runs. Every
+# other name is resolved, and bound at the loopback address it resolved to.
+_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 WAIT_CEILING = 10.0
 TIMEOUT = 30.0  # ordinary requests; a long poll derives its own from what it asked for
 # Hard bound on a single held request, whatever a caller asks for. Not a limit on `wait=`
@@ -779,10 +781,10 @@ REMOTE_SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=Fals
 # same-origin, and with TECHNOCORE_SIGNING_KEY set that is a signing oracle — posts as this
 # did:key, room claims, allow-list rewrites. Without a key it is still an open proxy from
 # the user's address. So Host and Origin must both name loopback, on any port (a local
-# client such as MCP Inspector sits on another one) or none (PORT=80 sends no port). Every
-# spelling of _LOOPBACK is listed rather than left to the SDK's own localhost default,
-# which matches three exact strings and so was off for `HOST=LOCALHOST`.
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "ip6-localhost")
+# client such as MCP Inspector sits on another one) or none (PORT=80 sends no port). Only
+# names no one else can rebind: the loopback literals and the reserved `localhost`, set
+# here rather than left to the SDK's own default, which was off for `HOST=LOCALHOST`.
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 LOCAL_SECURITY = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
     allowed_hosts=[h for name in _LOCAL_HOSTS for h in (name, f"{name}:*")],
