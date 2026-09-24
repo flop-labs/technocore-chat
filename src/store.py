@@ -889,6 +889,10 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
+    # `next:` that polls a dead cursor forever, and let a caller put a number of any width
+    # into every JSON reply. The newest record on disk, expired or not, for the same reason
+    # `last_seq` does not filter.
     head_seq = 0
     with suppress(FileNotFoundError), path.open("rb") as f:
         for raw in reverse_lines(f):
@@ -904,6 +908,8 @@ def read_messages(
             if len(out) >= limit:
                 break
     out.reverse()
+    if not head_seq and since:  # no record on disk: a reaped room resumes from its floor (#139)
+        head_seq = _seq_field(root, room, "floor")
     return {
         "room": room,
         "count": len(out),
