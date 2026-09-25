@@ -269,7 +269,14 @@ class StoreLifecycle(RuleBasedStateMachine):
         if seqs:
             assert view["last_seq"] == seqs[-1]
         else:
-            assert view["last_seq"] <= (since or 0), "last_seq must clamp to head, not echo since"
+            # Empty window: on-disk/floor head, except a plain read of a reaped name stays 0.
+            path = store.room_path(self.root, room)
+            if since is None and not path.exists():
+                assert view["last_seq"] == 0, "plain read of a reaped room stays at 0 (#585)"
+            else:
+                assert view["last_seq"] == store.last_seq(self.root, room), (
+                    "empty window reports room high-water (clamp past-head, advance expired)"
+                )
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 
