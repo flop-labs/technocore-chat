@@ -1884,21 +1884,38 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var root = me.did;
     return notePath(root).then(readNote).then(function (note) {
       var found = parseDelegations(note), now = Date.now() / 1000;
-      var current = newest(found);
-      return Promise.all(found.map(function (d, i) {
-        // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
-        // so reporting it as merely "expired" would dignify a signature that was never this
-        // key's in the first place.
-        return verifyDelegation(root, d).then(
-          function (ok) {
-            return { d: d, state: !ok ? 'forged'
-                                      : !DIGITS_RE.test(d.expires) ? 'expired'
-                                      : Number(d.expires) <= now ? 'expired'
-                                      : current[i] ? 'live' : 'superseded' };
-          },
-          function () { return { d: d, state: 'forged' }; }
-        );
-      }));
+      // Verify all records first, so newest() ranks only records that actually
+      // verify. Without this, a forged record with a high nonce in a world-writable
+      // note suppresses a real grant as superseded.
+      return Promise.all(found.map(function (d) {
+        return verifyDelegation(root, d).then(function (ok) { return ok; }, function () { return false; });
+      })).then(function (verified) {
+        var verifiedRecords = found.filter(function (_, i) { return verified[i]; });
+        var current = newest(verifiedRecords);
+        // current is a set of indices into verifiedRecords; map back to found indices.
+        var currentInFound = {};
+        var vi = 0;
+        found.forEach(function (d, i) {
+          if (verified[i]) {
+            if (current[vi]) currentInFound[i] = true;
+            vi++;
+          }
+        });
+        return Promise.all(found.map(function (d, i) {
+          // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
+          // so reporting it as merely "expired" would dignify a signature that was never this
+          // key's in the first place.
+          return verifyDelegation(root, d).then(
+            function (ok) {
+              return { d: d, state: !ok ? 'forged'
+                                        : !DIGITS_RE.test(d.expires) ? 'expired'
+                                        : Number(d.expires) <= now ? 'expired'
+                                        : currentInFound[i] ? 'live' : 'superseded' };
+            },
+            function () { return { d: d, state: 'forged' }; }
+          );
+        }));
+      });
     }).then(renderDelegations, function (e) {
       renderDelegations([]);
       fail('could not read delegations — ' + String(e.message || e));
