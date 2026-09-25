@@ -442,6 +442,37 @@ def ownable(name: str) -> bool:
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
 
+# Additional codepoints that render as nothing but live outside the swept categories.
+# Building and maintaining this set is accepted deliberately over adding whole Unicode
+# categories (Mn, Lo, So) that also contain visible characters — combining marks that
+# attach to a base render fine, and most "other" symbols are visible.
+# Each entry is a (start, end) inclusive range of codepoints that render as nothing
+# when written alone (or in any combination with each other).
+_INVISIBLE_CODEPOINTS: tuple[tuple[int, int], ...] = (
+    (0x115F, 0x1160),   # HANGUL FILLERs — occupy a slot in Korean text, render blank
+    (0x180B, 0x180D),   # MONGOLIAN FREE VARIATION SELECTORs — invisible on their own
+    (0x2800, 0x2800),   # BRAILLE PATTERN BLANK — all 8 dots clear, prints nothing
+    (0x3164, 0x3164),   # HANGUL FILLER — same class as 0x115F, different block
+    (0xFE00, 0xFE0F),   # VARIATION SELECTORs — change preceding glyph, invisible alone
+)
+
+
+def _renders_as_nothing(c: str) -> bool:
+    """True when `c` renders as nothing even though its category is not invisible.
+
+    Combining marks (unicodedata.combining(c) > 0) need a base character to attach to;
+    standing alone they produce no glyph.  The range-based set above catches the remaining
+    invisible codepoints whose category (Mn with combining=0, Lo, So) includes visible
+    characters — see _INVISIBLE_CODEPOINTS.
+    """
+    if unicodedata.combining(c) > 0:
+        return True
+    cp = ord(c)
+    for lo, hi in _INVISIBLE_CODEPOINTS:
+        if lo <= cp <= hi:
+            return True
+    return False
+
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
@@ -455,10 +486,12 @@ def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
     text = "".join(
         " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
     ).strip()
-    if not text:
+    if not text or all(_renders_as_nothing(c) for c in text):
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
         # characters would otherwise re-send the same bytes and get the same refusal.
+        # The `_renders_as_nothing` check extends the same guarantee to combining marks
+        # and other non-swept codepoints that produce no visible glyph.
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
             "replaces every control, format and line-separator character (newline, "
