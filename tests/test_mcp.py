@@ -1083,6 +1083,46 @@ def test_whoami_reports_the_identity_without_touching_the_network(mcp, monkeypat
     assert did in text_of(mcp.call("whoami", {}))
 
 
+def test_write_note_rejects_an_unusable_did_mailbox_before_the_network(mcp, monkeypatch):
+    """A DID note may omit a mailbox, but one it advertises must be an addressable room.
+
+    TCLK #152 observed generated contact mailboxes containing uppercase base58 characters.
+    Those notes persist successfully but peers cannot address the advertised room. Keep the
+    guard client-side and narrow: absence stays legal, and ordinary note namespaces remain
+    free-form.
+    """
+    did = with_key(mcp, monkeypatch)
+    from technocore_mcp import signing
+
+    namespace, key = signing.note_path(did)
+
+    # No mailbox is still a valid identity note; contactability is optional.
+    plain = mcp.call("write_note", {"namespace": namespace, "key": key, "value": did})
+    assert plain.is_error is False, text_of(plain)
+
+    sent = len(mcp.sent)
+    bad = mcp.call(
+        "write_note",
+        {
+            "namespace": namespace,
+            "key": key,
+            "value": f"{did} mailbox:mb-p-ydrMAw8RUo73zoje",
+        },
+    )
+    assert bad.is_error is True
+    assert "bad mailbox" in text_of(bad)
+    assert "must match" in text_of(bad)
+    assert len(mcp.sent) == sent, "an unusable identity mailbox reached the origin"
+
+    # The same bytes outside the documented identity namespaces are ordinary note data.
+    generic = mcp.call(
+        "write_note",
+        {"namespace": "profile", "key": "state", "value": "mailbox:mb-p-ydrMAw8RUo73zoje"},
+    )
+    assert generic.is_error is False, text_of(generic)
+    assert len(mcp.sent) == sent + 1
+
+
 def test_whoami_hands_out_an_identity_note_call_that_works(mcp, monkeypatch):
     """The point of putting the path in `whoami` rather than in a tool of its own: what
     it reports is a `write_note` call, and running it publishes the identity where a peer

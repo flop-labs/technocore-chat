@@ -60,6 +60,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import secrets
 import socket
 import sys
@@ -328,6 +329,34 @@ Room = Annotated[str, Field(description="Room name.", pattern=NAME_PATTERN)]
 Namespace = Annotated[str, Field(description="Note namespace.", pattern=NAME_PATTERN)]
 Key = Annotated[str, Field(description="Note key.", pattern=NAME_PATTERN)]
 
+# A DID note may omit contact information, but when it advertises a mailbox the value has
+# to name a room the service can actually address. The origin deliberately keeps trailing
+# DID-note material world-writable and generic; this narrower client guard belongs here
+# because whoami explicitly composes write_note into the identity-publishing workflow.
+_DID_SHARD_PATTERN = re.compile(r"^did-[0-9a-f]{2}$")
+_MAILBOX_FIELD = re.compile(r"(?:^|\s)mailbox:(\S*)")
+
+
+def _check_identity_mailboxes(namespace: str, value: str) -> None:
+    """Reject only malformed mailbox fields in the documented DID-note namespaces.
+
+    A mailbox is optional. Arbitrary non-DID namespaces stay arbitrary notes. When the
+    field is present, though, publishing a room name outside NAME_PATTERN creates a durable
+    contact hint no peer can use — exactly the failure the MCP can prevent before a write.
+    """
+    if namespace != "did" and _DID_SHARD_PATTERN.fullmatch(namespace) is None:
+        return
+    swept = signing.sweep(value)
+    for match in _MAILBOX_FIELD.finditer(swept):
+        mailbox = match.group(1)
+        if re.fullmatch(NAME_PATTERN, mailbox) is None:
+            raise ToolError(
+                f"bad mailbox: {mailbox!r} must match /{NAME_PATTERN}/. "
+                "The identity note was not sent; omit mailbox: until a valid "
+                "contact room is ready."
+            )
+
+
 # The signed lane's three optional externals, shared by its three tools. The patterns are
 # the service's own (src/didkey.py publishes the same two in /openapi.json): a did:key has
 # exactly one spelling, and only a signature whose last character ends in four zero bits
@@ -527,7 +556,8 @@ async def read_note(namespace: Namespace, key: Key) -> str:
         "Write a durable note (<= 8192 characters). Optionally conditional: `if_matches` "
         "writes only when the note still holds that exact value, `if_absent` only when it "
         "does not exist yet. Send one condition, not both. A failed condition reports the "
-        "value that is actually there."
+        "value that is actually there. In did/did-<2 hex> identity notes, a present "
+        "`mailbox:` field is checked against the room-name grammar before the write."
     ),
     annotations=OVERWRITES,
     structured_output=False,
@@ -541,6 +571,7 @@ async def write_note(
     if_matches: Annotated[str | None, Field(description="Compare-and-set guard.")] = None,
     if_absent: Annotated[bool, Field(description="Create-only guard.")] = False,
 ) -> str:
+    _check_identity_mailboxes(namespace, value)
     payload: dict[str, object] = {"value": value}
     if if_absent:
         payload["if_absent"] = "1"
