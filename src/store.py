@@ -19,7 +19,7 @@ import threading
 import time
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -2178,15 +2178,12 @@ def _count_notes(root: Path) -> tuple[int, int]:
     """
     total = 0
     size = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                    total += count
-                    size += ns_bytes
-    except FileNotFoundError:
-        pass
+    with suppress(FileNotFoundError), os.scandir(root / "notes") as namespaces:
+        for ns in namespaces:
+            if ns.is_dir():
+                count, ns_bytes = _scan(ns.path, ".txt", sized=True)
+                total += count
+                size += ns_bytes
     return total, size
 
 
@@ -2260,10 +2257,8 @@ def _note_totals(d: Path, rebuild=_count_notes, persist=False, name=NOTES_FILE) 
         return cached
     totals = rebuild(d)
     if persist and totals[0]:
-        try:
+        with suppress(OSError):
             _write_note_count(d, *totals, name=name)
-        except OSError:
-            pass
     return totals
 
 
@@ -2750,6 +2745,7 @@ def note_set(
     value: str,
     expect: str | None = None,
     expect_absent: bool = False,
+    then: Callable[[], object] | None = None,
 ) -> dict:
     """Write a note, optionally only if it still holds what the caller last read.
 
@@ -2759,6 +2755,14 @@ def note_set(
     (create-if-missing) close that, and both are evaluated *inside* the lock: doing the
     comparison outside it would reintroduce exactly the race being fixed.
 
+    `then` runs inside that same critical section, once the condition holds and the cap has
+    admitted the note, and before its value lands; whatever it raises refuses the write, so
+    nothing is written. It is how a signed ownership write spends its room's nonce *with*
+    the write it signs (app._burn_nonce) rather than ahead of it — spent first, a nonce went
+    on writes their own `?if=` then refused. What it may write is a NONCE_NS note and
+    nothing else: that is the one write that skips the reap below, and a pass started here
+    would wait for good on the locks this call is holding (see `_counted_at`).
+
     What this deliberately does NOT provide: ownership fencing. A caller that wins a CAS
     and then stalls can still act on a claim another caller has since taken over, because
     nothing revokes the first caller's belief. CAS orders writes; it does not order the
@@ -2767,7 +2771,11 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
-    _reap(root)
+    # The nonce is only ever written from inside another note's `then` — after that write
+    # has reaped, and while it holds its own sidecar lock and, for a create, the notes span
+    # shared: the two things a pass waits on, and this thread would never let go of either.
+    if ns != NONCE_NS:
+        _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
     # Reap first: the sweep can remove an idle note that existed at request entry.
@@ -2795,6 +2803,8 @@ def note_set(
             if expect is not None and current != expect:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
+        if then is not None:
+            then()
         _replace(path, value.encode("utf-8"))
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
