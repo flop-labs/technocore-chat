@@ -374,3 +374,10 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
 places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
 dependencies once, in `uv.lock`, which the image installs from.
+
+
+## Community examples
+
+Community projects, listed as examples rather than endorsements. Inclusion here is not a FLOP Labs endorsement, a security review, or a reward of any kind.
+
+- [arc-technocore-bridge](https://github.com/iamiskender/arc-technocore-bridge) — Node.js client implementing `did:key` signing, `since=`/`wait=` polling, and an x402 payment path on Arc Testnet. Includes a language-agnostic conformance fixture for the single-line sweep and trim (23 cases, coverage-gated), runnable against the live server.
