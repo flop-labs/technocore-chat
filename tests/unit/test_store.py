@@ -951,6 +951,33 @@ def test_ownership_guards_do_not_expire_out_from_under_a_live_room(tmp_path):
         assert store.note_get(tmp_path, ns, "d-live") is None, ns
 
 
+def test_a_nonce_written_inside_then_never_waits_on_the_write_around_it(tmp_path, monkeypatch):
+    """A signed claim spends its nonce from `then`, inside the owner note's critical section:
+    for a first claim that is the note's own lock and the notes span, held shared. A reap
+    pass started from the nonce write would wait on both for good — `_counted_at` takes the
+    span exclusively — so the nonce is the one write that does not reap. With every write
+    reaping, a nonce write that forgot would never return; it runs on a daemon thread so
+    that failing is a failed assertion rather than a hung suite."""
+    import store
+
+    monkeypatch.setattr(store, "REAP_EVERY", 0)  # every write runs a pass
+    did = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+    done = []
+
+    def spend():
+        store.note_set(tmp_path, store.NONCE_NS, "d-new", "1", expect_absent=True)
+
+    def claim():
+        done.append(store.note_set(tmp_path, store.OWNERS_NS, "d-new", did, then=spend))
+
+    worker = threading.Thread(target=claim, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    assert done, "the claim never returned: its nonce write reaped under the claim's own locks"
+    assert store.note_get(tmp_path, store.NONCE_NS, "d-new") == "1"
+    assert store.note_get(tmp_path, store.OWNERS_NS, "d-new") == did
+
+
 def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monkeypatch):
     import store
 

@@ -67,6 +67,10 @@ SAFE_TEXT = st.builds(
 )
 
 
+class _RefusedError(Exception):
+    """What a `then` raises to refuse the write it runs inside."""
+
+
 def _shift_records(path: Path, seconds: int) -> None:
     """Rewrite a room file with every `ts` moved `seconds` into the past."""
     lines = []
@@ -363,6 +367,46 @@ class StoreLifecycle(RuleBasedStateMachine):
             assert lost.current == existed
         else:
             assert existed is None, f"create-if-absent won against an existing {existed!r}"
+            self.notes[key] = value
+            self.note_age[key] = 0
+        self._resync()
+
+    @rule(
+        key=st.sampled_from(NOTES),
+        value=SAFE_TEXT,
+        absent=st.booleans(),
+        use_current=st.booleans(),
+        refuse=st.booleans(),
+    )
+    def then_runs_only_for_a_write_that_lands(
+        self, key: tuple[str, str], value: str, absent: bool, use_current: bool, refuse: bool
+    ) -> None:
+        """`then` is where a signed ownership write spends its nonce, so a write its own
+        condition refuses must never reach it, a write that wins must reach it exactly once
+        and before the value lands, and a `then` that raises must leave the note as it was
+        (which `notes_hold_what_was_written` checks the moment this returns)."""
+        self._reap_model()
+        current = self.notes.get(key)
+        expect = current if (use_current and current is not None) else f"stale-{value}"
+        condition = "if_absent" if absent else f"if={expect!r}"  # for the messages below
+        wins = current is None if absent else expect == current
+        seen: list[str | None] = []
+
+        def then() -> None:
+            seen.append(store.note_get(self.root, *key))
+            if refuse:
+                raise _RefusedError
+
+        try:
+            store.note_set(self.root, *key, value, None if absent else expect, absent, then=then)
+        except store.StoreConflictError:
+            assert not wins, f"{condition} was refused although it held against {current!r}"
+            assert not seen, f"then ran for a write {condition} refused"
+        except _RefusedError:
+            assert wins and seen == [current], f"then saw {seen}, the note held {current!r}"
+        else:
+            assert wins and not refuse, f"{condition} landed against {current!r}"
+            assert seen == [current], f"then saw {seen} rather than the value before the write"
             self.notes[key] = value
             self.note_age[key] = 0
         self._resync()
