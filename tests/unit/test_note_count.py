@@ -303,9 +303,12 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
 
     on_disk, _ = store._count_notes(root)
     assert on_disk == accepted, "every accepted write must be a note that exists"
-    assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
+    counted = store._note_count(root)
+    assert on_disk == cap, (
+        f"cap is {cap}, store holds {on_disk}, accepted {accepted}, count file {counted}"
+    )
     # …and the file agrees with the disk, or the next process starts from a wrong number.
-    assert store._note_count(root) == cap
+    assert counted == cap
 
 
 def test_a_pass_that_overlaps_creates_counts_high_never_low_and_the_next_one_is_exact(
