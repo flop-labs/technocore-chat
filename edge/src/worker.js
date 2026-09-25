@@ -139,12 +139,13 @@ async function stored(request, env, pathname, { fallback }) {
 
 async function edgeCached(request, pathname, seconds) {
   const cache = caches.default;
-  const hit = await cache.match(request);
+  const key = cacheKey(new URL(request.url), pathname) ?? request;
+  const hit = await cache.match(key);
   if (hit) return hit;
 
   let fresh;
   try {
-    fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
+    fresh = await fetch(key, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
   } catch (err) {
     // An origin that will not answer inside the budget IS the health answer, so report it
     // here rather than letting the timeout escape to the fail-open handler. That handler
@@ -169,7 +170,7 @@ async function edgeCached(request, pathname, seconds) {
     // proxy reuse `ok` without contacting the edge at all — liveness staleness outside
     // Cloudflare's control, and beyond the reach of a purge.
     headers.set("Cache-Control", `public, max-age=0, s-maxage=${seconds}`);
-    await cache.put(request, new Response(body, { status: 200, headers }));
+    await cache.put(key, new Response(body, { status: 200, headers }));
     return new Response(body, { status: 200, headers });
   }
   return fresh;
