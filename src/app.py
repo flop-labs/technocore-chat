@@ -283,8 +283,14 @@ def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) ->
     `valid_name` as a nick and came back quoting the shared `<room>`/`<nick>`/`<ns>`/
     `<key>` rule (#373). Either way the caller was told a parameter it had got right was
     the wrong one, which is the failure the doctrine's last clause names.
+
+    `text` and `value` are the free-form fields each POST body must carry. Absent, they
+    also became `""`, and `clean_text` then refused them as swept to nothing: a diagnosis
+    of characters the caller never sent, whose correction ("send at least one visible
+    character") is aimed at a different mistake. The credentials keep the `""`
+    default on purpose: absent is their ordinary state, and it means "unsigned".
     """
-    value = source.get(name, None if is_name else "")
+    value = source.get(name, None if is_name or name in ("text", "value") else "")
     if not isinstance(value, str):
         raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
     if is_name and not store.NAME_RE.fullmatch(value):
