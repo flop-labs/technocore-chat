@@ -1205,7 +1205,7 @@ async def _worker_answer(authorization, token="s3cret-token-value", key="a" * 64
     module = _worker_module()
     module._technocore = lambda: types.SimpleNamespace(
         configure=lambda **kwargs: None,
-        use_fetch=lambda fetch: None,
+        use_fetch=lambda *fetchers: None,
         streamable_http_app=lambda: None,
     )
     entry = module.Default.__new__(module.Default)
@@ -1249,8 +1249,8 @@ def test_a_whitespace_only_token_fails_closed_rather_than_admitting_everyone():
     only at the comparison left a whitespace-only `TECHNOCORE_MCP_TOKEN` truthy at the
     guard and empty at the compare, so `Authorization: Bearer ` — and an absent header —
     stripped to the same `b""` and matched: the signing endpoint admitted a caller with no
-    credential material. Reported by @yukkie3276 on this PR. Normalising once sends that
-    configuration to the 503 this gate already had for a key with no token.
+    credential material. Reported by @yukkie3276 on this PR. Normalising once, and
+    refusing a blank secret outright, sends that configuration to a 503.
     """
     with anyio.from_thread.start_blocking_portal() as portal:
         for stored in ("   ", " ", "\t", "\n"):
@@ -1262,6 +1262,23 @@ def test_a_whitespace_only_token_fails_closed_rather_than_admitting_everyone():
                     f"ADMITTED with no credential: stored={stored!r} header={header!r}"
                 )
                 assert answer.status == 503, (stored, header, answer.status)
+
+
+def test_a_blank_token_without_a_signing_key_is_refused_not_served():
+    """A blank secret is a misconfiguration, whether or not a signing key is set. Before
+    this change a whitespace-only `TECHNOCORE_MCP_TOKEN` stayed truthy and matched no
+    caller, so a keyless deployment refused everyone. Normalising it to empty must not
+    quietly read it as unset and serve the endpoint openly: that would turn a
+    configuration that was closed into one that is open."""
+    with anyio.from_thread.start_blocking_portal() as portal:
+        for stored in ("   ", "\t", "\n"):
+            for header in ("Bearer ", "", None, "Bearer s3cret-token-value"):
+                answer = portal.call(_worker_answer, header, stored, None)
+                assert answer != "SERVED", f"SERVED with blank token {stored!r}"
+                assert answer.status == 503, (stored, header, answer.status)
+        # Unset and empty stay what they were: no token means no gate without a key.
+        for unset in (None, ""):
+            assert portal.call(_worker_answer, None, unset, None) == "SERVED"
 
 
 def test_the_worker_refuses_a_bare_token_with_no_scheme():
@@ -1786,7 +1803,8 @@ def test_the_worker_token_check_answers_a_non_ascii_header_rather_than_crashing(
     # once at the top of `fetch` now (see the whitespace-only-token regression), so it
     # arrives here already trimmed rather than being trimmed in place.
     assert "compare_digest(presented.strip().encode(), token.encode())" in source
-    assert 'str(getattr(self.env, "TECHNOCORE_MCP_TOKEN", None) or "").strip()' in source
+    assert 'raw_token = str(getattr(self.env, "TECHNOCORE_MCP_TOKEN", None) or "")' in source
+    assert "token = raw_token.strip()" in source
     # And the property that motivates it, asserted against the stdlib rather than assumed.
     with pytest.raises(TypeError):
         hmac.compare_digest("café", "cafe")

@@ -209,10 +209,21 @@ class Default(WorkerEntrypoint):
         # expected credential had become b"", which `Authorization: Bearer ` — and an
         # absent header — also strip to, so `compare_digest` matched and the signing
         # endpoint admitted a caller carrying no credential material at all. Reported by
-        # @yukkie3276 in review on this PR. A whitespace-only secret now normalises to
-        # empty and takes the 503 below, which is the fail-closed answer this gate
-        # already had for a key with no token.
-        token = str(getattr(self.env, "TECHNOCORE_MCP_TOKEN", None) or "").strip()
+        # @yukkie3276 in review on this PR.
+        #
+        # A secret that is set but blank is refused with its own 503, key or no key.
+        # Whoever set it meant this endpoint to be gated, and before this change such a
+        # secret stayed truthy and matched no caller, so the deployment refused everyone.
+        # Reading blank as unset would serve it openly instead: that turns a
+        # configuration that was closed into one that is open.
+        raw_token = str(getattr(self.env, "TECHNOCORE_MCP_TOKEN", None) or "")
+        token = raw_token.strip()
+        if raw_token and not token:
+            return Response(
+                "503 TECHNOCORE_MCP_TOKEN is set but blank. Set a real token with "
+                "`wrangler secret put TECHNOCORE_MCP_TOKEN`, or delete the secret.",
+                status=503,
+            )
         if key and not token:
             return Response(
                 "503 TECHNOCORE_SIGNING_KEY is set but TECHNOCORE_MCP_TOKEN is not. A "
