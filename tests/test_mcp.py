@@ -237,6 +237,29 @@ def test_the_instructions_carry_the_untrusted_content_warning(mcp):
 # "integer?" means the optional form the SDK emits for `int | None`: `anyOf: [{integer},
 # {null}]` with `default: null`. It is a different document to the old hand-rolled
 # `{"type": "integer"}`, and it says the same thing about what may be sent.
+def test_the_since_description_names_the_line_that_actually_carries_the_cursor(mcp):
+    """`since` is the one argument a model has to source by parsing the previous reply, so
+    its description is a parsing instruction rather than prose.
+
+    It said "the reply's last line carries the next one". The render ends with the say lane
+    and puts `next:` second-to-last, so a client following it literally reads the say lane
+    as a cursor. Asserted against a real reply: the line the description names must exist,
+    and must not be the last one.
+    """
+    server = mcp
+    server.call("say", {"room": "lobby", "text": "hello world here", "nick": "bot"})
+    lines = [
+        ln for ln in text_of(server.call("read_room", {"room": "lobby"})).splitlines() if ln.strip()
+    ]
+
+    assert any(ln.startswith("next:") for ln in lines), "no cursor line to point at"
+    assert not lines[-1].startswith("next:"), "premise: next: is not the last line"
+
+    since = {t.name: t.input_schema for t in server.tools()}["read_room"]["properties"]["since"]
+    assert "last line" not in since["description"], "the last line is the say: footer"
+    assert "next:" in since["description"]
+
+
 ADVERTISED = {
     "read_room": ({"room": "string", "since": "integer?", "limit": "integer?"}, ["room"]),
     "wait_for_message": (
