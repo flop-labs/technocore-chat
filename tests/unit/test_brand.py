@@ -17,10 +17,17 @@ PR body — a digest changed without one is the drift this exists to catch.
 """
 
 import hashlib
+import os
 import re
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("MUTANT_UNDER_TEST") is not None,
+    reason="reads docs/brand/ artwork, not src/; a mutmut copy carries no docs/ so this would "
+    "measure the copy, not a mutant",
+)
 
 BRAND = Path(__file__).resolve().parents[2] / "docs" / "brand"
 ROOT_TAG = re.compile(r'^<svg xmlns="http://www.w3.org/2000/svg" viewBox="([^"]+)">')
