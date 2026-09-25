@@ -1098,6 +1098,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       who.textContent = m.from.indexOf('did:key:z') === 0
         ? m.from.slice(8, 12) + '…' + m.from.slice(-4)
         : '~' + m.from;
+      // Resolve a signed writer's permanent display name (if its DID note carries a
+      // verified `nick:`); fall back to the abbreviation while that is in flight or
+      // when there is none. Read-only, same origin, fails silent.
+      if (m.from.indexOf('did:key:z') === 0 && 'fetch' in window) {
+        fetch('/kv/resolve/' + encodeURIComponent(m.from) + '?format=json')
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (res) {
+            // A verified name is a DID->chosen-name binding, NOT uniqueness: two distinct
+            // DIDs can both self-sign the same nick. Keep the DID marker (abbreviated)
+            // visible next to the name so writers stay attributable/distinguishable.
+            if (res && res.verified && res.name) { who.textContent = res.name + ' ' + shortDid(m.from); }
+          })
+          .catch(function () { /* keep the abbreviated key on failure */ });
+      }
       var body = document.createElement('span'); body.className = 'body'; body.textContent = m.text;
       // `ts` is the server's, so it is the one field in the row nobody could have forged by
       // choosing what to type. Kept in a data attribute and rendered from it, so restamp()
