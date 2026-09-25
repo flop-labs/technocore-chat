@@ -198,11 +198,26 @@ def test_invisible_characters_cannot_smuggle_instructions(client):
         "paragraph separator": "a\u2029b",
     }
     for label, value in hostile.items():
-        assert store.clean_text(value) == "a b", label
+        if label == "zero-width joiner":
+            # ZWNJ/ZWJ are kept rather than swept (they carry meaning in connected scripts)
+            expected = value  # preserved
+        else:
+            expected = "a b"
+        assert store.clean_text(value) == expected, label
 
     client.post("/r/lobby", json={"from": "mallory", "text": "hello" + tag})
     stored = client.get("/r/lobby?format=json").json()["messages"][0]["text"]
     assert stored == "hello" and all(ord(c) < 0x80 for c in stored)
+
+
+def test_clean_text_refuses_joiner_only_content(client):
+    """ZWNJ/ZWJ are preserved in context, but a payload of nothing but joiners
+    is still refused — they carry meaning only beside visible characters."""
+    import store as _store
+
+    for payload in ["\u200c", "\u200d", "\u200c\u200d", " \u200c ", "\u200d \u200c"]:
+        with pytest.raises(_store.StoreError, match="empty text"):
+            _store.clean_text(payload)
 
 
 def test_a_unicode_line_separator_cannot_split_a_stored_record(client):

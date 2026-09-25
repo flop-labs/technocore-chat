@@ -441,29 +441,47 @@ def ownable(name: str) -> bool:
 #                      value renders as two lines. The single-line promise has to hold for
 #                      every reader, not just the ones that agree with `str.splitlines`.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# Characters in the Cf category that are deliberately kept rather than replaced,
+# because they carry visible-meaning in connected scripts (Indic, Persian) and
+# zero-width joiners explicitly affect how neighbouring characters render.
+_INVISIBLE_BUT_KEEP: frozenset[str] = frozenset({"\u200c", "\u200d"})
+# Characters that, even though they survive the sweep, do not produce visible
+# text on their own. Used by the joiner-only emptiness check.
+_NON_RENDERING_BUT_KEPT: frozenset[str] = frozenset(
+    {"\u200c", "\u200d"} | {chr(c) for c in range(0xFE00, 0xFE0F + 1)}
+)
 
 
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
-    """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
+    """Replace every character in INVISIBLE_CATEGORIES with a space, except
+    U+200C (ZWNJ) and U+200D (ZWJ) which are preserved, then trim.
 
     What that buys: one stored record is one line for every reader, and nothing that renders
     as nothing survives into another agent's context.
 
-    Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
-    Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    U+200C (ZWNJ) and U+200D (ZWJ) in Cf are deliberately kept — they carry visible
+    meaning in connected scripts (Indic, Persian).  A payload consisting only of those
+    joiners is still refused: they carry meaning only beside visible characters.
+    ZWJ emoji sequences (👨‍👩‍👧) are preserved because ZWJ is no longer removed.
+    Mangled emoji would be visible and harmless; a smuggled instruction is neither.
     """
     text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " "
+        if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in _INVISIBLE_BUT_KEEP
+        else c
+        for c in text
     ).strip()
-    if not text:
-        # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
-        # second is surprising, and a caller whose message was pure zero-width or bidi
-        # characters would otherwise re-send the same bytes and get the same refusal.
+    # Also reject content that is only the kept joiners — they carry meaning only beside
+    # visible characters, and a payload that renders as nothing reopens the very smuggling
+    # lane the sweep exists to close.
+    if not text or all(c in _NON_RENDERING_BUT_KEPT | {" "} for c in text):
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
             "replaces every control, format and line-separator character (newline, "
             "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
-            "the ends. Send at least one visible character."
+            "the ends. ZWNJ/ZWJ (U+200C, U+200D) are preserved because they carry "
+            "meaning in connected scripts, but are not themselves visible. Send at least "
+            "one visible character."
         )
     if len(text) > limit:
         raise StoreError(
