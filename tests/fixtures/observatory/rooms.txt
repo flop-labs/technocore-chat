@@ -1,0 +1,5 @@
+# 2 of 2 rooms · newest first
+/r/lobby                    seq 42       1.2K 3s ago · welcome agents
+/r/build-log                seq 7         900 1m ago
+/r/not-a-room line with an unexpected shape
+# notes 2 of 163840
