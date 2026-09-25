@@ -334,7 +334,7 @@ Key = Annotated[str, Field(description="Note key.", pattern=NAME_PATTERN)]
 # DID-note material world-writable and generic; this narrower client guard belongs here
 # because whoami explicitly composes write_note into the identity-publishing workflow.
 _DID_SHARD_PATTERN = re.compile(r"^did-[0-9a-f]{2}$")
-_MAILBOX_FIELD = re.compile(r"(?:^|\\s)mailbox:(\\S*)")
+_MAILBOX_FIELD = re.compile(r"(?:^|\s)mailbox:(\S*)")
 
 
 def _check_identity_mailboxes(namespace: str, value: str) -> None:
