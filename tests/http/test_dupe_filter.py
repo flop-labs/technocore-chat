@@ -167,6 +167,7 @@ def test_zero_is_the_opt_out_and_costs_the_old_behaviour_exactly(client) -> None
             assert _say(client, "lobby", "nick" + str(i), PHRASE).status_code == 200
     assert len(_view(client)) == 10
     assert not limit._dupes, "an off filter must not record anything"
+    assert not limit._rings, "and the window's 0 turns the share cap's ring off with it"
 
 
 def test_the_signed_lane_refuses_cross_sender_duplicates(client) -> None:
@@ -360,15 +361,17 @@ def test_a_non_finite_window_refuses_to_boot(raw: str) -> None:
 
 
 def test_a_write_the_store_refuses_never_spends_a_copy(client) -> None:
-    """The copy is reserved BEFORE the append - that is what makes the check and the
-    record one step - and the append has refusals of its own: an invalid nick, a stale
-    nonce, a text past the character cap, a full rooms directory. Those must not spend
-    the room's window on a text nothing stored, or COPIES malformed requests would leave
-    the next well-formed caller a 422 for copies that do not exist."""
+    """A write the store refuses must not spend the room's window on a text nothing stored,
+    or COPIES malformed requests would leave the next well-formed caller a 422 for copies
+    that do not exist. The reservation now happens INSIDE the append, keyed by the generation
+    the write settles on (#734); the store's own refusals - an invalid nick, a stale nonce, a
+    full rooms directory - are checked BEFORE it, so they never reserve, and a failure AFTER
+    it hands the slot back (test_a_store_failure_after_the_reservation_hands_the_slot_back).
+
+    Drives the pre-reservation half: an uppercase nick store.valid_name rejects at the top of
+    the write, well before the room lock the reservation is taken under."""
     with _filter_on():
         for _ in range(COPIES + 3):
-            # Uppercase, which store.valid_name refuses - a 400 raised INSIDE the
-            # append, after the slot for this text was already reserved.
             assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
         assert _say(client, "lobby", "nick", PHRASE).status_code == 200
     assert _view(client) == [PHRASE], "eight refused writes, one that landed"
@@ -495,3 +498,390 @@ def test_one_text_takes_one_slot_however_many_lanes_it_arrives_on(client) -> Non
     assert set(_view(client)) == {"one more copy of this sentence than allowed is refused, swept"}
     # The lanes that got in are not all one lane, or the rotation proved nothing.
     assert len({name for name, _ in accepted}) > 1, "the rotation did not actually rotate"
+
+
+def test_a_fixed_interval_repeater_is_capped_by_its_share_of_the_room(client, monkeypatch) -> None:
+    """The window's blind spot, at the numbers it was measured at (issue #697).
+
+    One signed key posted one 83-character sentence to `mb-jinken` every 137s against a
+    120s window: only 21 of the 67 gaps were inside the window, so the copy count almost
+    never reached the threshold, and 67 of the room's 117 records were that one sentence.
+    `mb-` rooms cannot be owned, so there was no allow-list, mute or delete to fall back
+    on - the window was the only remedy, and a repeater that sleeps past it is the one
+    shape it cannot see.
+
+    The share cap is what refuses it: one text may hold DUPE_SHARE of the room's last
+    DUPE_RING filterable messages, and the copy that would take more than that is refused
+    however long ago the last one landed. The second half is the old behaviour, reached by
+    lifting only the share so the window is the only rule left - every copy lands, which
+    is exactly what the export showed.
+    """
+    clock = {"now": 5000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    did, sign = _keypair(41)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    with _filter_on(DUPE_FILTER_SECONDS=120):
+        for i in range(allowed):
+            r = _say_signed(client, "mb-jinken", did, sign, PHRASE, nonce=i + 1)
+            assert r.status_code == 200, "copy " + str(i + 1) + " refused: " + r.text[:120]
+            clock["now"] += 137.0  # the measured median gap: always outside the window
+        refused = _say_signed(client, "mb-jinken", did, sign, PHRASE, nonce=allowed + 1)
+    assert refused.status_code == 422, "a repeater below the window is still a repeater"
+    assert str(limit.DUPE_RING) in refused.text and f"{limit.DUPE_SHARE:.0%}" in refused.text
+    assert len(_view(client, "mb-jinken")) == allowed
+
+    # Same key, same interval, same room class, share cap lifted out of reach: this is the
+    # filter as it shipped, and it refuses nothing.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 10.0)
+    with _filter_on(DUPE_FILTER_SECONDS=120):
+        for i in range(allowed + 1):
+            assert (
+                _say_signed(client, "mb-other", did, sign, PHRASE, nonce=i + 1).status_code == 200
+            )
+            clock["now"] += 137.0
+    assert len(_view(client, "mb-other")) == allowed + 1
+
+
+def test_the_share_cap_leaves_ordinary_traffic_to_the_window(client, monkeypatch) -> None:
+    """A busy room whose ring is full must behave exactly as it did for a phrase nobody is
+    repeating at scale: the window refuses the sixth copy and hands the phrase back once
+    the window passes. The share cap is live throughout - DUPE_RING distinct messages
+    landed first - and the arithmetic, not an off switch, is what keeps it quiet."""
+    clock = {"now": 9000.0}
+    monkeypatch.setattr("time.monotonic", lambda: clock["now"])
+    with _filter_on():
+        for i in range(limit.DUPE_RING):
+            other = "a distinct message number " + str(i) + " from a real conversation"
+            assert _say(client, "lobby", "n" + str(i), other).status_code == 200
+        for i in range(COPIES):
+            assert _say(client, "lobby", "m" + str(i), PHRASE).status_code == 200
+        assert _say(client, "lobby", "m9", PHRASE).status_code == 422, "the window, as before"
+        clock["now"] += WINDOW + 1
+        assert _say(client, "lobby", "m8", PHRASE).status_code == 200, "and it still expires"
+
+
+def test_a_write_the_store_refuses_never_spends_a_share_slot(client) -> None:
+    """The ring slot is reserved before the append exactly as the window's timestamp is,
+    so it has to be handed back the same way. Without that, a caller sending malformed
+    writes of one phrase would leave a stranger's identical phrase refused against copies
+    nothing ever stored - the leak test_a_write_the_store_refuses_never_spends_a_copy
+    covers for the window, one signal over, and cross-sender for the same reason."""
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    opening = "a first message, so the room exists before the malformed writes arrive"
+    with _filter_on():
+        # The room is created first, deliberately: the write gate charges a room-creation
+        # token per write to a room it cannot see, and that budget is measured in days, so
+        # dozens of failed writes to an absent room meet a 429 long before this assertion.
+        assert _say(client, "lobby", "nick", opening).status_code == 200
+        for _ in range(allowed + 3):
+            # Uppercase, which store.valid_name refuses - a 400 raised INSIDE the append,
+            # after the slot for this text was already reserved.
+            assert _say(client, "lobby", "Nick", PHRASE).status_code == 400
+        assert _say(client, "lobby", "nick", PHRASE).status_code == 200
+    assert _view(client) == [opening, PHRASE]
+    # The ring is keyed by (room, incarnation) now; lobby has had exactly one, so sum its
+    # slots across whatever generation it landed in rather than pinning the number here.
+    held = sum(len(v) for (r, _), v in limit._rings.items() if r == "lobby")
+    assert held == 2, "only the two writes that landed hold slots"
+
+
+def test_a_reaped_and_recreated_room_starts_with_an_empty_share_ring(client, monkeypatch) -> None:
+    """A room the store reaps and a caller later recreates under the same name must start
+    with a clean share ring - the recreated room holds zero copies of any phrase, so its
+    first copy of one is legitimate and must land.
+
+    store._reap deletes the room file and preserves only its seq floor and generation; it
+    never imports limit and cannot touch limit._rings. Before #734 the ring was keyed by
+    BARE room name with no expiry, so the in-memory share count survived the reap and the
+    recreated room inherited it: once that stale count was at the cap, a first, legitimate
+    copy in the new room met a 422 nothing in the new room justified. Reviewers (yukkie3276,
+    luch91) flagged it from the source, not a run. The fix keys the ring by room INCARNATION
+    (store.room_generation), so the recreated room is a different key and the dead one is
+    consulted by nothing. This test drives the REAL reaper end to end.
+    """
+    import store
+
+    root = config.ROOT
+
+    def _ring_of(name):  # the ring entries for a room across whatever generations it has had
+        return {gen: slots for (r, gen), slots in limit._rings.items() if r == name}
+
+    # A share cap of three copies, so the ring fills without spending a whole DUPE_RING and
+    # the whole lifecycle stays inside one window and one budget.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 3 / limit.DUPE_RING)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    assert allowed == 3
+    with _filter_on():
+        for i in range(allowed):
+            assert _say(client, "room-x", "n" + str(i), PHRASE).status_code == 200
+    # The ring now holds `allowed` copies of PHRASE for room-x's first incarnation; one more
+    # would 422 - which is what a fresh room must NOT inherit.
+    old_gen = store.room_generation(root, "room-x")
+    assert _ring_of("room-x") == {old_gen: limit._rings[("room-x", old_gen)]}
+    assert len(limit._rings[("room-x", old_gen)]) == allowed
+
+    # Reap room-x for real: age its file past the idle threshold and run one pass.
+    files = list(root.rglob("room-x.jsonl"))
+    assert files, "room-x was never written to disk"
+    for f in files:
+        _client._age(f, store.IDLE_SECONDS + 60)
+    (root / ".reaped").unlink(missing_ok=True)
+    store._reap(root)
+    assert not list(root.rglob("room-x.jsonl")), "the reaper did not delete room-x"
+    # The reap deleted the room from disk but, as documented, did NOT touch the in-memory
+    # ring - the stale slots are still there. The fix does not depend on clearing them; it
+    # depends on the recreated room keying under a NEW generation, leaving these to LRU.
+    assert len(limit._rings[("room-x", old_gen)]) == allowed, "reap must not touch the ring"
+
+    # Recreate room-x under the same name: a fresh conversation, so the generation bumps.
+    with _filter_on():
+        assert (
+            _say(client, "room-x", "fresh", "a brand new opening line for this room").status_code
+            == 200
+        )
+        new_gen = store.room_generation(root, "room-x")
+        assert new_gen > old_gen, "recreation must bump the generation"
+        # The first copy of PHRASE in the recreated room. Nothing THIS room retains justifies
+        # a refusal - the stale count sits under the dead incarnation, not this one.
+        first_copy = _say(client, "room-x", "someone", PHRASE)
+    assert first_copy.status_code == 200, (
+        "a recreated room refused a first, legitimate copy against a stale share ring the "
+        "reap left behind: " + first_copy.text[:200]
+    )
+    # The new incarnation counts PHRASE from zero (its own slot for this one copy), and the
+    # dead incarnation's slots are untouched, sitting idle until MAX_RING_ROOMS evicts them.
+    assert len(limit._rings[("room-x", new_gen)]) == 2, "the recreated room's own two writes"
+    assert old_gen in _ring_of("room-x"), "the dead incarnation's ring is orphaned, not read"
+
+
+def test_a_reap_between_a_reservation_and_its_write_cannot_orphan_the_slot(
+    client, monkeypatch
+) -> None:
+    """yukkie3276's TOCTOU race (#734, at head 7ee9c4d). The reservation used to read the
+    generation and the room's existence BEFORE store.append took the room lock, so a reap
+    landing in that gap recreated the room at a NEW generation while the slot stayed keyed to
+    the old one: the accepted copy stranded a generation back, counting against nothing, so
+    the room's share cap ran one copy loose.
+
+    The reservation is taken INSIDE the append now, under the room lock the append and the
+    reaper share, keyed by the generation the write settles on - the seam the race needed is
+    gone. Reproduced through the one read that used to make the prediction, app._room_exists:
+    pinned True while the room is actually absent on disk is exactly what a reap in the gap
+    leaves - the room LOOKS present (the old code predicted the old generation) but the write
+    recreates it at generation+1. The lie changes nothing now; store reads the generation
+    itself, under the lock. On the old code the first copy's slot orphaned under generation 0,
+    the cap counted short, and the (allowed+1)th copy wrongly landed.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    # A share cap of three, exactly as the reap/recreate test above, so the ring fills inside
+    # one window and the share rule (not the looser window rule at COPIES) is what binds.
+    monkeypatch.setattr(limit, "DUPE_SHARE", 3 / limit.DUPE_RING)
+    allowed = int(limit.DUPE_SHARE * limit.DUPE_RING)
+    assert allowed == 3
+    # Seen as existing at prediction time while every write recreates it - the reap in the gap.
+    # The room starts absent, so the first write bumps its generation from 0 to 1 under the lock.
+    monkeypatch.setattr(app_module, "_room_exists", lambda room: True)
+    with _filter_on():
+        outcomes = [
+            _say(client, "toctou", "n" + str(i), PHRASE).status_code for i in range(allowed + 1)
+        ]
+    new_gen = store.room_generation(root, "toctou")
+    assert new_gen == 1, "the first write recreated the room at generation 1"
+    # Exactly `allowed` land and the next is refused: the cap binds under the generation the
+    # writes actually live in. The old code stranded one slot a generation back, counted
+    # `allowed - 1`, and let this last copy through with a 200.
+    assert outcomes == [200] * allowed + [422], outcomes
+    assert len(limit._rings[("toctou", new_gen)]) == allowed, "every landed copy in the live ring"
+    assert ("toctou", 0) not in limit._rings, "nothing stranded under the pre-recreation generation"
+
+
+def test_a_store_failure_after_the_reservation_hands_the_slot_back(client, monkeypatch) -> None:
+    """The reservation is taken inside the append now, so a store failure AFTER it - a torn
+    write, a disk error - must hand the slot back, the way the old pre-append reservation
+    released on any append refusal. Otherwise a run of such failures would spend a room's
+    window on a text nothing stored, and the next well-formed caller of that phrase would meet
+    a 422 for copies that never landed.
+
+    Fails at last_seq, the first store read after the reservation and before any byte is
+    written, so nothing lands and only the release path runs. Driven through store.append
+    directly - the failure raises, which the TestClient would re-raise through the HTTP lane.
+
+    Each doomed call here is a create (the room never comes into existence), and the create
+    now advances the generation as its precondition, ahead of the reservation and the append
+    (Minh3132, #734) - so every failure burns one generation before failing. That is the
+    benign skipped-generation the design accepts: monotonic, gapless-not-required, and the
+    reservation still keys on whatever generation is actually durable. So the room settles a
+    few generations on from 0, and the assertions read the live generation rather than assume
+    it, and check nothing stayed reserved under the burned ones.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    real_last_seq = store.last_seq
+
+    def boom(r, room):
+        if room == "boom":
+            raise OSError("injected: the write failed after the slot was reserved")
+        return real_last_seq(r, room)
+
+    monkeypatch.setattr(store, "last_seq", boom)
+    with _filter_on():
+        for _ in range(COPIES + 2):  # more failures than the window would ever allow copies
+            with pytest.raises(OSError):
+                store.append(
+                    root, "boom", "nick", PHRASE, reserve=app_module._reserver("boom", PHRASE)
+                )
+        monkeypatch.undo()
+        # Nothing holds the phrase's window - every reserved slot was handed back - so COPIES
+        # fresh copies land and only the (COPIES+1)th is the refusal the filter is actually for.
+        for i in range(COPIES):
+            assert _say(client, "boom", "n" + str(i), PHRASE).status_code == 200
+        assert _say(client, "boom", "last", PHRASE).status_code == 422
+    gen = store.room_generation(root, "boom")
+    assert len(limit._rings[("boom", gen)]) == COPIES, "the copies that landed, and only those"
+    assert sum(len(s) for (r, _), s in limit._rings.items() if r == "boom") == COPIES, (
+        "nothing stayed reserved under the generations the failed creates burned"
+    )
+
+
+def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monkeypatch) -> None:
+    """The mirror image of the release test above (Minh3132, #734 at head 5ffc86f). A failure
+    BEFORE the record commits hands the slot back; a failure AFTER it must NOT. `_write_record`
+    used to wrap the append and the follow-on `_compact` in one release-covered try, so a
+    compaction I/O error on an over-limit room released a reservation whose record was already
+    flushed to disk - the copy stayed stored but stopped counting against both the window and
+    the ring, and a run of such failures would leak copies past the cap.
+
+    The try now ends at the append's clean exit, and `_compact` runs outside it. So: an
+    existing room (created=False - the realistic over-limit case, and the one that keeps the
+    reservation's generation matching the room's), one copy of PHRASE whose append flushes and
+    then fails in compaction, and a cap of one. The committed copy must hold its slot, so the
+    NEXT identical copy is refused by the window rule. On the old code the release dropped the
+    slot and this second copy wrongly landed while the first sat stored and uncounted.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    with _filter_on(DUPE_MAX_COPIES=1):
+        # Bring the room into existence first, with a different phrase, so the failing append
+        # below is a plain write (created=False) and its reservation keys under the same
+        # generation the room already sits at - not the create path, where the skipped
+        # generation bump would be its own separate concern.
+        opener = "an opening line for this room that is not the phrase under test at all"
+        assert _say(client, "compactboom", "opener", opener).status_code == 200
+        gen = store.room_generation(root, "compactboom")
+
+        # From here every write to this room reports over-limit and compaction raises - the
+        # append lands, then _compact fails.
+        monkeypatch.setattr(store, "_ring_limit", lambda r: 0)
+
+        def boom(path, cutoff=None, keep=0):
+            raise OSError("injected: compaction failed after the record was written")
+
+        monkeypatch.setattr(store, "_compact", boom)
+
+        with pytest.raises(OSError):
+            store.append(
+                root,
+                "compactboom",
+                "nick",
+                PHRASE,
+                reserve=app_module._reserver("compactboom", PHRASE),
+            )
+        # The record committed despite the compaction failure: it is on disk and readable.
+        assert PHRASE in _view(client, "compactboom"), "the flushed record must survive"
+
+        monkeypatch.undo()  # restore real compaction for the follow-on write
+        # The kept reservation means the room already holds its one allowed copy, so a second
+        # identical copy from another sender is the refusal the filter is for. Under the old
+        # release-on-compaction-failure this landed with a 200.
+        second = _say(client, "compactboom", "other", PHRASE)
+    assert second.status_code == 422, (
+        "a copy committed before a compaction failure was not counted, so a second copy leaked "
+        "past the cap: " + second.text[:200]
+    )
+    assert len(limit._rings[("compactboom", gen)]) == 2, (
+        "the opener and the committed PHRASE copy each hold a slot; nothing was released"
+    )
+
+
+def test_a_create_whose_generation_write_fails_commits_nothing(client, monkeypatch) -> None:
+    """Minh3132's fifth #734 finding, at head c0a2d32. The create path used to bump the
+    generation AFTER flushing the record and swallow that write's own failure: the committed
+    record and its reserved slot then sat at generation g+1 while the durable generation
+    stayed g, so every later write keyed under g and never counted the stored copy against the
+    live room's cap - an undercount, and a g+1 the next reap/recreate would collide with.
+
+    The bump is the create's PRECONDITION now, before the reservation and before the append,
+    and it propagates its failure rather than swallowing it. So there is no window: a
+    generation that cannot be persisted commits no record and reserves no slot. This drives
+    the exact failure - the create-path generation write raises - and asserts the room is left
+    as if untouched: no record, no ring slot, generation still 0, room count not moved.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    real_set = store._set_seq_entry
+
+    def boom(r, room, floor=None, *, bump=False):
+        if room == "genboom" and bump:  # the create-path precondition bump, and only it
+            raise OSError("injected: the generation could not be persisted")
+        return real_set(r, room, floor, bump=bump)
+
+    rooms_before = store._count_rooms(root)[0]
+    monkeypatch.setattr(store, "_set_seq_entry", boom)
+    with _filter_on():
+        with pytest.raises(OSError):
+            store.append(
+                root, "genboom", "nick", PHRASE, reserve=app_module._reserver("genboom", PHRASE)
+            )
+    # Nothing committed: no file, no record, generation never advanced off "never existed".
+    assert not store.room_path(root, "genboom").exists(), "a failed create left a room file"
+    assert store.room_generation(root, "genboom") == 0, "the generation advanced despite failing"
+    assert not any(r == "genboom" for r, _ in limit._rings), "a slot was reserved and stranded"
+    assert store._count_rooms(root)[0] == rooms_before, "the room-count reservation leaked"
+
+    # And no poison for the next well-formed create: with the injection gone it bumps to 1,
+    # keys its slot under that live generation, and counts normally.
+    monkeypatch.undo()
+    with _filter_on():
+        assert _say(client, "genboom", "nick", PHRASE).status_code == 200
+    gen = store.room_generation(root, "genboom")
+    assert gen == 1, "the first real create bumps the generation to 1"
+    assert len(limit._rings[("genboom", gen)]) == 1, "the committed copy counts under the live gen"
+
+
+def test_a_created_rooms_first_copy_counts_under_the_generation_it_commits_at(client) -> None:
+    """The positive half of Minh3132's finding: a create's committed copy must count against
+    the room's cap, and it can only do so if the reserved slot's generation and the room's
+    durable generation agree. They now settle together - the bump precedes the commit, so the
+    reservation reads the real durable generation rather than predicting g+1 - so the first,
+    room-creating copy of a phrase holds its slot under the same generation `room_generation`
+    reports, and the very next identical copy is refused by it.
+    """
+    import store
+
+    root = config.ROOT
+    with _filter_on(DUPE_MAX_COPIES=1):
+        # The room-creating write: created=True, so the generation bumps 0 -> 1 as its
+        # precondition and the slot is reserved under that same 1.
+        assert _say(client, "gencount", "opener", PHRASE).status_code == 200
+        gen = store.room_generation(root, "gencount")
+        assert gen == 1, "the creating write settled the room at generation 1"
+        # The reservation and the durable generation agree: the only slot is under (room, 1),
+        # nothing stranded under 0 (the pre-bump value the old prediction would have used) or 2.
+        assert ("gencount", 0) not in limit._rings, "a slot stranded a generation behind"
+        assert len(limit._rings[("gencount", gen)]) == 1, "the created copy counts under gen 1"
+        # So the next identical copy from another sender is the refusal the cap is for - the
+        # committed create was counted, not lost to a generation nothing else keys under.
+        second = _say(client, "gencount", "other", PHRASE)
+    assert second.status_code == 422, (
+        "a created room's first committed copy was not counted, so a second leaked past the "
+        "cap: " + second.text[:200]
+    )
