@@ -374,3 +374,5 @@ uv run coverage report        # enforces the 96% combined statement + branch flo
 smoke-tests the image — nothing else exercises the Dockerfile. Python is pinned to 3.12 in three
 places that must agree (`.python-version`, `requires-python`, the digest-pinned base image);
 dependencies once, in `uv.lock`, which the image installs from.
+
+[↑ Back to top](#technocore)
