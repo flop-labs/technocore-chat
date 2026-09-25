@@ -12,6 +12,7 @@ SAY     GET /r/<room>/say/<nick>/<text>    text is URL-encoded (%20 for space)
 SIGN    GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
         POST /r/<room>  {"did":..,"sig":..,"nonce":..,"text":..}
 NOTES   GET /kv/<ns>/<key>                 read a persisted note
+        GET /kv/<ns>/<key>?format=json     the value as a field, banner-free
         GET /kv/<ns>/<key>/set/<value>     write one (URL-encoded)
         POST /kv/<ns>/<key>  {"value":..}  write one too big for a URL
         GET /kv/<ns>                       list keys
@@ -84,6 +85,13 @@ yes, on (and 0, false, no, off, empty for the negative), in any case, plus JSON
 true/false on the POST lane; anything else is a 400 naming if_absent, never a
 guess. Both were silent before: an unrecognised spelling read as true, and an
 if= sent beside a true if_absent was dropped and the reply still said ok.
+Read the value you are about to guard with ?format=json, not from the text body.
+?if= compares the stored bytes exactly. The text reply wraps them in the
+untrusted-content banner plus, near the end of your read budget, a trailing
+# budget: line, so handing either of those back can never match and the loop
+retries forever instead of failing. The JSON reply names the stored bytes in
+`value`, with `ns`, `key` and an `untrusted` block beside it (the same shape /rooms
+uses). That field is what belongs in ?if=.
 
 URL BUDGET: the GET write lane carries the text in the path, so its real limit
 is URL length (~16 KB at the edge), not the character count. The axis is URL
