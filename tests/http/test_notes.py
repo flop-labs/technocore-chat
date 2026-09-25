@@ -1,5 +1,7 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import threading
+
 import _client
 import pytest
 from _client import (
@@ -10,6 +12,65 @@ from _client import (
 )
 
 client = _client.client  # the shared TestClient fixture
+
+
+def test_ownership_handoff_cannot_interleave_with_a_signed_allow_write(client, monkeypatch):
+    """Ownership authorization and commit are one room-scoped transaction.
+
+    Pause the former owner's allow-list write immediately after its authorization check, then
+    attempt a handoff. The handoff must wait for the first transaction rather than committing
+    between the check and the nonce/write, which would let the former owner mutate the new
+    owner's allow-list after transfer.
+    """
+    import app as app_module
+
+    owner, owner_sign = _keypair(seed=31)
+    recipient, _ = _keypair(seed=32)
+    assert _claim(client, "d-handoff", owner, owner_sign).status_code == 200
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_gate = app_module._note_write_gate
+
+    def paused_gate(ns, key, value, signer):
+        result = original_gate(ns, key, value, signer)
+        if ns == "room-allow" and signer == owner:
+            entered.set()
+            assert release.wait(5), "the paused ownership write never resumed"
+        return result
+
+    monkeypatch.setattr(app_module, "_note_write_gate", paused_gate)
+    stale = {}
+    handoff = {}
+
+    def write_allow():
+        stale["response"] = _client._set_signed(
+            client, "room-allow", "d-handoff", owner, owner_sign, recipient, nonce=10
+        )
+
+    def transfer():
+        handoff["response"] = _client._set_signed(
+            client, "room-owners", "d-handoff", owner, owner_sign, recipient, nonce=3
+        )
+
+    stale_thread = threading.Thread(target=write_allow)
+    stale_thread.start()
+    assert entered.wait(5), "allow-list write did not reach the authorization gate"
+    handoff_thread = threading.Thread(target=transfer)
+    handoff_thread.start()
+    handoff_thread.join(0.2)
+    assert handoff_thread.is_alive(), "handoff interleaved inside the allow-list transaction"
+
+    release.set()
+    stale_thread.join(5)
+    handoff_thread.join(5)
+    assert not stale_thread.is_alive() and not handoff_thread.is_alive()
+    assert stale["response"].status_code == 200
+    # The lower-numbered handoff is correctly serialized after the signed write and rejected
+    # by the shared nonce counter; it cannot become owner while the stale transaction is open.
+    assert handoff["response"].status_code == 403
+    assert client.get("/kv/room-owners/d-handoff").text.find(owner) >= 0
+    assert client.get("/kv/room-allow/d-handoff").text.find(recipient) >= 0
 
 
 def test_notes_roundtrip(client):

@@ -1740,14 +1740,15 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
-        return denied
-    condition = _condition(request.query_params)
-    denied = _burn_nonce(key, nonce)
-    if denied:
-        return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    with store._locked(config.ROOT / f".room-ownership.{key}"):
+        denied = _note_write_gate(ns, key, value, signer)
+        if denied:
+            return denied
+        condition = _condition(request.query_params)
+        denied = _burn_nonce(key, nonce)
+        if denied:
+            return denied
+        meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,
         meta,
@@ -1783,14 +1784,13 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
-        if denied:
-            return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
+        with store._locked(config.ROOT / f".room-ownership.{key}"):
+            denied = _note_write_gate(ns, key, value, signer)
+            if denied:
+                return denied
+            if signer is not None and (burned := _burn_nonce(key, nonce)):
                 return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+            meta = store.note_set(config.ROOT, ns, key, value, *condition)
         return respond(
             request,
             meta,
