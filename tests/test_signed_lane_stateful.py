@@ -7,50 +7,54 @@ reap, note CAS — and never touches a signature. This models the part of the st
 correctness is a *security* property: `_last_nonce`, which decides whether a captured signed
 URL still works.
 
-The contract is deliberately bounded. A signed URL is a bearer token for exactly one message,
-so replaying it must fail while the message is still there to be seen; once the record has aged
-out the replay is accepted again as a fresh message, and `_last_nonce`'s docstring says so. The
-bound is the retention model doing what it says rather than a hole.
+The contract is bounded by the ring. A signed URL is a bearer token for exactly one message,
+so replaying it must fail while the message it wrote is still there to be seen; once the ring
+drops that record the replay is accepted again as a fresh message, and `_last_nonce`'s
+docstring says so. The bound is the retention model doing what it says rather than a hole.
 
-WHY THE BOUND IS SAFE, which is not where it looks
---------------------------------------------------
-"Refused while the original is readable" is not established by anything in `_write_record`. It
-holds because of a coincidence of two default arguments:
+This file was written against a narrower version of that contract, where the guard scanned the
+newest `READ_BUDGET` rather than the whole ring, and four of its tests asserted that narrower
+boundary. They are inverted rather than removed, and the paragraphs below record what moved.
+
+WHY THE BOUND IS WHERE IT IS, which used to be somewhere else
+-------------------------------------------------------------
+"Refused while the original is readable" was not established by anything in `_write_record`. It
+held because of a coincidence of two default arguments:
 
     read_messages    for raw in reverse_lines(f):        <- default max_bytes
     _last_nonce      for raw in reverse_lines(f):        <- default max_bytes
 
-Those are the *only* two call sites in the module that take `reverse_lines`' default budget.
-Every other one names its own and narrower (`last_seq` 64 KiB, the tripwire window 64 KiB) or is
-a write path (`_compact`, MAX_ROOM_BYTES).
+Those were the only two call sites in the module that took `reverse_lines`' default budget, and
+the coincidence was doing load-bearing work nothing recorded. `_last_nonce` now names
+`MAX_ROOM_BYTES` explicitly, so the guard's reach is a decision rather than a shared default,
+and `read_messages` is the only bare call site left. `test_only_the_reader_takes_the_default_
+budget` keeps that grep as a locator.
 
-The property that follows, stated carefully, is an ORDERING and not an equality:
+The property, stated carefully, is an ORDERING and not an equality:
 
     guard depth  >=  visible depth
 
-Today the two are the same 1 MiB, which satisfies it with no slack. But equality is not what
-safety needs, and asserting equality would be asserting the mechanism: the guard is *allowed* to
-reach further back than a reader can see, and in two places it already does — an expired `e-`
-record still guards its nonce, and a MAX_LIMIT tail can run out of records before it runs out of
-budget. Stricter-than-visible costs nothing and hides nothing. Only the reverse is a hole.
+That is what safety needs, and asserting equality would be asserting the mechanism: the guard is
+*allowed* to reach further back than a reader can see, and it does in several places now, since
+an expired `e-` record still guards its nonce, a MAX_LIMIT tail can run out of records before it
+runs out of budget, and the guard reads the whole retained file where a reader stops at
+`READ_BUDGET`. Stricter-than-visible costs nothing and hides nothing. Only the reverse is a hole.
 
-So the thing to hold onto is the direction, not the coincidence. `a_visible_record_is_always_
-still_guarded` asserts it over the whole state machine, and
-`test_the_guard_scans_at_least_as_deep_as_a_reader_can_see` measures both depths directly by
-giving every record its own key. Neither one counts bytes or restates the scan.
+So the thing to hold onto is the direction. `a_visible_record_is_always_still_guarded` asserts it
+over the whole state machine, and `test_the_guard_scans_at_least_as_deep_as_a_reader_can_see`
+measures both depths directly by giving every record its own key, then pins the guard's remaining
+boundary as an equality against physical retention. Neither one counts bytes or restates the scan.
 
-Widen the reader's budget and not the guard's and the ordering is gone.
-`test_narrowing_only_the_guards_budget…` below constructs that state on purpose: a record a
-reader can still see, whose nonce is no longer guarded, so the replay lands as a second visible
-record with the same signature, nonce and text as the first. That is what a "let readers page
-further back" change costs if it touches `read_messages`' budget alone, and it is the state
-these tests exist to keep unreachable. Nothing in the repo records that this is load-bearing,
-which is the gap this file closes.
+Widening the reader's budget past the guard's would still break the ordering, and it is no longer
+reachable by tuning the shared default, because the guard does not take it.
+`test_narrowing_only_the_reader_no_longer_makes_a_visible_message_replayable` asserts that: the
+state it used to construct on purpose, a record a reader can still see whose nonce is no longer
+guarded, cannot be built through `_window` any more. That is what this change buys.
 
-The retention ring is a red herring here, and worth naming because it looks relevant: records
-survive on disk for 5-10 MiB (COMPACT_KEEP_BYTES, MAX_ROOM_BYTES), far past the 1 MiB either
-window reaches. So a room file legitimately holds records no reader can ever retrieve, and
-*disk* contents say nothing about what is guarded.
+The retention ring is now the boundary rather than a red herring. Records survive on disk for
+5-10 MiB (COMPACT_KEEP_BYTES, MAX_ROOM_BYTES), and the guard reads all of it, so *disk* contents
+are exactly what says what is guarded. A room file no longer holds records that are readable to
+the guard but invisible to it.
 
 Three notes on the model:
 
@@ -66,12 +70,14 @@ Three notes on the model:
 - **The window is tuned down, and it takes a patch to do it.** `READ_BUDGET` is bound into
   `reverse_lines`' default argument, so re-binding the module attribute does nothing — see
   `_window`. That is why this file did not exist sooner: the boundary is unreachable in a test
-  without writing a megabyte.
+  without writing a megabyte. It now moves the reader alone, so a test that needs the guard's
+  boundary moves `MAX_ROOM_BYTES` with `monkeypatch.setattr` and lets compaction do the work.
 """
 
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import shutil
 import sys
@@ -151,9 +157,11 @@ def _window(size: int):
     records. A one-line change (`max_bytes: int | None = None`, resolved to `READ_BUDGET` in the
     body) would make this helper unnecessary.
 
-    Note that it moves the budget for `read_messages` and `_last_nonce` *together*, which is
-    exactly the coupling the module docstring describes. Tuning them apart is the failure this
-    file is about, and only one test does it, deliberately.
+    Note that it moves the budget for `read_messages` alone. `_last_nonce` names
+    `MAX_ROOM_BYTES` explicitly, so it is immune to this patch, which is why a test that needs
+    the guard's own boundary tunes `MAX_ROOM_BYTES` instead and lets compaction drop records.
+    Tuning the reader wider than the guard is the failure this file is about, and it is no
+    longer reachable from here at all.
     """
     original = store.reverse_lines.__defaults__
     assert original is not None and len(original) == 2, (
@@ -341,13 +349,14 @@ class SignedLane(RuleBasedStateMachine):
 
         If a reader can retrieve a signed record, replaying it must still be refused — i.e. the
         guard must be at least that record's nonce. The converse is not asserted and does not
-        hold: the guard may outlive visibility (an expired `e-` record still guards, and a tail
-        of MAX_LIMIT records may not reach as far back as 1 MiB does), and stricter-than-visible
-        is the safe direction.
+        hold: the guard may outlive visibility (an expired `e-` record still guards, a tail of
+        MAX_LIMIT records may not reach as far back as the budget does, and the guard reads the
+        whole retained file where a reader stops at READ_BUDGET), and stricter-than-visible is
+        the safe direction.
 
-        This is the assertion that would fail if `read_messages`' and `_last_nonce`' scan
-        budgets ever diverged — see the module docstring, and
-        `test_narrowing_only_the_guards_budget_makes_a_visible_message_replayable` for the
+        This is the assertion that would fail if a reader ever scanned deeper than the guard —
+        see the module docstring, and
+        `test_narrowing_only_the_reader_no_longer_makes_a_visible_message_replayable` for the
         state it keeps out.
         """
         for room in ROOMS:
@@ -480,44 +489,78 @@ def test_read_budget_is_bound_into_reverse_lines_not_read_from_the_module() -> N
         setattr(store, "READ_BUDGET", original)  # noqa: B010
 
 
-def test_the_guard_scans_at_least_as_deep_as_a_reader_can_see(tmp_path) -> None:
+def test_the_guard_scans_at_least_as_deep_as_a_reader_can_see(tmp_path, monkeypatch) -> None:
     """The security property as an ORDERING, measured rather than read off the source.
 
-    `guard depth >= visible depth`. That is the whole requirement, and it is deliberately not
-    equality: the guard is allowed to outlive visibility — an expired `e-` record still guards,
-    and a MAX_LIMIT tail may not reach as far back as the budget does — because
+    `guard depth >= visible depth`. That is the whole requirement and it is deliberately not
+    equality against the reader: the guard is allowed to outlive visibility (an expired `e-`
+    record still guards, a MAX_LIMIT tail may not reach as far back as the budget does) because
     stricter-than-visible is the safe direction. Only the other direction is a hole.
 
-    Measured by giving every record its own key, which makes the two depths separately
-    observable: a key is *visible* if `read_messages` returns its record, and *guarded* if
-    `_last_nonce` still answers for it. The property is then plain set containment, with no
-    byte counting and no restatement of the algorithm.
+    INTENTIONAL INVERSION of the bounded-window contract. The version this file shipped with
+    took its slack from a coincidence: both scans took `reverse_lines`' default budget, so the
+    guard reached exactly READ_BUDGET and stopped there. It asserted that some key had fallen
+    past. `_last_nonce` now names `max_bytes=MAX_ROOM_BYTES` and scans the whole ring, so the
+    guard's boundary is physical retention. The bounded window is not the contract any more. What
+    replaces it is asserted below as an equality against the ring, the one place the guard may
+    still stop.
+
+    That policy change is also the mechanical reason the old version went red, rather than any
+    broken invariant. `_window` patches `reverse_lines.__defaults__`, so it still moves the
+    reader while a call site naming its own budget is immune to it. Every key stayed guarded and
+    the ordering held with more slack than before. What failed was the anti-vacuity guard, on a
+    boundary the guard no longer has.
+
+    Measured by giving every record its own key, which makes the depths separately observable: a
+    key is *visible* if `read_messages` returns its record, *retained* if the record is still in
+    the room file at all, *guarded* if `_last_nonce` still answers for it. Plain set containment,
+    with no byte counting and no restatement of the algorithm.
+
+    What the ordering still catches, now that no read budget can break it: a guard that skips a
+    record a reader can see. `_last_nonce` passes over a line its byte prefilter misses or whose
+    `nonce` is not an int. Either lands here rather than in the equality.
 
     This replaces an earlier version that counted `reverse_lines(f)` call sites in `store.py`
     and asserted there were exactly two. That asserted sameness at the call site, which is a
-    mechanism and the wrong shape: it went red on a harmless reformat, and it stayed green for
-    a new read path that named a *wider* budget explicitly — the one change that actually
-    breaks the ordering. `test_only_two_read_paths_take_the_default_budget` keeps the useful
-    half of that grep as a locator, below.
+    mechanism and the wrong shape: it went red on a harmless reformat and it stayed green for a
+    read path naming a *wider* budget explicitly. Widening one is exactly the change that has
+    since been made. On the guard's side it satisfies the ordering rather than breaking it.
+    Which side a wider budget lands on is what a call-site count cannot tell. The locator below
+    keeps the useful half of that grep.
     """
     room = "lobby"
-    keys = [_did(n) for n in range(3, 19)]  # 16 keys, one record each
+    # More keys than the bounded window needed, because compaction has to actually fire. The
+    # boundary being measured is the ring dropping records, not a scan giving up early.
+    keys = [_did(n) for n in range(3, 51)]  # 48 keys, one record each
     assert len(set(keys)) == len(keys)
+
+    # `setattr` reaches MAX_ROOM_BYTES where `_window` cannot: the compactor and the guard both
+    # read it at call time, which is the whole difference between the two knobs. Same values the
+    # state machine above uses, keeping the same ratio, so the reader's window still binds before
+    # the ring. `_write_record` compacts with `keep=limit // 2`, which lands on KEEP_BYTES here
+    # exactly as COMPACT_KEEP_BYTES does in production.
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", RING_BYTES)
 
     with _window(WINDOW_BYTES):
         for key in keys:
             store.append(tmp_path, room, "", "one record", did=key, nonce=1)
 
         visible = {r["from"] for r in _visible(tmp_path, room) if r.get("from") in keys}
+        retained = {r["from"] for r in _records(tmp_path, room) if r.get("from") in keys}
         guarded = {k for k in keys if store._last_nonce(tmp_path, room, k) is not None}
 
-        # Both directions have to be non-trivial or the containment below proves nothing: if
-        # everything is guarded the assertion is vacuous, and if nothing is visible there is no
-        # depth to compare against.
+        # Three ways the assertions below pass while proving nothing, closed first. Nothing
+        # readable leaves no depth to compare. Nothing dropped leaves "the guard stops where
+        # retention does" with no dropped record to stop at. `visible == retained` makes the
+        # ordering an identity, because a reader cannot retrieve what is not on disk.
         assert visible, "no record was readable — the window is too small to compare depths"
-        assert len(guarded) < len(keys), (
-            f"all {len(keys)} keys are still guarded, so the boundary was never crossed and "
-            f"this test is vacuous — lower WINDOW_BYTES or write more records"
+        assert len(retained) < len(keys), (
+            f"all {len(keys)} keys are still on disk, so compaction never ran and the guard's "
+            f"boundary was never crossed. Lower RING_BYTES or write more records"
+        )
+        assert len(visible) < len(retained), (
+            f"{len(visible)} of {len(retained)} retained keys are readable, so the reader's "
+            f"window does not bind before the ring and the guard has no slack to measure"
         )
 
         assert visible <= guarded, (
@@ -525,19 +568,38 @@ def test_the_guard_scans_at_least_as_deep_as_a_reader_can_see(tmp_path) -> None:
             f"whose nonce is no longer guarded: the reader now scans deeper than the replay "
             f"guard, so those messages' signed URLs can be replayed while still on the page"
         )
+        assert guarded == retained, (
+            f"the guard no longer stops exactly where retention does. "
+            f"{sorted(didkey.abbreviate(d) for d in retained - guarded)} still have a record in "
+            f"the room with their nonce handed back, so a captured URL works twice against a "
+            f"record the room is still keeping. "
+            f"{sorted(didkey.abbreviate(d) for d in guarded - retained)} are guarded with no "
+            f"record left to guard, which is replay state outliving its message"
+        )
 
 
-def test_only_two_read_paths_take_the_default_budget() -> None:
-    """A locator, not the property — the property is the ordering asserted above.
+def test_only_the_reader_takes_the_default_budget() -> None:
+    """A locator, not the property. The property is the ordering asserted above.
 
-    `read_messages` and `_last_nonce` are the only `reverse_lines` call sites in the module that
-    pass no `max_bytes`. That is worth knowing when this file goes red, because it says where to
-    look; it is not itself the guarantee, and a green result here does not mean the ordering
-    holds.
+    An intentional inversion of the bounded-window contract. The count went the other way. This
+    asserted TWO default-budget call sites back when the guard's depth was the reader's depth by
+    coincidence of one shared default. `_last_nonce` names MAX_ROOM_BYTES now, so `read_messages`
+    is the only caller left taking the default. The ordering has slack instead of none: the guard
+    scans the whole ring, a reader scans READ_BUDGET. Stricter-than-visible was always the safe
+    direction. It is a decision in the source now rather than a coincidence that a single line
+    could quietly spend.
 
-    Kept deliberately narrow: if a third unbudgeted read path appears, it inherits the guard's
-    reach by accident rather than by decision, and someone should say which it meant. Adjust the
-    count and move on — this is a prompt, not a veto.
+    Still narrow, still a prompt. The count says where to look when this file goes red. It never
+    says the ordering holds. A third unbudgeted read path would inherit the READER's reach by
+    accident rather than by decision. That reach is no longer the guard's, so someone should say
+    which it meant. A change to `read_messages`' own call site lands here too, because naming any
+    budget there takes the count to zero. Adjust the count and move on.
+
+    The second assertion is not a prompt. `max_bytes=MAX_ROOM_BYTES` inside `_last_nonce` is the
+    one line this policy is made of: without it the replay window closes again after 1 MiB of
+    newer traffic while every record it stopped guarding is still on the page. Either window is a
+    defensible policy, which is exactly why swapping them should cost a red test rather than
+    riding along with a tidy-up.
     """
     source = Path(store.__file__).read_text(encoding="utf-8")
     bare = [
@@ -545,11 +607,17 @@ def test_only_two_read_paths_take_the_default_budget() -> None:
         for n, line in enumerate(source.splitlines(), 1)
         if "reverse_lines(f)" in line or "reverse_lines(f):" in line
     ]
-    assert len(bare) == 2, (
-        f"expected exactly two default-budget reverse_lines calls (read_messages and "
-        f"_last_nonce); found {len(bare)} at lines {bare}. A new unbudgeted read path is not "
-        f"necessarily wrong — but check it against "
+    assert len(bare) == 1, (
+        f"expected exactly one default-budget reverse_lines call (read_messages); found "
+        f"{len(bare)} at lines {bare}. A new unbudgeted read path is not necessarily wrong. It "
+        f"takes the reader's budget now and not the guard's, so check it against "
         f"test_the_guard_scans_at_least_as_deep_as_a_reader_can_see before changing this number."
+    )
+    assert "max_bytes=MAX_ROOM_BYTES" in inspect.getsource(store._last_nonce), (
+        "the replay guard stopped naming its budget, so it is back on READ_BUDGET and a captured "
+        "signed URL works again once 1 MiB of newer traffic buries the record it wrote, while "
+        "that record is still readable at /r/<room>. Reverting the window is a policy decision: "
+        "make it here, in the tests that state the policy, not on a call site."
     )
 
 
@@ -565,43 +633,96 @@ def test_a_replay_is_refused_while_the_record_is_in_the_window(tmp_path) -> None
         assert store.append(tmp_path, "lobby", "", "up", did=did, nonce=8)["nonce"] == 8
 
 
-def test_a_replay_is_accepted_once_the_record_leaves_the_window(tmp_path) -> None:
-    """The bounded half — documented on `_last_nonce` and, until now, untested.
+def test_a_replay_is_accepted_once_the_record_leaves_the_ring(tmp_path, monkeypatch) -> None:
+    """The bounded half, rebounded. An intentional inversion of the window contract.
 
     The property most likely to surprise someone reading `nonce` as a permanent counter: it is
-    not one. The guarantee is "not twice while the message can be read", and filler traffic
-    from another writer is enough to end it. Both halves are asserted in one place so the
-    second cannot be quoted without the first.
+    still not one. What moved is where it stops being one. Filler traffic used to end the
+    guarantee the moment it pushed the record past the scanned tail, while the record itself was
+    still in the room and still on the page. The guard reads the whole ring now, so the only
+    thing that hands a used nonce back is the record physically leaving. Both stages are here in
+    order: buried past a reader's window and still refused, then dropped by compaction and
+    accepted. Both halves are asserted in one place so the second cannot be quoted without the
+    first.
+
+    Reaching the new boundary means shrinking the ring, because at the shipped 10 MiB it is
+    ~100k records of filler. The window stays shrunk as well: burial past a reader is the state
+    the first stage needs. `_window` cannot reach the guard any more, which is what gives that
+    stage its meaning (see `_window`: it moves `read_messages` alone now).
     """
     did = DIDS[0]
+    # The guard reads MAX_ROOM_BYTES at call time, so unlike READ_BUDGET this bound answers to
+    # setattr. Same pair the machine tunes, same values, for the same reason.
+    monkeypatch.setattr(store, "MAX_ROOM_BYTES", RING_BYTES)
+    monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", KEEP_BYTES)
+
+    def on_disk() -> list[int]:
+        """This key's nonces still in the room file, reachable by a reader or not. The boundary
+        is physical retention now, so the file is the thing to ask."""
+        return [r["nonce"] for r in _records(tmp_path, "lobby") if r.get("from") == did]
+
     with _window(WINDOW_BYTES):
         store.append(tmp_path, "lobby", "", "guarded", did=did, nonce=7)
         assert store._last_nonce(tmp_path, "lobby", did) == 7
-        for i in range(40):  # somebody else's traffic, pushing it past WINDOW_BYTES
-            store.append(tmp_path, "lobby", "filler", f"noise {i}")
-        assert store._last_nonce(tmp_path, "lobby", did) is None, (
-            "the record is still inside the scanned window, so this is not testing the "
-            "boundary it claims to — raise the filler count"
+
+        # Somebody else's traffic, until the record is past the reader's window. Keyed on that
+        # rather than on a filler count, because where it lands is what both stages turn on.
+        buried = 0
+        while any(m.get("from") == did for m in _visible(tmp_path, "lobby")):
+            store.append(tmp_path, "lobby", "filler", f"noise {buried}")
+            buried += 1
+        assert buried > 0, "the record was never readable, so this stage is not about burial"
+        assert on_disk() == [7], (
+            "the ring dropped the record already, so the two stages have merged and the "
+            "refusal below would prove nothing"
         )
+        assert store._last_nonce(tmp_path, "lobby", did) == 7, (
+            "traffic alone handed a used nonce back while the record is still in the room: the "
+            "guard is scanning a window again, not the ring"
+        )
+        with pytest.raises(store.StoreError, match="not greater than 7"):
+            store.append(tmp_path, "lobby", "", "guarded", did=did, nonce=7)
+
+        # Out of the ring, which is where the guarantee does end. Compaction fires on the append
+        # that takes the file past RING_BYTES and keeps the newest half of it, KEEP_BYTES here,
+        # so the oldest record is the first to go.
+        for i in range(buried, buried + 400):
+            store.append(tmp_path, "lobby", "filler", f"noise {i}")
+            if not on_disk():
+                break
+        assert on_disk() == [], "compaction never dropped the record, so nothing below is tested"
+        assert store._last_nonce(tmp_path, "lobby", did) is None
+
         # The safety condition, checked at the moment the guard drops rather than assumed:
-        # nothing a reader can retrieve is being replayed.
+        # nothing a reader can retrieve is being replayed. Stronger than it was and now true by
+        # construction, since the guard drops only once the record is off the disk rather than
+        # off the page.
         assert not any(m.get("from") == did for m in _visible(tmp_path, "lobby")), (
             "the original is still readable, so this replay would be a visible duplicate"
         )
         assert store.append(tmp_path, "lobby", "", "guarded", did=did, nonce=7)["nonce"] == 7
 
 
-def test_narrowing_only_the_guards_budget_makes_a_visible_message_replayable(tmp_path) -> None:
-    """What the shared default is buying, shown by taking it away.
+def test_narrowing_only_the_reader_no_longer_makes_a_visible_message_replayable(tmp_path) -> None:
+    """The hole a divergent budget used to open, kept as the test of why it is now closed.
 
-    Constructs the divergence on purpose: the guard scans a narrow tail while a reader scans a
-    wide one. Nothing in the repo does this — the point is that one line could, and that the
-    result is not a subtle degradation. The replay lands as a second readable record with the
-    same signature, nonce and text as an original the reader can still see, in the same room,
-    at a later seq and ts.
+    An intentional inversion of the bounded-window contract. This test used to build the
+    divergence and assert the damage: guard narrow, reader wide, so a replay landed as a second
+    readable record carrying the same signature, nonce and text as an original still on the
+    page. `_last_nonce` now names `MAX_ROOM_BYTES` itself, so `_window` cannot reach it and the
+    same construction cannot reach that state. What the ordering above used to hold by a
+    coincidence of two default arguments is now structural: the guard scans the whole ring,
+    which is as far back as a record physically goes, so no reader can be widened past it.
 
-    Delete this test if `reverse_lines` ever grows separate budgets on purpose, and replace it
-    with whatever then keeps the two in order.
+    The construction is kept and the outcome flips. `_window` still moves the default budget.
+    Only `read_messages` takes it now, so narrowing it narrows the reader alone. The guard
+    answers 7 regardless. The replay is refused. One record stays one record.
+
+    The old behaviour is shown rather than described, because that is the half worth keeping:
+    the tail the old guard scanned is scanned here the old way, showing this key's record is not
+    in it. That is the byte state in which a captured signed URL used to work a second time.
+
+    Goes red again if the guard ever takes a budget a reader can be widened past.
     """
     did = DIDS[0]
     narrow, wide = 256, 1 << 20
@@ -612,22 +733,41 @@ def test_narrowing_only_the_guards_budget_makes_a_visible_message_replayable(tmp
         assert any(m.get("from") == did for m in _visible(tmp_path, "lobby")), (
             "the original must be readable for this to demonstrate anything"
         )
-        assert store._last_nonce(tmp_path, "lobby", did) == 7  # coupled: still guarded
+        assert store._last_nonce(tmp_path, "lobby", did) == 7  # guarded by the ring now
 
-    # Exactly one change: the guard's reach, not the reader's.
+    # Exactly one change: the reader's reach. It cannot be the guard's any more, because
+    # `_window` moves the default and `_last_nonce` names its own budget.
     with _window(narrow):
-        assert store._last_nonce(tmp_path, "lobby", did) is None
-        replayed = store.append(tmp_path, "lobby", "", "the guarded message", did=did, nonce=7)
+        # The tail the old guard read, read the old way. Nothing of this key's is in it, so an
+        # unbudgeted scan answered None here and handed nonce 7 straight back. Checked as bytes
+        # rather than assumed: a `narrow` that still reached the record would make the refusal
+        # below pass for a reason that has nothing to do with the change.
+        with store.room_path(tmp_path, "lobby").open("rb") as f:
+            in_default_tail = [raw for raw in store.reverse_lines(f) if did.encode() in raw]
+        assert not in_default_tail, (
+            f"{narrow} bytes still reaches this key's record, so the old default guarded it too "
+            f"and the refusal below shows nothing. Write more filler."
+        )
+
+        assert store._last_nonce(tmp_path, "lobby", did) == 7, (
+            "the guard took the patched default, so its reach is whatever a reader's is and "
+            "the ordering this file protects is back to a coincidence"
+        )
+        with pytest.raises(store.StoreError, match="not greater than 7"):
+            store.append(tmp_path, "lobby", "", "the guarded message", did=did, nonce=7)
 
     with _window(wide):
         mine = [m for m in _visible(tmp_path, "lobby") if m.get("from") == did]
-        assert len(mine) == 2, f"expected the original and the replay, got {len(mine)}"
-        first, second = mine
-        assert first["nonce"] == second["nonce"] == 7
-        assert first["text"] == second["text"] == "the guarded message"
-        assert first["seq"] < second["seq"] == replayed["seq"]
-        # One signature over `lobby|7|the guarded message` now authenticates both records, and
-        # each verifies offline. Attribution is intact; distinctness is not.
+        assert len(mine) == 1, f"expected the original alone, got {len(mine)}"
+        assert mine[0]["nonce"] == 7
+        assert mine[0]["text"] == "the guarded message"
+        # One signature over `lobby|7|the guarded message`, still authenticating one record.
+        # Attribution and distinctness both intact. Distinctness no longer rests on two
+        # budgets happening to match.
+    # Refused before `seq` is drawn, so the file holds no second copy either. That is this
+    # construction, not a general rule: `surviving_nonces_may_repeat` has the case where the
+    # ring drops the original first and a repeat on disk is lawful.
+    assert len([r for r in _records(tmp_path, "lobby") if r.get("from") == did]) == 1
 
 
 def test_an_expired_record_still_guards_its_nonce(tmp_path) -> None:
