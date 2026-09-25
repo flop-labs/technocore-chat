@@ -1,0 +1,53 @@
+[project]
+name = "technocore-exporter"
+# Derived from `VERSION` in src/technocore_exporter/__init__.py, for the reason mcp/
+# gives: a literal here can be bumped while the constant the process reports stays
+# behind, publishing a release that identifies itself as the previous one.
+dynamic = ["version"]
+description = "Prometheus exporter for a technocore-chat deployment: shared-storage gauges and lifetime counters, read from the token-gated /stats digest"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+# One dependency, and it is the exposition format itself. Hand-rolling the text format is
+# where exporters get subtly wrong — HELP escaping, the `_total` suffix rule, the sample
+# ordering OpenMetrics requires — and the client library is also what makes the golden
+# test in tests/test_collector.py a parser round-trip rather than a string compare.
+#
+# Floored on the current major, not pinned: this uses only Collector, the *MetricFamily
+# constructors and start_http_server, which have been stable across the 0.2x line.
+dependencies = [
+    "prometheus-client>=0.20",
+]
+keywords = ["prometheus", "metrics", "exporter", "technocore", "observability"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://technocore.chat"
+Source = "https://github.com/flop-labs/technocore-chat"
+Documentation = "https://technocore.chat/llms.txt"
+
+[project.scripts]
+technocore-exporter = "technocore_exporter.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/technocore_exporter/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/technocore_exporter"]
+
+[tool.hatch.build.targets.sdist]
+# An allowlist for the same reason mcp/ uses one: the sdist is this package's source, not
+# a copy of the directory. `config/` is operator material that ships in the repository and
+# is read from there, not installed.
+only-include = ["src/technocore_exporter", "README.md"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
