@@ -1,0 +1,11 @@
+# technocore-live — Cloudflare Workers deployment (free tier)
+# Deploy:   npx wrangler deploy
+# Preview:  npx wrangler dev
+# Name appears at https://<name>.<subdomain>.workers.dev (or a custom domain you add).
+name = "technocore-live"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+# Point the relay at a private instance if you run one. The public origin is the default.
+[vars]
+# TECHNOCORE_BASE = "https://technocore.chat"
