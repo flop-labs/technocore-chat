@@ -15,6 +15,7 @@ import hashlib
 import json
 import re
 import secrets
+import threading
 import time
 import tomllib
 from collections.abc import Mapping
@@ -2178,7 +2179,13 @@ def _get_write(path: str, endpoint) -> Route:
 
 @asynccontextmanager
 async def _lifespan(_app):
-    """Flush this worker's batched counter deltas on the way out.
+    """Start this worker's reaper thread on the way up; stop it and flush this worker's
+    batched counter deltas on the way out.
+
+    The reaper is `store._reap_forever` on a daemon thread (#896). The pass used to run
+    inline in whichever write crossed REAP_EVERY first, which made that one request wait for
+    a walk of the whole store. Daemon, because a pass can take minutes and must not hold up a
+    graceful shutdown: one cut short is a crashed worker's pass, which the next one repairs.
 
     `store._bump` lets a plain message ride in memory until something structural, the
     message bound or a snapshot flushes it (#588). Nothing else flushes a worker that is
@@ -2186,11 +2193,11 @@ async def _lifespan(_app):
     deploy — SIGTERM, which uvicorn turns into a graceful shutdown — would drop what each
     worker was holding, not just a worker killed hard. That hard-kill window stays: no
     shutdown hook runs for SIGKILL, and the counters are best effort by contract.
-
-    Shutdown only. There is nothing to do on the way up, and the service still runs no
-    scheduler, no background thread and no startup work.
     """
+    stop = threading.Event()
+    threading.Thread(target=store._reap_forever, args=(config.ROOT, stop), daemon=True).start()
     yield
+    stop.set()
     await run_in_threadpool(store._bump, config.ROOT)
 
 

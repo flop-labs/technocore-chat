@@ -1464,7 +1464,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     one reap interval; here it is the gauge itself, and a fresh store that reported zero
     bytes against rooms it can see would be reporting something it knows to be false. That
     walk is the one this pass just dropped, so it is bounded by the same thing that bounds
-    an unreaped store: appends run reaps.
+    an unreaped store: every worker's reaper thread runs a pass each REAP_EVERY.
     """
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
@@ -1699,8 +1699,8 @@ def _split_seq_state(root: Path) -> None:
 
     Best effort and idempotent: a failure leaves the map in place, `_seq_entry` keeps reading
     it as the fallback, and the next reap tries again. Runs once in the life of a store — and
-    the reap it rides is throttled, so the window where reads still pay the old parse is at
-    most one REAP_EVERY after the first write.
+    the reap it rides runs one REAP_EVERY after a worker starts, so the window where reads
+    still pay the old parse is at most that interval.
     """
     legacy = _seq_state_path(root)
     shards: dict[Path, dict] = {}
@@ -1833,8 +1833,8 @@ def _drop_emptied_namespaces(
     Per namespace rather than once around the loop: a create only ever needs the directory it
     is entering to stand still, so holding the span across all of them would queue creates
     behind namespaces they have nothing to do with. Inside the `try` for the reason this whole
-    tail is best effort — `_reap` runs on the request path, and a pass that cannot take the
-    span must skip a cleanup, never fail the create that triggered it.
+    tail is best effort — a pass that cannot take the span skips a cleanup the next pass
+    repeats, rather than abandoning the rest of this one.
     """
     try:
         with os.scandir(root / "notes") as namespaces:
@@ -1876,8 +1876,8 @@ def _reap(root: Path) -> None:
     One pass at a time across the whole service, which the timestamp alone did not buy:
     reading the marker and touching it are two unserialised operations, so two of the ~230
     workers arriving together on an interval boundary both passed the check — and a walk that
-    takes longer than REAP_EVERY is overlapped by the next writer however the check is
-    written. Two passes interleaved write a count *below* the disk: the second deletes and
+    takes longer than REAP_EVERY is overlapped by the next worker's reaper however the check
+    is written. Two passes interleaved write a count *below* the disk: the second deletes and
     settles while the first is still walking, and the first then installs a figure measured
     against a window the second has already spent (see `_settle_count`). So the marker
     carries a lock as well as a timestamp, taken non-blocking around the whole pass — a caller
@@ -1903,6 +1903,29 @@ def _reap(root: Path) -> None:
             _reap_pass(root, now)
     except BlockingIOError:
         return  # a pass is already running in another worker; nothing here waits for it
+
+
+def _reap_forever(root: Path, stop: threading.Event) -> None:
+    """Call `_reap` every REAP_EVERY until `stop` is set — the pass's only caller outside
+    tests, on a daemon thread each worker starts in app.py's lifespan (#896).
+
+    It used to run inline, before the write, in `_write_record` and `note_set`, so whichever
+    ordinary write crossed the interval first carried the whole walk: minutes on the live
+    store, past the edge's 100 s origin timeout, holding a request thread and contending with
+    request writes for `.counters.lock` (#588) the whole time. The marker's throttle and lock
+    are unchanged, so it is still one pass per REAP_EVERY across the service however many
+    workers wait here.
+
+    It waits before its first pass: a worker that has just started has no reason to walk the
+    store ahead of the throttle, and a test that starts the app gets no pass racing it. A
+    pass that raises is reported and the loop carries on — a dead reaper thread would stop
+    retirement for the life of the worker, where an inline failure only ever cost one write.
+    """
+    while not stop.wait(REAP_EVERY):
+        try:
+            _reap(root)
+        except Exception as error:  # noqa: BLE001 - the next interval retries; dying would not
+            config._dbg(0, "reap_failed", error=repr(error))  # level 0: always printed
 
 
 def _reap_pass(root: Path, now: float) -> None:
@@ -2331,12 +2354,13 @@ def room_bytes_used(root: Path) -> int:
     """Total room bytes at the last reap pass, or 0 if none has run yet.
 
     0 means "no pressure", which is the right default: on a fresh store there is none, and
-    the first write runs a reap and establishes the real figure. A file written by a build
-    before USAGE_FILE carried a count is a single integer, so it has no second field and
-    reads as that same 0 — the one write this figure gates is a *compaction*, so failing open
-    keeps a full ring for at most one reap interval, where failing closed would compact every
-    room in the store back to its floor on the strength of a parse error. The first reap
-    rewrites it in the two-integer format and it never parses short again.
+    the first pass — one REAP_EVERY after a worker starts — establishes the real figure. A
+    file written by a build before USAGE_FILE carried a count is a single integer, so it has
+    no second field and reads as that same 0 — the one write this figure gates is a
+    *compaction*, so failing open keeps a full ring for at most one reap interval, where
+    failing closed would compact every room in the store back to its floor on the strength
+    of a parse error. The first reap rewrites it in the two-integer format and it never
+    parses short again.
 
     Shares `_read_counts`' parse and deliberately not `_note_totals`, which rebuilds by
     walking what that parse rejects: this runs on the append path, and a walk of every room
@@ -2640,7 +2664,6 @@ def _write_record(
         # a missing one means "not re-verifiable", never "invalid".
         if sig is not None:
             rec["sig"] = sig
-    _reap(root)
     # No check before the gate any more. That one existed because taking the gate meant
     # queueing behind every other create in the store, so a rotating room name flooding
     # rejections had to be shed before it got there — and because the check it repeated was a
@@ -2767,12 +2790,11 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
-    _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
-    # Reap first: the sweep can remove an idle note that existed at request entry.
     # This is a valid observation even if another caller creates immediately afterwards;
-    # existing notes still compare under the lock below.
+    # existing notes still compare under the lock below. No reap runs here any more
+    # (#896): an idle note the background pass has not reached yet is still a note.
     if expect is not None and not path.exists():
         raise StoreConflictError(f"note {ns}/{key} changed since you read it", None)
     # No cap check before the gate any more. One ran here to shed a full store's worth of

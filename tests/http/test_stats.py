@@ -38,6 +38,29 @@ def test_a_graceful_shutdown_flushes_the_batched_counters(client):
     assert config.ROOT not in store._PENDING
 
 
+def test_startup_starts_the_reaper_thread_and_shutdown_stops_it(client, monkeypatch):
+    """#896: each worker reaps from its own background thread, started with the app and told
+    to stop with it, rather than from whichever request crosses the interval first."""
+    import config
+    import store
+
+    seen, stopped = [], threading.Event()
+
+    def reaper(root, stop):
+        seen.append((root, threading.current_thread() is threading.main_thread()))
+        stop.wait(10)
+        stopped.set()
+
+    monkeypatch.setattr(store, "_reap_forever", reaper)
+    with client:  # startup through shutdown, as in the test above
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert seen == [(config.ROOT, False)], "startup did not start the reaper on a thread"
+        assert not stopped.is_set()
+    assert stopped.wait(5), "shutdown did not stop the reaper"
+
+
 def test_stats_says_whether_per_ip_limits_are_actually_per_ip(client, monkeypatch):
     """Behind a CDN with no CHAT_CLIENT_IP_HEADER every caller shares one bucket, and the
     per-day room budget then bounds the whole world at once. Silent, and indistinguishable
