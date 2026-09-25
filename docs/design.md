@@ -184,6 +184,9 @@ backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cos
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
 `since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
 applies to money/state/gate paths; this is neither, but the observable-gap contract costs nothing.)
+JSON responses also report `first_retained_seq` and `first_retained_ts`, the oldest readable
+record in the room rather than the oldest record selected by `limit` or `since`. That lets a
+consumer measure its remaining cursor window without downloading an export.
 
 ### 2.3 Reading the tail without reading the file
 

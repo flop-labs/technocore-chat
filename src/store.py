@@ -887,6 +887,19 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
+def _retained_floor(path: Path, cutoff: float | None) -> dict | None:
+    """Oldest readable record in the room file, not merely the oldest in one response.
+
+    The tail reader is bounded by `limit`; its first item cannot tell a lagging consumer
+    where the ring starts. Same expiry rule as `read_messages`.
+    """
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in f:
+            if (rec := _parse(raw)) is not None and (cutoff is None or not _expired(rec, cutoff)):
+                return rec
+    return None
+
+
 def read_messages(
     root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
 ) -> dict:
@@ -899,6 +912,7 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
+    retained = _retained_floor(path, cutoff)
     # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
     # `next:` that polls a dead cursor forever, and let a caller put a number of any width
     # into every JSON reply. The newest record on disk, expired or not, for the same reason
@@ -925,6 +939,8 @@ def read_messages(
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
         "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
+        "first_retained_seq": retained["seq"] if retained else None,
+        "first_retained_ts": retained["ts"] if retained else None,
         "generation": room_generation(root, room),
         "messages": out,
     }
