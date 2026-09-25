@@ -385,6 +385,41 @@ def test_a_lock_is_never_swept_while_its_data_file_is_there(tmp_path):
     assert path.exists() and lock.exists()
 
 
+def test_a_fresh_orphan_lock_is_spared_until_it_has_been_idle_a_full_week(tmp_path):
+    """The orphan sweep's own age guard, which the two tests above step around on both sides.
+
+    `_sweep_orphan_locks` keeps a lock whose data file is gone while the lock itself is still
+    fresh: `os.access(data, F_OK) or now - mtime <= IDLE_SECONDS`. The first clause is
+    `test_a_lock_is_never_swept_while_its_data_file_is_there`, the sweep half is
+    `test_orphan_locks_are_swept` aging a lock to `IDLE_SECONDS + 60`. Neither exercises the
+    age guard itself with the data file absent, so `<=` and `<` behave the same for every
+    existing caller and an off-by-one is invisible — the sweep never raises, so it would not
+    surface from a stack trace.
+
+    The direction it costs something is early: the lock outlives its data by design so a
+    writer recreating the room takes the lock beside its file, and unlinking a fresh one
+    splits the lock domain — two writers then flock different inodes and append at once. So a
+    lock idle for exactly IDLE_SECONDS is spared, and one microsecond older is swept.
+
+    `now` is passed in rather than read off the clock, so the boundary is exact here, not
+    raced: `_sweep_orphan_locks` already takes it so one pass decides against one instant.
+    """
+    import store
+
+    lock = store.room_path(tmp_path, "orphan").with_suffix(".jsonl.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch()  # an orphan the moment it exists: no data file was ever written beside it
+    assert not lock.with_suffix("").exists(), "premise: the data file is absent"
+    mtime = lock.stat().st_mtime
+    touched = {"rooms": set(), "notes": set()}
+
+    store._sweep_orphan_locks(tmp_path, mtime + store.IDLE_SECONDS, touched)
+    assert lock.exists(), "a fresh orphan lock at exactly the threshold must be spared"
+
+    store._sweep_orphan_locks(tmp_path, mtime + store.IDLE_SECONDS + 1, touched)
+    assert not lock.exists(), "one microsecond past IDLE_SECONDS it is swept"
+
+
 def test_cursors_survive_a_reaped_then_recreated_room(tmp_path):
     """#139: a room that is reaped and later recreated restarts seq at 1, so every reader
     still polling with a cursor from the old generation silently starves — reads answer 200
