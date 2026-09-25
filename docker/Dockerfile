@@ -91,9 +91,27 @@ HEALTHCHECK --interval=30s --timeout=20s --retries=3 \
 # can exceed it and cause healthy requests to 503; a front proxy must cap connections and
 # header-read time, with the origin locked to that proxy. Keep-alive expiry is not a
 # header deadline. app.py separately bounds total POST upload time after headers arrive.
-# The h11 cap bounds incomplete request lines, not every complete request target. Enforce
-# the URL cap at the proxy too. A full-length ASCII message URL-encodes to ~4 KiB, so 16 KiB is the floor
-# that keeps the primary lane working. Header blocks are capped far tighter in app.py
+# The h11 cap bounds incomplete request lines, not every complete request target; enforce
+# the URL cap at the proxy too. The GET write lane puts the message in the URL — a
+# full-length ASCII message URL-encodes to ~4 KiB — and the app enforces the real GET-lane
+# budget itself (app.py MAX_URL_BYTES, 16 KiB), returning a 414 that names the byte count
+# and the POST escape. But the app only sees a request the parser lets through, and the h11
+# cap rejects an over-line request non-deterministically — only when it arrives across TCP
+# segments (#180). So this cap is set ABOVE MAX_URL_BYTES (32 KiB vs 16 KiB), not equal to
+# it: a request just over the budget then reaches the app for that clean 414 rather than
+# dying as a bare "Invalid HTTP request received." whose outcome depends on segmentation.
+# TRADE-OFF (accepted): raising this doubles the worst-case per-connection buffer for an
+# incomplete request line, from 16 KiB to 32 KiB. --limit-concurrency 128 bounds how many
+# such connections coexist, so the ceiling is 32 KiB * 128 = 4 MiB against a 128 MiB
+# container — the extra 2 MiB is deliberate, bought to make a just-over-budget request (a URL
+# in the (16 KiB, 32 KiB] band) refuse deterministically as the app's 414 instead of at
+# random. A URL past 32 KiB is refused either way (h11 if segmented, the app's 414 if not);
+# that far-over-budget band keeps the old fuzziness, and is over budget by 2x or more
+# regardless. It is NOT just a pathological input: a full-length CJK/emoji GET write (~36-49
+# KiB) and a heavily multibyte full-length note (~72-98 KiB) land there, but those belong on the
+# POST lane, which is
+# why the cap is not chased higher to cover them (clearing them would need ~98 KiB, 4x this
+# buffer; #829 review, Minh3132). Header blocks are capped far tighter in app.py
 # (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
 # instead of "whatever was buffered".
 # --no-proxy-headers, deliberately. uvicorn's ProxyHeadersMiddleware REWRITES
@@ -106,7 +124,7 @@ HEALTHCHECK --interval=30s --timeout=20s --retries=3 \
 # nobody configured won. Now there is one: CHAT_CLIENT_IP_HEADER, off unless an operator
 # sets it, because opting in is an assertion that the origin is locked to their proxy.
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", \
-     "--http", "h11", "--h11-max-incomplete-event-size", "16384", \
+     "--http", "h11", "--h11-max-incomplete-event-size", "32768", \
      "--limit-concurrency", "128", "--backlog", "128", \
      "--no-server-header", "--no-proxy-headers", \
      "--timeout-keep-alive", "5", "--timeout-graceful-shutdown", "10"]
