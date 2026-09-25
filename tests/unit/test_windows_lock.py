@@ -39,11 +39,18 @@ _LK_LOCK, _LK_NBLCK, _LK_RLCK, _LK_NBRLCK, _LK_UNLCK = 1, 2, 3, 4, 0
 _WAITING_MODES = (_LK_LOCK, _LK_RLCK)
 
 
-def _recording_msvcrt(busy_for: int = 0) -> tuple[Any, list[tuple[int, int]]]:
+def _recording_msvcrt(
+    busy_for: int = 0, permanent: int | None = None
+) -> tuple[Any, list[tuple[int, int]]]:
     """A stand-in for `msvcrt` that records calls and can hold the region busy.
 
     `busy_for` is how many attempts fail with a busy region before one succeeds, which is
     the only way to reach the retry path without a second process.
+
+    `permanent` raises that errno on every attempt instead: a failure that will never become
+    a lock, as distinct from contention. EBADF is what a closed handle gives and EINVAL what
+    an unsupported lock or filesystem gives — both plain `OSError`, where a busy region is
+    EACCES and therefore `PermissionError`.
     """
     calls: list[tuple[int, int]] = []
     busy = [busy_for]
@@ -66,6 +73,8 @@ def _recording_msvcrt(busy_for: int = 0) -> tuple[Any, list[tuple[int, int]]]:
         )
         if mode == _LK_UNLCK:
             return
+        if permanent is not None:
+            raise OSError(permanent, os.strerror(permanent))
         if busy[0] > 0:
             busy[0] -= 1
             raise OSError(errno.EACCES, "the region is held")
@@ -155,6 +164,42 @@ def test_nonblocking_lock_reports_busy_as_eagain_without_waiting(monkeypatch, tm
                 pass
     assert caught.value.errno == errno.EAGAIN
     # One attempt of one byte, and no unlock of a lock that was never taken.
+    assert [mode for mode, _ in calls] == [_LK_NBLCK]
+
+
+def test_a_permanent_error_is_raised_rather_than_retried(monkeypatch, tmp_path):
+    """Only a busy region is contention; EBADF never becomes a lock however long you wait.
+
+    `locking` reports both through `OSError`, so catching the family whole turns a closed
+    handle into an infinite retry loop on the blocking path — the loop would never exit and
+    no caller would ever see the error. The errno has to be classified, not just caught.
+    """
+    fake, calls = _recording_msvcrt(permanent=errno.EBADF)
+    slept: list[float] = []
+    with _simulated_windows(monkeypatch, fake) as store:
+        monkeypatch.setattr(store.time, "sleep", slept.append)
+        with pytest.raises(OSError) as caught:
+            with store._locked(tmp_path / "probe"):
+                pass
+    assert caught.value.errno == errno.EBADF
+    assert [mode for mode, _ in calls] == [_LK_NBLCK], "a permanent error was retried"
+    assert slept == [], "a permanent error was waited on"
+
+
+def test_a_permanent_error_is_not_reported_as_eagain(monkeypatch, tmp_path):
+    """`nb` translates contention into EAGAIN. A permanent error must not borrow that mask.
+
+    `_bump` and `_reap` treat BlockingIOError as "someone else holds it, carry on", so a
+    mislabelled EBADF is a real failure silently downgraded to routine contention — worse
+    than the retry loop, because nothing looks wrong.
+    """
+    fake, calls = _recording_msvcrt(permanent=errno.EINVAL)
+    with _simulated_windows(monkeypatch, fake) as store:
+        with pytest.raises(OSError) as caught:
+            with store._locked(tmp_path / "probe", nb=True):
+                pass
+    assert caught.value.errno == errno.EINVAL
+    assert not isinstance(caught.value, BlockingIOError), "a permanent error was masked"
     assert [mode for mode, _ in calls] == [_LK_NBLCK]
 
 

@@ -663,6 +663,14 @@ def _lock_windows(lf, *, shared: bool, nb: bool) -> None:
     BlockingIOError(EAGAIN); that is normalised here so `_bump` and `_reap` keep their
     existing catch.
 
+    Only a busy byte range is contention, so only that errno is caught: `msvcrt.locking`
+    reports it as EACCES, which Python raises as `PermissionError` and nothing else, while a
+    permanent failure — a closed handle (EBADF) or an unsupported lock/filesystem (EINVAL) —
+    arrives as plain `OSError` and propagates untouched. Catching the whole family instead
+    would spin forever on one of those when `nb=False`, and report it as ordinary EAGAIN when
+    `nb=True`, which is the failure mode that turns a bug into a silent retry. The POSIX
+    branch has the same shape: `flock` propagates its non-contention errors unchanged.
+
     One gap stays open, because the CRT cannot close it: `LK_RLCK`/`LK_NBRLCK` are *read*
     locks in name only. Measured here, a second handle taking `LK_NBRLCK` on the same byte is
     refused — PermissionError, not coexistence — so this platform has no shared lock at all,
@@ -679,7 +687,7 @@ def _lock_windows(lf, *, shared: bool, nb: bool) -> None:
         try:
             msvcrt.locking(lf.fileno(), mode, 1)
             return
-        except OSError as e:
+        except PermissionError as e:
             if nb:
                 raise BlockingIOError(errno.EAGAIN, e.strerror) from e
             time.sleep(_WIN_LOCK_POLL_S)
@@ -796,8 +804,7 @@ def counters(root: Path) -> dict:
         data = orjson.loads((root / COUNTERS_FILE).read_bytes())
     except (OSError, ValueError):
         data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = data if isinstance(data, dict) else {}
     out = {}
     for key in COUNTER_KEYS:
         value = data.get(key, 0)
