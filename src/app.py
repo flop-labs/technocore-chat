@@ -84,10 +84,6 @@ BODY_TIMEOUT = 10  # total upload seconds, including callers that keep trickling
 # the intended audience, so it says so where crawlers look — Cloudflare serves a Content
 # Signals Policy (or a managed AI-blocking robots.txt) for zones that ship none.
 
-# Defined beside the rest of the signed-lane shapes, so /openapi.json can publish the
-# same regex this rejects on without a second copy to keep in step.
-NONCE_RE = didkey.NONCE_RE
-
 
 def _asset(name: str) -> str:
     """Served files, read once at import. SKILL.md sits at the repo root because that is
@@ -1264,7 +1260,7 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     could re-verify. `room`, `ns`, `key` and `nonce` cannot contain the separator, and the
     free-form field is last, so the canonical string parses one way only.
     """
-    if not NONCE_RE.fullmatch(nonce):
+    if not didkey.NONCE_RE.fullmatch(nonce):
         return text(f"400 nonce must be 1-19 digits, got {nonce!r}", 400)
     try:
         didkey.verify(did, sig, canonical)
@@ -2257,3 +2253,9 @@ app = Starlette(
         405: on_method_not_allowed,
     },
 )
+# Off: a path one slash away from a route gets the route map, like any other wrong URL.
+# Starlette's default is an empty 307 rebuilt from the request's own scheme and Host —
+# behind TLS termination with --no-proxy-headers that sent https://technocore.chat/rooms/
+# to http://, echoing a Host header public_base refuses to trust. It also redirected
+# /r/<room>/say/<nick> (text left off) to an empty message, and told a prober /stats/ exists.
+app.router.redirect_slashes = False
