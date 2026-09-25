@@ -271,7 +271,7 @@ _ROOM_VIEW_SCHEMA = {
             ),
         },
     },
-    "required": ["room", "count", "last_seq", "messages"],
+    "required": ["room", "count", "first_seq", "last_seq", "messages"],
 }
 
 
