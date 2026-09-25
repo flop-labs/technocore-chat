@@ -10,7 +10,7 @@ Design constraints (see docs/design.md):
 
 from __future__ import annotations
 
-import fcntl
+import errno
 import hashlib
 import os
 import re
@@ -24,6 +24,11 @@ from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 import orjson
 
@@ -632,6 +637,62 @@ def _prune(d: Path | str) -> bool:
     return empty
 
 
+#: How long a Windows waiter sleeps between lock attempts. The primitive's own waiting
+#: modes retried once a second, so this is finer than the behaviour being preserved.
+_WIN_LOCK_POLL_S = 0.05
+
+
+def _lock_windows(lf, *, shared: bool, nb: bool) -> None:
+    """Take `_locked`'s sidecar lock with `flock`'s semantics, on a platform without it.
+
+    `msvcrt.locking` locks a byte range from the current file position — there is no
+    whole-file lock — and its waiting modes (`LK_LOCK`, `LK_RLCK`) are not `flock(LOCK_EX)`:
+    they re-attempt once a second and raise OSError after ten attempts, so they wait
+    *boundedly*. `_locked` is the primitive callers use precisely because they intend to
+    wait the current holder out — `_reap` rewriting a count from a walk, `_create_gate`
+    removing a directory a create is entering — and a holder that outlives that window
+    would turn the next caller into an error instead of a queue. Measured against the
+    implementation this replaces: OSError(EDEADLK) at ~9.4s behind a 12s holder.
+
+    So the wait is built here by polling the non-blocking primitive: unbounded, as on
+    POSIX. The position is re-seeked before every attempt, because the lock covers one byte
+    from the current position — an attempt that inherited a moved position would lock a
+    *different* byte, which is no mutual exclusion at all.
+
+    The non-blocking call reports a busy region as OSError, where the POSIX path promises
+    BlockingIOError(EAGAIN); that is normalised here so `_bump` and `_reap` keep their
+    existing catch.
+
+    Only a busy byte range is contention, so only that errno is caught: `msvcrt.locking`
+    reports it as EACCES, which Python raises as `PermissionError` and nothing else, while a
+    permanent failure — a closed handle (EBADF) or an unsupported lock/filesystem (EINVAL) —
+    arrives as plain `OSError` and propagates untouched. Catching the whole family instead
+    would spin forever on one of those when `nb=False`, and report it as ordinary EAGAIN when
+    `nb=True`, which is the failure mode that turns a bug into a silent retry. The POSIX
+    branch has the same shape: `flock` propagates its non-contention errors unchanged.
+
+    One gap stays open, because the CRT cannot close it: `LK_RLCK`/`LK_NBRLCK` are *read*
+    locks in name only. Measured here, a second handle taking `LK_NBRLCK` on the same byte is
+    refused — PermissionError, not coexistence — so this platform has no shared lock at all,
+    `shared=True` does not reproduce `LOCK_SH`, and `_create_gate`'s "any number of holders
+    coexist" does not hold: on Windows, concurrent creates of distinct rooms serialise rather
+    than overlapping. Win32 does have shared byte-range locks, in `LockFileEx`, but `_locking`
+    does not expose them and #255 scopes a full locking replacement out, so this is recorded
+    rather than fixed. Waiting is still the right failure mode here — under the bounded
+    version the second create *failed* after ten seconds, where it now queues.
+    """
+    mode = msvcrt.LK_NBRLCK if shared else msvcrt.LK_NBLCK
+    while True:
+        lf.seek(0)
+        try:
+            msvcrt.locking(lf.fileno(), mode, 1)
+            return
+        except PermissionError as e:
+            if nb:
+                raise BlockingIOError(errno.EAGAIN, e.strerror) from e
+            time.sleep(_WIN_LOCK_POLL_S)
+
+
 @contextmanager
 def _locked(target: Path, shared: bool = False, nb: bool = False):
     """Exclusive lock held on a sidecar file, so compaction can replace the data
@@ -652,16 +713,27 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     count from a walk or removing a directory a create is entering — takes the same file
     exclusively and waits them out. A read/write open is deliberate and safe: flock locks the
     open file description, not a byte range, so LOCK_SH on a writable fd is ordinary.
+
+    Windows has no flock, and `msvcrt.locking` does not reproduce these semantics on its
+    own — `_lock_windows` carries the waiting half, including the normalisation of a busy
+    non-blocking lock to BlockingIOError that `_bump` and `_reap` catch.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
     with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+        if os.name == "nt":
+            _lock_windows(lf, shared=shared, nb=nb)
+        else:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
         config._dbg(2, "flock", path=target.name)
         try:
             yield
         finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            if os.name == "nt":
+                lf.seek(0)
+                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -696,7 +768,11 @@ def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o644)
+            # Made where it exists: Windows has no POSIX mode bits to restore — `os.fchmod`
+            # is absent there and `os.chmod` would only toggle the read-only flag — so the
+            # mode is a POSIX concern and the call is guarded rather than emulated.
+            if hasattr(os, "fchmod"):
+                os.fchmod(f.fileno(), 0o644)
             f.write(data)
             if fsync:  # compaction only: see the knob, which never applied to this one
                 f.flush()
@@ -737,8 +813,7 @@ def counters(root: Path, strict: bool = True) -> dict:
         data = orjson.loads((root / COUNTERS_FILE).read_bytes())
     except zeros:
         data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = data if isinstance(data, dict) else {}
     out = {}
     for key in COUNTER_KEYS:
         value = data.get(key, 0)
