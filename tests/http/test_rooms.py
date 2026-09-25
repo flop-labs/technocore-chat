@@ -226,10 +226,14 @@ def test_a_room_created_during_a_rooms_walk_is_listed_once_the_create_returns(
 
 def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monkeypatch):
     """The cache is an optimization with two hard operator controls: zero means no reuse,
-    and a flood of distinct `limit` values cannot turn it into attacker-sized process state.
+    and a flood of distinct `limit`/`offset` values cannot turn it into attacker-sized
+    process state. `limit` is not a cache key at all now, so a caller hammering every
+    limit and offset keeps the walk cache at exactly one entry for its stamp — the flood
+    closes on one (stamp, bucket) rather than opening one per page (#576).
     """
     import app as app_module
     import config
+    import store
 
     real_stats = app_module.store.room_stats
     calls = []
@@ -240,10 +244,10 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
 
     monkeypatch.setattr(app_module.store, "room_stats", counted)
     with config.override(ROOMS_CACHE_SECONDS=0):
-        app_module._rooms_walk.cache_clear()
+        store._room_entries.cache_clear()
         client.get("/rooms?limit=7")
         client.get("/rooms?limit=7")
-        assert calls == [7, 7] and app_module._rooms_walk.cache_info().currsize == 0
+        assert calls == [7, 7] and store._room_entries.cache_info().currsize == 0
         # Zero is also the exactness escape hatch, now that message recency is otherwise
         # bounded by the clock rather than by the stamp: with the cache off, a message is
         # on the very next listing rather than up to ROOMS_CACHE_SECONDS later.
@@ -253,13 +257,12 @@ def test_rooms_cache_can_be_disabled_and_never_grows_past_its_bound(client, monk
         assert listed["first"]["last_seq"] == 2
 
     with config.override(ROOMS_CACHE_SECONDS=60):
-        # The bound is the LRU's maxsize, fixed when the cache is built, so the flood is the
-        # real one rather than a shrunk stand-in: every distinct `limit` is a walk that
-        # wants an entry, and eight more of them than the cache can ever hold.
-        app_module._rooms_walk.cache_clear()
-        for limit in range(1, app_module.MAX_ROOMS_CACHE + 9):
+        # `limit` is not a cache key, so flooding limit spellings cannot inflate the cache:
+        # one structural stamp is one listing entry, however many limits are asked for.
+        store._room_entries.cache_clear()
+        for limit in range(1, store._MAX_ROOMS_WALK + 9):
             client.get(f"/rooms?limit={limit}")
-        assert app_module._rooms_walk.cache_info().currsize == app_module.MAX_ROOMS_CACHE
+        assert store._room_entries.cache_info().currsize == 1
 
 
 def test_a_lost_counter_bump_costs_one_window_and_not_the_listing(client, monkeypatch):
@@ -314,45 +317,39 @@ def test_a_cached_view_is_never_served_under_a_different_root(client, tmp_path):
 
 
 def test_a_used_entry_is_the_newest_and_the_coldest_is_what_leaves(client, monkeypatch):
-    """The eviction path, which entries outliving a write made reachable: a caller cycling
-    `?limit=` keeps the cache full, so the evictor runs while other requests are still
-    walking. Nothing in that path promotes an entry after finding it any more — the key
-    already carries everything that decides whether the entry is current, and the ordering
-    is the LRU's own bookkeeping — so there is no window between a hit and a promotion for
-    an eviction to land in, which is what used to make this reachable path a 500.
-
-    The policy that replaces it is the stricter one, and the change is deliberate: ordering
-    is by last *use*, where the hand-rolled memo ordered by last walk and a request served
-    from the cache did not reinsert. A cycling caller could push out a `limit` it was
-    hitting on every single request; it cannot now. Asserted so it stays the policy.
+    """The eviction path on the walk cache, in the key space it now has. `limit`/`offset`
+    are not cache keys anymore — the walk is keyed on the structural stamp
+    (store._room_entries) — so this drives distinct stamps directly, what a route test
+    would need that many structural writes to produce, and asserts the policy the new cache
+    inherits from lru_cache: ordering is by last use, so an entry touched after every insert
+    stays the newest (a hit, never re-walked) while the walk count stays capped at the LRU
+    bound.
     """
-    import app as app_module
-    import config
     import store
 
-    walked = []
-    real = store.room_stats
-    monkeypatch.setattr(
-        store, "room_stats", lambda *a, **k: (walked.append(k["limit"]), real(*a, **k))[1]
-    )
-    client.get("/r/first/say/bot/hi")
-    with config.override(ROOMS_CACHE_SECONDS=60):
-        # _rooms_view rather than the route: this needs more distinct limits than the read
-        # budget of one IP allows requests, and the cache sits under the route, not in it.
-        app_module._rooms_walk.cache_clear()
-        bound = app_module.MAX_ROOMS_CACHE
-        app_module._rooms_view(1)
-        for other in range(2, bound + 1):
-            app_module._rooms_view(other)
-            app_module._rooms_view(1)  # served from the cache, and that is what keeps it
-        assert app_module._rooms_walk.cache_info().currsize == bound, "full, and no fuller"
-        walked.clear()
-        for other in range(bound + 1, bound + 9):
-            app_module._rooms_view(other)  # eight entries in, eight of the coldest out
-        app_module._rooms_view(1)
-        assert 1 not in walked, "the one entry every cycle touched must not be the victim"
-        app_module._rooms_view(2)
-        assert 2 in walked, "and the coldest of them is what left"
+    miss = 0
+
+    def stub(_root):
+        nonlocal miss
+        miss += 1
+        return [(0.0, 1, "room", 1)]
+
+    monkeypatch.setattr(store, "_walk_entries", stub)
+    store._room_entries.cache_clear()
+    bound = store._MAX_ROOMS_WALK
+    root = "some-store"
+    # fill to the bound with distinct stamps, keeping stamp (1,) warm after every insert.
+    for n in range(bound):
+        store._room_entries(root, (n,), 0)
+        store._room_entries(root, (1,), 0)
+    # eight more distinct stamps in: the evictor runs while the hot entry is still asked for.
+    for other in range(bound, bound + 8):
+        store._room_entries(root, (other,), 0)
+        store._room_entries(root, (1,), 0)
+    before = miss
+    assert store._room_entries(root, (1,), 0) == ((0.0, 1, "room", 1),)
+    assert miss == before, "the hot entry is a hit after the flood, not re-walked"
+    assert store._room_entries.cache_info().currsize == bound, "full, and no fuller"
 
 
 def test_rooms_overview_carries_stats_newest_first(client, tmp_path):
@@ -467,6 +464,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
+        "truncated": False,
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
@@ -504,6 +502,94 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
     # junk limits fall back rather than 500 (the _cursor rule, incl. Unicode digits)
     for bad in ("abc", "\u00b2", "-4", ""):
         assert client.get(f"/rooms?limit={bad}&format=json").status_code == 200
+
+
+def test_rooms_overview_pages_with_offset_and_reports_truncated(client):
+    for i in range(5):
+        client.get(f"/r/room{i}/say/bot/hi")
+    total = client.get("/rooms?format=json").json()["total"]  # 5 rooms + the events room
+    seen = []
+    offset = 0
+    while True:
+        view = client.get(f"/rooms?limit=2&offset={offset}&format=json").json()
+        assert view["total"] == total  # complete count on every page
+        names = [r["room"] for r in view["rooms"]]
+        # no page overlaps another, and no room is invented by the offset slice
+        assert not (set(names) & set(seen))
+        seen += names
+        if not view["truncated"]:
+            assert offset + len(names) == total  # the census is exact when done
+            break
+        offset += len(view["rooms"])
+    assert sorted(seen) == ["events"] + sorted(f"room{i}" for i in range(5))
+    # a page past the end is an empty list, not an error, and truncated turns false
+    past = client.get(f"/rooms?limit=2&offset={total + 10}&format=json").json()
+    assert past["rooms"] == [] and past["truncated"] is False
+    # junk offsets fall back to 0 rather than 500, same _cursor rule as limit
+    for bad in ("abc", "\u00b2", "-4", ""):
+        assert client.get(f"/rooms?offset={bad}&format=json").status_code == 200
+
+
+def test_paging_never_rewalks_the_store_so_each_page_is_a_slice_of_one_walk(client, monkeypatch):
+    """Paging forward on /rooms must not re-walk the store per page. The expensive walk is
+    keyed on the structural stamp and the time bucket only (store._room_entries) — NOT on
+    limit/offset — so page 2 is a slice of the same cached walk as page 1: a pager that
+    walks a large listing in pages costs one directory/stat/sort walk, not one per page
+    (#576). Re-requesting a page is a cache hit on that same walk, not a third walk.
+    """
+    import store
+
+    for i in range(3):
+        client.get(f"/r/r{i}/say/bot/hi")
+    walks = 0
+    real = store._walk_entries
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    store._room_entries.cache_clear()
+    monkeypatch.setattr(store, "_walk_entries", counting)
+    first = client.get("/rooms?limit=2&offset=0&format=json").json()
+    second = client.get("/rooms?limit=2&offset=2&format=json").json()
+    # two distinct pages from one listing cost exactly one underlying walk.
+    assert walks == 1, f"one walk for the whole listing, two pages ({walks})"
+    client.get("/rooms?limit=2&offset=0&format=json")
+    assert walks == 1, "re-requesting a page is a hit on the one cached walk"
+    assert first["truncated"] is True and not second["truncated"]
+    # the walk cache holds one listing for the current stamp, not one per page
+    assert store._room_entries.cache_info().currsize == 1
+
+
+def test_offsets_past_the_live_count_never_open_a_fresh_cache_entry(client, monkeypatch):
+    """`offset` is not a cache key at all now — the walk is keyed on the structural stamp
+    and the time bucket only — so a value past the current end, which room_stats' clamp
+    renders as the empty end page, is served from the same walk as page one. The old
+    canonicalize-before-key (min(offset, total)) existed because the offset WAS the key;
+    with it out of the key there is nothing left to canonicalize, and an abuser advancing
+    `?offset=` past every value cannot open a cache slot per guess.
+    """
+    import store
+
+    for i in range(3):
+        client.get(f"/r/r{i}/say/bot/hi")
+    total = client.get("/rooms?format=json").json()["total"]  # 3 rooms + events
+    walks = 0
+    real = store._walk_entries
+
+    def counting(*a, **k):
+        nonlocal walks
+        walks += 1
+        return real(*a, **k)
+
+    store._room_entries.cache_clear()
+    monkeypatch.setattr(store, "_walk_entries", counting)
+    # past-the-live-count, far-past-capacity, and a repeat — no offset is a walk of its own.
+    for n in (total + 1, total + 2, store.MAX_ROOMS, total + 1):
+        client.get(f"/rooms?limit=2&offset={n}&format=json")
+    assert walks == 1, f"any offset, past the end or not, is one walk ({walks})"
+    assert store._room_entries.cache_info().currsize == 1
 
 
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
@@ -576,30 +662,28 @@ def test_rooms_metrics_never_scan_past_the_window_per_room(client, tmp_path, mon
     assert all(r["window"] <= 10 for r in view["rooms"])
 
 
-def test_one_reply_is_one_cache_entry_however_the_limit_was_spelled(client, monkeypatch):
-    """`?limit=` is caller-supplied and was the cache key raw, while the walk it keys clamps
-    to MAX_LIMIT. So ?limit=200, ?limit=1000000 and ?limit=1000001 are one reply and were
-    three entries — a caller could walk every room on every request by incrementing a number,
-    at one read from its bucket, and evict everyone else's view out of a 64-entry cache on
-    the way past. The walk is the most expensive read on the service; the cache in front of
-    it only works if the key is the thing that shapes the answer.
+def test_limit_spelling_never_costs_an_extra_walk(client, monkeypatch):
+    """`?limit=` used to be the cache key raw, so a caller incrementing it walked every room
+    on every request and evicted everyone else's view out of a 64-entry cache on the way
+    past. `limit` is not a cache key anymore — the walk is keyed on the structural stamp and
+    the time bucket only — so however the caller spells it, and however many rooms it asks
+    for, the listing is walked once and every page slices that one walk.
     """
-    import app
     import store
 
     client.get("/r/alpha/say/bot/hi")
     walks = 0
-    real = store.room_stats
+    real = store._walk_entries
 
     def counting(*a, **k):
         nonlocal walks
         walks += 1
         return real(*a, **k)
 
-    app._rooms_walk.cache_clear()
-    monkeypatch.setattr(store, "room_stats", counting)
+    store._room_entries.cache_clear()
+    monkeypatch.setattr(store, "_walk_entries", counting)
     bodies = [client.get(f"/rooms?limit={n}").text for n in (200, 1000000, 1000001, 0, 1)]
-    assert walks == 2, f"two distinct replies (>=200 and 1), {walks} walks"
+    assert walks == 1, f"every limit spelling is one walk ({walks})"
     assert bodies[0] == bodies[1] == bodies[2], "clamped to MAX_LIMIT, so one reply"
     assert bodies[3] == bodies[4], "0 and 1 both floor to one room"
 
