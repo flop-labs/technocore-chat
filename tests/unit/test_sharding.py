@@ -366,6 +366,35 @@ def test_a_reaped_room_does_not_leave_its_bucket_behind(tmp_path, monkeypatch):
     assert leftover == [], f"empty buckets left behind: {leftover}"
 
 
+def test_prune_survives_an_rmdir_race_on_a_bucket_refilled_under_it(tmp_path, monkeypatch):
+    """The empty check and the rmdir are two syscalls, not one: a bucket that fills between
+    them must not be forced empty by a caller that still thinks it is.
+
+    `os.rmdir` refuses a non-empty directory with `OSError` on every platform this runs on,
+    so a write landing in the gap between `_prune`'s own scan and its `rmdir` call reaches
+    exactly the two lines this exercises. Faking the error is the deterministic half of
+    that: it does not depend on winning a real race to land there, only on the branch
+    existing — and it was previously unreached by the suite (see the coverage report).
+    """
+    import store
+
+    bucket = tmp_path / "rooms" / "ab"
+    bucket.mkdir(parents=True)
+    real_rmdir = os.rmdir
+
+    def flaky_rmdir(path, *a, **kw):
+        if str(path) == str(bucket):
+            raise OSError("simulated: refilled under us")
+        return real_rmdir(path, *a, **kw)
+
+    monkeypatch.setattr(os, "rmdir", flaky_rmdir)
+
+    assert store._prune(tmp_path / "rooms") is False, (
+        "a bucket whose rmdir was refused must not read as empty"
+    )
+    assert bucket.exists(), "a refused rmdir must leave the directory in place, not raise"
+
+
 def test_a_reap_that_prunes_buckets_never_meets_a_create_gate_it_already_holds(
     tmp_path, monkeypatch
 ):
