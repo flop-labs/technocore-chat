@@ -57,9 +57,11 @@ Design notes worth keeping:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
+import socket
 import sys
 import urllib.parse
 from typing import Annotated, Literal
@@ -78,17 +80,19 @@ from .fetch import Fetch, urllib_fetch
 # here at build time, so the wheel, `initialize`'s serverInfo and the User-Agent cannot
 # disagree. `mcp/server.json` states it twice more, which a test and the release workflow
 # check against this constant.
-VERSION = "0.14.0"
+VERSION = "0.14.5"
 DEFAULT_URL = "https://technocore.chat"
 # The public instance's `?wait=` ceiling. Documentation and a default here, *not* a clamp:
 # CHAT_MAX_WAIT is a per-instance knob, and a wrapper enforcing 10 against an instance
 # tuned to 60 would silently serve a sixth of the wait the service would have held — the
 # advisory-parameter mistake the input doctrine exists to stop. The service clamps; this
 # forwards.
-# `--http` refuses to serve a configured signing key on anything but these. Names as well
-# as addresses: `HOST=localhost` is the same bind as `HOST=127.0.0.1` and should not be
-# the difference between refusing and not.
-_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", "ip6-localhost"})
+# The binds `--http` takes as loopback without asking a resolver. `localhost` is here
+# because RFC 6761 reserves it and browsers resolve it locally, never through DNS — which
+# is also why `ip6-localhost` is not: it is an /etc/hosts convention, and on a system
+# without that entry a search domain can hand it to a DNS server someone else runs. Every
+# other name is resolved, and bound at the loopback address it resolved to.
+_LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost"})
 WAIT_CEILING = 10.0
 TIMEOUT = 30.0  # ordinary requests; a long poll derives its own from what it asked for
 # Hard bound on a single held request, whatever a caller asks for. Not a limit on `wait=`
@@ -711,9 +715,10 @@ async def whoami() -> str:
         lines.append(
             "  — publishes this key where peers look for it, so your signed messages "
             "verify against a note they can find. Durable and world-readable. Append "
-            "` x25519:<b64url>` and/or ` mailbox:<mb-p-room>` to the value to advertise "
-            "an encryption key and a mailbox others may write to (patterns.md §3-§4); "
-            "poll that mailbox with wait_for_message."
+            "` mailbox:<mb-p-room>` to advertise a mailbox others may write to, and poll it "
+            "with wait_for_message. An encryption key is only sealed to as a signed "
+            "` e2e:` record (scripts/sign.py e2e, patterns.md §3-§4): the note is "
+            "world-writable, so a bare ` x25519:` field is a hint nobody should trust."
         )
     else:
         lines.append(
@@ -761,14 +766,98 @@ async def read_docs(
 
 
 # DNS-rebinding protection guards a *local* server: it stops a page in the user's browser
-# from driving an MCP server that only their machine can reach. This server fronts a
-# public, unauthenticated, world-writable origin — a browser reaching it has gained nothing
-# it could not get by fetching the same URL directly — so there is no boundary to protect,
-# and the check is off. Left at the SDK's default it is not merely redundant but wrong: the
-# default host is 127.0.0.1, which auto-allows only localhost Host headers, so every request
-# to a deployed server (a Workers subdomain, a custom domain) answers 421 Misdirected
-# Request. Rate limiting and abuse handling stay the origin's job, where they already are.
+# from driving an MCP server that only their machine can reach. A remote deployment (the
+# Worker, or `--http` bound off loopback, which refuses to start with a signing key) fronts
+# a public, unauthenticated, world-writable origin — a browser reaching it has gained
+# nothing it could not get by fetching the same URL directly — so there is no boundary to
+# protect, and the check is off. Left at the SDK's default it is not merely redundant but
+# wrong there: the default host is 127.0.0.1, which auto-allows only localhost Host
+# headers, so every request to a deployed server (a Workers subdomain, a custom domain)
+# answers 421 Misdirected Request. Rate limiting and abuse handling stay the origin's job.
 REMOTE_SECURITY = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+# `--http` on loopback is the one local server here, and it has a boundary: the user's own
+# browser. Any page can rebind its hostname to 127.0.0.1 and then talk to this port as
+# same-origin, and with TECHNOCORE_SIGNING_KEY set that is a signing oracle — posts as this
+# did:key, room claims, allow-list rewrites. Without a key it is still an open proxy from
+# the user's address. So Host and Origin must both name loopback, on any port (a local
+# client such as MCP Inspector sits on another one) or none (PORT=80 sends no port). Only
+# names no one else can rebind: the loopback literals and the reserved `localhost`, set
+# here rather than left to the SDK's own default, which was off for `HOST=LOCALHOST`.
+_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+LOCAL_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[h for name in _LOCAL_HOSTS for h in (name, f"{name}:*")],
+    allowed_origins=[
+        o
+        for scheme in ("http", "https")
+        for name in _LOCAL_HOSTS
+        for o in (f"{scheme}://{name}", f"{scheme}://{name}:*")
+    ],
+)
+
+
+def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
+    """Where to bind and what a client may send as Host, or None when `host` is not loopback.
+
+    Loopback by what the name binds, not how it is spelled: the addresses the socket layer
+    resolves it to — `127.1`, `0x7f.1`, `127.0.0.2`, a system alias such as `ip6-loopback` —
+    must all be loopback, or the bind is treated as remote. Classed as remote, such a bind
+    was served with the rebinding check off.
+
+    A name that went through a resolver is bound at the address just validated, never passed
+    on to be resolved a second time: an answer that changed in between would put the key on
+    whatever the name pointed at by then. And only the resolved addresses are allowed as
+    Host, never the name as typed — its DNS may be someone else's, who could serve a page
+    from it, rebind it here, and pass this very check. A client connects by address (or
+    `localhost`), which browsers already do for shorthand like `127.1`. The fixed names and
+    literal addresses involve no resolver and are passed through unchanged.
+    """
+    bare = host.strip("[]").lower()
+    if bare in _LOOPBACK:
+        return host, [f"[{bare}]" if ":" in bare else bare]
+    try:
+        infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError):
+        return None
+    addrs = sorted({ipaddress.ip_address(str(info[4][0]).split("%")[0]) for info in infos}, key=str)
+    if not addrs or not all(addr.is_loopback for addr in addrs):
+        return None
+    # A literal is kept as typed, for the bind and as an allowed Host: no resolver is
+    # involved, so nobody else can move it (`0:0:0:0:0:0:0:1` is the ::1 it spells).
+    try:
+        ipaddress.ip_address(bare)
+        bind, typed = host, [f"[{bare}]" if ":" in bare else bare]
+    except ValueError:
+        bind, typed = str(addrs[0]), []
+    resolved = [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
+    return bind, list(dict.fromkeys([*typed, *resolved]))
+
+
+def _local_security(names: list[str]) -> TransportSecuritySettings:
+    """LOCAL_SECURITY, plus whichever of `names` it does not already allow (the rest of
+    127/8, a shorthand spelling): refusing the Host a client of this listener sends would
+    make the bind unusable rather than safe."""
+    extra = [name for name in names if name not in _LOCAL_HOSTS]
+    if not extra:
+        return LOCAL_SECURITY
+    return LOCAL_SECURITY.model_copy(
+        update={
+            "allowed_hosts": [
+                *LOCAL_SECURITY.allowed_hosts,
+                *(h for name in extra for h in (name, f"{name}:*")),
+            ],
+            "allowed_origins": [
+                *LOCAL_SECURITY.allowed_origins,
+                *(
+                    f"{scheme}://{name}{port}"
+                    for name in extra
+                    for scheme in ("http", "https")
+                    for port in ("", ":*")
+                ),
+            ],
+        }
+    )
 
 
 def streamable_http_app() -> Starlette:
@@ -820,7 +909,8 @@ def main() -> None:
         # bearer token; there is no token here, so the wall is the bind address. Loopback
         # with a key is fine and is the default. Off loopback with a key is refused rather
         # than warned about, because a warning scrolls past and the exposure does not.
-        if _signer is not None and host.lower() not in _LOOPBACK:
+        loopback = _loopback_bind(host)
+        if _signer is not None and loopback is None:
             raise SystemExit(
                 f"refusing to serve --http on {host} with TECHNOCORE_SIGNING_KEY set: an "
                 "endpoint that signs as "
@@ -828,13 +918,14 @@ def main() -> None:
                 "oracle. Bind loopback (the default) and put your own authenticated proxy "
                 "in front, or unset the key to serve the anonymous tools openly."
             )
+        bind, names = loopback or (host, [])
         server.run(
             "streamable-http",
-            host=host,
+            host=bind,
             port=int(os.environ.get("PORT", "8000")),
             streamable_http_path="/mcp",
             stateless_http=True,
-            transport_security=REMOTE_SECURITY,
+            transport_security=_local_security(names) if loopback else REMOTE_SECURITY,
         )
     elif not argv:
         server.run()

@@ -1,6 +1,6 @@
 [project]
 name = "technocore-chat"
-version = "0.14.0"
+version = "0.14.5"
 description = "HTTP-native chat and notes for AI agents — over plain GETs or MCP"
 license = "Apache-2.0"
 # One Python, everywhere: `.python-version` pins what uv provisions locally and in CI, and
@@ -8,8 +8,8 @@ license = "Apache-2.0"
 # parsing hostile path segments should not run on a version nobody tested it on.
 requires-python = ">=3.12"
 dependencies = [
-    "starlette==1.6.0",
-    "uvicorn[standard]==0.52.2",
+    "starlette==1.7.0",
+    "uvicorn[standard]==0.53.0",
     # Signature *verification* only (src/didkey.py) — libsodium is ~2x OpenSSL per verify
     # (bench/ed25519_backends.py), and provably the same verdicts (tests/unit).
     "pynacl==1.6.2",
@@ -20,7 +20,7 @@ dependencies = [
     "orjson==3.12.0",
     # Still required: scripts/sign.py generates keys with it, and the docs examples
     # exercised by tests/http/test_docs.py use its X25519 and AES-GCM.
-    "cryptography==50.0.0",
+    "cryptography==50.0.1",
     # Response compression. The CDN asks this origin for `gzip, br` on every request
     # (measured: 16,782 of 16,782 in one 25s capture) and the service answered every one
     # uncompressed, so the whole metered origin leg was plaintext. Brotli rather than the
@@ -41,7 +41,10 @@ dependencies = [
 dev = [
     "coverage>=7.15.4",
     "pytest>=9.1.1",
-    "httpx2>=2.10.0",
+    # The TestClient's transport, never shipped in the image. The floor is the fix for
+    # GHSA-8xx6-hgc6-gc2m, GHSA-h4x7-gw46-3wm6 and GHSA-pf96-p4fj-6566, so a stale lock
+    # cannot resolve back below it.
+    "httpx2>=2.12.0",
     "ruff>=0.16.1",
     "ty>=0.0.71",
     # The task runner behind the repo-root justfile, from PyPI rather than a system package
@@ -69,7 +72,7 @@ dev = [
 # Same reasoning, and it never runs on a pull request — see
 # .github/workflows/mutation.yml and tests/mutation_scope.py.
 mutation = [
-    "mutmut==3.7.0",
+    "mutmut==3.8.0",
 ]
 
 [tool.ruff]

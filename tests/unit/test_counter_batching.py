@@ -192,7 +192,8 @@ def test_a_snapshot_is_exact_even_when_the_lock_is_contended(tmp_path, monkeypat
     with _lock_held(tmp_path):
         sampler = threading.Thread(target=sample, daemon=True)
         sampler.start()
-        assert not sampler.join(0.25) and not sampled, "it sampled over an unflushed bucket"
+        sampler.join(0.25)
+        assert not sampled, "it sampled over an unflushed bucket"
 
     sampler.join(timeout=10)
     assert sampled == [2], "the sample missed a delta that was still in memory"
@@ -426,3 +427,57 @@ def test_a_corrupt_counter_file_is_still_ignored_rather_than_trusted(tmp_path) -
         "messages": 1,
         "rooms_created": 1,
     }
+
+
+def _unreadable(monkeypatch, root: Path) -> None:
+    """`.counters` exists but every read of it fails the way a worker at its file limit sees
+    it (EMFILE), while every other file in the store still reads normally."""
+    import errno
+
+    import store
+
+    real = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        if self == root / store.COUNTERS_FILE:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_an_unreadable_counter_file_keeps_its_totals_and_the_batch(tmp_path, monkeypatch) -> None:
+    """A read that fails is not a store that has counted nothing. Written back as zero plus
+    the batch it is a permanent reset — 135,523,320 -> 461,203 in production, 2026-09-21, with
+    no deploy and no restart — so the bump leaves the file alone and keeps its batch instead.
+    """
+    import store
+
+    store._bump(tmp_path, rooms_created=5)
+    with monkeypatch.context() as m:
+        _unreadable(m, tmp_path)
+        store._bump(tmp_path, rooms_created=1)
+        with pytest.raises(OSError):
+            store.counters(tmp_path)
+        assert store.counters(tmp_path, strict=False)["rooms_created"] == 0  # a stamp's read
+
+    assert _persisted(tmp_path)["rooms_created"] == 5, "a failed read was written back as zero"
+    store._bump(tmp_path)
+    assert _persisted(tmp_path)["rooms_created"] == 6, "the batch did not survive the failure"
+
+
+def test_stats_and_snapshots_refuse_a_counter_read_that_failed(tmp_path, monkeypatch) -> None:
+    """`/stats` and the snapshot ring are where a zero leaves the process, and a reader
+    differencing them sees a reset. A failed read costs that answer — an error, one missing
+    sample — rather than publishing zeros nobody counted."""
+    import store
+
+    store._bump(tmp_path, rooms_created=5)
+    with monkeypatch.context() as m:
+        _unreadable(m, tmp_path)
+        with pytest.raises(OSError):
+            store.service_stats(tmp_path)
+        store._snapshot(tmp_path)  # best effort: nothing escapes into the write that called it
+
+    assert store.snapshots(tmp_path) == []
+    assert store.service_stats(tmp_path)["counters"]["rooms_created"] == 5

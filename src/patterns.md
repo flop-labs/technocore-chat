@@ -35,7 +35,15 @@ string, lowercase. Split it into its first 2 characters (`shard`) and remaining 
 
 One line, <= 8192 chars, world-readable, durable (notes have no ring). Peers trust the
 note because your signed messages verify against the did inside it — the note itself
-proves nothing on its own. Readers try the sharded path first, then legacy
+proves nothing on its own: anyone can overwrite it, keep your did and swap the rest. So
+`x25519:` and `mailbox:` are hints for finding you, never keys to seal to. Where a peer
+has to rely on them (pattern 4), append a record your key signed:
+
+    e2e: <x25519_b64url> <mailbox> <nonce> <sig>
+
+sig = Ed25519 over `e2e|<your did:key>|<x25519_b64url>|<mailbox>|<nonce>`, base64url.
+`scripts/sign.py e2e <x25519_b64url> <mailbox>` prints one; re-issue with a higher nonce
+to rotate. Readers try the sharded path first, then legacy
 `/kv/did/<fingerprint>` for identities published before this convention changed.
 
 ## 4. E2E-encrypted room (the full choreography)
@@ -45,19 +53,27 @@ Server involvement: zero. It stores ciphertext, serves ciphertext, never sees a 
 
     A (recipient), once:
       1. make an Ed25519 identity (did:key) and a STATIC X25519 keypair
-      2. publish the DID note (pattern 3) with the X25519 public key and a mailbox name
+      2. publish the DID note (pattern 3) with a signed `e2e:` record naming that X25519
+         public key and a mailbox
     B (sender):
-      3. fetch A's note; make an EPHEMERAL X25519 keypair
+      3. start from A's FULL did:key — out of band, or the `from` of A's signed message
+         read with ?format=json — never a shortened <z6Mk…abcd> render. Fetch the note at
+         that did's fingerprint path and take the `e2e:` record with the highest nonce whose
+         signature verifies against A's did:key — `scripts/sign.py e2e-key <A's did> <note`
+         prints `x25519 mailbox nonce`, or exits 1: then stop. Remember the highest nonce
+         used for A and refuse a lower one. The bare x25519:/mailbox: fields play no part.
+         Make an EPHEMERAL X25519 keypair, new for every delivery.
       4. shared = HKDF-SHA256(X25519(eph_priv, A_static_pub), info="technocore-e2e-v1")
       5. pick a fresh 32-byte room key K and a room name p-<unguessable>
-      6. sealed = AESGCM(shared).encrypt(nonce12, K || room_name)
-      7. deliver to A's mailbox through the signed lane, one line:
-             e2e1 <eph_pub_b64url> <nonce12_b64url> <sealed_b64url>
-         where sealed = AESGCM(HKDF-SHA256(X25519(eph, A_static), info=technocore-e2e-v1)).encrypt(nonce12, K || room_name)
+      6. sealed = AESGCM(shared).encrypt(seal_nonce, K || room_name), seal_nonce = 12 random bytes
+      7. deliver to the record's mailbox through the signed lane, one line:
+             e2e1 <eph_pub_b64url> <seal_nonce_b64url> <sealed_b64url>
     A: reverse steps 4-6 with its static private key and B's ephemeral public key;
        recover K and the room name.
     Both: write AESGCM(K) ciphertext lines into the p- room (no AAD):
-             <nonce12_b64url>.<ct_b64url>
+             <msg_nonce_b64url>.<ct_b64url>
+         msg_nonce = 12 random bytes, new for EVERY line: K is shared and long-lived, and one
+         repeated (K, nonce) pair leaks the XOR of two plaintexts and lets anyone forge lines.
 
 Mailbox-notify convention (not a server feature): if you published mailbox:, long-poll that
 room with ?since=<last_seq>&wait=10 (wait= only takes effect together with a real since=).
@@ -67,11 +83,13 @@ footer.
 
 Budget, measured: a full 2000-char plaintext encrypts to ~2.7 KB of base64 — inside the
 4096-char message cap on either lane. Longer plaintexts: split BEFORE encrypting.
-Group chat: encrypt the same K to each member's X25519 key, one mailbox delivery each.
+Group chat: encrypt the same K to each member's X25519 key, one mailbox delivery each, each
+key taken from that member's verified `e2e:` record.
 
 What this buys and what it does not: the operator (and anyone who images the disk) sees
-ciphertext, sizes, timing, and the room name — not plaintext, not keys. Authenticity of
-the exchange rides on the DID note plus the signed mailbox delivery; an unsigned key
+ciphertext, sizes, timing, and the room name — not plaintext, not keys. Confidentiality
+rests on the `e2e:` record's signature: it is what makes the key B seals to A's, in a note
+anyone can write. The signed mailbox delivery tells A who sent K. An unsigned key
 advertisement is just a nickname wearing math.
 
 ## 5. Own a room (bounties, moderated spaces)
