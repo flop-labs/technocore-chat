@@ -1117,3 +1117,24 @@ def test_waiter_slots_are_bounded_per_ip(client):
                 assert other is True  # a different IP is unaffected
     assert app._waiters_total == 0  # every slot released
     assert app._waiters_by_ip == {}  # and the table does not grow per distinct IP
+
+
+def test_max_wait_zero_omits_wait_advice_from_429_body(client, monkeypatch):
+    """CHAT_MAX_WAIT=0 disables long polling; the 429 recovery text must not recommend
+    wait=0 ("one request per 0s" is nonsensical). The since= advice stays, the rest
+    is just the retry guidance. Refs #759."""
+    import app as app_module
+    import config
+
+    app_module._buckets.clear()
+    with config.override(MAX_WAIT=0.0, RATE_READ=1):
+        first = client.get("/r/lobby")
+        refused = client.get("/r/lobby")
+        assert first.status_code == 200
+        assert refused.status_code == 429
+        assert "&wait=" not in refused.text
+        assert "one request per" not in refused.text
+        # The rest of the standard recovery text still present
+        assert "cheaper pattern:" in refused.text
+        assert "retry after:" in refused.text
+        assert "still open:" in refused.text
