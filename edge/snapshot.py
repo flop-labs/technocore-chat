@@ -100,14 +100,17 @@ EDGE_CACHED = {"/healthz": 10}
 # rather than a target — test_the_refresh_interval_is_not_faster_than_the_origin_can_answer.
 EDGE_REVALIDATE = {"/rooms": 5}
 
-# What a /rooms cache key is made of. The handler reads only `limit` and `format` and clamps
-# the first, so /rooms?limit=999999999, ?limit=200 and ?limit=200&x=1 are one reply — and a
+# What a /rooms cache key is made of. The handler reads `limit`, `format` and `kind`; it clamps
+# the first and validates the last, so /rooms?limit=999999999, ?limit=200 and
+# ?limit=200&x=1 are one reply — and a
 # key built from the raw URL stores them as three, letting a caller force a cold walk per
 # request by incrementing a digit. app.py fixed this for its own cache ("the key space is the
 # reply space"); a lane in front of it has to carry the same fix.
 #
 # `match` names a parameter that matters only when it equals one value: `format=json` picks
 # the rendering, every other value is ignored. `clamped` names a numeric one and its bounds.
+# `enum` names a semantic parameter, its accepted values and which one is the omitted default;
+# an unknown value bypasses the shared copy so the origin can return its field-naming 400.
 #
 # The ceiling is restated here rather than read from anywhere, which needs two excuses. It is
 # not taken from the served schema because `limit` is advisory: by the input doctrine it
@@ -130,6 +133,9 @@ EDGE_REVALIDATE = {"/rooms": 5}
 EDGE_ONLY = {"/favicon.ico": ("edge/assets/favicon.ico", "image/x-icon")}
 
 ROOMS_KEY_MATCH = {"format": "json"}
+ROOMS_KEY_ENUM = {
+    "kind": {"values": ["discussion", "mailbox", "all"], "default": "all"},
+}
 
 
 def rooms_key() -> dict:
@@ -137,6 +143,7 @@ def rooms_key() -> dict:
     return {
         "/rooms": {
             "match": dict(ROOMS_KEY_MATCH),
+            "enum": dict(ROOMS_KEY_ENUM),
             "clamped": {"limit": {"min": 1, "max": 200}},
         }
     }

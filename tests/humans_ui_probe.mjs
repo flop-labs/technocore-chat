@@ -25,10 +25,14 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-07, 138 checks, all passing — expected shape:
+ * Checked 2026-09-10, 156 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
+ *   category        removes stale room targets while the next category request is pending
+ *                   and rejects older same-kind responses after category ABA or overlapping polls
+ *   capacity        category counts stay scoped; count warnings do not change views, and
+ *                   last-reap bytes are labelled as a snapshot rather than live headroom
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -124,6 +128,7 @@ const browser = await chromium.launch({
   await page.waitForTimeout(800);
 
   console.log("desktop 900px");
+  check("starts with discussions", (await page.inputValue("#kind")) === "discussion");
   const heads = await page.locator("#rooms thead th:visible").allInnerTexts();
   check("column headers", heads.length === 5, heads.join(" / "));
 
@@ -160,6 +165,16 @@ const browser = await chromium.launch({
   check("filter survives the refresh", (await page.inputValue("#filter")) === "lobby");
   check("and stays applied", (await page.locator("#rooms tbody tr").count()) === 1);
 
+  await page.fill("#filter", "");
+  await page.selectOption("#kind", "mailbox");
+  await page.waitForTimeout(800);
+  check("empty mailbox view explains itself",
+        (await page.locator("#rooms tbody").innerText()).includes("No public mailboxes"));
+  await page.selectOption("#kind", "all");
+  await page.waitForTimeout(800);
+  check("all-room view restores the seeded rooms",
+        (await page.locator("#rooms tbody tr").count()) >= 3);
+
   console.log("navigation");
   await page.fill("#filter", "");
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -177,6 +192,193 @@ const browser = await chromium.launch({
   check("Enter opens the top match", (await page.inputValue("#room")) === "standup");
 
   check("no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// ---------------------------------------------------------- category switch loading window
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 1200 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(5000);
+  const view = (room, values = {}) => Object.assign({
+    rooms: [{ room, count: 1, first_seq: 1, last_seq: 1, bytes: 100, idle_seconds: 0, topic: "" }],
+    total: 1,
+    capacity: 5120,
+    bytes: 100,
+    bytes_capacity: 5368709120,
+    whole_store: { total: 1, capacity: 5120, bytes_at_last_reap: 100, bytes_capacity: 5368709120 },
+    engagement: {
+      window_cap: 200,
+      windowed_messages: 1,
+      zero_response_share: 0,
+      nick_diversity: 1,
+      windowed_note_to_message_ratio: 0,
+    },
+    notes: { total: 0, bytes: 0, capacity: 163840, capacity_per_namespace: 5120 },
+    untrusted: { fields: ["room", "topic"], note: "test data" },
+  }, values);
+  let releaseNew;
+  const newGate = new Promise((resolve) => { releaseNew = resolve; });
+  let markPending;
+  const pendingSeen = new Promise((resolve) => { markPending = resolve; });
+  await page.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    if (kind === "mailbox") {
+      markPending();
+      await newGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(view("mb-new-room")),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view("old-room")),
+    });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const oldRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "old-room" });
+  await oldRoom.waitFor();
+
+  console.log("category switch loading window");
+  await page.selectOption("#kind", "mailbox");
+  await pendingSeen;
+  check("old row is removed while the new category is pending", (await oldRoom.count()) === 0);
+  await page.fill("#filter", "old-room");
+  await page.press("#filter", "Enter");
+  check("Enter cannot open the old category's room", (await page.inputValue("#room")) === "lobby");
+  const staleClick = await oldRoom.click({ timeout: 250 }).then(() => true, () => false);
+  check("the old category has no clickable navigation target", !staleClick);
+
+  const response = page.waitForResponse((r) =>
+    new URL(r.url()).searchParams.get("kind") === "mailbox",
+  );
+  releaseNew();
+  await response;
+  await page.fill("#filter", "mb-new-room");
+  const newRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "mb-new-room" });
+  await newRoom.waitFor();
+  check("the new category's row appears after its response", (await newRoom.count()) === 1);
+  await page.press("#filter", "Enter");
+  check("Enter opens the new category's first room", (await page.inputValue("#room")) === "mb-new-room");
+  await page.fill("#room", "lobby");
+  await newRoom.click();
+  check("the new category's row remains clickable", (await page.inputValue("#room")) === "mb-new-room");
+  await page.close();
+
+  async function staleRace(categoryABA) {
+    const racePage = await context.newPage();
+    racePage.setDefaultTimeout(5000);
+    let releaseOld;
+    const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+    let markOldStarted;
+    const oldStarted = new Promise((resolve) => { markOldStarted = resolve; });
+    let markOldReturned;
+    const oldReturned = new Promise((resolve) => { markOldReturned = resolve; });
+    let discussionCalls = 0;
+    await racePage.route("**/rooms?*", async (route) => {
+      const kind = new URL(route.request().url()).searchParams.get("kind");
+      if (kind === "mailbox") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("mb-current")) });
+      } else if (++discussionCalls === 1) {
+        markOldStarted();
+        await oldGate;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("stale-discussion")) });
+        markOldReturned();
+      } else {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("fresh-discussion")) });
+      }
+    });
+    await racePage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await oldStarted;
+    if (categoryABA) {
+      await racePage.selectOption("#kind", "mailbox");
+      await racePage.locator(".btn-ghost", { hasText: "mb-current" }).waitFor();
+      await racePage.selectOption("#kind", "discussion");
+    } else {
+      await racePage.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    }
+    await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).waitFor();
+    const before = await racePage.locator("#rooms tbody .btn-ghost").first().innerText();
+    releaseOld();
+    await oldReturned;
+    await racePage.waitForTimeout(100);
+    const result = {
+      before,
+      fresh: await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).count(),
+      stale: await racePage.locator(".btn-ghost", { hasText: "stale-discussion" }).count(),
+      discussionCalls,
+    };
+    await racePage.close();
+    return result;
+  }
+
+  console.log("room response generations");
+  const categoryABA = await staleRace(true);
+  check("a newer discussion response renders after category ABA",
+        categoryABA.before === "fresh-discussion" && categoryABA.discussionCalls === 2);
+  check("the old pre-ABA response cannot replace it", categoryABA.fresh === 1 && categoryABA.stale === 0);
+  const sameKind = await staleRace(false);
+  check("a newer overlapping same-kind response renders",
+        sameKind.before === "fresh-discussion" && sameKind.discussionCalls === 2);
+  check("the older same-kind response cannot replace it", sameKind.fresh === 1 && sameKind.stale === 0);
+
+  console.log("global capacity across category views");
+  const capacityPage = await context.newPage();
+  capacityPage.setDefaultTimeout(5000);
+  await capacityPage.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    const whole_store = { total: 10, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
+    const payload = kind === "discussion"
+      ? view("only-discussion", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store })
+      : kind === "mailbox"
+        ? view("none", { rooms: [], total: 0, capacity: 10, bytes: 0, bytes_capacity: 100, whole_store })
+        : view("global-room", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await capacityPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const globalUse = "10 of 10 global room cap";
+  const globalBytes = "95B room bytes at last reap (100B budget; current byte use is not sampled here)";
+  const warning = "near room-count capacity — 100% full";
+  await capacityPage.locator("#stats", { hasText: "2 discussions" }).waitFor();
+  check("discussion view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("2 discussions"));
+  check("discussion view uses whole-store capacity and warns",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "mailbox");
+  await capacityPage.locator("#stats", { hasText: "0 public mailboxes" }).waitFor();
+  check("mailbox view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("0 public mailboxes"));
+  check("mailbox view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "all");
+  await capacityPage.locator("#stats", { hasText: "2 public rooms" }).waitFor();
+  check("all view names only its listed-room total", (await capacityPage.locator("#stats").innerText()).includes("2 public rooms"));
+  check("all view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.close();
+
+  const staleBytesPage = await context.newPage();
+  staleBytesPage.setDefaultTimeout(5000);
+  await staleBytesPage.route("**/rooms?*", async (route) => {
+    const whole_store = { total: 1, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
+    const payload = view("growing-room", { whole_store });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await staleBytesPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await staleBytesPage.locator("#stats", { hasText: "room bytes at last reap" }).waitFor();
+  check("last-reap bytes are explicitly labelled as a non-current snapshot",
+        (await staleBytesPage.locator("#stats").innerText()).includes(globalBytes));
+  check("a stale byte snapshot does not drive a real-time capacity warning",
+        (await staleBytesPage.locator("#stats .badge.err").count()) === 0);
+  await staleBytesPage.close();
   await context.close();
 }
 
@@ -459,7 +661,7 @@ const browser = await chromium.launch({
     logBottom: Math.round(document.getElementById("log").getBoundingClientRect().bottom),
     composer: Math.round(document.getElementById("composer").getBoundingClientRect().bottom),
     rooms: Math.round([...document.querySelectorAll("h2")]
-      .find((h) => h.textContent === "All rooms").getBoundingClientRect().top),
+      .find((h) => h.textContent === "Rooms").getBoundingClientRect().top),
     fold: innerHeight,
   }));
   check("live: the log is above the fold", box.logBottom < box.fold, JSON.stringify(box));
