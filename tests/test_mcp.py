@@ -1097,9 +1097,7 @@ def test_write_note_rejects_an_unusable_did_mailbox_before_the_network(mcp, monk
     namespace, key = signing.note_path(did)
 
     # No mailbox is still a valid identity note; contactability is optional.
-    plain = mcp.call(
-        "write_note", {"namespace": namespace, "key": key, "value": did}
-    )
+    plain = mcp.call("write_note", {"namespace": namespace, "key": key, "value": did})
     assert plain.is_error is False, text_of(plain)
 
     sent = len(mcp.sent)
