@@ -352,8 +352,10 @@ def _check_identity_mailboxes(namespace: str, value: str) -> None:
         if re.fullmatch(NAME_PATTERN, mailbox) is None:
             raise ToolError(
                 f"bad mailbox: {mailbox!r} must match /{NAME_PATTERN}/. "
-                "The identity note was not sent; omit mailbox: until a valid contact room is ready."
+                "The identity note was not sent; omit mailbox: until a valid "
+                "contact room is ready."
             )
+
 
 # The signed lane's three optional externals, shared by its three tools. The patterns are
 # the service's own (src/didkey.py publishes the same two in /openapi.json): a did:key has
