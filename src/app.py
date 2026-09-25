@@ -845,7 +845,7 @@ def _rooms_stamp() -> tuple:
     window on a boundary can only expire an entry sooner than its own insertion would have,
     which is the direction that keeps this docstring's promise rather than weakening it.
     """
-    counted = store.counters(config.ROOT)
+    counted = store.counters(config.ROOT, strict=False)
     # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
     # `limit` alone, so nothing else would stop a view walked under one root being served
     # under another. Production never moves it; a test fixture and a reconfigured reload do.
@@ -868,7 +868,7 @@ def _note_stats() -> dict:
     saves a file read. Keep it anyway — the stamp is what makes a second worker's write
     visible here — but it is no longer the thing standing between /rooms and the store."""
     global _note_stats_cache
-    stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
+    stamp = (store.counters(config.ROOT, strict=False)["notes_written"], config.ROOT)
     now = time.monotonic()
     hit = _note_stats_cache
     if config.NOTE_STATS_CACHE_SECONDS > 0 and hit and hit[0] == stamp and now < hit[1]:

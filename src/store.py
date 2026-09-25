@@ -721,12 +721,21 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def counters(root: Path) -> dict:
+def counters(root: Path, strict: bool = True) -> dict:
     """The lifetime counters, with every key present. Read without the lock: the file is
-    replaced atomically, so a reader either sees the old bytes or the new ones."""
+    replaced atomically, so a reader either sees the old bytes or the new ones.
+
+    A missing file has counted nothing yet and a corrupt one is a diagnostic, never authority:
+    both read as zeros. A file that exists but could not be *read* (EMFILE, EIO) is neither,
+    and raises. `_bump` writes back what it read plus its batch, so zeros there are a permanent
+    reset, the likeliest way production went 135,523,320 -> 461,203 on 2026-09-21 with no
+    deploy and no restart; `service_stats` publishes and snapshots it, where zeros read as a
+    reset downstream. Only a cache stamp, where a wrong read costs one miss, passes
+    `strict=False`."""
+    zeros = (ValueError, FileNotFoundError) if strict else (OSError, ValueError)
     try:
         data = orjson.loads((root / COUNTERS_FILE).read_bytes())
-    except (OSError, ValueError):
+    except zeros:
         data = {}
     if not isinstance(data, dict):
         data = {}
@@ -814,7 +823,8 @@ def _bump(root: Path, **deltas: int) -> None:
     except OSError:
         # BlockingIOError — EAGAIN, the lock being busy — is a subclass of OSError and is
         # the ordinary path here rather than a failure; a real IO error lands here too and
-        # is swallowed exactly as it was before. Either way the deltas go back: `batch` is
+        # is swallowed exactly as it was before. So does a `.counters` that `counters()`
+        # could not read: the batch goes back rather than being written over zeros. Either way the deltas go back: `batch` is
         # empty unless the flock was held and the replace then failed, which is the one
         # case that has taken deltas out of the bucket and must return them.
         with _PENDING_LOCK:
@@ -1398,7 +1408,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
-    topics_stamp = (counters(root)["topics_written"], root_key)
+    topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
     mono = time.monotonic()
     for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
