@@ -287,9 +287,11 @@ WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 # more than the extra refusal window. Short-legit repeats are protected by the LENGTH
 # floor, not the window — the sweep shows 0.00% on them at every window from 15s to 900s.
 DUPE_FILTER_SECONDS = max(0.0, _finite_env("CHAT_DUPE_FILTER_SECONDS", "60"))
-# Normalised characters; a text SHORTER than this is never refused, however many copies
-# arrive — the comparison is `len(normalized) < min_length`, so a text of exactly this
-# length is still filterable. 16 keeps every observed conversational repeat ("ok", "gm", "+1",
+# Characters; a text SHORTER than this — as typed OR after normalisation, whichever is
+# shorter — is never refused, however many copies arrive. The comparison is
+# `min(len(text), len(normalized)) < min_length`, so a text of exactly this length in
+# both forms is still filterable, and a one-character ligature that NFKC expands past
+# the floor is not (limit._dupe_key). 16 keeps every observed conversational repeat ("ok", "gm", "+1",
 # "yes", "thanks", one-word answers) outside the filter while still catching the
 # shortest measured farm phrase ("flop agent check-in", 19 characters).
 DUPE_MIN_LENGTH = max(0, int(os.environ.get("CHAT_DUPE_MIN_LENGTH", "16")))
