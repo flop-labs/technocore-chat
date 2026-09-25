@@ -1117,3 +1117,67 @@ def test_waiter_slots_are_bounded_per_ip(client):
                 assert other is True  # a different IP is unaffected
     assert app._waiters_total == 0  # every slot released
     assert app._waiters_by_ip == {}  # and the table does not grow per distinct IP
+
+
+def test_a_body_of_exactly_the_cap_is_accepted_on_both_lanes(client):
+    """The cap is inclusive: MAX_BODY bytes fit, MAX_BODY+1 do not. Both guards decide it
+    with `> MAX_BODY`, so flipping either to `>=` shrinks the real limit by one byte and
+    refuses a body the documentation promises fits. The existing body-cap tests all send
+    an over-cap payload, so the accept side of the boundary is unchecked on both the
+    Content-Length lane and the streaming lane a chunked upload takes.
+
+    A body of exactly MAX_BODY passes the byte cap and is then judged on content, so it may
+    come back 400 (the padding is one long over-length text) rather than 200. The assertion
+    is only that it is not 413: the byte boundary let it through.
+    """
+    import app as app_module
+
+    prefix, suffix = b'{"from":"bot","text":"', b'"}'
+    at_cap = prefix + b"x" * (app_module.MAX_BODY - len(prefix) - len(suffix)) + suffix
+    assert len(at_cap) == app_module.MAX_BODY
+
+    declared = client.post("/r/lobby", content=at_cap)  # httpx sets Content-Length here
+    assert declared.status_code != 413, declared.text[:200]
+
+    chunked = client.post("/r/lobby", content=iter([at_cap]))  # no length: the stream lane
+    assert chunked.status_code != 413, chunked.text[:200]
+
+    over = client.post("/r/lobby", content=at_cap + b"x")
+    assert over.status_code == 413  # one byte past the cap is refused, as it must be
+
+
+def test_the_retry_after_is_not_off_by_the_minute(client, monkeypatch):
+    """The wait is `(1.0 - tokens) * 60.0 / per_min`. At 4/min the bucket hands a token back
+    in ~15s, so an exhausted caller must be told ~15, never ~1. Dropping the `* 60.0` or the
+    `/ per_min` collapses the wait toward a single second: an agent that believes it sleeps
+    straight back into the wall and burns the budget it was told to let refill. The existing
+    actionable-headers test only upper-bounds Retry-After, so a ~3600x-too-small value slips
+    through. This pins the floor.
+    """
+    import app as app_module
+    import config
+
+    with config.override(RATE_WRITE=4):
+        app_module._buckets.clear()
+        codes = [client.get(f"/r/lobby/say/bot/m{i}").status_code for i in range(6)]
+        assert 429 in codes  # the bucket is empty
+        r = client.get("/r/lobby/say/bot/again")
+        assert r.status_code == 429
+        assert int(r.headers["retry-after"]) >= 10  # ~15s at 4/min, not the collapsed 1s
+
+
+def test_the_bucket_table_settles_at_exactly_its_bound(client, monkeypatch):
+    """The eviction loop is `while len(_buckets) > max_buckets`, so after a flood the table
+    holds exactly the bound. The existing bounded test asserts `<= 8`, which a `> max_buckets`
+    turned `>= max_buckets` (evicting one too many, leaving 7) still passes. A full table is
+    the property that keeps the most recent callers' budgets, so pin the count exactly.
+    """
+    import app as app_module
+    import config
+
+    monkeypatch.setattr(app_module, "MAX_BUCKETS", 8)
+    with config.override(CLIENT_IP_HEADER="cf-connecting-ip"):
+        app_module._buckets.clear()
+        for i in range(50):
+            client.get("/r/lobby", headers={"cf-connecting-ip": f"2001:db8::{i:x}"})
+        assert len(app_module._buckets) == 8  # not merely <= 8: the table stays full
