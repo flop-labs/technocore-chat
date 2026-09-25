@@ -98,6 +98,30 @@ def _base58(raw: bytes) -> str:
     return out
 
 
+def _base58_decode(raw: str) -> bytes:
+    n = 0
+    for char in raw:
+        digit = _B58.find(char)
+        if digit < 0:
+            raise ValueError("invalid base58 digit")
+        n = n * 58 + digit
+    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+
+
+def is_valid_did(did: str | None) -> bool:
+    """Match the service's did:key acceptance: shape, codec and key length."""
+    if not isinstance(did, str) or not did.startswith(PREFIX + "z"):
+        return False
+    encoded = did[len(PREFIX) + 1 :]
+    if len(encoded) != 47:
+        return False
+    try:
+        decoded = _base58_decode(encoded)
+    except (ValueError, OverflowError):
+        return False
+    return len(decoded) == 34 and decoded.startswith(MULTICODEC_ED25519)
+
+
 class Signer:
     """One Ed25519 identity: the did:key it publishes and the signatures it mints."""
 
