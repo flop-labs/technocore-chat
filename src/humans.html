@@ -2025,17 +2025,25 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // Re-render on every keystroke: filtering is a client-side pass over at most 200 rows the
   // page already has, so there is nothing to debounce and no request to spare.
   filterEl.addEventListener('input', renderRooms);
+
+  // Enter confirms an IME candidate before it means "send" or "open". Some browsers
+  // clear isComposing before that keydown but retain the IME keyCode 229, so check both.
+  // All three shortcuts share this gate: finishing a filter must not navigate either.
+  function submitEnter(ev) {
+    return ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229;
+  }
+
   // Type a few letters, press Enter, you are in the room. Filtering to one row and then
   // asking the reader to go and click it is a step the page can do for them.
   filterEl.addEventListener('keydown', function (ev) {
-    if (ev.key !== 'Enter') return;
+    if (!submitEnter(ev)) return;
     var first = roomsBody.querySelector('.btn-ghost');
     if (first) { first.click(); }
   });
   document.getElementById('join').addEventListener('click', function () { open(roomEl.value); });
   document.getElementById('send').addEventListener('click', send);
-  textEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') send(); });
-  roomEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') open(roomEl.value); });
+  textEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) send(); });
+  roomEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) open(roomEl.value); });
 
   // Pasting a #room link into an already-open tab must navigate, not sit there.
   window.addEventListener('hashchange', function () {

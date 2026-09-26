@@ -180,6 +180,85 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// -------------------------------------------------------------------------- IME confirmation
+// Enter can accept a Japanese/Chinese conversion candidate rather than submit a field.
+// Exercise both the standard composing flag and the legacy 229 event browsers can emit
+// while confirming a candidate. The fetch stub records the page's outgoing writes without
+// changing the seeded room order used by the other checks.
+{
+  console.log("IME confirmation");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.__imePosts = [];
+    window.fetch = (url, init) => {
+      if (init && init.method === "POST") {
+        window.__imePosts.push({ url, body: JSON.parse(init.body) });
+        return Promise.resolve(new Response("ok\n", { status: 200 }));
+      }
+      return original(url, init);
+    };
+  });
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#rooms .btn-ghost");
+  const enter = (selector, properties) => page.evaluate(async ([selector, properties]) => {
+    document.querySelector(selector).dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, ...properties,
+    }));
+    // Let send()'s promise chain settle too: a synchronous-only check misses the POST.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }, [selector, properties]);
+
+  for (const [label, properties] of [
+    ["isComposing", { isComposing: true, keyCode: 13 }],
+    ["keyCode 229", { isComposing: false, keyCode: 229 }],
+  ]) {
+    await page.fill("#text", "日本語を変換中");
+    const before = await page.evaluate(() => window.__imePosts.length);
+    await enter("#text", properties);
+    check(`${label}: confirming a message sends nothing`,
+          (await page.evaluate(() => window.__imePosts.length)) === before);
+    check(`${label}: the composing draft is preserved`,
+          (await page.inputValue("#text")) === "日本語を変換中");
+
+    await page.fill("#room", "lobby");
+    await page.click("#join");
+    await page.fill("#room", "standup");
+    const roomHash = await page.evaluate(() => location.hash);
+    await enter("#room", properties);
+    check(`${label}: confirming a room name does not navigate`,
+          (await page.evaluate(() => location.hash)) === roomHash);
+
+    await page.fill("#room", "lobby");
+    await page.click("#join");
+    await page.fill("#filter", "standup");
+    const filterHash = await page.evaluate(() => location.hash);
+    await enter("#filter", properties);
+    check(`${label}: confirming a filter does not open its top match`,
+          (await page.evaluate(() => location.hash)) === filterHash);
+  }
+
+  await page.fill("#text", "confirmed message");
+  const before = await page.evaluate(() => window.__imePosts.length);
+  await enter("#text", { keyCode: 13 });
+  check("ordinary Enter still sends once and clears the submitted draft",
+        (await page.evaluate(() => window.__imePosts.length)) === before + 1 &&
+        (await page.inputValue("#text")) === "");
+  await page.fill("#text", "shift enter message");
+  await enter("#text", { keyCode: 13, shiftKey: true });
+  check("Shift+Enter keeps the existing send behavior",
+        (await page.evaluate(() => window.__imePosts.length)) === before + 2);
+  await page.fill("#room", "build-notes");
+  await enter("#room", { keyCode: 13 });
+  check("ordinary Enter still opens a room by name",
+        (await page.evaluate(() => location.hash)) === "#r/build-notes");
+  await enter("#filter", { keyCode: 13 });
+  check("ordinary Enter still opens the top filter match",
+        (await page.evaluate(() => location.hash)) === "#r/standup");
+  await context.close();
+}
+
 // ----------------------------------------------------------------------------------- mobile
 {
   const context = await browser.newContext({
@@ -1087,6 +1166,51 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+
+// --------------------------------------------------------------- browser-engine composition
+// Unlike the synthetic compatibility events above, CDP starts composition inside Blink.
+// Keep this after the directory checks: the successful send really writes to the store.
+{
+  console.log("browser-engine IME");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  let posts = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url() === `${BASE}/r/ime-compose`) posts++;
+  });
+  await page.goto(`${BASE}/humans#r/ime-compose`, { waitUntil: "domcontentloaded" });
+  await page.locator("#text").focus();
+  await page.evaluate(() => {
+    window.__imeKeys = [];
+    document.getElementById("text").addEventListener("keydown", (event) => {
+      window.__imeKeys.push({ key: event.key, composing: event.isComposing, trusted: event.isTrusted });
+    });
+  });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Input.imeSetComposition", {
+    text: "日本語", selectionStart: 3, selectionEnd: 3,
+  });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(100);
+  const keys = await page.evaluate(() => window.__imeKeys);
+  check("IME engine delivers a trusted composing Enter",
+        keys.some((event) => event.key === "Enter" && event.composing && event.trusted));
+  let view = await (await page.request.get(`${BASE}/r/ime-compose?format=json`)).json();
+  check("composing Enter preserves the Japanese draft without posting",
+        posts === 0 && view.count === 0 && (await page.inputValue("#text")) === "日本語");
+  await cdp.send("Input.insertText", { text: "日本語" });
+  await Promise.all([
+    page.waitForResponse((response) =>
+      response.request().method() === "POST" && response.url() === `${BASE}/r/ime-compose`),
+    page.keyboard.press("Enter"),
+  ]);
+  view = await (await page.request.get(`${BASE}/r/ime-compose?format=json`)).json();
+  check("Enter after composition stores exactly one Japanese message",
+        posts === 1 && view.count === 1 && view.messages[0].text === "日本語");
+  await page.waitForFunction(() => document.getElementById("text").value === "");
+  check("the successful send clears the draft", (await page.inputValue("#text")) === "");
+  await context.close();
+}
 
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
