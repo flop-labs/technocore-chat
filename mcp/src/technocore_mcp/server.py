@@ -64,6 +64,7 @@ import secrets
 import socket
 import sys
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import MCPServer
@@ -379,6 +380,33 @@ def _resolve_signature(
     )
 
 
+# Re-signs after a nonce refusal, then stop. One covers what #916 names — a peer isolate's
+# later nonce landing first, or a key's nanosecond-scale floor; the second covers that
+# peer writing once more in between. A floor still moving after that is a live race with
+# another writer of this key, and chasing it would only race it harder.
+NONCE_RETRIES = 2
+
+
+async def _signed_write(attempt: Callable[[int], Awaitable[str]], external: bool) -> str:
+    """Run one signed write, re-signing above the floor a nonce refusal names.
+
+    `attempt(nonce)` signs and posts with that nonce. Only this server's own signatures are
+    re-signed: an external signer chose its nonce, and the refusal is its answer. Nothing is
+    duplicated by a retry — a refused write did not land.
+    """
+    minted = signing.next_nonce()
+    for _ in range(NONCE_RETRIES):
+        try:
+            return await attempt(minted)
+        except ToolError as exc:
+            floor = None if external or _signer is None else signing.refused_floor(str(exc))
+            if floor is None:
+                raise
+            signing.raise_floor(floor)
+            minted = signing.next_nonce()
+    return await attempt(minted)
+
+
 @server.tool(
     name="read_room",
     description=(
@@ -588,8 +616,8 @@ async def say_signed(
 ) -> str:
     # The signature covers the swept text — exactly the bytes the service stores — with a
     # nonce greater than the last one this key used in this room; a millisecond clock
-    # satisfies that, so nothing is read before the write.
-    minted = signing.next_nonce()
+    # satisfies that, so nothing is read before the write, and a refusal that names a
+    # higher floor is cleared by `_signed_write`.
     swept = signing.sweep(text)
     if not swept and _signer is None and did is None and sig is None and nonce is None:
         # A no-key caller receives the exact canonical string from _resolve_signature. An
@@ -599,10 +627,14 @@ async def say_signed(
             "empty text: nothing visible was left after the single-line sweep. "
             "Send at least one visible character."
         )
-    did, sig, nonce = _resolve_signature(f"{room}|{minted}|{swept}", did, sig, nonce, minted)
-    return await _post(
-        f"/r/{_segment(room)}", {"did": did, "sig": sig, "nonce": str(nonce), "text": text}
-    )
+
+    async def attempt(minted: int) -> str:
+        d, s, n = _resolve_signature(f"{room}|{minted}|{swept}", did, sig, nonce, minted)
+        return await _post(
+            f"/r/{_segment(room)}", {"did": d, "sig": s, "nonce": str(n), "text": text}
+        )
+
+    return await _signed_write(attempt, external=did is not None)
 
 
 @server.tool(
@@ -626,7 +658,7 @@ async def claim_room(
     # The claim stores the signer's own did as the value, so the canonical string embeds
     # it; the create-only guard is what makes "first claimant wins" true, and the nonce
     # burns the room's shared ownership counter.
-    minted = signing.next_nonce()
+    #
     # The value is the signer's own did, which is the one field of this canonical that an
     # external signer knows and this server does not. Handing back a canonical with a
     # placeholder in it would be handing back a string that cannot be signed as instructed:
@@ -639,6 +671,7 @@ async def claim_room(
     elif signer is not None:
         value = signer.did
     else:
+        minted = signing.next_nonce()
         raise ToolError(
             "no signing identity, and `claim_room` is the one signed tool that cannot hand "
             "you a ready-to-sign string without one: the value being signed IS the "
@@ -648,13 +681,17 @@ async def claim_room(
             f"did set to the same value, sig, and nonce {minted}:\n"
             f"room-owners|{room}|{minted}|<your did:key>"
         )
-    did, sig, nonce = _resolve_signature(
-        f"room-owners|{room}|{minted}|{value}", did, sig, nonce, minted
-    )
-    return await _post(
-        f"/kv/room-owners/{_segment(room)}",
-        {"did": did, "sig": sig, "nonce": str(nonce), "value": did, "if_absent": "1"},
-    )
+
+    async def attempt(minted: int) -> str:
+        d, s, n = _resolve_signature(
+            f"room-owners|{room}|{minted}|{value}", did, sig, nonce, minted
+        )
+        return await _post(
+            f"/kv/room-owners/{_segment(room)}",
+            {"did": d, "sig": s, "nonce": str(n), "value": d, "if_absent": "1"},
+        )
+
+    return await _signed_write(attempt, external=did is not None)
 
 
 @server.tool(
@@ -676,15 +713,16 @@ async def set_room_allow(
     sig: Sig = None,
     nonce: Nonce = None,
 ) -> str:
-    minted = signing.next_nonce()
     swept = signing.sweep(dids)
-    did, sig, nonce = _resolve_signature(
-        f"room-allow|{room}|{minted}|{swept}", did, sig, nonce, minted
-    )
-    return await _post(
-        f"/kv/room-allow/{_segment(room)}",
-        {"did": did, "sig": sig, "nonce": str(nonce), "value": dids},
-    )
+
+    async def attempt(minted: int) -> str:
+        d, s, n = _resolve_signature(f"room-allow|{room}|{minted}|{swept}", did, sig, nonce, minted)
+        return await _post(
+            f"/kv/room-allow/{_segment(room)}",
+            {"did": d, "sig": s, "nonce": str(n), "value": dids},
+        )
+
+    return await _signed_write(attempt, external=did is not None)
 
 
 @server.tool(

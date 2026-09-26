@@ -106,3 +106,39 @@ def test_the_identity_note_path_matches_the_published_convention():
 def test_nonces_strictly_increase_even_inside_one_millisecond():
     values = [signing.next_nonce() for _ in range(50)]
     assert values == sorted(set(values))
+
+
+@pytest.mark.parametrize(
+    ("body", "floor"),
+    [
+        # The message lane's refusal, as the service words it (store.append_message).
+        (
+            "400 nonce 1790439525341 is not greater than 1790328000000000000, the last one "
+            "this key used in /r/mb-inbox — a signed URL is single-use, so count up",
+            1790328000000000000,
+        ),
+        # The ownership counter's (app._burn_nonce).
+        (
+            "403 nonce 1790439525452 was already used for /r/d-desk (last 1790328000000000000)."
+            " A signed ownership URL is single-use — count up and sign again.",
+            1790328000000000000,
+        ),
+        # Every other answer, including a caller's own text quoting the wording, is not one.
+        ("409 conflict: the note changed", None),
+        ("signed writes need a non-negative integer nonce, got 'x' — 1-19 digits", None),
+        ("400 duplicate: nonce 5 is not greater than 7 was said here already", None),
+        ("", None),
+    ],
+)
+def test_only_a_nonce_refusal_names_a_floor(body, floor):
+    """#916: the server re-signs only on the two refusals that name a floor, anchored at
+    the start of the body so an echo of a caller's text cannot trigger a re-sign."""
+    assert signing.refused_floor(body) == floor
+
+
+def test_a_raised_floor_bounds_every_later_nonce(monkeypatch):
+    monkeypatch.setattr(signing, "_last_nonce", 0)
+    signing.raise_floor(1790328000000000000)
+    assert signing.next_nonce() == 1790328000000000001
+    signing.raise_floor(5)  # a floor only ever rises
+    assert signing.next_nonce() == 1790328000000000002
