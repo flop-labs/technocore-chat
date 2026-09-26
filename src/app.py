@@ -1656,7 +1656,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
         # claimant that read "no owner" before losing can never empty the winner's list.
         with store._locked(owner := store.note_path(config.ROOT, store.OWNERS_NS, key)):
             if not owner.exists() and store.note_get(config.ROOT, store.ALLOW_NS, key):
-                store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
+                store.note_set(config.ROOT, store.ALLOW_NS, key, "none", reap=False)
         return None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
