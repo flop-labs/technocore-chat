@@ -642,9 +642,9 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     later writer can carry instead; everything else here is holding the lock to make a
     decision that has to be made, and would have to wait again anyway.
 
-    `nb` is also how `_reap` keeps one pass running at a time: it takes its own marker file
-    that way and gives up rather than queueing, because a caller that cannot get it is one
-    whose work is already being done.
+    `nb` is also how `_reap` and `_snapshot` keep one pass running at a time: each takes its
+    own marker file that way and gives up rather than queueing, because a caller that cannot
+    get it is one whose work is already being done.
 
     `shared` takes LOCK_SH instead, which is what lets a lock mean "a create is in flight"
     without meaning "one create at a time" (see `_create_gate`): any number of holders
@@ -721,12 +721,21 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
-def counters(root: Path) -> dict:
+def counters(root: Path, strict: bool = True) -> dict:
     """The lifetime counters, with every key present. Read without the lock: the file is
-    replaced atomically, so a reader either sees the old bytes or the new ones."""
+    replaced atomically, so a reader either sees the old bytes or the new ones.
+
+    A missing file has counted nothing yet and a corrupt one is a diagnostic, never authority:
+    both read as zeros. A file that exists but could not be *read* (EMFILE, EIO) is neither,
+    and raises. `_bump` writes back what it read plus its batch, so zeros there are a permanent
+    reset, the likeliest way production went 135,523,320 -> 461,203 on 2026-09-21 with no
+    deploy and no restart; `service_stats` publishes and snapshots it, where zeros read as a
+    reset downstream. Only a cache stamp, where a wrong read costs one miss, passes
+    `strict=False`."""
+    zeros = (ValueError, FileNotFoundError) if strict else (OSError, ValueError)
     try:
         data = orjson.loads((root / COUNTERS_FILE).read_bytes())
-    except (OSError, ValueError):
+    except zeros:
         data = {}
     if not isinstance(data, dict):
         data = {}
@@ -814,7 +823,8 @@ def _bump(root: Path, **deltas: int) -> None:
     except OSError:
         # BlockingIOError — EAGAIN, the lock being busy — is a subclass of OSError and is
         # the ordinary path here rather than a failure; a real IO error lands here too and
-        # is swallowed exactly as it was before. Either way the deltas go back: `batch` is
+        # is swallowed exactly as it was before. So does a `.counters` that `counters()`
+        # could not read: the batch goes back rather than being written over zeros. Either way the deltas go back: `batch` is
         # empty unless the flock was held and the replace then failed, which is the one
         # case that has taken deltas out of the bucket and must return them.
         with _PENDING_LOCK:
@@ -889,25 +899,32 @@ def read_messages(
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
-    if path.exists():
-        with path.open("rb") as f:
-            for raw in reverse_lines(f):
-                rec = _parse(raw)
-                if rec is None:
-                    continue
-                if since is not None and rec["seq"] <= since:
-                    break
-                if cutoff is not None and _expired(rec, cutoff):
-                    break
-                out.append(rec)
-                if len(out) >= limit:
-                    break
+    # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
+    # `next:` that polls a dead cursor forever, and let a caller put a number of any width
+    # into every JSON reply. The newest record on disk, expired or not, for the same reason
+    # `last_seq` does not filter.
+    head_seq = 0
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in reverse_lines(f):
+            rec = _parse(raw)
+            if rec is None:
+                continue
+            head_seq = head_seq or rec["seq"]
+            if since is not None and rec["seq"] <= since:
+                break
+            if cutoff is not None and _expired(rec, cutoff):
+                break
+            out.append(rec)
+            if len(out) >= limit:
+                break
     out.reverse()
+    if not head_seq and since:  # no record on disk: a reaped room resumes from its floor (#139)
+        head_seq = _seq_field(root, room, "floor")
     return {
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else (since or 0),
+        "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
         "generation": room_generation(root, room),
         "messages": out,
     }
@@ -1161,18 +1178,17 @@ def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
 
 def last_seq(root: Path, room: str) -> int:
     path = room_path(root, room)
-    if path.exists():
-        with path.open("rb") as f:
-            # chunk_size 4 KiB, not the 64 KiB default: this runs under the room lock on
-            # every append and wants exactly one record — the newest. A typical record is
-            # ~120 B, so 4 KiB holds ~34 of them and the first read almost always answers.
-            # reverse_lines loops until it has a complete line, so a room of long records
-            # simply reads again; nothing is lost, and the common case stops reading 60 KiB
-            # it only ever split and threw away.
-            for raw in reverse_lines(f, chunk_size=4096, max_bytes=65536):
-                rec = _parse(raw)
-                if rec is not None:
-                    return rec["seq"]
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        # chunk_size 4 KiB, not the 64 KiB default: this runs under the room lock on
+        # every append and wants exactly one record — the newest. A typical record is
+        # ~120 B, so 4 KiB holds ~34 of them and the first read almost always answers.
+        # reverse_lines loops until it has a complete line, so a room of long records
+        # simply reads again; nothing is lost, and the common case stops reading 60 KiB
+        # it only ever split and threw away.
+        for raw in reverse_lines(f, chunk_size=4096, max_bytes=65536):
+            rec = _parse(raw)
+            if rec is not None:
+                return rec["seq"]
         return 0
     # The room file is gone (reaped). A recreated room carries the previous generation's
     # high-water mark in a root-level floor map so cursors from the old generation keep
@@ -1220,17 +1236,16 @@ def room_window(root: Path, room: str) -> tuple[int, list[str]]:
     nicks: list[str] = []
     top = 0
     path = room_path(root, room)
-    if path.exists():
-        with path.open("rb") as f:
-            for raw in reverse_lines(f, max_bytes=WINDOW_BYTES):
-                rec = _parse(raw)
-                if rec is None:
-                    continue
-                if not nicks:
-                    top = rec["seq"]
-                nicks.append(str(rec.get("from", "")))
-                if len(nicks) >= WINDOW_MESSAGES:
-                    break
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in reverse_lines(f, max_bytes=WINDOW_BYTES):
+            rec = _parse(raw)
+            if rec is None:
+                continue
+            if not nicks:
+                top = rec["seq"]
+            nicks.append(str(rec.get("from", "")))
+            if len(nicks) >= WINDOW_MESSAGES:
+                break
     return top, nicks
 
 
@@ -1393,7 +1408,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
-    topics_stamp = (counters(root)["topics_written"], root_key)
+    topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
     mono = time.monotonic()
     for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
@@ -2027,6 +2042,14 @@ def _snapshot(root: Path) -> None:
     older than the interval, which is why every sample carries its own timestamp instead of
     the reader assuming a fixed cadence.
 
+    Locked like `_reap` too, non-blocking, and for the same reason: a writer that cannot have
+    the lock is one whose sample is already being taken. Waiting for it bought nothing but
+    latency — the pass walks every room with the lock held, ~4.7 s at ~239k rooms on 0.14.2,
+    and every writer that found the sample due queued behind it holding a threadpool token (91
+    at once, measured), only to find the marker fresh when it got in. Unlike `_reap` nothing
+    is touched before the pass: the marker is the data, so it is replaced at the end or not at
+    all, and the re-check under the lock still turns away a writer that stat'ed it just before.
+
     Best effort, like `_log_event` and `_bump`: the caller's write has already succeeded.
     """
     marker = root / SNAPSHOTS_FILE
@@ -2039,7 +2062,7 @@ def _snapshot(root: Path) -> None:
     except OSError:
         return
     try:
-        with _locked(marker):
+        with _locked(marker, nb=True):
             # Re-check under the lock: two writers racing the stat above would otherwise
             # both take a sample, and the file is the throttle as well as the data.
             try:
@@ -2055,6 +2078,8 @@ def _snapshot(root: Path) -> None:
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
+    except BlockingIOError:
+        return  # a pass is already running in another worker; nothing here waits for it
     except OSError:
         pass
 
@@ -2784,8 +2809,9 @@ def note_set(
 
 
 def note_get(root: Path, ns: str, key: str) -> str | None:
-    path = note_path(root, ns, key)
-    return path.read_text(encoding="utf-8") if path.exists() else None
+    with suppress(FileNotFoundError):
+        return note_path(root, ns, key).read_text(encoding="utf-8")
+    return None
 
 
 def topic(root: Path, room: str) -> str | None:
