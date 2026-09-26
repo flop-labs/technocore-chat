@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
 
-import orjson
+import strictjson
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware import Middleware
@@ -464,7 +464,7 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
         # caller-supplied integer in a view must be clamped the same way. The published
         # documents keep stdlib and indent=1 (`read_json` says why).
         return Response(
-            orjson.dumps(view, option=orjson.OPT_APPEND_NEWLINE),
+            strictjson.dumps(view, option=strictjson.OPT_APPEND_NEWLINE),
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
@@ -1439,9 +1439,10 @@ async def read_json(request: Request) -> dict | Response:
         # orjson here, stdlib json for the three documents below. orjson is ~4.7x on the
         # parse and, on a service whose whole job is hostile input, refuses the
         # `NaN`/`Infinity` literals stdlib accepts — the same non-finite tokens
-        # config._finite_env already refuses to boot with. The documents keep stdlib
-        # because they are published with indent=1 and orjson only offers indent 2.
-        payload = orjson.loads(bytes(raw) if raw else b"{}")
+        # config._finite_env already refuses to boot with. strictjson retains that decoder
+        # and refuses repeated object names before it; the documents keep stdlib because
+        # they are published with indent=1 and orjson only offers indent 2.
+        payload = strictjson.loads(bytes(raw) if raw else b"{}")
     except ValueError as exc:
         return text(
             f"400 body must be JSON, and this did not parse: {exc}.\n"
