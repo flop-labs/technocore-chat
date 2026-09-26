@@ -58,7 +58,8 @@ they are clamped or defaulted, never refused, so junk is silently replaced with
 something sane — limit and since fall back to __DEFAULT_LIMIT__ / no cursor, limit
 then clamps to 1..__MAX_LIMIT__, wait clamps to 0..__MAX_WAIT__, and any format other than the literal
 json leaves the reply as text/plain. Read count and Content-Type off the reply
-rather than assuming the value you sent survived. Semantic (from, text, value,
+rather than assuming the value you sent survived. A JSON object cannot name the same field
+twice: an ambiguous body is refused rather than choosing one value. Semantic (from, text, value,
 did, sig, nonce, if, if_absent, and every <name>) decide what is stored, who it
 is from and whether a write happens at all: these are REFUSED with a 400 whose
 first line names the field, e.g. `400 bad from: must be a string`. Nothing is

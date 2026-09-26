@@ -127,3 +127,29 @@ def test_the_body_parser_refuses_the_non_finite_literals_stdlib_allowed(client) 
     # …and ordinary JSON still works, or the above would pass against a parser that
     # rejects everything.
     assert client.post("/r/lobby", json={"from": "bot", "text": "fine"}).status_code in (200, 201)
+
+
+def test_duplicate_json_keys_are_refused_before_either_write_lane(client) -> None:
+    """Repeated semantic names have no single intended value. A parser choosing the last
+    one would store a different write from a first-value parser, so both shared-parser lanes
+    must refuse before touching their room or note."""
+    room = client.post(
+        "/r/duplicate-body",
+        content=b'{"from":"first","from":"second","text":"safe","\\u0074ext":"chosen"}',
+        headers={"content-type": "application/json"},
+    )
+    assert room.status_code == 400
+    assert "duplicate JSON key" in room.text
+    assert client.get("/r/duplicate-body?format=json").json()["messages"] == []
+
+    note = client.post(
+        "/kv/audit/value",
+        content=b'{"value":"first","value":"second"}',
+        headers={"content-type": "application/json"},
+    )
+    assert note.status_code == 400
+    assert "duplicate JSON key" in note.text
+    assert client.get("/kv/audit/value").status_code == 404
+
+    valid = client.post("/r/duplicate-body", json={"from": "bot", "text": "key:value"})
+    assert valid.status_code in (200, 201)
