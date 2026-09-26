@@ -30,6 +30,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Match, Route
+from starlette_compress import CompressMiddleware, add_compress_type
 
 import config
 import didkey
@@ -360,7 +361,7 @@ def _quality(ranges: list[tuple[str, float]], media_type: str) -> float:
 def _markdown_wanted(request: Request) -> bool:
     """True when the caller asked for markdown ahead of plain text.
 
-    Only consulted for the three documents whose bytes already *are* markdown, so honouring
+    Only consulted for the documents whose bytes already *are* markdown, so honouring
     it relabels the response and never reformats one — a Content-Type is a claim about the
     body, and returning text/markdown for prose that is not markdown would be a false one.
 
@@ -380,7 +381,8 @@ def _markdown_wanted(request: Request) -> bool:
     default stands. Once it is named, q decides — `text/markdown;q=0` is a refusal, and a
     markdown range listed after a lower-q plain one still wins.
     """
-    ranges = _accept_ranges(request.headers.get("accept", ""))
+    # Accept is a list field: preserve every field line and its order (RFC 9110 section 5.2).
+    ranges = _accept_ranges(",".join(request.headers.getlist("accept")))
     if not any(name == "text/markdown" for name, _ in ranges):
         return False
     markdown = _quality(ranges, "text/markdown")
@@ -453,8 +455,16 @@ def render(view: dict) -> str:
 
 def respond(request: Request, view: dict, body_text: str | None = None, note: str = "") -> Response:
     if request.query_params.get("format") == "json":
+        # orjson, compact, not stdlib `indent=1`: any indent drops stdlib onto its pure-Python
+        # encoder, and this is the hottest encode in the service (every JSON read, long-poll
+        # and write reply) — ~24% of GIL-held Python on the live box at 711 req/s. The same
+        # JSON value in fewer bytes. Safe here because nothing in these views is wider than
+        # 64 bits: records are what orjson wrote, and `last_seq` is clamped to the room's head
+        # (#565) — it used to echo any `?since=`, which orjson would refuse with a 500. A new
+        # caller-supplied integer in a view must be clamped the same way. The published
+        # documents keep stdlib and indent=1 (`read_json` says why).
         return Response(
-            json.dumps(view, ensure_ascii=False, indent=1) + "\n",
+            orjson.dumps(view, option=orjson.OPT_APPEND_NEWLINE),
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
@@ -502,7 +512,14 @@ def _static_cacheable(resp: Response) -> Response:
     30 minutes of worst-case edge staleness, which is *past* the 15-minute autoupdate poll —
     the manual could then outlive the deploy that changed it, which is the one thing this
     window exists to prevent. 60 caps the total at 360s, comfortably under the poll.
+
+    Without CHAT_PUBLIC_URL the documents print this origin's URLs from the request's own
+    Host, so they vary on it and must say so: a shared cache that forwards the caller's Host
+    but keys only on the path would otherwise hand everyone the copy made for whichever Host
+    arrived first — `Host: evil.example` included. With it set, nothing here reads Host.
     """
+    if not config.PUBLIC_URL:
+        resp.headers.add_vary_header("Host")
     return _edge_cacheable(resp, config.STATIC_CACHE_SECONDS, 60)
 
 
@@ -571,7 +588,7 @@ def _document(doc: dict, media_type: str = "application/json") -> Response:
     the origin is briefly unwell rather than passing on a 503. **The CDN needs a rule making
     these paths cache-eligible for any of that to happen** — without one this only adds
     revalidations. These are the safer half of the document set to put behind such a rule:
-    unlike the four `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
+    unlike the `.md` files they do not negotiate on `Accept`, so there is no `Vary` for
     a cache key to get wrong.
 
     `media_type` is for the one document that is JSON under a more specific label
@@ -828,7 +845,7 @@ def _rooms_stamp() -> tuple:
     window on a boundary can only expire an entry sooner than its own insertion would have,
     which is the direction that keeps this docstring's promise rather than weakening it.
     """
-    counted = store.counters(config.ROOT)
+    counted = store.counters(config.ROOT, strict=False)
     # ROOT rides along for the reason _note_stats_cache stamps it: the entries are keyed by
     # `limit` alone, so nothing else would stop a view walked under one root being served
     # under another. Production never moves it; a test fixture and a reconfigured reload do.
@@ -851,7 +868,7 @@ def _note_stats() -> dict:
     saves a file read. Keep it anyway — the stamp is what makes a second worker's write
     visible here — but it is no longer the thing standing between /rooms and the store."""
     global _note_stats_cache
-    stamp = (store.counters(config.ROOT)["notes_written"], config.ROOT)
+    stamp = (store.counters(config.ROOT, strict=False)["notes_written"], config.ROOT)
     now = time.monotonic()
     hit = _note_stats_cache
     if config.NOTE_STATS_CACHE_SECONDS > 0 and hit and hit[0] == stamp and now < hit[1]:
@@ -1052,9 +1069,9 @@ async def _await_messages(
     "nothing" cannot tell which — see `limit.waiter_note`.
 
     Polling rather than watching: inotify would need a per-room watch table and a wakeup
-    fan-out, which is state this service does not otherwise keep. At WAIT_POLL the cost is
-    two tail reads a second per waiter, bounded by MAX_WAITERS_TOTAL — cheaper in total
-    than the busy-polling it replaces, which is the entire point.
+    fan-out, which is state this service does not otherwise keep. A tick costs one stat;
+    the tail read runs only when the room file changed since the last read, which is exact
+    because messages come from that file alone (`store.room_stamp`).
 
     It is also what makes ?wait= work under --workers N, which is not obvious and has been
     read as a bug more than once. The poll re-reads the room *file*, so a write from any
@@ -1070,11 +1087,17 @@ async def _await_messages(
         if not granted:
             return None, waiter_note(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP, wait)
         deadline = time.monotonic() + wait
+        last: object = object()  # the stamp the last read saw; none yet, so the first reads
         while time.monotonic() < deadline:
             await asyncio.sleep(min(WAIT_POLL, max(0.0, deadline - time.monotonic())))
             # Stop burning tail reads on a caller that has already hung up.
             if await request.is_disconnected():
                 return None, ""
+            # Taken before the read, so a write racing it moves the next tick's stamp.
+            stamp = await run_in_threadpool(store.room_stamp, config.ROOT, room)
+            if stamp == last:
+                continue
+            last = stamp
             view = await run_in_threadpool(
                 store.read_messages, config.ROOT, room, limit=limit, since=since
             )
@@ -1406,9 +1429,9 @@ async def read_json(request: Request) -> dict | Response:
     try:
         async with asyncio.timeout(BODY_TIMEOUT):
             async for chunk in request.stream():
-                raw.extend(chunk)
-                if len(raw) > MAX_BODY:
+                if len(raw) + len(chunk) > MAX_BODY:
                     return text(f"{too_large}\nthe stream passed it before it ended.", 413)
+                raw.extend(chunk)
     except TimeoutError:
         expired = f"408 body upload exceeded {BODY_TIMEOUT:g}s. Send complete JSON promptly; retry on a new connection."
         return text(expired, 408, extra_headers={"Connection": "close"})
@@ -1620,6 +1643,20 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 "take over a conversation already in progress.",
                 403,
             )
+        # No owner, so no allow-list here can be current: only an owner writes one. The
+        # reaper retires an owner note on its own clock, so a list planted just before its
+        # owner aged out would otherwise be inherited by whoever claims the name next — and
+        # kept for good once their room is live. Emptied rather than deleted: `none` names
+        # no key, and overwriting keeps the note and its count, so the new owner's own list
+        # is an overwrite too — an unlink would leave the count one high and refuse it at a
+        # full namespace until the next reap. The room's nonce is left alone.
+        #
+        # Under the owner note's own lock, re-checked: a claim that raced this one and won
+        # writes its owner note under that lock, and can only write a list after it, so a
+        # claimant that read "no owner" before losing can never empty the winner's list.
+        with store._locked(owner := store.note_path(config.ROOT, store.OWNERS_NS, key)):
+            if not owner.exists() and store.note_get(config.ROOT, store.ALLOW_NS, key):
+                store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
         return None
     owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
@@ -1864,12 +1901,31 @@ async def healthz(request: Request) -> Response:
     return text("ok")
 
 
-_stats_cache: tuple[float, dict] = (0.0, {})
+# Both stamped on ROOT for the reason _note_stats_cache is: a view walked under one root
+# must not be served under another. The refresh outlives the request that began it, so the
+# stamp has to ride with the task too — a caller with nothing to serve awaits it, and an
+# unfinished walk of the old root would otherwise answer the first request of the new one.
+# One runs at a time, held in a global so it is not collected mid-walk.
+_stats_cache: tuple[Path, float, dict] | None = None
+_stats_refresh: tuple[Path, asyncio.Task] | None = None
 
 
-def _stats_view() -> dict:
+async def _refresh_stats() -> dict:
+    """Recompute the view off the request path and install it against its own root.
+
+    The root is read once and handed to the walk, not read again inside it: `config.ROOT`
+    after an await is whatever it is by then, and a view stamped with a root it did not
+    measure is served under that root by every later caller.
+    """
+    global _stats_cache
+    root = config.ROOT
+    _stats_cache = (root, time.monotonic(), await run_in_threadpool(_stats_view, root))
+    return _stats_cache[2]
+
+
+def _stats_view(root: Path) -> dict:
     """Live aggregates plus the stored history, in one blocking call for the threadpool."""
-    return {**store.service_stats(config.ROOT), "history": store.snapshots(config.ROOT)}
+    return {**store.service_stats(root), "history": store.snapshots(root)}
 
 
 async def stats(request: Request) -> Response:
@@ -1882,8 +1938,18 @@ async def stats(request: Request) -> Response:
     and "how did we get here" together.
 
     Not rate limited: the gate is the token, and the one caller is a scheduled job. It is
-    cached for STATS_CACHE_SECONDS instead, because the room walk is O(cap) stats plus the
-    bounded tail reads of the engagement rollup — cheap per minute, not per request.
+    cached for STATS_CACHE_SECONDS instead, because the room walk is O(rooms) readdir plus
+    the bounded tail reads of the engagement rollup — cheap per window, not per request.
+
+    Stale while revalidating: an expired entry is served as it stands and the refresh runs
+    behind it, so a caller waits for the walk only when there is nothing at all to serve --
+    or when the window is not positive, which asks for no reuse at all and so leaves
+    nothing to serve either.
+    A blocking refresh made the cost of the walk the caller's: at 239k rooms the walk
+    outgrew the 45 s timeout of the digest this exists for, and because each poll started
+    another walk, the misses arrived faster than they cleared. One refresh runs at a time;
+    a failing one raises into whichever caller had nothing to serve, and is logged by the
+    loop for the rest, who keep the last good view until a later refresh succeeds.
     """
     # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
     # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
@@ -1901,14 +1967,15 @@ async def stats(request: Request) -> Response:
     # distinctive body would give that back — so the two must not drift apart.
     if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
         return text(NOT_FOUND, 404)
-    global _stats_cache
-    fresh_at, cached = _stats_cache
-    now = time.monotonic()
-    if cached and now - fresh_at < config.STATS_CACHE_SECONDS:
-        view = cached
+    global _stats_refresh
+    hit = _stats_cache if _stats_cache and _stats_cache[0] == config.ROOT else None
+    if hit and time.monotonic() - hit[1] < config.STATS_CACHE_SECONDS:
+        view = hit[2]
     else:
-        view = await run_in_threadpool(_stats_view)
-        _stats_cache = (now, view)
+        run = _stats_refresh
+        if run is None or run[0] != config.ROOT or run[1].done():
+            run = _stats_refresh = (config.ROOT, asyncio.create_task(_refresh_stats()))
+        view = hit[2] if hit and config.STATS_CACHE_SECONDS > 0 else await run[1]
     view = {
         **view,
         # Per *worker*, and labelled as such rather than summed. `_requests` is a plain
@@ -2127,6 +2194,12 @@ async def _lifespan(_app):
     await run_in_threadpool(store._bump, config.ROOT)
 
 
+# NDJSON is not in the library's default allow-list, and `/r/<room>/export` is the single
+# largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
+# requests. Without this line the middleware is a silent no-op exactly where it pays most.
+# Module scope, not lifespan: the allow-list is module state and every worker imports here.
+add_compress_type("application/x-ndjson", streaming=True)
+
 app = Starlette(
     lifespan=_lifespan,
     routes=[
@@ -2167,6 +2240,15 @@ app = Starlette(
             allow_methods=["GET", "POST"],
             allow_credentials=False,
         ),
+        # Innermost, so it sees handler responses only. Every knob is left at the
+        # library's default because those defaults are what measured best here
+        # (bench/compression.py): brotli q=4 and gzip level 4. The CDN in front asks the
+        # origin for `gzip, br` on every request — measured, 16,782 of 16,782 in one
+        # capture — and decompresses for callers that ask for neither, so this shrinks the
+        # metered origin leg without any client needing to change. Transport encoding
+        # only: a caller decodes to the same bytes, which is what keeps the export's
+        # byte-exact re-verification promise (design §5.1-§5.2) intact.
+        Middleware(CompressMiddleware),
     ],
     exception_handlers={
         StoreError: on_bad_input,

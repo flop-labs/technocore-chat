@@ -204,6 +204,106 @@ def test_a_generation_survives_the_split_and_keeps_counting_up(tmp_path) -> None
     assert store.last_seq(tmp_path, "gone") == 41, "the pre-split floor was not carried over"
 
 
+def _parsed_sizes(monkeypatch) -> list[int]:
+    """Every `orjson.loads` from here on, by the size of its input."""
+    import store
+
+    sizes: list[int] = []
+    real = store.orjson.loads
+    monkeypatch.setattr(store.orjson, "loads", lambda data: sizes.append(len(data)) or real(data))
+    return sizes
+
+
+def _read_twice(tmp_path, room: str) -> set[int]:
+    """Both answers: the first read verifies the copy, the second trusts the verdict."""
+    import store
+
+    return {store.room_generation(tmp_path, room) for _ in range(2)}
+
+
+def test_a_read_finds_its_entry_without_building_the_shard(tmp_path, monkeypatch) -> None:
+    """Once a shard version is verified, hits and misses come from its bytes (#890)."""
+    import store
+
+    rooms = {f"r{i}": {"floor": i, "gen": i % 7 + 1, "t": 1} for i in range(2_000)}
+    shards: dict[Path, dict] = {}
+    for room, entry in rooms.items():
+        shards.setdefault(store._seq_state_path(tmp_path, room), {})[room] = entry
+    for path, group in shards.items():
+        path.write_bytes(orjson.dumps(group))
+    for room in rooms:
+        store.room_generation(tmp_path, room)
+
+    sizes = _parsed_sizes(monkeypatch)
+    for room, entry in rooms.items():
+        assert store.room_generation(tmp_path, room) == entry["gen"], room
+        assert store.last_seq(tmp_path, room) == entry["floor"], room
+    assert store.room_generation(tmp_path, "never-made") == 0
+    assert max(sizes) < 100, f"parsed {max(sizes)} bytes to read one entry"
+
+
+def test_what_the_writer_writes_passes_the_check(tmp_path, monkeypatch) -> None:
+    """Pins the search to `_set_seq_entry`'s output: a create's gen and a reap's floor."""
+    import store
+
+    for room in ("lobby", "mb-inbox", "z9"):
+        store._write_record(tmp_path, room, "bot", "hi")
+    store._set_seq_entry(tmp_path, "z9", 17)
+    for room in ("lobby", "mb-inbox", "z9"):
+        store.room_generation(tmp_path, room)
+
+    sizes = _parsed_sizes(monkeypatch)
+    for room in ("lobby", "mb-inbox", "z9"):
+        assert store.room_generation(tmp_path, room) == 1, room
+    assert store._seq_field(tmp_path, "z9", "floor") == 17
+    assert max(sizes) < 100, f"parsed {max(sizes)} bytes to read one entry"
+
+
+def test_any_other_form_answers_as_the_whole_map_parse(tmp_path) -> None:
+    """Spacing, other whitespace, duplicate keys, damage: never searched, same answer as a parse."""
+    import json
+
+    import store
+
+    entry = {"floor": 9, "gen": 4, "t": 1}
+    path = store._seq_state_path(tmp_path, "kept")
+    cases = [
+        (json.dumps({"kept": entry, "o": entry}).encode(), 4),
+        (json.dumps({"kept": entry}, indent=2).encode(), 4),
+        (b'{"o":{"gen":1},"kept":\n{"floor":9,"gen":4}}', 4),
+        (b'{"o":{"gen":1},"kept":\t{"floor":9,"gen":4}}', 4),
+        (b'{"kept":{"floor":9,"gen":3},"kept":{"floor":9,"gen":4}}', 4),  # the parse keeps the last
+        (b'{"kept":{"floor":9,"gen":4},"bad":{"gen":"x"}}', 4),
+        (b'{"kept":{"floor":9,"gen":4},"bad":7}', 4),
+        (b'{"kept":{"floor":9,"gen":4},"bad":{"gen":}}', 0),  # not JSON: no state
+        (orjson.dumps({"kept": entry, "o": entry})[:-1], 0),
+    ]
+    for data, gen in cases:
+        path.write_bytes(data)
+        assert _read_twice(tmp_path, "kept") == {gen}, data
+
+
+def test_a_verified_shard_rewritten_in_place_is_verified_again(tmp_path) -> None:
+    """Same inode, same size, old mtime put back with utime(): only the ctime moves."""
+    import time
+
+    import store
+
+    path = store._seq_state_path(tmp_path, "kept")
+    path.write_bytes(b'{"kept":{"floor":5,"gen":2},"bad":{"gen":7}}')
+    assert store.room_generation(tmp_path, "kept") == 2
+    before = path.stat()
+    time.sleep(0.05)  # past the kernel's coarse timestamp tick
+    with path.open("r+b") as f:
+        f.write(b'{"kept":{"floor":5,"gen":2},"bad":{"gen":x}}')  # same length, not JSON
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = path.stat()
+    kept = (after.st_ino, after.st_size, after.st_mtime_ns)
+    assert kept == (before.st_ino, before.st_size, before.st_mtime_ns), "premise"
+    assert after.st_ctime_ns != before.st_ctime_ns, "premise"
+    assert store.room_generation(tmp_path, "kept") == 0
+
+
 # --------------------------------------------------------------------------- isolation
 
 
