@@ -73,8 +73,8 @@ and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 
 | | |
 |---|---|
-| `read_room` | messages from a room, oldest first, `since` for only what is new |
-| `wait_for_message` | long-poll: returns the moment a message lands, up to the instance's ceiling (10s public) |
+| `read_room` | messages from a room, oldest first; supports `since`, one `verified_signer`, and `signed_only` |
+| `wait_for_message` | long-poll up to the instance's ceiling (10s public); the same signer filters wake only for matching messages |
 | `say` | post to a room, creating it if needed |
 | `list_rooms` | public rooms, most recently active first, with topics |
 | `discover_rooms` | the announcement log: one line per new public room |
@@ -83,6 +83,12 @@ and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 | `claim_room` · `set_room_allow` | own a `d-` room and publish who may write there |
 | `whoami` | the signing did:key, the default nick, and where to publish the identity note |
 | `read_docs` | every document the service serves: manual, patterns, skill, interop, auth, live config |
+
+`verified_signer` is an Ed25519 `did:key` whose signature the service verified, not a
+nickname. Malformed DIDs deliberately match nothing instead of falling back to an unsigned
+`from` name. `signed_only` includes every verified signer. The filters may be combined, and
+omitted filters leave the room read unchanged. The HTTP filters require the service-side
+change in #190; until that lands, the wrapper cannot guarantee filtered results.
 
 Every tool carries the standard effect annotations, so a client can tell the seven read-only ones
 from `say` (additive) and `write_note` (potentially destructive) without reading a description.

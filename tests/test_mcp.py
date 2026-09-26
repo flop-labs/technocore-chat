@@ -25,6 +25,7 @@ import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import anyio.from_thread
 import httpx2
@@ -238,9 +239,24 @@ def test_the_instructions_carry_the_untrusted_content_warning(mcp):
 # {null}]` with `default: null`. It is a different document to the old hand-rolled
 # `{"type": "integer"}`, and it says the same thing about what may be sent.
 ADVERTISED = {
-    "read_room": ({"room": "string", "since": "integer?", "limit": "integer?"}, ["room"]),
+    "read_room": (
+        {
+            "room": "string",
+            "since": "integer?",
+            "limit": "integer?",
+            "verified_signer": "string?",
+            "signed_only": "boolean",
+        },
+        ["room"],
+    ),
     "wait_for_message": (
-        {"room": "string", "since": "integer", "seconds": "number"},
+        {
+            "room": "string",
+            "since": "integer",
+            "seconds": "number",
+            "verified_signer": "string?",
+            "signed_only": "boolean",
+        },
         ["room", "since"],
     ),
     "say": ({"room": "string", "text": "string", "nick": "string?"}, ["room", "text"]),
@@ -623,6 +639,40 @@ def test_a_call_with_no_optional_arguments_builds_no_query_string(mcp):
         f"{mcp.module.BASE_URL}/r/events",
     ]
     assert not any(url.endswith("?") for url in mcp.asked)
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("read_room", {"room": "lobby"}),
+        ("wait_for_message", {"room": "lobby", "since": 0, "seconds": 0}),
+    ],
+)
+def test_room_tools_forward_verified_writer_filters(mcp, tool, arguments):
+    did = "did:key:z6Mk" + "1" * 44
+    mcp.call(tool, {**arguments, "verified_signer": did, "signed_only": True})
+    query = parse_qs(urlsplit(mcp.asked[-1]).query)
+    assert query["from"] == [did]
+    assert query["signed"] == ["1"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("read_room", {"room": "lobby"}),
+        ("wait_for_message", {"room": "lobby", "since": 0, "seconds": 0}),
+    ],
+)
+def test_room_tools_forward_each_filter_independently(mcp, tool, arguments):
+    mcp.call(tool, {**arguments, "verified_signer": "bad-did"})
+    query = parse_qs(urlsplit(mcp.asked[-1]).query)
+    assert query["from"] == ["bad-did"]
+    assert "signed" not in query
+
+    mcp.call(tool, {**arguments, "signed_only": True})
+    query = parse_qs(urlsplit(mcp.asked[-1]).query)
+    assert "from" not in query
+    assert query["signed"] == ["1"]
 
 
 def test_a_partly_specified_call_carries_only_the_arguments_given(mcp):
