@@ -2009,11 +2009,15 @@ def _reap_pass(root: Path, now: float) -> None:
 
 def snapshots(root: Path) -> list[dict]:
     """Stored samples, oldest first. Each carries `t` (unix seconds) and the aggregates
-    `service_stats` returns. A torn last line costs that one sample, never the history."""
+    `service_stats` returns. Malformed JSON lines are skipped; I/O and UTF-8 decode
+    failures propagate so callers cannot mistake unreadable history for an empty file."""
     out = []
+    # A failed read is not an empty history: _snapshot rewrites this same file.
+    # Its best-effort boundary also handles decode failures: UnicodeDecodeError is a
+    # ValueError, but unlike a malformed JSON line it prevents reading the entire history.
     try:
         lines = (root / SNAPSHOTS_FILE).read_text(encoding="utf-8").splitlines()
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return out
     for line in lines:
         try:
@@ -2080,7 +2084,7 @@ def _snapshot(root: Path) -> None:
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
     except BlockingIOError:
         return  # a pass is already running in another worker; nothing here waits for it
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
 
 
