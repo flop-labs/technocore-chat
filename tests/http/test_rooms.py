@@ -1030,7 +1030,7 @@ def test_protected_write_never_reaps_under_the_room_lock(client, tmp_path, monke
     owner, owner_sign = _keypair()
     successor, _ = _keypair(seed=2)
     room = "d-reap-wiring"
-    assert _claim(client, room, owner, owner_sign).status_code == 200
+    store.note_set(tmp_path, store.ALLOW_NS, room, "none")
     r_path, real_reap, held = store.room_path(tmp_path, room), store._reap, []
 
     def probing_reap(root):
@@ -1047,6 +1047,7 @@ def test_protected_write_never_reaps_under_the_room_lock(client, tmp_path, monke
         return real_reap(root)
 
     monkeypatch.setattr(store, "_reap", probing_reap)
+    assert _claim(client, room, owner, owner_sign).status_code == 200
     r = _set_signed(client, store.OWNERS_NS, room, owner, owner_sign, successor, nonce=2)
     assert r.status_code == 200
     assert held and True not in held, held
