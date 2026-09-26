@@ -391,17 +391,11 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
     wait = max(1, round(retry_after))
     other = "write" if kind == "read" else "read"
     # CHAT_MAX_WAIT=0 disables long-polling; don't recommend &wait= then.
+    wait_advice = (
+        "cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching the room"
+    )
     if max_wait > 0:
-        wait_advice = (
-            f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-            f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
-            f"{max_wait:g}s instead of twenty."
-        )
-    else:
-        wait_advice = (
-            f"cheaper pattern: poll /r/<room>?since=<last seq you saw> rather than refetching "
-            f"the room."
-        )
+        wait_advice += f", and prefer &wait={max_wait:g} to tight polling — one request per {max_wait:g}s instead of twenty."
     body = (
         f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
         f"retry after: {wait}s — the bucket refills continuously "
