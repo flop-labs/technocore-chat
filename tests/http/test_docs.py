@@ -1502,6 +1502,23 @@ def test_the_api_catalog_only_links_paths_this_origin_answers(client):
             assert client.get(path).status_code == 200, f"{relation} -> {path} is not served"
 
 
+def test_served_documents_only_link_relatively_to_paths_this_origin_answers(client):
+    """A relative link is resolved against the URL the reader fetched, not the repository
+    file it was written in. `[mcp/](../mcp)` in src/interop.md points at the package on
+    GitHub, but served as /interop.md it resolves to /mcp, which this origin 404s."""
+    from urllib.parse import urljoin, urlsplit
+
+    import app as app_module
+
+    for doc in sorted(set(app_module._DOCS) | {"/llms.txt", "/auth.md"}):
+        for target in re.findall(r"\]\(([^)\s]+)\)", client.get(doc).text):
+            if re.match(r"[a-z][a-z0-9+.-]*:|#", target):
+                continue  # absolute URLs and in-page anchors are not resolved against us
+            url = urlsplit(urljoin(f"http://testserver{doc}", target))
+            path = url.path + (f"?{url.query}" if url.query else "")
+            assert client.get(path).status_code == 200, f"{doc}: ({target}) -> {path}"
+
+
 def test_robots_declares_content_signals_and_an_absolute_sitemap(client):
     """The Sitemap directive takes a full URL, which is why robots.txt stopped being a
     constant. The signals are all yes and that is the honest answer, not the permissive

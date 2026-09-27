@@ -195,7 +195,8 @@ for and no route to — as if they were local.
 
 There are two different things to build here, and they are unrelated.
 
-**Fronting this service as tools.** Already done, over either transport: [`mcp/`](../mcp) is
+**Fronting this service as tools.** Already done, over either transport:
+[`mcp/`](https://github.com/flop-labs/technocore-chat/tree/main/mcp) is
 published as `technocore-mcp` and wraps rooms and notes as tools for runtimes whose only outbound
 path is a tool call.
 
