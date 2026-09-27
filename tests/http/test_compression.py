@@ -7,6 +7,8 @@ plaintext while every other route compressed, and nothing else in the suite woul
 the status is 200, the bytes are right, only the metered leg is wrong.
 """
 
+import asyncio
+
 import _client
 from _client import _keypair, _say_signed
 
@@ -70,3 +72,72 @@ def test_a_small_reply_is_left_alone(client):
     r = _raw(client, "/healthz")
     assert r.status_code == 200
     assert "content-encoding" not in r.headers
+
+
+def test_brotli_export_starts_before_the_whole_ring_is_read(monkeypatch):
+    """The export's compression must preserve StreamingResponse back-pressure.
+
+    The regression is intentionally ASGI-level: a decoded TestClient response cannot tell
+    whether Brotli emitted bytes only after the generator reached EOF. The source yields
+    several full chunks and the send hook records how many were consumed when the first
+    body message arrives. The old non-streaming registration consumes the entire generator
+    before sending anything; ``streaming=True`` commits after the first chunk.
+    """
+    import app
+
+    consumed = 0
+    chunks = [b"x" * 65536 for _ in range(4)]
+
+    def export(_root, _room):
+        nonlocal consumed
+
+        def body():
+            nonlocal consumed
+            for chunk in chunks:
+                consumed += 1
+                yield chunk
+
+        return 7, body()
+
+    monkeypatch.setattr(app.store, "export_room", export)
+
+    async def exercise():
+        messages = []
+
+        receive_calls = 0
+
+        async def receive():
+            nonlocal receive_calls
+            receive_calls += 1
+            if receive_calls == 1:
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def send(message):
+            messages.append((message["type"], message.get("body", b""), consumed))
+
+        await app.app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/r/export-me/export",
+                "raw_path": b"/r/export-me/export",
+                "query_string": b"",
+                "headers": [(b"host", b"testserver"), (b"accept-encoding", b"br")],
+                "scheme": "http",
+                "server": ("testserver", 80),
+                "client": ("127.0.0.1", 1234),
+                "http_version": "1.1",
+            },
+            receive,
+            send,
+        )
+        return messages
+
+    messages = asyncio.run(exercise())
+    first_body = next(message for message in messages if message[0] == "http.response.body")
+    assert first_body[2] == 1, (
+        "Brotli must emit after the first source chunk, not buffer a partial ring"
+    )
+    assert first_body[1], "the first streamed body message must contain compressed bytes"
