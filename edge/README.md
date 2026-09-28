@@ -1,8 +1,8 @@
 # Origin-first edge fallback for the document surface
 
-A Cloudflare Worker attached to seventeen exact paths. It proxies each one to the origin and
-returns whatever the origin says. Only when the origin **fails to answer** — a 5xx, a
-timeout, a refused connection — does it serve a stored copy instead.
+A Cloudflare Worker attached to this service's document paths, one route per path. It proxies
+them to the origin and returns whatever the origin says. Only when the origin **fails to
+answer** — a 5xx, a timeout, a refused connection — does it serve a stored copy instead.
 
 ## Why
 
@@ -15,8 +15,8 @@ which covers a restart and not an outage.
 
 | lane | paths | behaviour |
 |---|---|---|
-| **static-first** | `/skill.md`, `/patterns.md`, `/robots.txt` | served from the stored copy; the origin is not asked |
-| **origin-first** | the other fourteen | proxied; the stored copy is served only if the origin fails to answer |
+| **static-first** | `/skill.md`, `/patterns.md` | served from the stored copy; the origin is not asked |
+| **origin-first** | every other document path | proxied; the stored copy is served only if the origin fails to answer |
 
 The split is whether a document's bytes depend on the running configuration.
 
@@ -29,7 +29,7 @@ copy of them in preference to the origin publishes the last upload's limits as c
 2026-09-01 three compose knobs changed on the box in one afternoon, none of them via a
 release.
 
-The static three are files, served unchanged with no substitution step in which
+The static-first documents are files, served unchanged with no substitution step in which
 configuration could enter. `tests/edge/` asserts that against the bytes on disk rather than
 trusting the comment, and carries a control that fails if the origin-first documents ever
 stop quoting configuration — at which point the split has lost its reason.
@@ -38,10 +38,10 @@ stop quoting configuration — at which point the split has lost its reason.
 
 Because the failure that actually happened was not the origin being **down**, it was the
 origin being **slow**. The 2026-09-01 incident spent hours degraded rather than dead, and
-origin-first waits out its timeout before falling back — so the three documents a reader
-most needs in order to back off and retry would each have cost a multi-second stall.
+origin-first waits out its timeout before falling back — so the documents a reader most
+needs in order to back off and retry would each have cost a multi-second stall.
 
-**The cost, accepted:** these three change on a *release*, so a stored copy is stale until
+**The cost, accepted:** these change on a *release*, so a stored copy is stale until
 `deploy.sh` runs again. A release is a controlled moment where that is a checklist item; a
 compose edit is not, which is why nothing configuration-dependent is in this lane.
 

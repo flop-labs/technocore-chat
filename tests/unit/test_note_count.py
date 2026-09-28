@@ -258,6 +258,12 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
 
     An off-by-one here is invisible on a quiet store and shows up as a breached cap under
     exactly the load the cap exists for, so it is worth the process spawns.
+
+    The reaper is held off, because this is a race between creates and nothing else. On a
+    fresh store the first write starts a pass, and a pass that overlaps creates installs a
+    count above the disk on purpose (`_settle_count`, pinned by the test below): the gate
+    then refuses a create or two short of the cap, and this test failed in CI one run in
+    tens on scheduling alone — "cap is 64, store holds 63".
     """
     import store
 
@@ -277,6 +283,7 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     }
     root = tmp_path / "shared"
     root.mkdir()
+    (root / ".reaped").touch()  # no pass is due for REAP_EVERY: see the docstring
 
     workers = [
         subprocess.Popen(
@@ -299,6 +306,51 @@ def test_the_global_cap_binds_exactly_under_concurrent_processes(tmp_path) -> No
     assert on_disk == cap, f"cap is {cap}, store holds {on_disk}"
     # …and the file agrees with the disk, or the next process starts from a wrong number.
     assert store._note_count(root) == cap
+
+
+def test_a_pass_that_overlaps_creates_counts_high_never_low_and_the_next_one_is_exact(
+    tmp_path, monkeypatch
+) -> None:
+    """Why the race above holds the reaper off, pinned as the contract it is.
+
+    A create that lands between a pass's opening count and its walk is counted twice: once
+    in the growth `_settle_count` adds back, and once by the walk that saw its file. So the
+    pass installs a figure above the disk. That is the chosen direction — a figure below the
+    disk admits a write the cap should refuse, and exactness would take a second walk or a
+    span held across the walk — so it is bounded instead: never below the disk, high by at
+    most the creates that landed in the window, and measured exactly by the next pass that
+    nothing overlaps. Built, not timed: the creates run from inside the pass's note walk.
+    """
+    import store
+
+    store.note_set(tmp_path, "ns-0", "k", "v")
+    real_walk = store._walk
+    landed = []
+
+    def walk_after_three_creates(d, suffix):
+        if str(d).endswith("notes") and not landed:
+            for i in (1, 2, 3):  # after the opening count, before the walk reads a thing
+                store.note_set(tmp_path, f"ns-{i}", "k", "v")
+                landed.append(i)
+        yield from real_walk(d, suffix)
+
+    monkeypatch.setattr(store, "_walk", walk_after_three_creates)
+    _due(tmp_path)
+    store._reap(tmp_path)
+    monkeypatch.undo()
+
+    on_disk = store._count_notes(tmp_path)[0]
+    installed = store._read_counts(tmp_path, store.NOTES_FILE)
+    assert installed is not None, "the pass wrote no count"
+    counted = installed[0]
+    assert on_disk == 4 and len(landed) == 3, "premise: three creates landed inside the pass"
+    assert on_disk < counted <= on_disk + len(landed), (on_disk, counted)
+
+    _due(tmp_path)
+    store._reap(tmp_path)  # nothing overlaps this one
+    assert store._read_counts(tmp_path, store.NOTES_FILE) == (on_disk, installed[1] - 3), (
+        "the next quiet pass measures the store exactly"
+    )
 
 
 def test_a_refused_write_counts_nothing(tmp_path) -> None:
