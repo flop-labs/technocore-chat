@@ -739,11 +739,7 @@ def counters(root: Path, strict: bool = True) -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    out = {}
-    for key in COUNTER_KEYS:
-        value = data.get(key, 0)
-        out[key] = value if isinstance(value, int) and value >= 0 else 0
-    return out
+    return {k: (v if isinstance(v := data.get(k, 0), int) and v >= 0 else 0) for k in COUNTER_KEYS}
 
 
 # Deltas wait here between flushes, one bucket per store root. Fixed size whatever the write
@@ -870,21 +866,19 @@ def _expired(rec: dict, cutoff: float) -> bool:
     and a record whose age cannot be established cannot honour that promise. Elsewhere `ts`
     stays what it always was — an opaque string nothing parses."""
     ts = rec.get("ts")
-    if isinstance(ts, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-            try:
-                return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
-            except ValueError:
-                continue
+    if not isinstance(ts, str):
+        return True
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        with suppress(ValueError):
+            return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
     return True
 
 
 def _parse(line: bytes) -> dict | None:
-    try:
+    with suppress(ValueError, UnicodeDecodeError):
         rec = orjson.loads(line)
-    except (ValueError, UnicodeDecodeError):
-        return None  # torn write at EOF, or hand-edited garbage
-    return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
+        if isinstance(rec, dict) and isinstance(rec.get("seq"), int):
+            return rec
 
 
 def read_messages(
@@ -898,12 +892,11 @@ def read_messages(
     # the scan stops there. `last_seq` deliberately does NOT filter — seq must keep
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
-    out: list[dict] = []
     # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
     # `next:` that polls a dead cursor forever, and let a caller put a number of any width
     # into every JSON reply. The newest record on disk, expired or not, for the same reason
     # `last_seq` does not filter.
-    head_seq = 0
+    out, head_seq = [], 0
     with suppress(FileNotFoundError), path.open("rb") as f:
         for raw in reverse_lines(f):
             rec = _parse(raw)
@@ -1073,6 +1066,10 @@ def _read_seq_state(path: Path) -> dict:
     except (OSError, orjson.JSONDecodeError):
         return {}
     return state if isinstance(state, dict) else {}
+
+
+def _seq_value(entry: dict, key: str) -> int:
+    return v if isinstance(v := entry.get(key), int) and v >= 0 else 0
 
 
 # Shard -> identity of the last copy verified to be in the writers' exact form. A verdict
@@ -1269,11 +1266,8 @@ def _engagement(nicks: Sequence[str]) -> dict:
     n = len(nicks)
     if not n:  # no parsable record in the window: no data, which is not the same as zero
         return {"window": 0, "zero_response_share": None, "nick_diversity": None}
-    return {
-        "window": n,
-        "zero_response_share": round(_unanswered(nicks) / n, 4),
-        "nick_diversity": round(len(set(nicks)) / n, 4),
-    }
+    zrs, div = round(_unanswered(nicks) / n, 4), round(len(set(nicks)) / n, 4)
+    return {"window": n, "zero_response_share": zrs, "nick_diversity": div}
 
 
 def _rollup(windows: list[Sequence[str]]) -> dict:
@@ -1282,25 +1276,23 @@ def _rollup(windows: list[Sequence[str]]) -> dict:
     Nicks are pooled globally too — one bot talking to itself in forty rooms should read as low
     diversity, not as forty separate healthy-looking rooms."""
     total = sum(len(w) for w in windows)
-    if not total:
-        return {
-            "window_cap": WINDOW_MESSAGES,
-            "windowed_messages": 0,
-            "zero_response_share": None,
-            "nick_diversity": None,
-        }
-    distinct = len({nick for w in windows for nick in w})
-    return {
+    base = {
         "window_cap": WINDOW_MESSAGES,
-        "windowed_messages": total,
-        "zero_response_share": round(sum(_unanswered(w) for w in windows) / total, 4),
-        "nick_diversity": round(distinct / total, 4),
+        "windowed_messages": total or 0,
+        "zero_response_share": None,
+        "nick_diversity": None,
     }
+    if not total:
+        return base
+    base["zero_response_share"] = round(sum(_unanswered(w) for w in windows) / total, 4)
+    base["nick_diversity"] = round(len({n for w in windows for n in w}) / total, 4)
+    return base
 
 
 def list_rooms(root: Path) -> list[str]:
-    names = (e.name[: -len(".jsonl")] for e in _walk(root / "rooms", ".jsonl"))
-    return sorted(n for n in names if _listable(n))
+    return sorted(
+        n for e in _walk(root / "rooms", ".jsonl") if _listable(n := e.name[: -len(".jsonl")])
+    )
 
 
 def _time_bucket(now: float, ttl: float) -> int:
@@ -1514,14 +1506,11 @@ def _stillborn(path: Path | str) -> bool:
     costs two lines and an unanswered one costs the few hundred bytes it is. An unreadable
     file is not stillborn: deleting what cannot be counted is how a reaper eats live data.
     """
-    seen = 0
     try:
         with open(path, "rb") as f:
+            seen = 0
             for line in f:
-                if _parse(line) is None:
-                    continue
-                seen += 1
-                if seen > STILLBORN_MESSAGES:
+                if _parse(line) is not None and (seen := seen + 1) > STILLBORN_MESSAGES:
                     return False
     except OSError:
         return False
@@ -1675,18 +1664,12 @@ def _split_seq_state(root: Path) -> None:
     Grouped before any shard is opened, so this costs one pass over the map and one lock per
     *shard* rather than one per room.
 
-    Which side of the merge wins is decided by whether the backup already exists, and the two
-    cases are opposite for the same reason — the later write is the true one:
-
-      - **The first split.** No backup yet, so every entry in the map predates this pass, and
-        anything already in a shard was put there by `_set_seq_entry` while this ran. The shard
-        wins.
-      - **A map that came back.** The backup exists, so this map was written *after* a split
-        had already consumed and renamed the original — which only an old worker still running
-        the pre-shard code does, during a rolling upgrade. Its entry is then the newer fact and
-        the shard's is stale, so the map wins. Getting this backwards silently drops that
-        worker's reap or create: the room's floor regresses and cursors past it miss messages,
-        or a generation bump is lost and a stateful reader is told nothing changed.
+    Fields merge independently by high-water mark. A rolling upgrade can have an old worker
+    update the legacy map while a new worker updates the shard, and those updates need not be
+    the same kind of transition: one may advance `floor` while the other bumps `gen`. Choosing
+    one whole entry based on which file exists can preserve one field while regressing the
+    other. Both fields are monotonic within a lifecycle, so maxima preserve every accepted
+    transition; a higher `gen` wins the whole entry so recreate clears floor with the bump.
 
     The recovered map is unlinked rather than renamed, so the backup keeps holding the *whole*
     pre-shard state. Overwriting it with the handful of entries a mixed-version window produced
@@ -1712,7 +1695,19 @@ def _split_seq_state(root: Path) -> None:
             for path, entries in shards.items():
                 with _locked(path):
                     shard = _read_seq_state(path)
-                    merged = {**entries, **shard} if first else {**shard, **entries}
+                    merged = dict(shard)
+                    for room, entry in entries.items():
+                        cur = merged.get(room)
+                        if not isinstance(cur, dict) or not isinstance(entry, dict):
+                            merged[room] = entry
+                            continue
+                        # Higher gen owns the lifecycle (recreate clears floor); same gen max floor.
+                        cg, ig = _seq_value(cur, "gen"), _seq_value(entry, "gen")
+                        if ig != cg:
+                            merged[room] = dict(entry if ig > cg else cur)
+                        else:
+                            fl = max(_seq_value(cur, "floor"), _seq_value(entry, "floor"))
+                            merged[room] = {**cur, **entry, "floor": fl, "gen": cg}
                     _replace(path, orjson.dumps(merged), fsync=config.FSYNC)
             legacy.replace(backup) if first else legacy.unlink()
     except OSError:
@@ -2348,9 +2343,7 @@ def room_bytes_used(root: Path) -> int:
 def _ring_limit(root: Path) -> int:
     """How much ring a room may keep right now — the full ring, or its guaranteed floor
     once the service is over its total room-byte budget. See RESERVED_ROOM_BYTES."""
-    if room_bytes_used(root) < MAX_TOTAL_ROOM_BYTES:
-        return MAX_ROOM_BYTES
-    return RESERVED_ROOM_BYTES
+    return MAX_ROOM_BYTES if room_bytes_used(root) < MAX_TOTAL_ROOM_BYTES else RESERVED_ROOM_BYTES
 
 
 def _check_room_capacity(root: Path, path: Path) -> None:

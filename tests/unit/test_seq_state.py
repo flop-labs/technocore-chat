@@ -152,6 +152,43 @@ def test_a_map_written_after_the_split_wins_over_the_shard(tmp_path) -> None:
     assert kept == {"gone": {"floor": 5, "gen": 1}}, "the backup lost the original state"
 
 
+def test_mixed_upgrade_does_not_let_stale_map_clobber_shard_recreate(tmp_path) -> None:
+    """A shard recreate must survive a post-split legacy map that still holds the old lifecycle.
+
+    Whole-entry "map wins after backup exists" prefers the stale map and rewinds both gen and
+    floor. Field-wise merge keeps the higher gen as one lifecycle so the recreate's cleared
+    floor is not replaced by the prior conversation's high-water mark.
+    """
+    import store
+
+    _legacy(tmp_path, {"gone": {"floor": 500, "gen": 2}})
+    _reap_now(tmp_path)
+    store._set_seq_entry(tmp_path, "gone", None)  # new worker: gen advances, floor clears
+    assert store.last_seq(tmp_path, "gone") == 0
+    gen_after = store.room_generation(tmp_path, "gone")
+    assert gen_after > 2
+
+    _legacy(tmp_path, {"gone": {"floor": 500, "gen": 2}})  # old worker rewrites the map
+    _reap_now(tmp_path)
+
+    assert store.room_generation(tmp_path, "gone") == gen_after, "stale map rewound generation"
+    assert store.last_seq(tmp_path, "gone") == 0, "stale map restored the old conversation floor"
+
+
+def test_mixed_upgrade_keeps_same_gen_floor_high_water(tmp_path) -> None:
+    """Same lifecycle: independent reaps must keep the higher floor across map and shard."""
+    import store
+
+    _legacy(tmp_path, {"gone": {"floor": 100, "gen": 4}})
+    _reap_now(tmp_path)
+    store._set_seq_entry(tmp_path, "gone", 150)
+    _legacy(tmp_path, {"gone": {"floor": 300, "gen": 4}})
+    _reap_now(tmp_path)
+
+    assert store.last_seq(tmp_path, "gone") == 300
+    assert store.room_generation(tmp_path, "gone") == 4
+
+
 # --------------------------------------------------------------------------- reads
 
 
