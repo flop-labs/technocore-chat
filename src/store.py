@@ -1699,7 +1699,7 @@ def _split_seq_state(root: Path) -> None:
                     for room, entry in entries.items():
                         cur = merged.get(room)
                         if not isinstance(cur, dict) or not isinstance(entry, dict):
-                            merged[room] = entry
+                            merged[room] = cur if isinstance(cur, dict) else entry
                             continue
                         # Higher gen owns the lifecycle (recreate clears floor); same gen max floor.
                         cg, ig = _seq_value(cur, "gen"), _seq_value(entry, "gen")

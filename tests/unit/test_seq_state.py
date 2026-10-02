@@ -455,3 +455,64 @@ def test_seq_state_survives_a_read_only_store(tmp_path) -> None:
     store._set_seq_entry(tmp_path, "nope", 5)  # must not raise
     assert store.last_seq(tmp_path, "nope") == 0
     assert os.path.isdir(shard)
+
+
+@pytest.mark.parametrize("recovered", [False, True], ids=["first", "recovered"])
+@pytest.mark.parametrize("bad", [None, [], 7, "torn"])
+@pytest.mark.parametrize("bad_legacy", [False, True], ids=["bad-shard", "bad-legacy"])
+def test_split_preserves_the_only_valid_lifecycle(tmp_path, recovered, bad, bad_legacy):
+    import store
+
+    good = {"floor": 50, "gen": 3}
+    backup = tmp_path / ".seqstate.pre-shard"
+    if recovered:
+        backup.write_bytes(orjson.dumps({"original": {"floor": 1, "gen": 1}}))
+    before = backup.read_bytes() if recovered else None
+    legacy, shard = (bad, good) if bad_legacy else (good, bad)
+    _legacy(tmp_path, {"gone": legacy})
+    store._seq_state_path(tmp_path, "gone").write_bytes(orjson.dumps({"gone": shard}))
+
+    store._split_seq_state(tmp_path)
+    assert store.last_seq(tmp_path, "gone") == 50
+    assert store.room_generation(tmp_path, "gone") == 3
+    assert not (tmp_path / ".seqstate").exists()
+    assert backup.read_bytes() == (before if recovered else orjson.dumps({"gone": legacy}))
+    store._split_seq_state(tmp_path)
+    assert store.last_seq(tmp_path, "gone") == 50
+    store._write_record(tmp_path, "gone", "bot", "back")
+    result = store.read_messages(tmp_path, "gone", since=50)
+    assert [message["seq"] for message in result["messages"]] == [51]
+    assert store.room_generation(tmp_path, "gone") == 4
+
+
+@pytest.mark.parametrize("recovered", [False, True], ids=["first", "recovered"])
+@pytest.mark.parametrize(
+    "legacy,shard,expected",
+    [
+        ({"floor": 50, "gen": 3}, {"floor": 10, "gen": 3}, {"floor": 50, "gen": 3}),
+        ({"floor": 10, "gen": 3}, {"floor": 50, "gen": 3}, {"floor": 50, "gen": 3}),
+        ({"floor": 0, "gen": 9}, {"floor": 500, "gen": 2}, {"floor": 0, "gen": 9}),
+        ({"floor": 500, "gen": 2}, {"floor": 0, "gen": 9}, {"floor": 0, "gen": 9}),
+        ({"floor": -1, "gen": "bad"}, {"floor": 50, "gen": 0}, {"floor": 50, "gen": 0}),
+        ({"floor": 50, "gen": 0}, {"floor": [], "gen": -1}, {"floor": 50, "gen": 0}),
+    ],
+)
+def test_split_merges_lifecycle_in_both_directions(tmp_path, recovered, legacy, shard, expected):
+    import store
+
+    backup = tmp_path / ".seqstate.pre-shard"
+    if recovered:
+        backup.write_bytes(orjson.dumps({"original": {"floor": 1, "gen": 1}}))
+    before = backup.read_bytes() if recovered else None
+    _legacy(tmp_path, {"gone": legacy})
+    store._seq_state_path(tmp_path, "gone").write_bytes(orjson.dumps({"gone": shard}))
+    store._split_seq_state(tmp_path)
+    assert store.last_seq(tmp_path, "gone") == expected["floor"]
+    assert store.room_generation(tmp_path, "gone") == expected["gen"]
+    assert backup.read_bytes() == (before if recovered else orjson.dumps({"gone": legacy}))
+    store._split_seq_state(tmp_path)
+    assert store.last_seq(tmp_path, "gone") == expected["floor"]
+    store._write_record(tmp_path, "gone", "bot", "back")
+    result = store.read_messages(tmp_path, "gone", since=expected["floor"])
+    assert [message["seq"] for message in result["messages"]] == [expected["floor"] + 1]
+    assert store.room_generation(tmp_path, "gone") == expected["gen"] + 1
