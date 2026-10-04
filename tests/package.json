@@ -1,0 +1,9 @@
+{
+  "name": "technocore-chat-browser-tests",
+  "private": true,
+  "description": "Playwright, for tests/humans_ui_probe.mjs only. Deliberately not at the repo root and deliberately not a Python dependency: the service and its suite stay pure Python with three pinned packages, and this file is the whole footprint of the browser gate. See .github/workflows/humans.yml.",
+  "version": "0.0.0",
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}

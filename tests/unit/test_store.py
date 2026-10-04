@@ -1,7 +1,9 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import fcntl
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 
@@ -613,6 +615,41 @@ def test_stillborn_room_survives_its_first_day(tmp_path):
     assert store.room_path(tmp_path, "waiting").exists()
 
 
+def test_the_stillborn_window_is_a_knob_the_reaper_actually_reads(tmp_path):
+    """CHAT_STILLBORN_SECONDS moves the reaper, not just the published number.
+
+    Both rooms are 12 hours idle and on one message, which is inside the 24h default and
+    outside a shortened window — so the same room survives or goes on the knob alone. This
+    is the assertion the knob exists for: a deployment at its room cap shortens this to free
+    slots, and a setting that only changed what /config prints would be worse than none.
+    """
+    import config
+    import store
+
+    store.append(tmp_path, "monologue", "bot", "anyone here?")
+    _age(store.room_path(tmp_path, "monologue"), 12 * 3600 + 60)
+    _reap_now(tmp_path)
+    assert store.room_path(tmp_path, "monologue").exists()  # inside the 86400 default
+
+    with config.override(STILLBORN_SECONDS=12 * 3600):
+        _reap_now(tmp_path)
+        assert not store.room_path(tmp_path, "monologue").exists()
+
+
+def test_the_capacity_refusal_quotes_the_window_this_deployment_reaps_at(tmp_path):
+    """The refusal tells a blocked agent when a slot frees. It stated 24 hours as prose for
+    as long as that was the only value; now that an operator can move it, prose that cannot
+    move with it is a wrong answer to the one question the message exists to answer."""
+    import config
+    import store
+
+    with config.override(STILLBORN_SECONDS=12 * 3600, MAX_ROOMS=1):
+        store.append(tmp_path, "first", "bot", "hi")
+        with pytest.raises(store.StoreError) as refused:
+            store.append(tmp_path, "second", "bot", "hi")
+    assert "goes after 12 hours" in str(refused.value)
+
+
 def test_stillborn_rule_does_not_touch_notes(tmp_path):
     """A note has no reply to wait for, so a single write says nothing about it. Notes keep
     the 7-day rule, and a topic must outlive the first day of the room it describes."""
@@ -721,6 +758,43 @@ def test_torn_final_line_costs_only_that_record(tmp_path):
     assert [m["text"] for m in view["messages"]] == [f"m{i}" for i in range(5)]
     store.append(tmp_path, "crash", "bot", "after")  # and writing still works
     assert store.read_messages(tmp_path, "crash", limit=1)["messages"][0]["text"] == "after"
+
+
+@pytest.mark.parametrize(
+    ("kind", "reader", "empty"),
+    (
+        ("room", lambda store, root: store.read_messages(root, "gone")["messages"], []),
+        ("room", lambda store, root: store.last_seq(root, "gone"), 0),
+        ("room", lambda store, root: store.room_window(root, "gone"), (0, [])),
+        ("note", lambda store, root: store.note_get(root, "plans", "gone"), None),
+    ),
+)
+def test_readers_tolerate_a_reap_between_path_resolution_and_open(
+    tmp_path, monkeypatch, kind, reader, empty
+):
+    """A concurrent reaper may unlink after a reader chose the path but before open().
+
+    That state is externally indistinguishable from an already-absent room or note, so it
+    must return the ordinary empty result instead of turning an idle cleanup into a 500.
+    """
+    import store
+
+    if kind == "room":
+        store.append(tmp_path, "gone", "bot", "hi")
+        target = store.room_path(tmp_path, "gone")
+    else:
+        store.note_set(tmp_path, "plans", "gone", "hi")
+        target = store.note_path(tmp_path, "plans", "gone")
+    path_type = type(target)
+    real_open = path_type.open
+
+    def open_after_reap(self, *args, **kwargs):
+        if self == target:
+            target.unlink(missing_ok=True)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "open", open_after_reap)
+    assert reader(store, tmp_path) == empty
 
 
 def test_concurrent_appends_never_duplicate_a_seq(tmp_path):
@@ -1042,6 +1116,37 @@ def test_snapshots_survive_a_torn_line(tmp_path, monkeypatch):
     assert len(store.snapshots(tmp_path)) == 1
 
 
+def test_a_writer_never_waits_for_a_snapshot_pass_in_another_worker(tmp_path):
+    """A pass walks every room — ~4.7 s at ~239k rooms on the live box — and every writer that
+    found it due used to queue behind it on the lock, holding a threadpool token while it did:
+    91 at once, measured on 0.14.2. A writer that cannot have the lock is one whose sample is
+    already being taken, so it returns, exactly as a second reap pass does.
+
+    The lock is held here the way another worker's pass holds it: `flock` is per open file
+    description, so a second fd contends exactly as a second process does. Joined with a bound,
+    and released in `finally`, so a writer that queues fails here rather than hanging the suite.
+    """
+    import store
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path / (store.SNAPSHOTS_FILE + ".lock"), "a+b") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            writer = threading.Thread(
+                target=store.append, args=(tmp_path, "lobby", "bot", "hi"), daemon=True
+            )
+            writer.start()  # no marker yet, so the sample is due
+            writer.join(5)
+            assert not writer.is_alive(), "the append queued behind the snapshot pass"
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    writer.join(10)
+    assert store.read_messages(tmp_path, "lobby")["last_seq"] == 1, "the write itself landed"
+    assert store.snapshots(tmp_path) == [], "the sample is the running pass's to take"
+    store.append(tmp_path, "lobby", "bot", "again")
+    assert len(store.snapshots(tmp_path)) == 1, "and the next writer takes it once it is free"
+
+
 def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path):
     """Counters and snapshots are diagnostics, never authority. A corrupt sidecar must not
     take down writes or be interpreted as a huge/negative value that changes enforcement.
@@ -1221,3 +1326,152 @@ def test_a_room_holding_undecodable_bytes_is_counted_not_crashed_on(tmp_path):
     # and reaching that answer at all is the half the binary mode buys.
     assert store._stillborn(p) is False
     assert store._reapable(p, os.stat(p).st_mtime, stillborn_rule=True) is None
+
+
+def test_compaction_retains_the_whole_byte_budget_at_every_record_size(tmp_path):
+    """Retention is the byte budget, at every record size.
+
+    `COMPACT_MAX_LINES` sits beside the budget in `_compact`, and the comment on it says it
+    "only bounds how much the compactor holds in memory at once". A flat 5000 made that
+    false: it bound first for any record under ~1 KB, which is every ordinary message. A
+    full ring of ~81-byte records compacted to 5000 records / 400 KB — 7.6% of the floor
+    the ring model promises, with every `since=` cursor further back than 5000 losing
+    history the ring still owed it.
+
+    Deriving the cap from the budget restores the stated meaning: at the smallest record
+    the write path emits (~73 B) the byte budget always stops the scan first, so the count
+    can only ever bind on malformed input, which is the memory case it is for.
+
+    Asserted at the small end because that is the end that broke, and against `keep` rather
+    than a record count so it keeps holding if the record shape changes.
+    """
+    import json
+
+    import store
+
+    path = tmp_path / "small.jsonl"
+    record = {"seq": 0, "ts": "2026-08-27T00:00:00.000000Z", "from": "bot", "text": "hi"}
+    written = size = 0
+    with path.open("wb") as handle:  # built directly: 140k append() calls is not a unit test
+        while size <= store.MAX_ROOM_BYTES:
+            written += 1
+            record["seq"] = written
+            line = (json.dumps(record) + "\n").encode()
+            handle.write(line)
+            size += len(line)
+
+    store._compact(path, cutoff=None, keep=store.COMPACT_KEEP_BYTES)
+
+    data = path.read_bytes()
+    seqs = [json.loads(line)["seq"] for line in data.splitlines()]
+    # Within one record of the budget, not merely "more than the old cap".
+    assert len(data) > store.COMPACT_KEEP_BYTES - 200, (
+        f"retained {len(data)} of a {store.COMPACT_KEEP_BYTES} byte budget"
+    )
+    assert len(data) <= store.COMPACT_KEEP_BYTES
+    assert seqs == sorted(seqs), "compaction must leave the file ascending by seq"
+    assert seqs[-1] == written, "the newest record must survive compaction"
+
+
+def test_the_append_path_can_size_the_file_it_just_wrote(tmp_path):
+    """The compaction check adds `size + len(line)` rather than stat()ing a file it has just
+    written while holding the room lock. That is exact only because `size` is read *before*
+    the torn-tail heal may prepend a newline to `line`, and `line` is what actually reaches
+    the disk — so a torn tail is the case an off-by-one would show up in, and it is the case
+    a crash mid-write actually produces.
+
+    Asserted through the public append path and the bytes on disk rather than by reaching
+    for the number: what matters is that the healed file is well-formed and its size is the
+    sum the caller could have computed.
+    """
+    import store
+
+    store.append(tmp_path, "torncalc", "bot", "first")
+    path = store.room_path(tmp_path, "torncalc")
+    with path.open("r+b") as f:  # a write cut short by a crash: the trailing newline is gone
+        f.truncate(path.stat().st_size - 1)
+
+    before = path.stat().st_size
+    store.append(tmp_path, "torncalc", "bot", "second")
+    after = path.stat().st_size
+
+    body = path.read_bytes()
+    assert body.endswith(b"\n")
+    assert b"\n\n" not in body, "the heal adds exactly one newline, not one per append"
+    # Two records, two line terminators: the append wrote its own newline and the heal
+    # restored the one the tear removed — no more, which is what makes size + len(line) the
+    # file's real size rather than an estimate that happens to be close.
+    assert body.count(b"\n") == 2
+    assert after == before + (len(body) - before)
+    assert after > before
+
+    texts = [m["text"] for m in store.read_messages(tmp_path, "torncalc")["messages"]]
+    assert texts == ["first", "second"], "the healed record and the new one both survive"
+
+
+def test_service_stats_counts_rooms_from_the_maintained_totals(tmp_path, monkeypatch):
+    """The room count is the integer the cap is enforced against, not a fresh walk.
+
+    Statting every room file was 71% of this pass at the live size (238,983 rooms: 3.26 s
+    with it, 0.94 s without), for two numbers one file already holds.
+    """
+    import store
+
+    for room in ("openroom", "p-secret", "d-owned"):
+        store.append(tmp_path, room, "nick", "hi")
+    walked = store._count_rooms(tmp_path)  # the three above plus the service's own events room
+
+    store._write_note_count(tmp_path, 41, 4100, name=store.USAGE_FILE)
+    view = store.service_stats(tmp_path)
+    assert walked[0] != 41, "the fixture must be able to tell the two apart"
+    assert view["rooms"]["total"] == 41, "the maintained count, not the walk's"
+    assert view["bytes"]["rooms"] == 4100
+    # The class decomposition still comes from the names on disk, which only a walk has.
+    assert (view["rooms"]["unlisted"], view["rooms"]["ownable"]) == (1, 1)
+
+
+def test_service_stats_measures_room_bytes_until_a_reap_settles_them(tmp_path):
+    """A create carries the count but not the bytes, so an unreaped store has none on file.
+
+    0 there means "no pressure" on the append path, where the figure gates a compaction.
+    Here it is the gauge itself, and a store that can see its rooms must not report zero
+    bytes against them.
+    """
+    import store
+
+    store.append(tmp_path, "openroom", "nick", "hi")
+    assert store.room_bytes_used(tmp_path) == 0  # nothing reaped yet
+    assert store.service_stats(tmp_path)["bytes"]["rooms"] == store._count_rooms(tmp_path)[1] > 0
+
+
+def test_a_cursor_past_the_room_head_clamps_so_text_polling_can_progress(tmp_path):
+    """A future cursor must settle on the room's actual head, or the text lane keeps
+    printing a dead next: URL forever (#565)."""
+    import store
+
+    store.append(tmp_path, "cursor", "bot", "one")
+
+    view = store.read_messages(tmp_path, "cursor", since=999)
+
+    assert view["count"] == 0
+    assert view["last_seq"] == 1
+
+
+def test_a_cursor_on_a_reaped_room_clamps_to_its_floor_not_to_zero(tmp_path):
+    """A reaped room has no file, but its head is not 0: the next write continues from the
+    floor the reaper left (#139). Clamping to the newest line on disk would rewind a caller
+    who is exactly caught up to `last_seq: 0` — the rewind #287 is about — and hand the text
+    lane a `next:` that no longer matches the cursor it was given."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice", f"msg {i}")
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    assert store.read_messages(tmp_path, "d-talk", since=6)["last_seq"] == 6, "caught up: kept"
+    assert store.read_messages(tmp_path, "d-talk", since=999)["last_seq"] == 6, "past it: clamped"
+    assert store.read_messages(tmp_path, "d-talk")["last_seq"] == 0, "no cursor: as before"

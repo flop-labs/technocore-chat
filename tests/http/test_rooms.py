@@ -51,12 +51,12 @@ def test_posting_to_the_events_room_documents_what_it_really_answers(client):
     """`/r/events` is the ordinary room POST handler with one room that always says no, so
     the body is read and parsed *before* the refusal — a malformed or oversized body never
     reaches the 403. Documenting only the 403 promised a client one outcome and delivered
-    three. Review catch on #40.
+    several. Review catch on #40; slow bodies can now time out before the refusal too.
     """
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "413", "429"}
+    assert set(documented["responses"]) == {"400", "403", "408", "413", "429"}
     # It parses a body, so it declares one.
     assert (
         "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])
@@ -902,6 +902,85 @@ def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     assert client.get("/kv/room-allow/d-orphan").status_code == 404
 
 
+def test_a_first_claim_does_not_inherit_an_allow_list_left_by_a_reaped_owner(client):
+    """The reaper retires an owner note on its own clock, and an allow-list written after it
+    outlives it. Unowned, the room's name is claimable again — and the list used to come with
+    it: the planted key could post in the new owner's room, and once that room was live the
+    reaper never took the list away. A claim with no current owner starts with no list."""
+    import config
+    import store
+
+    squatter, squatter_sign = _keypair(21)
+    planted, planted_sign = _keypair(22)
+    victim, victim_sign = _keypair(23)
+    assert _claim(client, "d-bait", squatter, squatter_sign).status_code == 200
+    planting = _set_signed(client, "room-allow", "d-bait", squatter, squatter_sign, planted, 2)
+    assert planting.status_code == 200
+
+    _age(store.note_path(config.ROOT, store.OWNERS_NS, "d-bait"), store.IDLE_SECONDS + 60)
+    (config.ROOT / ".reaped").unlink(missing_ok=True)
+    store._reap(config.ROOT)
+    assert client.get("/kv/room-owners/d-bait").status_code == 404, "premise: owner reaped"
+    assert client.get("/kv/room-allow/d-bait").status_code == 200, "premise: list outlived it"
+
+    # The room's nonce counter survives, so the next claim counts on from it.
+    assert _claim(client, "d-bait", victim, victim_sign, nonce=3).status_code == 200
+    assert client.get("/kv/room-allow/d-bait").text.strip().endswith("none"), "list emptied"
+    assert _say_signed(client, "d-bait", planted, planted_sign, "let me in").status_code == 403
+    assert _say_signed(client, "d-bait", victim, victim_sign, "mine").status_code == 200
+
+
+def test_a_full_allow_namespace_still_takes_the_new_owners_list(client, monkeypatch):
+    """Emptying the stale list must leave its slot to the new owner. Unlinking it left the
+    namespace's cached count one high, so at a full `room-allow` the owner's own list was a
+    create refused as over the cap until the next reap — up to REAP_EVERY away."""
+    import config
+    import store
+
+    squatter, squatter_sign = _keypair(27)
+    planted, _ = _keypair(28)
+    victim, victim_sign = _keypair(29)
+    friend, _ = _keypair(30)
+    assert _claim(client, "d-full", squatter, squatter_sign).status_code == 200
+    planting = _set_signed(client, "room-allow", "d-full", squatter, squatter_sign, planted, 2)
+    assert planting.status_code == 200
+    _age(store.note_path(config.ROOT, store.OWNERS_NS, "d-full"), store.IDLE_SECONDS + 60)
+    (config.ROOT / ".reaped").unlink(missing_ok=True)
+    store._reap(config.ROOT)  # retires the owner and re-counts, as in production
+    monkeypatch.setattr(store, "MAX_NOTES_PER_NS", 1)  # room-allow now holds exactly its cap
+
+    assert _claim(client, "d-full", victim, victim_sign, nonce=3).status_code == 200
+    mine = _set_signed(client, "room-allow", "d-full", victim, victim_sign, friend, 4)
+    assert mine.status_code == 200, mine.text
+    assert _say_signed(client, "d-full", planted, _keypair(28)[1], "still here?").status_code == 403
+
+
+def test_a_claimant_that_read_no_owner_cannot_unlink_the_winners_allow_list(client, monkeypatch):
+    """The clean-up above must not reach state created after its own observation. Two first
+    claims can both read "no owner"; if the one that loses then drops the allow-list, it
+    drops the list the winner has since published. Replayed here: the winner has claimed and
+    published, and the gate runs as the other claimant saw the room — unowned."""
+    import app as app_module
+    import store
+
+    winner, winner_sign = _keypair(24)
+    friend, _ = _keypair(25)
+    loser, _ = _keypair(26)
+    assert _claim(client, "d-race", winner, winner_sign).status_code == 200
+    listed = _set_signed(client, "room-allow", "d-race", winner, winner_sign, friend, 2)
+    assert listed.status_code == 200
+
+    real = store.note_get
+    monkeypatch.setattr(
+        store,
+        "note_get",
+        lambda root, ns, key: None if ns == store.OWNERS_NS else real(root, ns, key),
+    )
+    assert app_module._note_write_gate(store.OWNERS_NS, "d-race", loser, loser) is None
+    monkeypatch.setattr(store, "note_get", real)
+    assert friend in client.get("/kv/room-allow/d-race").text, "the winner's list survives"
+
+
 def test_signed_note_writes_are_scoped_to_the_two_ownership_namespaces(client):
     did, sign = _keypair()
     r = _set_signed(client, "plans", "next", did, sign, "ship")
@@ -966,6 +1045,35 @@ def test_signed_note_get_covers_the_swept_value(client):
         == 403
     )
     assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+
+def test_invalid_signed_note_conditions_do_not_burn_a_nonce(client):
+    """A rejected condition must leave the signed write retryable on both lanes."""
+    owner, owner_sign = _keypair()
+    room = "d-condition-get"
+    assert _claim(client, room, owner, owner_sign).status_code == 200
+
+    value, _ = _keypair(seed=3)
+    signature = owner_sign(f"room-allow|{room}|2|{value}")
+    base = f"/kv/room-allow/{room}/set-signed/{owner}/{signature}/2/{value}"
+    invalid = client.get(f"{base}?if_absent=maybe")
+    assert invalid.status_code == 400 and "if_absent" in invalid.text
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+    assert client.get(f"{base}?if_absent=1").status_code == 200
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+    post_owner, post_sign = _keypair(seed=2)
+    post_room = "d-condition-post"
+    assert _claim(client, post_room, post_owner, post_sign).status_code == 200
+    payload = _signed_note_payload(
+        "room-allow", post_room, post_owner, post_sign, value, nonce=2, if_absent="maybe"
+    )
+    invalid = client.post(f"/kv/room-allow/{post_room}", json=payload)
+    assert invalid.status_code == 400 and "if_absent" in invalid.text
+    assert client.get(f"/kv/room-nonce/{post_room}").text.strip().endswith("1")
+    payload["if_absent"] = True
+    assert client.post(f"/kv/room-allow/{post_room}", json=payload).status_code == 200
+    assert client.get(f"/kv/room-nonce/{post_room}").text.strip().endswith("2")
 
 
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):

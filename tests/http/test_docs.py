@@ -455,18 +455,29 @@ def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, 
 
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     """Executable version of /patterns.md pattern 4. The server never does crypto here —
-    the test proves the documented choreography fits the real lanes and caps: DID notes
-    hold the key material, the signed mailbox lane carries the sealed room key, and a
-    full-length encrypted message fits a room write. Protocol drift breaks this first."""
+    the test proves the documented choreography fits the real lanes and caps: the DID note
+    carries a signed `e2e:` record, the signed mailbox lane carries the sealed room key, and
+    a full-length encrypted message fits a room write. It also runs the attack the record
+    exists for — anyone rewriting A's note — and the nonce rule that keeps a shared K safe.
+    Protocol drift breaks this first."""
     import base64
     import hashlib
+    import importlib.util
+    import os
 
     from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
     import store
+
+    spec = importlib.util.spec_from_file_location(
+        "sign", Path(__file__).resolve().parents[2] / "scripts" / "sign.py"
+    )
+    assert spec is not None and spec.loader is not None
+    sign_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sign_py)
 
     def b64(raw: bytes) -> str:
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
@@ -481,45 +492,69 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
             )
         )
 
-    # A (recipient), once: identity + static X25519 key, published in a DID note.
-    did_a, _sign_a = _keypair(7)
-    a_static = X25519PrivateKey.from_private_bytes(bytes([7]) * 32)
+    def read_note(path: str) -> str:
+        # The value is the last non-empty line: note reads open with the untrusted-content
+        # banner, and a real reader has to skip it exactly like this.
+        return [ln for ln in client.get(path).text.splitlines() if ln.strip()][-1]
+
+    # A (recipient), once: identity + static X25519 key, published in a DID note with the
+    # signed e2e: record next to the bare hints.
+    did_a, sign_a = _keypair(7)
+    a_static = X25519PrivateKey.generate()
+    a_pub_s = b64(a_static.public_key().public_bytes_raw())
     fp = hashlib.sha256(did_a.encode()).hexdigest()[:16]
     did_path = f"/kv/did-{fp[:2]}/{fp[2:]}"
     mailbox = "mb-p-inbox-of-a"
-    note = f"{did_a} x25519:{b64(a_static.public_key().public_bytes_raw())} mailbox:{mailbox}"
+    record = (
+        f"e2e: {a_pub_s} {mailbox} 1 {sign_a(sign_py.e2e_record(did_a, a_pub_s, mailbox, '1'))}"
+    )
+    note = f"{did_a} x25519:{a_pub_s} mailbox:{mailbox} {record}"
     assert client.post(did_path, json={"value": note}).status_code == 200
 
-    # B (sender): reads the note, seals a room key to A with an ephemeral key.
+    # Anyone can rewrite that note: keep A's did in front, point the hints at themselves and
+    # add an e2e: record they signed. Nothing in it verifies against A's did:key, so B stops
+    # instead of sealing K to the writer — and beside A's real record, it changes nothing.
+    did_m, sign_m = _keypair(9)
+    evil_s = b64(X25519PrivateKey.generate().public_key().public_bytes_raw())
+    forged = (
+        f"e2e: {evil_s} mb-p-evil 9 {sign_m(sign_py.e2e_record(did_a, evil_s, 'mb-p-evil', '9'))}"
+    )
+    swapped = f"{did_a} x25519:{evil_s} mailbox:mb-p-evil {forged}"
+    assert client.post(did_path, json={"value": swapped}).status_code == 200  # anonymous
+    assert sign_py.e2e_key(did_a, read_note(did_path)) is None
+    assert sign_py.e2e_key(did_a, f"{note} {forged}") == (a_pub_s, mailbox, 1)
+    assert client.post(did_path, json={"value": note}).status_code == 200  # A republishes
+
+    # B (sender): trusts only the record A signed; a fresh ephemeral key and seal nonce.
     did_b, sign_b = _keypair(8)
-    # The value is the last non-empty line: note reads open with the untrusted-content
-    # banner, and a real reader has to skip it exactly like this.
-    fetched = [ln for ln in client.get(did_path).text.splitlines() if ln.strip()][-1]
-    b_x25519 = dict(f.split(":", 1) for f in fetched.split(" ")[1:])
-    eph = X25519PrivateKey.from_private_bytes(bytes([8]) * 32)
-    a_pub = X25519PrivateKey.from_private_bytes(bytes([7]) * 32).public_key()
-    assert b64(a_pub.public_bytes_raw()) == b_x25519["x25519"]  # note round-tripped
-    room, room_key, nonce12 = "p-e2e-room-3f9a1c", AESGCM.generate_key(256), bytes(12)
-    sealed = derive(eph.exchange(a_pub)).encrypt(nonce12, room_key + room.encode(), None)
-    delivery = f"e2e1 {b64(eph.public_key().public_bytes_raw())} {b64(nonce12)} {b64(sealed)}"
-    assert _say_signed(client, b_x25519["mailbox"], did_b, sign_b, delivery).status_code == 200
+    x25519_s, to_mailbox, _ = sign_py.e2e_key(did_a, read_note(did_path))
+    assert (x25519_s, to_mailbox) == (a_pub_s, mailbox)  # note round-tripped
+    eph = X25519PrivateKey.generate()
+    a_pub = X25519PublicKey.from_public_bytes(unb64(x25519_s))
+    room, room_key, seal_nonce = "p-e2e-room-3f9a1c", AESGCM.generate_key(256), os.urandom(12)
+    sealed = derive(eph.exchange(a_pub)).encrypt(seal_nonce, room_key + room.encode(), None)
+    delivery = f"e2e1 {b64(eph.public_key().public_bytes_raw())} {b64(seal_nonce)} {b64(sealed)}"
+    assert _say_signed(client, to_mailbox, did_b, sign_b, delivery).status_code == 200
 
     # A: reads its mailbox (attributed to B's key), unseals the room key + room name.
     inbox = client.get(f"/r/{mailbox}?format=json").json()["messages"][-1]
     assert inbox["from"] == did_b  # the delivery is attributable, not a bare nickname
     kind, eph_pub_s, nonce_s, sealed_s = inbox["text"].split(" ")
     assert kind == "e2e1"
-    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
-
     opened = derive(a_static.exchange(X25519PublicKey.from_public_bytes(unb64(eph_pub_s)))).decrypt(
         unb64(nonce_s), unb64(sealed_s), None
     )
     assert opened[:32] == room_key and opened[32:].decode() == room
 
-    # Both: a full-length plaintext, encrypted, fits the message cap — and round-trips.
+    # Both: every line under K gets its own random nonce — K is shared and long-lived, and
+    # one repeated (K, nonce) pair leaks the XOR of two plaintexts.
+    def seal_line(text: str) -> str:
+        msg_nonce = os.urandom(12)
+        return f"{b64(msg_nonce)}.{b64(AESGCM(room_key).encrypt(msg_nonce, text.encode(), None))}"
+
     plaintext = "the lobsters molt at midnight " * 66 + "km"  # 1982 chars
-    ct = AESGCM(room_key).encrypt(nonce12, plaintext.encode(), None)
-    line = f"{b64(nonce12)}.{b64(ct)}"
+    line = seal_line(plaintext)
+    assert seal_line(plaintext) != line  # the same plaintext never makes the same line
     assert len(line) <= store.MAX_TEXT_CHARS  # the documented budget holds
     assert client.post(f"/r/{room}", json={"from": "b", "text": line}).status_code == 200
     got = client.get(f"/r/{room}?format=json").json()["messages"][-1]["text"]
@@ -528,7 +563,7 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
 
     # The operator's view: the stored bytes carry ciphertext, never the plaintext.
     on_disk = store.room_path(tmp_path, room).read_text()
-    assert "lobsters" not in on_disk and b64(ct)[:40] in on_disk
+    assert "lobsters" not in on_disk and ct_s[:40] in on_disk
 
 
 UNDOCUMENTED = {
@@ -642,6 +677,46 @@ def test_every_documented_response_declares_the_body_it_returns(client):
     markdown = client.get("/skill.md", headers={"Accept": "text/markdown"})
     assert markdown.headers["content-type"].startswith("text/markdown")
     assert "text/markdown" in doc["paths"]["/skill.md"]["get"]["responses"]["200"]["content"]
+
+
+def test_every_negotiable_response_publishes_the_switch_that_negotiates_it(client):
+    """A 200 that declares both `text/plain` and `application/json` is a promise the caller
+    can choose — and `?format=json` is the only way to choose it. Two operations carried
+    their own copy of that parameter and five carried none, so a machine reading the spec
+    saw endpoints it believed were text-only and never asked for the JSON they serve
+    (#658). The parameter is now one shared constant, and this test is what keeps the
+    document from drifting away from the switch again: the negotiable set is derived from
+    the responses, so a new dual-lane operation is covered the day it is added.
+    """
+    doc = client.get("/openapi.json").json()
+    negotiable = [
+        (verb, path, op)
+        for path, operations in doc["paths"].items()
+        for verb, op in operations.items()
+        if {"text/plain", "application/json"}
+        <= set(op["responses"].get("200", {}).get("content", {}))
+    ]
+    assert negotiable, "no negotiable operation found — this test would pass on nothing"
+
+    silent = [
+        f"{verb.upper()} {path}"
+        for verb, path, op in negotiable
+        if "format" not in {p.get("name") for p in op.get("parameters", [])}
+    ]
+    assert not silent, f"negotiable but the switch is undocumented: {silent}"
+
+    # One description, not per-operation prose that drifts: the same text everywhere.
+    described = {
+        next(p["description"] for p in op["parameters"] if p.get("name") == "format")
+        for _, _, op in negotiable
+    }
+    assert len(described) == 1, f"{len(described)} spellings of the same parameter"
+
+    # And the switch it documents is the one the server honours, on a lane that had none.
+    assert client.get("/r/events").headers["content-type"].startswith("text/plain")
+    assert (
+        client.get("/r/events?format=json").headers["content-type"].startswith("application/json")
+    )
 
 
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
@@ -1265,6 +1340,24 @@ def test_configured_public_url_wins_over_the_request(client, monkeypatch):
         assert doc["servers"] == [{"url": "https://technocore.chat"}]
 
 
+def test_documents_printed_from_the_request_host_vary_on_it(client):
+    """A well-formed Host is used as given, and the document is cached at the edge. So the
+    copy depends on Host and has to say so: a shared cache that forwards the caller's Host
+    but keys on the path alone would otherwise serve the `evil.example` copy to everyone.
+    CHAT_PUBLIC_URL removes the dependence, and with it the Vary."""
+    import config
+
+    for path in ("/openapi.json", "/.well-known/agent.json", "/robots.txt", "/auth.md"):
+        got = client.get(path, headers={"host": "evil.example"})
+        assert "evil.example" in got.text, f"premise: {path} prints the request's host"
+        assert "s-maxage" in got.headers["cache-control"], f"premise: {path} is shared"
+        assert "host" in got.headers["vary"].lower(), f"{path} does not vary on Host"
+    with config.override(PUBLIC_URL="https://technocore.chat/"):
+        pinned = client.get("/openapi.json", headers={"host": "evil.example"})
+    assert "evil.example" not in pinned.text
+    assert "host" not in pinned.headers.get("vary", "").lower()
+
+
 def test_metadata_is_never_rate_limited_and_is_crawlable(client, monkeypatch):
     """A registry crawler arrives without warning and re-fetches on a schedule; a 429 on
     the document that describes the service is a listing that never validates."""
@@ -1537,8 +1630,8 @@ def test_auth_md_is_reachable_from_the_sitemap(client):
 
 def test_only_the_markdown_documents_negotiate_markdown(client):
     """Negotiation relabels bytes, it never reformats them, so a document only negotiates
-    when its bytes really are markdown. /auth.md, /skill.md and /patterns.md are; the manual
-    is not, and / and /llms.txt therefore answer text/plain even when markdown is named."""
+    when its bytes really are markdown. The paths below are; the manual is not, and / and
+    /llms.txt therefore answer text/plain even when markdown is named."""
     md = {"Accept": "text/markdown"}
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
         got = client.get(path, headers=md).headers["content-type"]
@@ -1634,13 +1727,17 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
     So the disabled setting is asserted here for both halves of the document set together.
     The prose side has always been right; the JSON side was not until the header was seeded
-    before `_static_cacheable` could decline to overwrite it.
+    before `_static_cacheable` could decline to overwrite it. /humans joined them when it
+    stopped minting a per-response nonce and became cacheable, and it arrived with the same
+    defect for the same reason — a bare `Response` whose explicit `no-store` had been
+    removed along with the nonce that required it.
     """
     import config
 
     both = (
         "/llms.txt",
         "/robots.txt",
+        "/humans",
         "/.well-known/security.txt",
         "/openapi.json",
         "/config",
@@ -1657,17 +1754,21 @@ def test_a_zero_window_means_not_cached_rather_than_cached_without_a_bound(clien
 
 
 def test_the_per_caller_and_liveness_surfaces_are_never_edge_cacheable(client):
-    """The three that would each be a real defect if held at the edge.
+    """The two that would each be a real defect if held at the edge.
 
-    /humans carries a per-response CSP nonce, so a cached copy pins one nonce for every
-    visitor and defeats the mechanism it exists for. /healthz is what the autoupdate
-    rollback probe reads — a cached `ok` would let a broken release pass its own health
-    gate. /stats is token-gated and counts one worker's requests.
+    /healthz is what the autoupdate rollback probe reads — a cached `ok` would let a broken
+    release pass its own health gate. /stats is token-gated and counts one worker's requests.
+
+    /humans used to be the third, because a per-response CSP nonce meant a cached copy
+    pinned one nonce for every visitor and defeated the mechanism it existed for. The pin
+    is a `sha256-` of each inline block now, so the page is byte-identical between requests
+    and there is nothing per-caller left in it to leak. It is deliberately cacheable, and
+    tests/http/test_humans.py asserts that half — a 60 KiB document a reader most needs
+    when the origin is down is the wrong thing to make origin-only.
     """
     import config
 
-    for path in ("/humans", "/healthz"):
-        assert client.get(path).headers["cache-control"] == "no-store", path
+    assert client.get("/healthz").headers["cache-control"] == "no-store"
 
     # With no token configured /stats is a 404, so the gated response has to be provoked
     # or this asserts no-store on a path that was never routed.
@@ -1701,7 +1802,14 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     /skill.md, /patterns.md, /interop.md and /auth.md answer the same bytes under two
     labels depending on Accept, so they must say `Vary: Accept` — a shared cache that
     ignored Accept would hand one caller's label to the next. / and /llms.txt never
-    negotiate, so Vary there would fragment the cache key on the busiest path for nothing.
+    negotiate, so the `Accept` dimension there would fragment the cache key on the busiest
+    path for nothing.
+
+    The *encoding* dimension is a separate thing and is expected everywhere compression
+    reaches, which since the compression middleware is every document above its minimum
+    size. It costs nothing at the CDN — Accept-Encoding is the one Vary dimension
+    Cloudflare varies on natively, whatever the origin says. So this asserts the `Accept`
+    half specifically rather than the whole header.
 
     And the markdown answer itself stays no-store, which is belt-and-braces on top of
     Vary: Cloudflare honours Vary only where a Cache Rule enables it, so on a zone where
@@ -1709,14 +1817,18 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
     """
     import config
 
+    def vary(path: str) -> set[str]:
+        got = client.get(path).headers.get("vary", "")
+        return {part.strip().lower() for part in got.split(",") if part.strip()}
+
     for path in ("/skill.md", "/patterns.md", "/interop.md", "/auth.md"):
-        assert client.get(path).headers["vary"] == "Accept", path
+        assert "accept" in vary(path), path
         negotiated = client.get(path, headers={"Accept": "text/markdown"})
         assert negotiated.headers["content-type"].startswith("text/markdown"), path
         assert negotiated.headers["cache-control"] == "no-store", path
 
     for path in ("/", "/llms.txt"):
-        assert "vary" not in client.get(path).headers, path
+        assert "accept" not in vary(path), path
 
     # 0 restores no-store everywhere, the same escape hatch EDGE_CACHE_SECONDS has.
     with config.override(STATIC_CACHE_SECONDS=0):

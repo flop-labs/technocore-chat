@@ -16,14 +16,42 @@ def test_humans_page_is_static_and_never_interpolates_messages(client):
     assert "innerHTML" not in r.text.replace("never innerHTML", "")  # textContent only
 
 
-def test_humans_page_pins_its_inline_code_with_a_fresh_nonce(client):
-    r1, r2 = client.get("/humans"), client.get("/humans")
-    csp = r1.headers["content-security-policy"]
-    nonce = csp.split("script-src 'nonce-")[1].split("'")[0]
-    assert f'<script nonce="{nonce}">' in r1.text and f'<style nonce="{nonce}">' in r1.text
-    assert "__NONCE__" not in r1.text
+def test_humans_page_pins_its_inline_code_with_hashes_of_the_blocks_it_serves(client):
+    """The CSP hash is recomputed here from the *served* body rather than compared against
+    a digest written down beside it. A hash that does not match its block is not a weaker
+    page — the browser refuses that block outright and the document renders inert — so the
+    failure this guards is any edit to humans.html, down to one byte of whitespace, that
+    does not travel with the header describing it.
+    """
+    import base64
+    import hashlib
+    import re as _re
+
+    r = client.get("/humans")
+    csp = r.headers["content-security-policy"]
+    assert "__NONCE__" not in r.text and "nonce-" not in csp
     assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp
-    assert r1.headers["content-security-policy"] != r2.headers["content-security-policy"]
+
+    for tag, directive in (("script", "script-src"), ("style", "style-src")):
+        blocks = _re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", r.text, _re.DOTALL)
+        assert len(blocks) == 1, f"expected exactly one inline {tag} block, got {len(blocks)}"
+        digest = base64.b64encode(hashlib.sha256(blocks[0].encode("utf-8")).digest()).decode()
+        assert f"{directive} 'sha256-{digest}'" in csp, f"{directive} does not pin its own block"
+
+
+def test_humans_page_is_byte_identical_between_requests_so_the_edge_can_hold_it(client):
+    """The point of hashing rather than minting a nonce. A per-response nonce pinned the
+    blocks just as tightly, but made the one 60 KiB document this service renders unique
+    per request — so it could only ever come from the origin, including when the origin is
+    the thing that is down. Identical bytes plus a shared-cache header is what makes it
+    survivable; this asserts the first half, and the header assert below the second.
+    """
+    r1, r2 = client.get("/humans"), client.get("/humans")
+    assert r1.text == r2.text
+    assert r1.headers["content-security-policy"] == r2.headers["content-security-policy"]
+    cache = r1.headers["cache-control"]
+    assert "no-store" not in cache, "the page cannot be shared if it refuses to be stored"
+    assert "s-maxage=" in cache and "max-age=0" in cache, cache
 
 
 def test_the_human_page_points_at_the_protocol_in_its_headers(client):
@@ -88,6 +116,42 @@ def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatc
         warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
         assert warned[2] == "ship it"
         assert warned[-1].startswith("# budget:")
+
+
+def test_the_passkey_dead_end_names_a_button_the_page_actually_has(client):
+    """The page's instruction, checked against the page's own label.
+
+    WebAuthn cannot tell "you cancelled" from "this authenticator holds nothing for this
+    site", so discovery's failure has to name the way forward — and it names it in prose,
+    in a string six hundred lines from the button it is talking about. Relabel either one
+    and a reader with no passkey is told to press something that is not there, which is the
+    exact dead end the message exists to prevent. Two spellings of one label, so: pinned.
+
+    The reveal beside it is checked in the browser (tests/humans_ui_probe.mjs) — whether the
+    disclosure is actually open is a question about a rendered page, not about bytes.
+    """
+    import re as _re
+
+    body = client.get("/humans").text
+    label = _re.search(r'id="keypassnew"[^>]*>([^<]+)</button>', body)
+    assert label, "the enrolment button is gone"
+    assert f"(then: {label.group(1)})" in body
+
+
+def test_the_human_page_says_a_passkey_becomes_the_did_before_asking_for_one(client):
+    """Signed *out* is where this has to be said, and it is where it used to be missing.
+
+    The passkey is not a login here: there is no account behind it, and no server that knows
+    anything. It is a key-derivation function whose PRF output is the seed (design §5.6), so
+    what a reader is agreeing to when they press the button is that this authenticator will
+    *be* their did:key. The signed-in copy explained that; the signed-out copy, the only one
+    anybody reads before deciding, did not.
+    """
+    body = client.get("/humans").text
+    hint = body.split('id="keyhint"', 1)[1].split("</p>", 1)[0]
+    assert "did:key" in hint  # what the passkey turns into
+    assert "derives" in hint  # and that it is derived rather than stored
+    assert "nothing is kept here" in hint
 
 
 def test_human_page_caps_its_log_rows(client):
