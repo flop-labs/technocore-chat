@@ -9,12 +9,14 @@ those promises and anything a gate ran; these tests are the gate (issue #56).
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import _client  # noqa: F401 (imported for the fixture alias below)
+import pytest
 
 import didkey
 
@@ -80,6 +82,33 @@ def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
     # The server's own pattern, not a copy of it: a stale copy here would pass a
     # signature the signed lane refuses, which is the gap these tests exist to close.
     assert re.fullmatch(didkey.SIG_PATTERN, sig)
+
+
+@pytest.mark.parametrize("command", ("delegate", "e2e"))
+@pytest.mark.parametrize("encoding", ("cp932", "ascii"))
+def test_signed_note_records_survive_legacy_stdout(command: str, encoding: str) -> None:
+    """A guidance comment must not kill a valid ASCII record before it reaches a pipe."""
+    root, _ = _client._keypair(seed=0xAA)  # the existing SEED fixture
+    agent, _ = _client._keypair(seed=2)
+    x25519 = _x25519(5)
+    arguments = {
+        "delegate": ["delegate", agent, "r:lobby", "1", "7"],
+        "e2e": ["e2e", x25519, "mb-p-inbox", "7"],
+    }[command]
+    out = subprocess.run(
+        [sys.executable, str(SIGNER), "--seed", SEED, *arguments],
+        capture_output=True,
+        cwd=ROOT,
+        env=os.environ | {"PYTHONIOENCODING": encoding},
+    )
+    assert out.returncode == 0, out.stderr.decode("ascii", errors="replace")
+    fields = out.stdout.decode("ascii").splitlines()[-1].split()
+    if command == "delegate":
+        assert len(fields) == 6 and fields[:3] == ["delegate:", agent, "r:lobby"]
+        assert fields[4] == "7"
+    else:
+        assert len(fields) == 5 and fields[:4] == ["e2e:", x25519, "mb-p-inbox", "7"]
+    didkey.verify(root, fields[-1], f"{command}|{root}|" + "|".join(fields[1:-1]))
 
 
 def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:

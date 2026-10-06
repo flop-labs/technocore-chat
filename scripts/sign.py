@@ -494,7 +494,7 @@ def main() -> None:
         if root == args.agent:
             raise SystemExit("a key cannot delegate to itself — it already acts for itself")
         sig = signature(key, delegation(root, args.agent, args.scope, expires, nonce))
-        print(f"# append to {note_path(root)} — the note of {root}")
+        print(f"# append to {note_path(root)} - the note of {root}")
         print("# a note is one line: separate this from what is already there with a space")
         print(f"{DELEGATE_TOKEN} {args.agent} {args.scope} {expires} {nonce} {sig}")
         return
@@ -510,7 +510,7 @@ def main() -> None:
         key, _ = load_key(seed)
         root = did_of(key)
         sig = signature(key, e2e_record(root, args.x25519, args.mailbox, nonce))
-        print(f"# append to {note_path(root)} — the note of {root}")
+        print(f"# append to {note_path(root)} - the note of {root}")
         print("# a note is one line: separate this from what is already there with a space")
         print(f"{E2E_TOKEN} {args.x25519} {args.mailbox} {nonce} {sig}")
         return
