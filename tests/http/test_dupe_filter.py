@@ -810,6 +810,53 @@ def test_a_compaction_failure_after_the_append_lands_keeps_the_slot(client, monk
     )
 
 
+def test_an_fsync_failure_after_the_flush_keeps_the_slot(client, monkeypatch) -> None:
+    """yukkie3276, #734. Under CHAT_FSYNC=1 the append flushes and then fsyncs, and the fsync
+    sat inside the release-covered try. A flush that succeeds puts the record in the file,
+    where every reader sees it, so an fsync that then raises leaves a stored copy behind - and
+    releasing its slot would let that copy stop counting, exactly as the compaction failure
+    above did. Whether the bytes survive a crash is unknown at that point; the copy is
+    visible now, so the slot is kept and the error still reaches the caller.
+
+    Same shape as the compaction test: an existing room, a cap of one, one copy of PHRASE
+    whose flush succeeds and whose fsync raises. It must stay readable and hold its slot, so
+    the next identical copy is refused. On the old code the release dropped the slot and the
+    second copy landed with a 200.
+    """
+    import app as app_module
+    import store
+
+    root = config.ROOT
+    with _filter_on(DUPE_MAX_COPIES=1, FSYNC=True):
+        opener = "an opening line for this room that is not the phrase under test at all"
+        assert _say(client, "fsyncboom", "opener", opener).status_code == 200
+        gen = store.room_generation(root, "fsyncboom")
+        room_ino = store.room_path(root, "fsyncboom").stat().st_ino
+        real_fsync = store.os.fsync
+
+        def boom(fd):
+            # Only the room file's own fsync fails; any other file this append syncs is real.
+            if store.os.fstat(fd).st_ino == room_ino:
+                raise OSError("injected: fsync failed after the record was flushed")
+            return real_fsync(fd)
+
+        monkeypatch.setattr(store.os, "fsync", boom)
+        with pytest.raises(OSError):
+            store.append(
+                root, "fsyncboom", "nick", PHRASE, reserve=app_module._reserver("fsyncboom", PHRASE)
+            )
+        monkeypatch.undo()
+        assert PHRASE in _view(client, "fsyncboom"), "the flushed record is readable"
+        second = _say(client, "fsyncboom", "other", PHRASE)
+    assert second.status_code == 422, (
+        "a copy flushed before an fsync failure was not counted, so a second copy leaked past "
+        "the cap: " + second.text[:200]
+    )
+    assert len(limit._rings[("fsyncboom", gen)]) == 2, (
+        "the opener and the flushed PHRASE copy each hold a slot; nothing was released"
+    )
+
+
 def test_a_create_whose_generation_write_fails_commits_nothing(client, monkeypatch) -> None:
     """Minh3132's fifth #734 finding, at head c0a2d32. The create path used to bump the
     generation AFTER flushing the record and swallow that write's own failure: the committed

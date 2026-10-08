@@ -2638,6 +2638,7 @@ def _write_record(
         if reserve is not None:
             if reserve.reserve(_seq_field(root, room, "gen")):
                 raise DuplicateRefused
+        committed = False  # set once the record is flushed into the file readers see
         try:
             rec["seq"] = last_seq(root, room) + 1
             line = orjson.dumps(rec) + b"\n"
@@ -2654,6 +2655,7 @@ def _write_record(
             with path.open("ab") as f:
                 f.write(line)
                 f.flush()
+                committed = True
                 if config.FSYNC:  # see the knob: the one durability trade an operator may make
                     os.fsync(f.fileno())
         except BaseException:
@@ -2669,7 +2671,13 @@ def _write_record(
             # here — it is the create's precondition, above the reservation. A torn write stays
             # inside the try and still releases correctly — a half-written line is no parseable
             # record, and the next append's torn-tail heal isolates the fragment.
-            if reserve is not None:
+            #
+            # The commit point is the flush, not the fsync (yukkie3276, #734). Once the flush
+            # returns, the record is in the file every reader opens; an fsync that fails after
+            # it leaves crash-durability unknown but the copy already visible, so the slot is
+            # kept and the error still propagates. Releasing it would let a stored copy stop
+            # counting, the same leak as a compaction failure.
+            if reserve is not None and not committed:
                 reserve.release()
             raise
         limit = _ring_limit(root)
