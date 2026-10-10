@@ -518,7 +518,7 @@ def test_rooms_overview_pages_with_offset_and_reports_truncated(client):
         assert not (set(names) & set(seen))
         seen += names
         if not view["truncated"]:
-            assert offset + len(names) == total  # the census is exact when done
+            assert offset + len(names) == total  # the observed listing is complete
             break
         offset += len(view["rooms"])
     assert sorted(seen) == ["events"] + sorted(f"room{i}" for i in range(5))
