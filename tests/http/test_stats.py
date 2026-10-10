@@ -181,10 +181,11 @@ def test_a_non_ascii_configured_token_can_be_presented(tmp_path, monkeypatch):
     latin-1 round-trip in the header — so the operator's token is simply a token."""
     import app as app_module
     import config
+    import store
 
     monkeypatch.setenv("CHAT_ROOT", str(tmp_path))
     app_module._buckets.clear()
-    app_module._rooms_walk.cache_clear()
+    store._room_entries.cache_clear()
     with config.override(ROOT=tmp_path, STATS_TOKEN="t\u00f6k\u00e9n", STATS_CACHE_SECONDS=0):
         client = TestClient(app_module.app)
         right = "t\u00f6k\u00e9n".encode("utf-8")

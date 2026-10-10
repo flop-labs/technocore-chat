@@ -879,7 +879,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                             "Whether more rooms exist past this page "
                                             "(`offset + len(rooms) < total`). Page forward "
                                             "with `offset` while this is true; `total` is "
-                                            "the full count so a completed census is exact."
+                                            "the full count observed by this walk; rooms may "
+                                            "change between requests, so this is not a "
+                                            "snapshot-consistent census guarantee."
                                         ),
                                     },
                                     "capacity": {"type": "integer"},
