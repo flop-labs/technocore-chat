@@ -119,6 +119,21 @@ def test_one_write_never_pays_for_the_whole_backlog() -> None:
     limit._dupes.clear()
 
 
+def test_the_sweep_keeps_copies_exactly_one_window_old() -> None:
+    """The sweep and the live filter have to agree on the edge. Any accepted write runs
+    the sweep from the oldest key, so if it dropped copies the live filter still counts,
+    a phrase the room is already full of would land again just because somebody else
+    said something else at that instant."""
+    limit._dupes.clear()
+    for _ in range(COPIES):
+        assert refused(LONG, now=100.0) is False
+    # Another text lands exactly WINDOW later, sweeping from LONG's key, the oldest.
+    assert refused("an unrelated sentence, long enough to be keyed", now=100.0 + WINDOW) is False
+    # Copies exactly one window old still count, so the next copy is still refused.
+    assert refused(LONG, now=100.0 + WINDOW) is True
+    limit._dupes.clear()
+
+
 def test_off_is_one_comparison_and_touches_nothing() -> None:
     """window=0 is the opt-out, so it must cost nothing and record nothing - an operator
     setting CHAT_DUPE_FILTER_SECONDS=0 buys back the pre-filter hot path exactly."""
