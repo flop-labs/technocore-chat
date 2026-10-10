@@ -1434,7 +1434,8 @@ def room_stats(
     `limit` is capped to MAX_LIMIT and `offset` is clamped into the listing, so a page
     past the tail is an empty list with `truncated` False — a caller pages forward by
     advancing `offset` while `truncated` is True, and `total` stays the full count so a
-    completed census is `offset + len(rooms)` catching up to it.
+    `offset + len(rooms)` catches up to the count observed by this walk; rooms can change
+    between requests, so this is not a snapshot-consistent census guarantee.
 
     `entries` is an optional pre-walked sorted listing (the cached `_room_entries`): the
     caller's way of paying for the expensive walk once per `(stamp, bucket)` and reusing it
@@ -1471,7 +1472,7 @@ def room_stats(
         "bytes": sum(e[1] for e in entries),
         # Whether more rooms exist past this page (`offset + len(rooms) < total`). Always
         # present so a client parses a shape it can rely on and pages forward while it is
-        # true; `total` is the full count so a completed census is exact.
+        # true; `total` is the full count observed by this walk, not a cross-request snapshot.
         "truncated": offset + len(shown) < len(entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
