@@ -1320,17 +1320,10 @@ _MAX_ROOMS_WALK = 64
 def _walk_entries(root: Path) -> list:
     """The uncached walk room_stats runs when no cached listing is supplied."""
     entries = []
-    for e in _walk(root / "rooms", ".jsonl"):
-        name = e.name[: -len(".jsonl")]
-        if not _listable(name):
-            continue
-        try:
-            st = e.stat()
-        except OSError:
-            continue  # reaped between the readdir and the stat
-        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    entries.sort(reverse=True)
-    return entries
+    for e in filter(lambda e: _listable(e.name[: -len(".jsonl")]), _walk(root / "rooms", ".jsonl")):
+        with suppress(OSError):
+            entries.append(((st := e.stat()).st_mtime, st.st_size, e.name[:-6], st.st_mtime_ns))
+    return sorted(entries, reverse=True)
 
 
 @lru_cache(maxsize=_MAX_ROOMS_WALK)
@@ -1421,9 +1414,7 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(
-    root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0, *, entries: list | tuple | None = None
-) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT, offset: int = 0, *, entries=None) -> dict:
     """Recency-sorted room summaries for the overview.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
@@ -1442,26 +1433,21 @@ def room_stats(
     across every page, so distinct `limit`/`offset` never re-walk the store. When None the
     walk runs here, once, which is the uncached/cold path.
     """
-    now = time.time()
-    if entries is None:
-        entries = _walk_entries(root)
-    offset = min(max(0, offset), len(entries))
-    page = entries[offset : offset + max(1, min(int(limit), MAX_LIMIT))]
-    shown = []
-    windows = []
-    root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
-    topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
-    mono = time.monotonic()
-    for mtime, size, name, mtime_ns in page:
-        top, nicks = _cached_window(root_key, name, (mtime_ns, size))
+    entries = _walk_entries(root) if entries is None else entries
+    shown, windows = [], []
+    topics_stamp = (counters(root, strict=False)["topics_written"], str(root))
+    for mtime, size, name, mtime_ns in entries[max(0, offset) :][
+        : max(1, min(int(limit), MAX_LIMIT))
+    ]:
+        top, nicks = _cached_window(str(root), name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
             {
                 "room": name,
                 "last_seq": top,
                 "bytes": size,
-                "idle_seconds": max(0, int(now - mtime)),
-                "topic": _cached_topic(root_key, name, topics_stamp, mono),
+                "idle_seconds": max(0, int(time.time() - mtime)),
+                "topic": _cached_topic(str(root), name, topics_stamp, time.monotonic()),
                 **_engagement(nicks),
             }
         )
@@ -1473,7 +1459,7 @@ def room_stats(
         # Whether more rooms exist past this page (`offset + len(rooms) < total`). Always
         # present so a client parses a shape it can rely on and pages forward while it is
         # true; `total` is the full count observed by this walk, not a cross-request snapshot.
-        "truncated": offset + len(shown) < len(entries),
+        "truncated": max(0, offset) + len(shown) < len(entries),
         # Both bounds, because either can be the one that bites: a service can be far from
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
