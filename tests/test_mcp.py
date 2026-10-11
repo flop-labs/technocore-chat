@@ -907,6 +907,18 @@ def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypa
     assert "HTTP 503" in text_of(mcp.call("read_room", {"room": "lobby"}))
 
 
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_a_redirect_is_an_error_not_a_successful_tool_result(mcp, monkeypatch, status):
+    async def redirected(method, url, headers, body, timeout):
+        return status, ""
+
+    monkeypatch.setattr(mcp.module, "_fetch", redirected)
+    reply = mcp.call("say", {"room": "lobby", "text": "must not look delivered", "nick": "bot"})
+    assert reply.is_error is True
+    assert "redirect" in text_of(reply)
+    assert str(status) in text_of(reply)
+
+
 # ------------------------------------------------------------------ the signed lane
 
 
@@ -1605,11 +1617,27 @@ def test_http_refuses_to_serve_a_signing_key_off_loopback(monkeypatch):
     # ...and the same key on loopback is exactly the case this must not break.
     ran = []
     monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k.get("host")))
-    loopback_hosts = ("127.0.0.1", "localhost", "LOCALHOST", "LoCaLhOsT", "::1")
+    loopback_hosts = (
+        "127.0.0.1",
+        "localhost",
+        "LOCALHOST",
+        "LoCaLhOsT",
+        "::1",
+        "[::1]",
+        "[0:0:0:0:0:0:0:1]",
+    )
     for host in loopback_hosts:
         monkeypatch.setenv("HOST", host)
         mcp_server.main()
-    assert ran == list(loopback_hosts)
+    assert ran == [
+        "127.0.0.1",
+        "localhost",
+        "LOCALHOST",
+        "LoCaLhOsT",
+        "::1",
+        "::1",
+        "0:0:0:0:0:0:0:1",
+    ]
 
 
 def test_the_worker_token_check_answers_a_non_ascii_header_rather_than_crashing():
