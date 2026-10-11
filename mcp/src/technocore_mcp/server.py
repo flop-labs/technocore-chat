@@ -265,6 +265,10 @@ async def _request(
         status, text = await _fetch(method, url, headers, body, timeout or TIMEOUT)
     except OSError as exc:
         raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
+    if 300 <= status < 400:
+        raise ToolError(
+            f"unexpected HTTP redirect ({status}); set TECHNOCORE_URL to the final HTTPS origin"
+        )
     if status >= 400:
         raise ToolError(text.strip() or f"HTTP {status}")
     return text
@@ -815,7 +819,8 @@ def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
     """
     bare = host.strip("[]").lower()
     if bare in _LOOPBACK:
-        return host, [f"[{bare}]" if ":" in bare else bare]
+        bind = bare if ":" in bare else host
+        return bind, [f"[{bare}]" if ":" in bare else bare]
     try:
         infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
     except (OSError, UnicodeError):
@@ -827,7 +832,7 @@ def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
     # involved, so nobody else can move it (`0:0:0:0:0:0:0:1` is the ::1 it spells).
     try:
         ipaddress.ip_address(bare)
-        bind, typed = host, [f"[{bare}]" if ":" in bare else bare]
+        bind, typed = bare, [f"[{bare}]" if ":" in bare else bare]
     except ValueError:
         bind, typed = str(addrs[0]), []
     resolved = [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
