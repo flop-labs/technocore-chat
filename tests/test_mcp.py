@@ -1100,6 +1100,14 @@ def test_write_note_rejects_an_unusable_did_mailbox_before_the_network(mcp, monk
     plain = mcp.call("write_note", {"namespace": namespace, "key": key, "value": did})
     assert plain.is_error is False, text_of(plain)
 
+    # Both spellings are valid: the public manual documents `mailbox: <room>`.
+    for field in ("mailbox:mb-p-room", "mailbox: mb-p-room", "mailbox:\tmb-p-room"):
+        accepted = mcp.call(
+            "write_note",
+            {"namespace": namespace, "key": key, "value": f"{did} {field}"},
+        )
+        assert accepted.is_error is False, text_of(accepted)
+
     sent = len(mcp.sent)
     bad = mcp.call(
         "write_note",
