@@ -36,6 +36,13 @@ import anyio.to_thread
 Fetch = Callable[[str, str, dict[str, str], bytes | None, float], Awaitable[tuple[int, str]]]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Return redirects as HTTP responses instead of replaying or rewriting a request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _blocking_request(
     method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
 ) -> tuple[int, str]:
@@ -46,8 +53,9 @@ def _blocking_request(
     treat "the service said no, and here is why" as ordinary data.
     """
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
