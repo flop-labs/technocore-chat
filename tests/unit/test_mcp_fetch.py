@@ -34,6 +34,12 @@ class _Handler(BaseHTTPRequestHandler):
     """Echoes the method, path, User-Agent and any body; takes its status from the path."""
 
     def _answer(self):
+        if self.path.startswith("/redirect/"):
+            self.send_response(int(self.path.rsplit("/", 1)[1]))
+            self.send_header("Location", "/redirect-target")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         status = 429 if self.path.startswith("/slow-down") else 200
         length = int(self.headers.get("Content-Length") or 0)
         received = self.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -91,6 +97,18 @@ def test_a_post_carries_its_body_bytes_verbatim(origin):
     assert status == 200
     assert "for POST /kv/ns/key" in body
     assert 'body={"value": "привет"}' in body
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_a_redirect_is_returned_without_replaying_the_post(origin, status):
+    """A redirect must not turn a write POST into a successful GET (or replay it)."""
+    response_status, _ = fetch(
+        f"{origin}/redirect/{status}",
+        {"Content-Type": "application/json"},
+        method="POST",
+        body=b'{"text":"write"}',
+    )
+    assert response_status == status
 
 
 def test_an_http_failure_comes_back_as_a_value_with_its_body_intact(origin):
