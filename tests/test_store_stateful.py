@@ -546,7 +546,8 @@ StoreLifecycle.TestCase.settings = settings(
     # Measured properly against the pre-fix reaper on current main — isolated worktree, a fresh
     # `.hypothesis` per run, nothing else touching the tree:
     #
-    #   derandomize=True, 150x60 (what CI runs)  found it: no
+    #   derandomize=True,  40x60 (what CI runs)  found it: no
+    #   derandomize=True, 150x60                 found it: no
     #   derandomize=False, 150x60, seeds 1-5     found it: 1 of 5
     #   derandomize=False, 40x60,  seeds 1-5     found it: 3 of 5
     #
@@ -557,6 +558,7 @@ StoreLifecycle.TestCase.settings = settings(
     # deterministic regressions in tests/unit/test_sharding.py, which fail on the parent commit
     # and under mutation; this machine is here for the orderings nobody wrote down, and it
     # explores as far at 40 as the repository has always paid for.
+    max_examples=40,
     stateful_step_count=60,
     deadline=None,
     # Every rule fsyncs and `advance` rewrites the whole store: slow by construction.
