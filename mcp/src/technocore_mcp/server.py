@@ -264,7 +264,12 @@ async def _request(
     try:
         status, text = await _fetch(method, url, headers, body, timeout or TIMEOUT)
     except OSError as exc:
-        raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
+        if method in ("GET", "HEAD"):
+            raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
+        raise ToolError(
+            f"no complete response from {BASE_URL}; the write was not confirmed. "
+            f"Check whether it landed before retrying. ({exc})"
+        ) from None
     if status >= 400:
         raise ToolError(text.strip() or f"HTTP {status}")
     return text
