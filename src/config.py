@@ -125,7 +125,7 @@ PUBLIC_URL = os.environ.get("CHAT_PUBLIC_URL", "").strip()
 # Lazy expiry for the `e-` class: nothing sweeps in the background, records are simply not
 # returned once they are older than this, and physically leave on the next compaction or
 # when the IDLE_SECONDS reaper takes the file.
-EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
+EPHEMERAL_TTL_SECONDS = max(60, int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900")))
 
 # How many rooms the service will track. Floored at 1 for the same reason the rate knobs
 # are: the capacity check divides the tracked count against it, and a zero would refuse
