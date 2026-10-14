@@ -91,10 +91,18 @@ def build(root: Path, rooms: int, deep: int, depth: int) -> float:
     The deep rooms are written last, so they are the ones a recency-sorted listing reaches
     first. That ordering is the whole point: a store whose deep rooms sort last would let
     every limit below `rooms - deep` skip the tail reads entirely.
+
+    `deep` is a count *of* `rooms`, so `0 <= deep <= rooms` is the invariant and anything
+    else is refused rather than clamped: the loops below build exactly as many rooms as the
+    arguments name, and a store built past that is not the one the caller reports on. A
+    benchmark that silently measures a differently shaped store than the one it names is
+    worse than one that does not run.
     """
+    if not 0 <= deep <= rooms:
+        raise ValueError(f"deep ({deep}) must be between 0 and rooms ({rooms})")
     (root / "rooms").mkdir(parents=True, exist_ok=True)
     t = time.perf_counter()
-    for i in range(max(0, rooms - deep)):
+    for i in range(rooms - deep):
         store._write_record(root, f"bench-s{i:06d}", "n0", "x")
     for i in range(deep):
         name = f"bench-d{i:06d}"
@@ -165,7 +173,9 @@ def main() -> int:
     p.add_argument(
         "--rooms", type=int, default=store.MAX_ROOMS, help="rooms on disk (default: the cap)"
     )
-    p.add_argument("--deep", type=int, default=max(LADDER), help="how many hold a full window")
+    p.add_argument(
+        "--deep", type=int, default=max(LADDER), help="how many hold a full window (<= --rooms)"
+    )
     p.add_argument(
         "--depth", type=int, default=store.WINDOW_MESSAGES, help="records in a deep room"
     )
@@ -174,6 +184,17 @@ def main() -> int:
     p.add_argument("--limits", type=int, nargs="+", default=list(LADDER))
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
+
+    # Refused here rather than in build() so the setup cost is never paid: at the default
+    # --depth the deep loop writes 200 records per room before anything is measured, and a
+    # run whose arguments cannot describe a store is not worth one record of it. build()
+    # refuses too, for callers that do not come through this parser.
+    if not 0 <= args.deep <= args.rooms:
+        p.error(
+            f"--deep {args.deep} is not between 0 and --rooms {args.rooms}: the deep rooms "
+            f"are a subset of the rooms, and a run that builds past that does not measure "
+            f"the store its own report names"
+        )
 
     with tempfile.TemporaryDirectory(prefix="bench-rooms-") as tmp:
         root = Path(tmp)
