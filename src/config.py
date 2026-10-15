@@ -139,7 +139,13 @@ EPHEMERAL_TTL_SECONDS = int(os.environ.get("CHAT_EPHEMERAL_TTL_SECONDS", "900"))
 # survivable and is unchanged: this only decides where the wall is, not who may run at it.
 # Raising it costs directory walks (the reaper and /rooms are O(cap)), not disk — the disk
 # budget is MAX_TOTAL_ROOM_BYTES and is enforced separately.
+MAX_TOTAL_ROOM_BYTES = 5 << 30
 MAX_ROOMS = max(1, int(os.environ.get("CHAT_MAX_ROOMS", "5120")))
+if MAX_ROOMS > MAX_TOTAL_ROOM_BYTES:
+    raise ValueError(
+        f"CHAT_MAX_ROOMS ({MAX_ROOMS}) exceeds the room byte budget "
+        f"({MAX_TOTAL_ROOM_BYTES}); the per-room retention floor would be zero"
+    )
 # What ONE namespace may hold. Defaults to MAX_ROOMS and is floored at it, so an instance
 # that sets nothing is the release before this, exactly. The floor is the reserved-namespace
 # invariant: `topic`, `room-owners`, `room-allow` and `room-nonce` hold one note per room, so

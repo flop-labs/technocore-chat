@@ -27,6 +27,8 @@ PROBE = (
     "import json, app, config, limit, store; "
     "print(json.dumps({"
     "'config.MAX_ROOMS': config.MAX_ROOMS, 'store.MAX_ROOMS': store.MAX_ROOMS, "
+    "'config.MAX_TOTAL_ROOM_BYTES': config.MAX_TOTAL_ROOM_BYTES, "
+    "'store.RESERVED_ROOM_BYTES': store.RESERVED_ROOM_BYTES, "
     "'config.MAX_NOTES_PER_NS': config.MAX_NOTES_PER_NS, "
     "'store.MAX_NOTES_PER_NS': store.MAX_NOTES_PER_NS, "
     "'config.MAX_NOTES_TOTAL': config.MAX_NOTES_TOTAL, "
@@ -252,6 +254,25 @@ def test_junk_refuses_to_boot() -> None:
     )
     assert run.returncode != 0, "app booted with a non-numeric CHAT_MAX_ROOMS"
     assert "ValueError" in run.stderr
+
+
+def test_room_count_cannot_make_the_retention_floor_zero() -> None:
+    """The exact budget leaves one byte per room; a larger cap would make compaction
+    discard the entire room on every append, so refuse that deployment at import."""
+    max_rooms = 5 << 30  # MAX_TOTAL_ROOM_BYTES
+    boundary = boot(CHAT_MAX_ROOMS=str(max_rooms))
+    assert boundary["store.RESERVED_ROOM_BYTES"] == 1
+
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, "CHAT_MAX_ROOMS": str(max_rooms + 1)},
+    )
+    assert run.returncode != 0, "app booted with a zero per-room retention floor"
+    assert "CHAT_MAX_ROOMS" in run.stderr
+    assert "retention floor would be zero" in run.stderr
 
 
 def test_the_poll_interval_is_a_knob_and_defaults_where_it_was_hardcoded() -> None:

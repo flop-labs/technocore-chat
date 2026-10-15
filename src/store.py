@@ -73,7 +73,7 @@ MAX_ROOMS = config.MAX_ROOMS
 # hundreds of full ones. This is the number a deployment sizes its volume against.
 # Raising it, or MAX_ROOM_BYTES, is what needs re-checking against the volume now —
 # raising MAX_ROOMS no longer does.
-MAX_TOTAL_ROOM_BYTES = 5 << 30
+MAX_TOTAL_ROOM_BYTES = config.MAX_TOTAL_ROOM_BYTES
 # The budget above is only a real bound if rooms cannot grow past it after they are made.
 # Gating *creation* alone does not do that: 5120 rooms created while usage is low can each
 # then grow to MAX_ROOM_BYTES, which is 51 GiB — ten times the number the operator was told
