@@ -185,11 +185,17 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
 
+    # A negative count is truthy, so it would reach `contended()` and raise only after
+    # `build()` had already run — the setup this block exists to avoid. Refused with the
+    # other two, by name, rather than left to `0 <= writers <= deep` behind the setup.
+    if args.writers < 0:
+        p.error(f"--writers {args.writers} is negative: it is a count of threads")
+
     # The writers append to the deep rooms, so a writer count with no deep room under it
     # names an arm that cannot exist. Refused here rather than in `contended()` so the setup
-    # is never paid for, the same place and for the same reason `build()` refuses its pair —
-    # and refused rather than clamped to `--deep`, because a run that starts four threads and
-    # reports eight has measured a lighter arm than its own output claims.
+    # is never paid for — and refused rather than clamped to `--deep`, because a run that
+    # starts four threads and reports eight has measured a lighter arm than its own output
+    # claims.
     if args.writers and args.deep == 0:
         p.error(
             f"--writers {args.writers} with --deep 0: the writers churn the deep rooms and "

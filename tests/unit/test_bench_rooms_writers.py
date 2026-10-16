@@ -148,6 +148,16 @@ def test_the_cli_refuses_a_writer_with_no_deep_room() -> None:
     assert "--writers 2" in run.stderr and "--deep 0" in run.stderr
 
 
+def test_the_cli_refuses_a_negative_writer_count_before_the_setup() -> None:
+    """`-1` is truthy, so without its own check it reached `contended()` and raised there —
+    after `build()` had written `depth` records per deep room. Exit 2 is `main()`'s refusal;
+    a `ValueError` out of the arm would be an uncaught traceback and exit 1, so the code is
+    what says the pair was refused before the setup rather than behind it."""
+    run = cli("--rooms", "50", "--deep", "2", "--depth", "20", "--writers", "-1")
+    assert run.returncode == 2, run.stderr
+    assert "--writers -1" in run.stderr and "negative" in run.stderr
+
+
 def test_the_cli_refuses_more_writers_than_deep_rooms() -> None:
     run = cli("--rooms", "4", "--deep", "2", "--writers", "8", "--limits", "1", "--reps", "1")
     assert run.returncode == 2, run.stderr
