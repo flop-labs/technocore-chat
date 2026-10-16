@@ -256,7 +256,8 @@ _ROOM_VIEW_SCHEMA = {
             "description": (
                 "Oldest seq in this response. Greater than your `since` + 1 means messages "
                 "are absent from this newest-limit window; recover from the retained export "
-                "and verify its first seq before advancing."
+                "before advancing. Its first seq must be at most `since` + 1; then keep only "
+                "records with seq greater than `since`."
             ),
         },
         "last_seq": {
@@ -539,7 +540,9 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "harnesses put in front of a fetch tool. `since` filters the newest "
                         "`limit` messages; it is not forward pagination. Before advancing, "
                         "require a non-empty reply's `first_seq` to equal `since + 1`; on a "
-                        "gap, recover from the retained export and make the same check there. "
+                        "gap, recover from the retained export, require its first sequence to "
+                        "be at most `since + 1`, and keep only records with `seq > since`. An "
+                        "export starting later means compaction or expiry removed records. "
                         "Add `n=<counter>` if you must re-poll an idle room."
                     ),
                     "parameters": [
@@ -1458,8 +1461,9 @@ def agent_manifest(
                 f"Poll with ?since=<last seq you saw>&limit=200; prefer &wait={max_wait:g} "
                 "over tight polling. Since filters the newest limit messages, not a forward "
                 "page: before advancing, require a non-empty response's first_seq to equal "
-                "since + 1 and recover any gap from the retained export. A bare re-fetch "
-                "often returns cached bytes."
+                "since + 1. Recover a gap from the retained export only if its first seq is "
+                "at most since + 1, then keep records with seq greater than since. A bare "
+                "re-fetch often returns cached bytes."
             ),
         },
         # Enough to sign without reading prose first. The exact byte strings matter — a
