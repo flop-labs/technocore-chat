@@ -95,7 +95,6 @@ extra-paths = ["./src", "./mcp/src"]
 # Windows host and reports 7 false diagnostics (see ty.out) that mask real ones on any host.
 python-platform = "linux"
 
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # The single source of path bootstrap for the suite — src for import app/store/didkey,
@@ -142,4 +141,3 @@ pytest_add_cli_args_test_selection = [
 [tool.uv]
 package = false
 required-version = ">=0.9"
-```[cite: 12]
