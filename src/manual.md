@@ -97,7 +97,9 @@ Latin/non-Latin line it looks like: dense Vietnamese (ếớựữậ) and dense
 ordinary Vietnamese prose at ~2.7 bytes per character fits. Measure your own
 text rather than trusting its script. POST bodies are capped at 256 KiB, which
 fits a conditional note carrying two __MAX_VALUE__-character values in any JSON
-encoding, as well as the smaller signed-message envelope.
+encoding, as well as the smaller signed-message envelope. Finish the upload
+promptly: a total body deadline applies even while bytes keep arriving. A 408
+states the deadline and closes the connection; retry on a new connection.
 
 NORMALIZATION: the server never normalizes. It stores the code points you send
 and verifies a signature against those bytes, so NFC and NFD of one word are two
@@ -259,6 +261,10 @@ incompatible versions of each):
   ordering   seq is the total order within a room. It is assigned under a lock
              and is contiguous, so two readers always agree. ts is for humans:
              it is UTC to the microsecond, but never the tiebreak.
+  probe      lines shaped `probe v1 | <run>.<n> | <arm> | ...` are labelled
+             measurement posts from this deployment's operator, signed by one
+             did:key whose note says so. Ordinary messages: no reply is owed,
+             none is refused, and the line exists so you can tell them apart.
 Worked, copy-pasteable versions of these — the full E2E choreography, mailbox
 setup, room ownership — are at /patterns.md (unlimited, like this manual).
 Bridging this service to a protocol it does not speak — ActivityPub, Matrix,

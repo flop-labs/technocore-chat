@@ -96,6 +96,7 @@ from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 
 PREFIX = "did:key:z6Mk"  # multibase 'z' + the fixed ed25519-pub prefix base58-encodes to z6Mk
 MULTICODEC_ED25519 = b"\xed\x01"  # varint ed25519-pub, the two bytes every z6Mk key decodes from
@@ -131,6 +132,8 @@ DIGITS_RE = re.compile(r"[0-9]{1,19}")
 # the sweep could eat.
 DELEGATE_TOKEN = "delegate:"
 DELEGATE_FIELDS = 5  # agent, scope, expires, nonce, sig
+E2E_TOKEN = "e2e:"
+E2E_FIELDS = 4  # x25519, mailbox, nonce, sig
 
 
 def swept(text: str, limit: int) -> str:
@@ -286,6 +289,71 @@ def newest(records: list[tuple[str, str, str, str, str]]) -> set[int]:
     return {i for _rank, i in best.values()}
 
 
+def e2e_record(root: str, x25519: str, mailbox: str, nonce: str) -> str:
+    """The canonical string an `e2e:` record's signature covers (patterns.md pattern 4).
+
+    A DID note is world-writable, so its bare `x25519:` and `mailbox:` fields say only what
+    whoever wrote last wanted them to: a sender that sealed a room key to them would be
+    sealing it to that writer. This record is what a sender trusts instead. It names its
+    root for the reason a delegation does, and the `e2e` prefix keeps any other string this
+    key signs from being read as one.
+    """
+    return f"e2e|{root}|{x25519}|{mailbox}|{nonce}"
+
+
+def x25519_bytes(value: str) -> bytes | None:
+    """The 32 key bytes of a canonical, unpadded base64url X25519 public key, else None.
+
+    Strict on purpose: a record's signature covers the string, so a typo like `x` signs
+    perfectly well and would then win as the newest record while no sender could decode it.
+    Refused when signing, and skipped when choosing, so a bad record is inert rather than
+    the one that bricks the identity. The same goes for a low-order point (32 zero bytes is
+    one): every exchange with it is all zeros, which `exchange()` refuses and a laxer
+    implementation turns into a secret anyone can compute. One trial exchange finds them.
+    """
+    try:
+        raw = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except ValueError:
+        return None
+    if len(raw) != 32 or base64.urlsafe_b64encode(raw).decode().rstrip("=") != value:
+        return None
+    try:
+        X25519PrivateKey.generate().exchange(X25519PublicKey.from_public_bytes(raw))
+    except ValueError:
+        return None
+    return raw
+
+
+def e2e_key(root: str, body: str) -> tuple[str, str, int] | None:
+    """The `e2e:` record in `body` a sender may seal to: `(x25519, mailbox, nonce)` of the
+    highest-nonce record that `root` really signed, or None when there is none.
+
+    Forged records are expected and inert, as in `check_note`. Highest nonce wins so that
+    re-adding a record the root has since replaced changes nothing; a sender should also
+    remember the highest nonce it has used for a root and refuse anything lower, because a
+    writer who can blank the note can leave only an old record behind.
+    """
+    key, best = public_key(root), None
+    fields = body.split()
+    for i, token in enumerate(fields):
+        record = fields[i + 1 : i + 1 + E2E_FIELDS]
+        if token != E2E_TOKEN or len(record) != E2E_FIELDS or not DIGITS_RE.fullmatch(record[2]):
+            continue
+        x25519, mailbox, nonce, sig = record
+        if x25519_bytes(x25519) is None or not re.fullmatch(NAME, mailbox):
+            continue
+        try:
+            key.verify(
+                base64.urlsafe_b64decode(sig + "=="),
+                e2e_record(root, x25519, mailbox, nonce).encode(),
+            )
+        except (InvalidSignature, ValueError, TypeError):
+            continue
+        if best is None or int(nonce) >= best[2]:
+            best = (x25519, mailbox, int(nonce))
+    return best
+
+
 def check_note(root: str, body: str) -> int:
     """Report every delegation in `body` against `root`. Returns the count that verify.
 
@@ -363,6 +431,13 @@ def main() -> None:
     give.add_argument("scope", help="'*', 'r:<room>' or 'kv:<ns>'")
     give.add_argument("days", help="how many days it stays valid")
     give.add_argument("nonce", nargs="?", help="defaults to a millisecond clock")
+    seal = sub.add_parser("e2e", parents=[seeded], help="sign the e2e: key record for a DID note")
+    seal.add_argument("x25519", help="your static X25519 public key, base64url")
+    seal.add_argument("mailbox", help="the mailbox room senders deliver to, e.g. mb-p-<name>")
+    seal.add_argument("nonce", nargs="?", help="defaults to a millisecond clock")
+    pick = sub.add_parser("e2e-key", help="the e2e: record in a note a sender may seal to")
+    pick.add_argument("root", help="the recipient's full did:key")
+    pick.add_argument("file", nargs="?", help="note text; reads stdin when absent")
     audit = sub.add_parser("check", help="verify the delegation lines in a note")
     audit.add_argument("root", help="the root did:key the note belongs to")
     audit.add_argument("file", nargs="?", help="note text; reads stdin when absent")
@@ -380,6 +455,14 @@ def main() -> None:
     # load_key is ever reached so that they work with no --seed and no $SIGN_SEED.
     if args.cmd == "note":
         print(note_path(args.did))
+        return
+
+    if args.cmd == "e2e-key":
+        body = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+        found = e2e_key(args.root, body)
+        if found is None:
+            raise SystemExit("no e2e: record here verifies against that did:key; do not seal")
+        print(*found)  # x25519 mailbox nonce
         return
 
     if args.cmd == "check":
@@ -414,6 +497,22 @@ def main() -> None:
         print(f"# append to {note_path(root)} — the note of {root}")
         print("# a note is one line: separate this from what is already there with a space")
         print(f"{DELEGATE_TOKEN} {args.agent} {args.scope} {expires} {nonce} {sig}")
+        return
+
+    if args.cmd == "e2e":
+        nonce = args.nonce or str(int(time.time() * 1000))
+        if not DIGITS_RE.fullmatch(nonce):
+            raise SystemExit(f"nonce must be 1-19 ASCII digits, got {nonce!r}")
+        if not re.fullmatch(NAME, args.mailbox):
+            raise SystemExit(f"bad mailbox {args.mailbox!r}: it must be a room name")
+        if x25519_bytes(args.x25519) is None:
+            raise SystemExit(f"bad x25519 {args.x25519!r}: 32 bytes as unpadded base64url")
+        key, _ = load_key(seed)
+        root = did_of(key)
+        sig = signature(key, e2e_record(root, args.x25519, args.mailbox, nonce))
+        print(f"# append to {note_path(root)} — the note of {root}")
+        print("# a note is one line: separate this from what is already there with a space")
+        print(f"{E2E_TOKEN} {args.x25519} {args.mailbox} {nonce} {sig}")
         return
 
     # say/set: build the canonical string over the SWEPT text — what is stored.

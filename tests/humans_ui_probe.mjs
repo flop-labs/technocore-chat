@@ -25,7 +25,7 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-05, 109 checks, all passing — expected shape:
+ * Checked 2026-09-07, 138 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
@@ -46,8 +46,20 @@
  *                   invisible-character sweep matches the server's, the identity survives
  *                   a reload, and signing out lands back on the nickname lane
  *   passkey         a virtual authenticator with PRF enrols, derives a did:key, stores no
- *                   seed, and hands the SAME did:key back to a browser whose storage has
- *                   been wiped; discovery with nothing enrolled refuses instead of enrolling
+ *                   seed, and hands the SAME did:key back three ways a reader comes back —
+ *                   a browser whose storage has been wiped, a reload with it intact, and a
+ *                   sign-out; discovery with nothing enrolled refuses instead of enrolling
+ *                   and opens the disclosure holding the button it tells them to press;
+ *                   a ceremony nobody answers is replaced by the next click rather than
+ *                   wedging the page, and holds the badge against the room's own heartbeat
+ *                   for as long as it runs — then hands it back when it settles
+ *   deadline        an engine that ignores `publicKey.timeout` still ends the ceremony: the
+ *                   page's own deadline aborts it and says so, on a stubbed get() that never
+ *                   settles, with the clock skipping the two minutes
+ *   no PRF          an authenticator without it is told apart from one that works, and nobody
+ *                   is signed in on a seed that never arrived
+ *   no WebAuthn     both passkey controls and the prose naming them are gone, and the seed
+ *                   lane still derives the DID scripts/sign.py does
  *   delegation      two `delegate:` records are signed, published to the DID note path
  *                   beside an existing `mailbox:`, and both read back verified out of the
  *                   ONE line a note can hold; re-issuing replaces rather than appends; four
@@ -649,13 +661,18 @@ const browser = await chromium.launch({
 
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable", { enableUI: false });
-  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", {
     options: {
       protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
       hasResidentKey: true, hasUserVerification: true, hasPrf: true,
       automaticPresenceSimulation: true, isUserVerified: true,
     },
   });
+  // A ceremony nobody answers. Turning presence off is the closest a virtual authenticator
+  // comes to the states that produced the bug below, and it is a faithful one: the request
+  // is issued, no dialog is answered, and the promise simply never settles.
+  const answers = (enabled) =>
+    cdp.send("WebAuthn.setAutomaticPresenceSimulation", { authenticatorId, enabled });
 
   const ready = () => page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
   const signedIn = () =>
@@ -672,6 +689,9 @@ const browser = await chromium.launch({
   await page.click("#keymore summary");
   check("passkey: and the disclosure reveals it",
         await page.locator("#keypassnew").isVisible());
+  // Folded away again: a first-timer has never opened it, and what follows is about what
+  // that reader can see.
+  await page.click("#keymore summary");
 
   // Discovery with nothing enrolled must explain itself and must not quietly enrol. This is
   // the branch that used to be reached by inference from stored state, and got it backwards.
@@ -682,6 +702,16 @@ const browser = await chromium.launch({
         await page.textContent("#status"));
   check("passkey: and signed nobody in",
         (await page.textContent("#me")) === "Not signed in");
+
+  // Pointing at a button is only a next step if the button is on screen. The reader with no
+  // passkey is the one who needs enrolment most and the one least likely to go looking for
+  // it behind a disclosure they have no reason to open.
+  check("passkey: the dead end opens the way out rather than naming it",
+        await page.locator("#keypassnew").isVisible());
+  check("passkey: and the message names that button exactly",
+        (await page.textContent("#status"))
+          .includes(await page.textContent("#keypassnew")),
+        `${await page.textContent("#status")} / ${await page.textContent("#keypassnew")}`);
 
   await page.click("#keypassnew");
   await signedIn();
@@ -698,9 +728,95 @@ const browser = await chromium.launch({
   await ready();
   check("passkey: a wiped browser starts signed out",
         (await page.textContent("#me")) === "Not signed in");
+  // A ceremony the reader never gets to answer is not an edge case: the platform dialog
+  // that opens behind the browser window, the OS sheet the OS itself dismissed, the hybrid
+  // flow whose phone never joined. None of those rejects the promise — it just never
+  // settles, and WebAuthn allows one outstanding request per document. So the page used to
+  // wedge: the second click was refused with the browser's own "A request is already
+  // pending.", a sentence about bookkeeping the reader cannot see, and it went on being
+  // refused until someone thought to reload. Clicking again has to mean "try that again".
+  await answers(false);
+  await page.click("#keypass");
+  await page.waitForTimeout(600);
+  check("passkey: a ceremony in flight says what it is waiting for",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  await page.click("#keypass");
+  await page.waitForTimeout(600);
+  check("passkey: clicking again replaces the parked ceremony instead of refusing it",
+        !(await page.textContent("#status")).includes("already pending"),
+        await page.textContent("#status"));
+
+  // The badge is shared with the pump, which stamps `seq N` on it every time a poll lands —
+  // about once a second in a room that is not idle. The line telling a reader what their
+  // click is waiting for, and the error when it fails, both have to outlive that; when they
+  // did not, a ceremony that never surfaced looked exactly like a button doing nothing.
+  await fetch(`${BASE}/r/lobby/say/probe/passkey%20heartbeat`);
+  await page.waitForTimeout(2000);
+  check("passkey: and the room's heartbeat does not wipe the answer",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  // …and does not creep back over it later. A hold measured in seconds cannot be right for
+  // a wait CEREMONY_MS deliberately allows two minutes of: the cross-device flow is a reader
+  // walking to another room for their phone, and handing the badge back to `seq N` while
+  // they are still holding it is the original bug with a delay in front of it. Ten seconds
+  // and a second message, so a poll certainly lands after any few-second window would have
+  // lapsed (Codex review, #747).
+  await page.waitForTimeout(8000);
+  await fetch(`${BASE}/r/lobby/say/probe/still%20waiting`);
+  await page.waitForTimeout(2000);
+  check("passkey: nor once a short hold window would have lapsed",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  // The whole point of replacing it rather than refusing it: the reader gets in on the next
+  // click, from the same document, having reloaded nothing.
+  await answers(true);
   await page.click("#keypass");
   await signedIn();
   check("passkey: the same passkey recovers the same DID from empty storage",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // The hold that ceremony took is released, not leaked. It held the badge with no deadline
+  // — the only way to cover a two-minute wait honestly — so failing to hand it back would
+  // freeze the seq for the life of the document, which is the same badge lost to the same
+  // bug from the other direction. Past HOLD_MS from the sign-in line, with a poll after it.
+  await page.waitForTimeout(9000);
+  await fetch(`${BASE}/r/lobby/say/probe/heartbeat%20resumes`);
+  await page.waitForTimeout(2000);
+  check("passkey: and the badge goes back to the room once the ceremony settles",
+        /^seq \d+$/.test(await page.textContent("#status")),
+        await page.textContent("#status"));
+
+  // Coming back later, in the same browser, with its storage untouched. The page will not
+  // re-derive a passkey identity on load and that is deliberate: deriving one costs a
+  // user-verification prompt, and demanding a fingerprint from a reader who came to watch a
+  // room would have earned being closed. So the promise is narrower and has to hold exactly
+  // — it starts signed out, and one click brings back the DID they left with rather than
+  // minting a new one.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await ready();
+  check("passkey: coming back starts signed out rather than prompting on load",
+        (await page.textContent("#me")) === "Not signed in");
+  check("passkey: with nothing about the identity left in storage to restore it from",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: and one click hands back the same DID, not a new one",
+        (await page.getAttribute("#me", "title")) === did,
+        await page.getAttribute("#me", "title"));
+
+  // The same recovery without the reload: sign-out has to leave nothing behind, and the
+  // passkey has to be enough on its own to undo it.
+  await page.click("#keyout");
+  check("passkey: signing out drops the identity",
+        (await page.textContent("#me")) === "Not signed in");
+  await page.click("#keypass");
+  await signedIn();
+  check("passkey: and signing back in returns the same DID",
         (await page.getAttribute("#me", "title")) === did,
         await page.getAttribute("#me", "title"));
 
@@ -822,6 +938,152 @@ const browser = await chromium.launch({
 
   check("passkey + delegation: no page errors throughout",
         errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+
+// ------------------------------------------------------------- a deadline the page owns
+// `publicKey.timeout` is a hint: the spec lets a user agent clamp or ignore it, so it cannot
+// be what bounds a ceremony. This is the engine that ignores it — a get() that never settles
+// and honours only the AbortSignal, which is every real implementation's floor. Without a
+// deadline of the page's own the request stays pending for the life of the document, and the
+// open-ended hold keeps the badge on "waiting for your passkey…" for a ceremony that is
+// never coming back (#747 review).
+//
+// The clock skips the two minutes rather than spending them. The tab is reported hidden for
+// the same reason the pump checks it: with the poll parked, the only timer this section can
+// be measuring is the one under test.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.clock.install();
+  await page.addInitScript(() => {
+    Object.defineProperty(document, "hidden", { get: () => true });
+    navigator.credentials.get = (opts) => new Promise((_, reject) => {
+      if (opts && opts.signal) {
+        opts.signal.addEventListener("abort", () => {
+          const e = new Error("signal aborted");
+          e.name = "AbortError";
+          reject(e);
+        });
+      }
+    });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+
+  await page.click("#keypass");
+  await page.waitForTimeout(300);
+  check("deadline: the ceremony starts and says what it is waiting for",
+        (await page.textContent("#status")) === "waiting for your passkey…",
+        await page.textContent("#status"));
+
+  await page.clock.fastForward("02:10");
+  await page.waitForTimeout(500);
+  check("deadline: an engine that ignores the timeout hint still gets an answer",
+        (await page.textContent("#status")).includes("timed out with no answer"),
+        await page.textContent("#status"));
+  check("deadline: and the way back in is on screen with it",
+        await page.locator("#keypassnew").isVisible());
+  check("deadline: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+
+// ------------------------------------------------------ an authenticator without PRF
+// The PRF extension is what makes any of this work: its output *is* the seed. Plenty of
+// authenticators do not have it — security keys without `hmac-secret`, older platform ones —
+// and the page has a branch saying so, which until now had never run in a test. What it must
+// not do is leave a reader holding a credential that cannot derive a key without telling
+// them, or sign anybody in on a seed it never got.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable", { enableUI: false });
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+      hasResidentKey: true, hasUserVerification: true, hasPrf: false,
+      automaticPresenceSimulation: true, isUserVerified: true,
+    },
+  });
+  // localhost, not the IP: WebAuthn refuses a bare address as a relying party, and this
+  // section really does reach the authenticator.
+  await page.goto(`${BASE.replace("127.0.0.1", "localhost")}/humans`,
+                  { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+  await page.click("#keymore summary");
+  await page.click("#keypassnew");
+  await page.waitForTimeout(3000);
+
+  check("no PRF: the reader is told the authenticator cannot derive a key",
+        (await page.textContent("#status")).includes("no PRF support"),
+        await page.textContent("#status"));
+  check("no PRF: and is pointed at the lanes that do work",
+        (await page.textContent("#status")).includes("key or a seed"),
+        await page.textContent("#status"));
+  check("no PRF: nobody was signed in on a seed that never arrived",
+        (await page.textContent("#me")) === "Not signed in");
+  check("no PRF: and nothing was written to storage",
+        (await page.evaluate(() => localStorage.getItem("technocore.seed"))) === null);
+  check("no PRF: no page errors throughout", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// -------------------------------------------------------------- a browser without WebAuthn
+// §5.2 makes signing an upgrade and never a gate, and the same has to hold one level down:
+// no WebAuthn is not no identity, it is the seed lane. So the passkey controls go — *both*
+// of them, since a "Create a passkey" that can only throw is worse than no button — and the
+// prose naming them goes with them, while a pasted seed still yields the DID the command
+// line derives.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.addInitScript(() => {
+    // `delete` alone will not do it for credentials: it is an accessor on Navigator.prototype,
+    // so shadow it with an own property instead.
+    delete window.PublicKeyCredential;
+    Object.defineProperty(navigator, "credentials", { value: undefined, configurable: true });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+
+  check("no WebAuthn: the identity row still appears — Ed25519 is what it needs",
+        !(await page.locator("#identity").isHidden()));
+  check("no WebAuthn: the way in by passkey is gone",
+        !(await page.locator("#keypass").isVisible()));
+  await page.click("#keymore summary");
+  check("no WebAuthn: and so is enrolling one",
+        !(await page.locator("#keypassnew").isVisible()));
+  check("no WebAuthn: the prose no longer names a button that is not there",
+        !(await page.textContent("#keyhint")).includes("Other ways in"),
+        await page.textContent("#keyhint"));
+  check("no WebAuthn: nor promises an identity this browser cannot carry",
+        !(await page.textContent("#keyhint")).includes("passkey"),
+        await page.textContent("#keyhint"));
+
+  // The lanes that do not need WebAuthn are untouched, and the seed one still agrees with
+  // scripts/sign.py — the whole point of keeping it.
+  check("no WebAuthn: creating a key in the browser is still offered",
+        await page.locator("#keynew").isVisible());
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  await page.fill("#seed", SEED);
+  await page.click("#keyuse");
+  await page.waitForFunction(
+    () => document.getElementById("me").textContent !== "Not signed in",
+    null, { timeout: 8000 });
+  check("no WebAuthn: and a pasted seed still yields the DID the signer derives",
+        (await page.getAttribute("#me", "title")) === EXPECTED,
+        await page.getAttribute("#me", "title"));
+  check("no WebAuthn: no page errors throughout", errors.length === 0, errors.join("; "));
   await context.close();
 }
 

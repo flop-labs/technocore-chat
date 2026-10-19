@@ -1,5 +1,8 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import json
+import re
+
 import _client
 import pytest
 
@@ -116,6 +119,42 @@ def test_the_note_framing_the_human_page_parses_is_a_contract(client, monkeypatc
         warned = client.get("/kv/plans/next").text.rstrip("\n").split("\n")
         assert warned[2] == "ship it"
         assert warned[-1].startswith("# budget:")
+
+
+def test_the_passkey_dead_end_names_a_button_the_page_actually_has(client):
+    """The page's instruction, checked against the page's own label.
+
+    WebAuthn cannot tell "you cancelled" from "this authenticator holds nothing for this
+    site", so discovery's failure has to name the way forward — and it names it in prose,
+    in a string six hundred lines from the button it is talking about. Relabel either one
+    and a reader with no passkey is told to press something that is not there, which is the
+    exact dead end the message exists to prevent. Two spellings of one label, so: pinned.
+
+    The reveal beside it is checked in the browser (tests/humans_ui_probe.mjs) — whether the
+    disclosure is actually open is a question about a rendered page, not about bytes.
+    """
+    import re as _re
+
+    body = client.get("/humans").text
+    label = _re.search(r'id="keypassnew"[^>]*>([^<]+)</button>', body)
+    assert label, "the enrolment button is gone"
+    assert f"(then: {label.group(1)})" in body
+
+
+def test_the_human_page_says_a_passkey_becomes_the_did_before_asking_for_one(client):
+    """Signed *out* is where this has to be said, and it is where it used to be missing.
+
+    The passkey is not a login here: there is no account behind it, and no server that knows
+    anything. It is a key-derivation function whose PRF output is the seed (design §5.6), so
+    what a reader is agreeing to when they press the button is that this authenticator will
+    *be* their did:key. The signed-in copy explained that; the signed-out copy, the only one
+    anybody reads before deciding, did not.
+    """
+    body = client.get("/humans").text
+    hint = body.split('id="keyhint"', 1)[1].split("</p>", 1)[0]
+    assert "did:key" in hint  # what the passkey turns into
+    assert "derives" in hint  # and that it is derived rather than stored
+    assert "nothing is kept here" in hint
 
 
 def test_human_page_caps_its_log_rows(client):
@@ -334,6 +373,25 @@ def test_webmcp_tools_say_which_results_a_stranger_wrote(client):
     assert "untrustedContentHint" not in tools["get_manual"]
     # open_room changes what a person sees, so it is not read-only; it returns no room text.
     assert tools["open_room"] == tools["post_message"].replace(", untrustedContentHint: true", "")
+
+
+def test_every_if_absent_the_page_sends_is_one_the_note_lane_accepts(client):
+    """The page builds its note-write bodies in JavaScript, so the `if_absent` literal it
+    sends is a contract with `_condition` that no browser run was checking: the WebMCP
+    `write_note` tool sent the number `1`, which the input doctrine (docs/design.md §3.5)
+    refuses as `400 bad if_absent: must be a string`. Every create-only write through the
+    tool failed. Each literal is posted exactly as the page serialises it: the first write
+    must create the note and a second must lose with a 409, never a 400.
+    """
+    body = client.get("/humans").text
+    sent = re.findall(r"payload\.if_absent = ([^;]+);", body)
+    assert len(sent) == 2, sent  # the write_note tool and the delegation publisher
+    for i, literal in enumerate(sent):
+        payload = {"value": "first", "if_absent": json.loads(literal)}
+        created = client.post(f"/kv/plans/claim-{i}", json=payload)
+        assert created.status_code == 200, (literal, created.text)
+        lost = client.post(f"/kv/plans/claim-{i}", json={**payload, "value": "second"})
+        assert lost.status_code == 409, (literal, lost.text)
 
 
 def test_webmcp_registration_is_torn_down_through_an_abort_signal(client):
