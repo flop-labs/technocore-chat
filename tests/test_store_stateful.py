@@ -514,3 +514,34 @@ def test_the_model_and_the_sweep_agree_on_these_values():
 @given(SAFE_TEXT)
 def test_the_generator_only_produces_text_the_sweep_leaves_alone(sample):
     assert store.clean_text(sample) == sample
+
+
+
+@given(older=st.integers(min_value=2, max_value=6), newer=st.integers(min_value=1, max_value=4))
+@settings(max_examples=20, deadline=None)
+def test_crash_torn_ephemeral_rotation_retains_unexpired_sequence(older: int, newer: int) -> None:
+    """A torn write amid a generated append sequence cannot become an expiry barrier.
+
+    Model the crash, then the next writer healing the tail and a subsequent rotation.
+    Every unexpired, in-budget record written before the crash must remain readable.
+    """
+    with tempfile.TemporaryDirectory(prefix="chat-torn-stateful-") as location:
+        root = Path(location)
+        room = "e-crash-model"
+        for i in range(older):
+            store.append(root, room, "bot", f"prior {i}")
+        path = store.room_path(root, room)
+        with path.open("ab") as file:
+            file.write(b'{"seq":999,"ts":')
+        for i in range(newer):
+            store.append(root, room, "bot", f"later {i}")
+
+        expected = [f"prior {i}" for i in range(older)] + [
+            f"later {i}" for i in range(newer)
+        ]
+        assert [m["text"] for m in store.read_messages(root, room)["messages"]] == expected
+        store._compact(path, cutoff=store._cutoff(room), keep=8192)
+        after = store.read_messages(root, room)
+        assert [m["text"] for m in after["messages"]] == expected
+        assert [m["seq"] for m in after["messages"]] == list(range(1, older + newer + 1))
+        assert all(store._parse(line) is not None for line in path.read_bytes().splitlines())
