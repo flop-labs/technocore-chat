@@ -2731,15 +2731,16 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
                 # `seq` is read back from it. Compacting an `e-` room to nothing would
                 # restart the sequence at 1 and silently strand every cursor pointing past
                 # it. Unreadable on the way out, one line on disk — the cheap side of that
-                # trade. Append-ordered, so everything further back is older still.
-                rec = _parse(line)
-                if rec is None or _expired(rec, cutoff):
+                # trade. Only parsed expired records bound the age of preceding records;
+                # a crash-torn line says nothing about earlier records' expiry.
+                if (rec := _parse(line)) is None:
+                    continue
+                if _expired(rec, cutoff):
                     break
             kept.append(line)
-    kept.reverse()
     # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and
     # join would leave a stray newline behind instead of an empty file.
-    _replace(path, b"".join(line + b"\n" for line in kept), fsync=True)
+    _replace(path, b"".join(line + b"\n" for line in reversed(kept)), fsync=True)
     config._dbg(2, "compact", room=path.name, kept=len(kept), bytes=total)
 
 
