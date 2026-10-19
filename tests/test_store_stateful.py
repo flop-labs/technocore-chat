@@ -536,9 +536,7 @@ def test_crash_torn_ephemeral_rotation_retains_unexpired_sequence(older: int, ne
         for i in range(newer):
             store.append(root, room, "bot", f"later {i}")
 
-        expected = [f"prior {i}" for i in range(older)] + [
-            f"later {i}" for i in range(newer)
-        ]
+        expected = [f"prior {i}" for i in range(older)] + [f"later {i}" for i in range(newer)]
         assert [m["text"] for m in store.read_messages(root, room)["messages"]] == expected
         store._compact(path, cutoff=store._cutoff(room), keep=8192)
         after = store.read_messages(root, room)
