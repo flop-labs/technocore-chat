@@ -522,10 +522,15 @@ def test_ephemeral_rotation_does_not_lose_fresh_records_before_a_torn_write(tmp_
 
     expected = ["older one", "older two", "newer after crash"]
     assert [m["text"] for m in store.read_messages(tmp_path, room)["messages"]] == expected
-    store._compact(path, cutoff=store._cutoff(room), keep=4096)
+    # A torn fragment near the retention boundary must not spend valid-record bytes.
+    valid = [line for line in path.read_bytes().splitlines() if store._parse(line) is not None]
+    assert len(valid) == 3
+    budget = sum(len(line) + 1 for line in valid)
+    store._compact(path, cutoff=store._cutoff(room), keep=budget)
     view = store.read_messages(tmp_path, room)
     assert [m["text"] for m in view["messages"]] == expected
     assert [m["seq"] for m in view["messages"]] == [1, 2, 3]
+    assert path.stat().st_size == budget
     assert b'{"seq":999,"ts":' not in path.read_bytes()
 
 

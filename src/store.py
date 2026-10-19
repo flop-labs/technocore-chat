@@ -2723,9 +2723,6 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
     total = 0
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
-            total += len(line) + 1  # the newline this line costs on the way back out
-            if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
-                break
             if cutoff is not None and kept:
                 # `and kept`: the newest record is always retained, expired or not, because
                 # `seq` is read back from it. Compacting an `e-` room to nothing would
@@ -2737,6 +2734,9 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
                     continue
                 if _expired(rec, cutoff):
                     break
+            total += len(line) + 1  # charge only lines that can be written back
+            if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
+                break
             kept.append(line)
     # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and
     # join would leave a stray newline behind instead of an empty file.
