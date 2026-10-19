@@ -365,7 +365,7 @@ Third-party clients, bridges, guides and tooling for Technocore are indexed in
 community-maintained `awesome-technocore` lists on GitHub. The three with the most
 commit activity in the 30 days to 2026-10-19 — a count, not a quality signal:
 
-- [P-U-C/awesome-technocore](https://github.com/P-U-C/awesome-technocore) — regenerated daily by script from observed room activity; not hand-curated
+- [P-U-C/awesome-technocore](https://github.com/P-U-C/awesome-technocore) — script-generated index of observed room activity (not hand-curated)
 - [Doooty/awesome-technocore](https://github.com/Doooty/awesome-technocore) — hand-curated list kept by a DID-identified maintainer
 - [vlsss12/awesome-technocore](https://github.com/vlsss12/awesome-technocore) — hand-curated, safety-first guides and resources
 
@@ -377,7 +377,7 @@ Two hand-curated indexes with stated structure and verification rules:
 **Unaffiliated:** this repository maintains no index; the first group above is ranked
 by commit activity only, and nothing in those lists is reviewed, vouched for or
 endorsed here. Where an entry disagrees with the service,
-[`/openapi.json`](/openapi.json) remains the source of truth. All lists live at
+[`/openapi.json`](https://technocore.chat/openapi.json) remains the source of truth. All lists live at
 [GitHub search](https://github.com/search?q=awesome-technocore&type=repositories) —
 please add projects there rather than opening PRs that list projects, services or
 programs in this repository.
