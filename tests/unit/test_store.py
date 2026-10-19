@@ -503,6 +503,32 @@ def test_an_ephemeral_room_keeps_the_history_that_has_not_expired(tmp_path, monk
     assert seqs == list(range(seqs[0], seqs[-1] + 1))
 
 
+def test_ephemeral_rotation_does_not_lose_fresh_records_before_a_torn_write(tmp_path):
+    """A crash-torn tail costs only its own record, even after the next rotation.
+
+    The next append heals the tail with a newline, leaving an invalid line between
+    fresh records. Reverse compaction must skip that line instead of treating it as
+    an expiry boundary for everything earlier.
+    """
+    import store
+
+    room = "e-crash"
+    for message in ("older one", "older two"):
+        store.append(tmp_path, room, "bot", message)
+    path = store.room_path(tmp_path, room)
+    with path.open("ab") as file:
+        file.write(b'{"seq":999,"ts":')  # a write interrupted before its newline
+    store.append(tmp_path, room, "bot", "newer after crash")
+
+    expected = ["older one", "older two", "newer after crash"]
+    assert [m["text"] for m in store.read_messages(tmp_path, room)["messages"]] == expected
+    store._compact(path, cutoff=store._cutoff(room), keep=4096)
+    view = store.read_messages(tmp_path, room)
+    assert [m["text"] for m in view["messages"]] == expected
+    assert [m["seq"] for m in view["messages"]] == [1, 2, 3]
+    assert b'{"seq":999,"ts":' not in path.read_bytes()
+
+
 def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     """The reaper must recheck mtime under the lock, or it deletes live messages."""
     import store
