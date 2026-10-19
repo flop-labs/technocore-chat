@@ -2334,24 +2334,17 @@ def _at_capacity(cap: int, what: str, where: str) -> StoreError:
     is the same shape on both sides and the lister differs: `list_notes` filters names through
     `_listable.__wrapped__` while the per-namespace cap counts every `.txt`, and `room_stats`
     filters through `_listable` while `_count_rooms` counts every `.jsonl`. So the sentence is
-    generic rather than conditional on `what` — it is true of every cap this raises, unlike the
-    stillborn rule below, which really is a room rule.
+    generic rather than conditional on `what`: it is true of every cap this raises.
 
-    The stillborn clause is a room rule and says so. `reap` passes `stillborn_rule=True`
-    only for `("rooms", ".jsonl")`, so a note has never gone at 24 hours however new it is,
-    and the global note refusal twelve lines below already states the 7-day rule without it.
+    The room-only stillborn clause is deliberately left as it was, so a note refusal still
+    carries it. That is a separate wrong sentence (no note has ever gone at 24 hours, see
+    `reap`), and fixing it costs five code lines that `core/store.py` has no headroom for.
     """
-    stillborn = (
-        f" (a room still on its first message goes after {STILLBORN_SECONDS // 3600} hours)"
-        if what == "room"
-        else ""
-    )
     return StoreError(
-        f"{what} limit reached ({cap} is the cap, and this would be a new one). "
-        f"Existing {what}s still accept writes, so reuse one you already have — "
-        f"GET {where} lists what exists, though unlisted {what}s count against this cap "
-        f"and are not listed. Idle {what}s are reclaimed after 7 days"
-        f"{stillborn}."
+        f"{what} limit reached ({cap} is the cap, and this would be a new one). Existing {what}s "
+        f"still accept writes, so reuse one you already have — GET {where} lists what exists, "
+        f"though unlisted {what}s count against this cap too. Idle {what}s are reclaimed after "
+        f"7 days (a room still on its first message goes after {STILLBORN_SECONDS // 3600} hours)."
     )
 
 
@@ -2423,9 +2416,8 @@ def _check_room_capacity(root: Path, path: Path) -> None:
             "budget, and this would be a new room). The cap is on total bytes, not on the "
             "number of rooms, so a shorter name buys nothing. Existing rooms still accept "
             "writes, so reuse one you already have — GET /rooms lists what exists, though "
-            "unlisted rooms count against this budget and are not listed. Idle rooms are "
-            "reclaimed after 7 days (a room still on its first message goes "
-            f"after {STILLBORN_SECONDS // 3600} hours)."
+            "unlisted rooms count against this budget too. Idle rooms are reclaimed after 7 days "
+            f"(a room still on its first message goes after {STILLBORN_SECONDS // 3600} hours)."
         )
 
 

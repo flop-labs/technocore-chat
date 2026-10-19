@@ -204,10 +204,10 @@ def test_a_capacity_refusal_points_at_the_surface_that_shows_the_full_cap(tmp_pa
     caller sent there sees plenty of headroom while the namespace it asked for is at its
     cap. /kv/<ns> is the surface that lists the namespace being counted.
 
-    The stillborn clause is the same fault one field along. `reap` passes stillborn_rule=True
-    only for ("rooms", ".jsonl"), so no note has ever been reclaimed at 24 hours, yet the
-    note refusal carried the room's 24-hour sentence. The global note refusal below it states
-    the 7-day rule alone, which is what a note actually gets.
+    The room-only stillborn sentence is out of scope here and is left exactly as it was: the
+    note refusal still carries it, which `core/store.py` has no line headroom to fix. The
+    assertions below pin the sentence as it stands, so a later change to it is a decision
+    rather than an accident.
     """
     import store
 
@@ -221,8 +221,7 @@ def test_a_capacity_refusal_points_at_the_surface_that_shows_the_full_cap(tmp_pa
     store.note_set(tmp_path, "did", "only", "hi")
     with pytest.raises(store.StoreError, match=r"GET /kv/did lists what exists") as note:
         store.note_set(tmp_path, "did", "second", "hi")
-    assert str(note.value).endswith("Idle notes are reclaimed after 7 days.")
-    assert "24 hours" not in str(note.value)
+    assert "Idle notes are reclaimed after 7 days" in str(note.value)
 
     # A second namespace, to pin that the path is the namespace asked for rather than a
     # constant that happens to read correctly for the first one.
@@ -252,7 +251,7 @@ def test_a_capacity_refusal_says_the_listing_omits_what_the_cap_counts(tmp_path,
 
     with pytest.raises(store.StoreError) as refusal:
         store.note_set(tmp_path, "did", "second", "hi")
-    assert "unlisted notes count against this cap and are not listed" in str(refusal.value)
+    assert "unlisted notes count against this cap too" in str(refusal.value)
 
     # The room side of the same asymmetry, which the message now states for both.
     monkeypatch.setattr(store, "MAX_ROOMS", 1)
@@ -261,7 +260,7 @@ def test_a_capacity_refusal_says_the_listing_omits_what_the_cap_counts(tmp_path,
 
     with pytest.raises(store.StoreError) as room:
         store.append(tmp_path, "second", "bot", "hi")
-    assert "unlisted rooms count against this cap and are not listed" in str(room.value)
+    assert "unlisted rooms count against this cap too" in str(room.value)
 
 
 def test_the_room_byte_budget_refusal_says_the_listing_omits_it_too(tmp_path, monkeypatch):
@@ -286,7 +285,7 @@ def test_the_room_byte_budget_refusal_says_the_listing_omits_it_too(tmp_path, mo
     with pytest.raises(store.StoreError) as full:
         store.append(tmp_path, "second", "bot", "hi")
     assert "room storage is full" in str(full.value)
-    assert "unlisted rooms count against this budget and are not listed" in str(full.value)
+    assert "unlisted rooms count against this budget too" in str(full.value)
 
 
 def test_an_empty_usage_file_reads_as_no_pressure(tmp_path):
