@@ -516,7 +516,6 @@ def test_the_generator_only_produces_text_the_sweep_leaves_alone(sample):
     assert store.clean_text(sample) == sample
 
 
-
 @given(older=st.integers(min_value=2, max_value=6), newer=st.integers(min_value=1, max_value=4))
 @settings(max_examples=20, deadline=None)
 def test_crash_torn_ephemeral_rotation_retains_unexpired_sequence(older: int, newer: int) -> None:
