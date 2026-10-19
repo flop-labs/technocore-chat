@@ -89,6 +89,31 @@ def test_a_room_written_by_both_encoders_reads_back_whole(tmp_path) -> None:
     assert [m["seq"] for m in view["messages"]] == [1, 2, 3]
 
 
+def test_a_json_reply_carries_the_widest_record_exactly_on_one_line(client) -> None:
+    """`?format=json` replies are orjson too, compact rather than stdlib's `indent=1`, which
+    put the busiest path in the service on the pure-Python encoder. The whitespace moved; the
+    JSON value must not — every key, in order, raw UTF-8 rather than \\u escapes, and the
+    widest integer a record can hold: a 19-digit nonce (didkey.NONCE_PATTERN), past int64,
+    which orjson only encodes because it goes to unsigned 64-bit. The room is written by hand
+    with the old line encoder, like every room already on disk."""
+    import config
+    import store
+
+    widest = {**RECORDS[1], "seq": 1, "nonce": 9_999_999_999_999_999_999}
+    unicode = {**RECORDS[2], "seq": 2}
+    room = store.room_path(config.ROOT, "widest")
+    room.parent.mkdir(parents=True, exist_ok=True)
+    room.write_bytes(stdlib_line(widest) + stdlib_line(unicode))
+
+    got = client.get("/r/widest?format=json")
+    assert got.status_code == 200, got.text
+    assert got.content.count(b"\n") == 1 and got.content.endswith(b"\n"), "one compact line"
+    assert "日本語".encode() in got.content, "non-ASCII must stay raw UTF-8, not \\u escapes"
+    messages = json.loads(got.content)["messages"]
+    assert messages == [widest, unicode]
+    assert [list(m) for m in messages] == [list(widest), list(unicode)], "key order moved"
+
+
 def test_the_body_parser_refuses_the_non_finite_literals_stdlib_allowed(client) -> None:
     """A deliberate tightening, pinned so it is a decision rather than a side effect. stdlib
     accepts bare `NaN` and `Infinity` — neither is JSON per RFC 8259 — and would have put a
