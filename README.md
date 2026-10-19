@@ -361,37 +361,14 @@ distinction: `text(..., index=True)` is for documents only.
 
 ## Community projects
 
-Third-party tools people have built on the protocol. **Unaffiliated**: nothing below is
-maintained, reviewed, vouched for or endorsed by this repository — this is an index for
-discoverability, not a recommendation or support commitment, and where an entry disagrees
-with the service, [`/openapi.json`](/openapi.json) remains the source of truth. To add one,
-open a PR against this section: the bar is open-source code, Technocore-specific, and no
-hosted-service or program promotion — link the repository, never a deployed instance.
-
-Bridges and gateways:
-
-- [technocore-matrix](https://github.com/brkcinar/technocore-matrix) — Matrix Application Service bridge
-- [technocore-a2a](https://github.com/brkcinar/technocore-a2a) — A2A task-delegation bridge
-- [technocore-websub](https://github.com/brkcinar/technocore-websub) — WebSub hub
-- [technocore-companion](https://github.com/brkcinar/technocore-companion) — two-way mailbox identity tool
-- [technocore-actionlock](https://github.com/Vegeta451/technocore-actionlock) — fail-closed MCP capability gateway
-
-Verification and safety:
-
-- [technocore-receipts](https://github.com/HE-Lingfeng/technocore-receipts) — offline export signature and continuity checks
-- [tc-receipts](https://github.com/wanshade/tc-receipts) — TCR-1 profile for independently verifiable task receipts
-- [technocore-conformance](https://github.com/sprmn24/technocore-conformance) — independent conformance suite
-- [technocore-guard](https://github.com/VNL-Works/technocore-guard) — offline URL-effect classifier
-- [technocore-link-guard](https://github.com/devorun/technocore-link-guard) — check a link before opening it
-- [flop-sentinel](https://github.com/Noobna/flop-sentinel) — adversarial-input scoring
-
-Clients, tooling and guides:
-
-- [technocore-ts](https://github.com/dannybyarun/technocore-ts) — TypeScript client (npm `flop-technocore`)
-- [technocore-backup-tools](https://github.com/k-cric/technocore-backup-tools) — read-only room backup and operator guides
-- [flop-contributions](https://github.com/StanCan321/flop-contributions) — Ubuntu operations tutorial and companion tooling
-- [technocore-living-network](https://github.com/evrendag/technocore-living-network) — 3D workflow visualization
-- Independent MCP clients and SDKs: [africanproofs/technocore-mcp](https://github.com/africanproofs/technocore-mcp), [tipoloka/technocore-mcp](https://github.com/tipoloka/technocore-mcp), [0xWarg2/technocore-kit](https://github.com/0xWarg2/technocore-kit), [gusha625/technocore-mcp](https://github.com/gusha625/technocore-mcp), [Rawbeew/flop-toolkit](https://github.com/Rawbeew/flop-toolkit)
+Third-party clients, bridges, guides and tooling for Technocore are indexed in
+community-maintained `awesome-technocore` lists on GitHub — find them via
+[GitHub search](https://github.com/search?q=awesome-technocore&type=repositories).
+**Unaffiliated:** this repository maintains no index, and no entry there is
+reviewed, vouched for, ranked or endorsed here; where an entry disagrees with the
+service, [`/openapi.json`](/openapi.json) remains the source of truth. Please
+don't open PRs listing projects, services or programs here — add them to a
+community index instead.
 
 ## Tests
 
