@@ -643,6 +643,124 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ------------------------------------------------------------- delegation reads in flight
+// Hold real note replies before the page receives them. Switching through the visible
+// sign-out/seed controls must discard the previous identity's rows and late completions.
+{
+  const { createPrivateKey, createHash, sign } = await import("node:crypto");
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const agent = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const identities = [];
+  for (const [byte, scope] of [[17, "r:display-a"], [18, "r:display-b"]]) {
+    const seed = Buffer.alloc(32, byte);
+    const key = createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]),
+      format: "der", type: "pkcs8",
+    });
+    const publicBytes = Buffer.from(key.export({ format: "jwk" }).x, "base64url");
+    let n = BigInt("0x" + Buffer.concat([Buffer.from([0xed, 0x01]), publicBytes]).toString("hex"));
+    let encoded = "";
+    while (n) { encoded = alphabet[Number(n % 58n)] + encoded; n /= 58n; }
+    const did = "did:key:z" + encoded;
+    const fp = createHash("sha256").update(did).digest("hex").slice(0, 16);
+    const path = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+    const expires = String(Math.floor(Date.now() / 1000) + 86400);
+    const nonce = String(Date.now());
+    const signature = sign(null, Buffer.from(`delegate|${did}|${agent}|${scope}|${expires}|${nonce}`), key);
+    const value = `delegate: ${agent} ${scope} ${expires} ${nonce} ${signature.toString("base64url")}`;
+    const response = await fetch(`${BASE}${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!response.ok) throw new Error(`delegation fixture: HTTP ${response.status}`);
+    identities.push({ seed: seed.toString("hex"), did, path, scope });
+  }
+  const [a, b] = identities;
+  for (const lateError of [false, true]) {
+    const label = `delegation display (${lateError ? "late error" : "late success"})`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    await page.addInitScript(() => {
+      // No room heartbeat may hide the error badge this section is checking.
+      Object.defineProperty(document, "hidden", { get: () => true });
+      const realFetch = window.fetch.bind(window);
+      const realVerify = crypto.subtle.verify.bind(crypto.subtle);
+      window.delegationProbe = { reads: [], verified: 0 };
+      crypto.subtle.verify = async (...args) => {
+        const result = await realVerify(...args);
+        window.delegationProbe.verified++;
+        return result;
+      };
+      window.fetch = async (...args) => {
+        const response = await realFetch(...args);
+        const path = new URL(args[0], location.href).pathname;
+        if (!path.startsWith("/kv/did-") || (args[1]?.method || "GET") !== "GET") return response;
+        const read = { path, returned: false };
+        const held = new Promise((resolve) => {
+          read.release = (error) => resolve(error ? new Response("temporary failure", { status: 503 }) : response);
+        });
+        window.delegationProbe.reads.push(read);
+        const result = await held;
+        read.returned = true;
+        return result;
+      };
+    });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+    const signIn = async (identity, count) => {
+      await page.click("#keymore summary");
+      await page.fill("#seed", identity.seed);
+      await page.click("#keyuse");
+      await page.waitForFunction((did) => document.getElementById("me").title === did, identity.did);
+      await page.waitForFunction((n) => window.delegationProbe.reads.length === n, count);
+    };
+    const release = async (index, error = false) => {
+      const before = await page.evaluate(() => window.delegationProbe.verified);
+      await page.evaluate(({ index, error }) => window.delegationProbe.reads[index].release(error), { index, error });
+      await page.waitForFunction((i) => window.delegationProbe.reads[i].returned, index);
+      if (!error) await page.waitForFunction((n) => window.delegationProbe.verified === n + 1, before);
+      // Verification is real WebCrypto. Its promise reactions, including Promise.all
+      // and the final render, drain before this next task; no fixed sleep can race it.
+      await page.evaluate(() => new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+          channel.port1.close(); channel.port2.close(); resolve();
+        };
+        channel.port2.postMessage(null);
+      }));
+    };
+    await signIn(a, 1);
+    await release(0);
+    check(`${label}: current identity's verified grant renders`,
+          (await page.locator("#delegations .deleg.ok .scope").textContent()).startsWith(a.scope));
+    await page.click("#keyout");
+    check(`${label}: sign-out clears the previous rows`,
+          (await page.locator("#delegations .deleg").count()) === 0);
+    await signIn(a, 2); // leave A's second read pending across the next sign-out
+    await page.click("#keyout");
+    await signIn(b, 3);
+    check(`${label}: replacement identity starts without the previous rows`,
+          (await page.locator("#delegations .deleg").count()) === 0);
+    await release(2);
+    check(`${label}: replacement identity's verified grant renders`,
+          (await page.locator("#delegations .deleg.ok .scope").textContent()).startsWith(b.scope));
+    const current = await page.locator("#delegations").textContent();
+    const status = await page.locator("#status").textContent();
+    await release(1, lateError);
+    check(`${label}: old completion cannot replace the current grants`,
+          (await page.locator("#delegations").textContent()) === current);
+    check(`${label}: old completion cannot replace the current status`,
+          (await page.locator("#status").textContent()) === status);
+    check(`${label}: the selected identity remains unchanged`,
+          (await page.getAttribute("#me", "title")) === b.did);
+    check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+    await context.close();
+  }
+}
+
+
 // -------------------------------------------------------------------- passkey + delegation
 // Two things a Python test cannot reach at all: whether an authenticator's PRF output can
 // actually stand in as an Ed25519 seed, and whether the identity comes back on a browser
@@ -942,6 +1060,140 @@ const browser = await chromium.launch({
 }
 
 
+// ----------------------------------------------------------- identity operations overtaken
+// Complete a real PRF ceremony, but hold delivery of its credential while the reader
+// chooses a seed, creates a key or signs out. Abort cannot recall a credential already returned by the
+// authenticator. Also hold a real Ed25519 import: both lanes must respect the latest choice.
+{
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const errors = [];
+  for (const outcome of ["success", "failure", "logout", "import"]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    page.on("pageerror", (e) => errors.push(String(e)));
+    // Keep the room heartbeat from replacing the status being measured here.
+    await page.addInitScript(() => {
+      Object.defineProperty(document, "hidden", { get: () => true });
+    });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("WebAuthn.enable", { enableUI: false });
+    await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+        hasResidentKey: true, hasUserVerification: true, hasPrf: true,
+        automaticPresenceSimulation: true, isUserVerified: true,
+      },
+    });
+    await page.goto(`${BASE.replace("127.0.0.1", "localhost")}/humans`,
+                    { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+    if (outcome !== "import") {
+      await page.click("#keymore summary");
+      await page.click("#keypassnew");
+      await page.waitForFunction(() => document.getElementById("me").title.startsWith("did:"),
+                                 null, { timeout: 15000 });
+      await page.click("#keyout");
+    }
+    await page.evaluate((outcome) => {
+      const probe = window.identityProbe = { ready: false };
+      const pending = new Set();
+      const track = (promise) => {
+        pending.add(promise);
+        promise.then(() => pending.delete(promise), () => pending.delete(promise));
+        return promise;
+      };
+      // A task boundary drains promise callbacks. Await native crypto too, since those
+      // operations can finish after that boundary; checking only microtasks misses them.
+      const turn = () => new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+          channel.port1.close(); channel.port2.close(); resolve();
+        };
+        channel.port2.postMessage(null);
+      });
+      probe.settle = async () => {
+        let timer;
+        try {
+          await Promise.race([
+            (async () => {
+              await turn();
+              while (pending.size) await Promise.allSettled([...pending]);
+              await turn();
+            })(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("identity did not settle")), 8000);
+            }),
+          ]);
+        } finally { clearTimeout(timer); }
+      };
+      const pause = (value) => new Promise((resolve, reject) => {
+        probe.ready = true;
+        probe.release = () => outcome === "failure"
+          ? reject(new DOMException("delayed cancellation", "NotAllowedError")) : resolve(value);
+      });
+      let holdImport = outcome === "import";
+      const importKey = crypto.subtle.importKey.bind(crypto.subtle);
+      crypto.subtle.importKey = (...args) => track(importKey(...args).then((key) => {
+        if (!holdImport) return key;
+        holdImport = false;
+        return pause(key);
+      }));
+      const exportKey = crypto.subtle.exportKey.bind(crypto.subtle);
+      crypto.subtle.exportKey = (...args) => track(exportKey(...args));
+      if (outcome !== "import") {
+        const get = navigator.credentials.get.bind(navigator.credentials);
+        navigator.credentials.get = (...args) => get(...args).then(pause);
+      }
+    }, outcome);
+    if (outcome === "import") {
+      await page.click("#keymore summary");
+      await page.fill("#seed", "11".repeat(32));
+      await page.click("#keyuse");
+    } else {
+      await page.click("#keypass");
+    }
+    await page.waitForFunction(() => window.identityProbe.ready, null, { timeout: 15000 });
+    if (outcome !== "import") await page.click("#keymore summary");
+    if (outcome === "logout") {
+      await page.click("#keynew");
+      await page.waitForFunction(() => document.getElementById("me").title.startsWith("did:"),
+                                 null, { timeout: 8000 });
+      check("identity logout: Create key signs in while the old passkey result is held",
+            /^[0-9a-f]{64}$/.test(await page.evaluate(() => localStorage.getItem("technocore.seed"))));
+    } else {
+      await page.fill("#seed", SEED);
+      await page.click("#keyuse");
+      await page.waitForFunction((did) => document.getElementById("me").title === did,
+                                 EXPECTED, { timeout: 8000 });
+      if (outcome !== "import") {
+        check(`identity ${outcome}: the newer seed signs in while the old result is held`,
+              (await page.getAttribute("#me", "title")) === EXPECTED);
+      }
+    }
+    if (outcome === "logout") await page.click("#keyout");
+    const statusBefore = await page.textContent("#status");
+    const result = await page.evaluate(async () => {
+      window.identityProbe.release();
+      await window.identityProbe.settle();
+      return {
+        did: document.getElementById("me").title,
+        seed: localStorage.getItem("technocore.seed"),
+        status: document.getElementById("status").textContent,
+      };
+    });
+    check(`identity ${outcome}: the old result cannot replace the latest identity`,
+          result.did === (outcome === "logout" ? "" : EXPECTED), result.did);
+    check(`identity ${outcome}: the old result cannot alter the saved seed`,
+          result.seed === (outcome === "logout" ? null : SEED));
+    check(`identity ${outcome}: the old result cannot overwrite the current status`,
+          result.status === statusBefore, result.status);
+    await context.close();
+  }
+  check("identity operations: no page errors throughout", errors.length === 0, errors.join("; "));
+}
+
+
 // ------------------------------------------------------------- a deadline the page owns
 // `publicKey.timeout` is a hint: the spec lets a user agent clamp or ignore it, so it cannot
 // be what bounds a ceremony. This is the engine that ignores it — a get() that never settles
@@ -1087,6 +1339,63 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+
+// ------------------------------------------------------------- empty cursor checkpoints
+// A future permalink gets an empty page whose last_seq corrects the cursor. The next
+// message must appear without reopening the room; the server's successful correction
+// is useful even though there was nothing to render in the first response.
+for (const [label, initial, target] of [
+  ["future existing room", 2, 9999],
+  ["future absent room", 0, 9999],
+  ["ordinary room", 2, 0],
+  ["valid permalink", 2, 2],
+]) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const room = `cursor-${initial}-${target}-${Date.now().toString(36)}`;
+  const errors = [], cursors = [];
+  page.on("pageerror", e => errors.push(e.message));
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === `/r/${room}` && request.method() === "GET") {
+      cursors.push(Number(url.searchParams.get("since")));
+    }
+  });
+  for (let n = 1; n <= initial; n++) {
+    const response = await context.request.post(`${BASE}/r/${room}`, {
+      data: { from: "cursor-test", text: `initial message ${n}` },
+    });
+    if (!response.ok()) throw new Error(`cursor fixture failed: ${await response.text()}`);
+  }
+  const firstResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === `/r/${room}` && response.request().method() === "GET");
+  await page.goto(`${BASE}/humans#r/${room}${target ? `/${target}` : ""}`,
+                  { waitUntil: "domcontentloaded" });
+  const first = await (await firstResponse).json();
+  if (target === 9999) {
+    check(`${label}: initial empty page corrects the cursor`,
+          first.count === 0 && first.last_seq === initial);
+    await page.getByText("message 9999 has not been posted yet", { exact: true })
+      .waitFor({ timeout: 5000 });
+  } else {
+    await page.locator("#log .msg").first().waitFor({ timeout: 5000 });
+    check(`${label}: initial messages are visible`,
+          (await page.locator("#log .msg .body").allTextContents())
+            .includes(`initial message ${initial}`));
+  }
+  const nextText = `message after ${label}`;
+  const written = await context.request.post(`${BASE}/r/${room}`, {
+    data: { from: "cursor-test", text: nextText },
+  });
+  if (!written.ok()) throw new Error(`cursor follow-up failed: ${await written.text()}`);
+  const arrived = await page.locator("#log .msg .body")
+    .filter({ hasText: nextText }).waitFor({ timeout: 8000 }).then(() => true, () => false);
+  check(`${label}: the next message appears without reopening`, arrived);
+  check(`${label}: a follow-up read uses the server checkpoint`,
+        cursors.slice(1).includes(initial), JSON.stringify(cursors));
+  check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+  await context.close();
+}
 
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
