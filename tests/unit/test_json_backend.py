@@ -155,8 +155,29 @@ def test_duplicate_json_keys_are_refused_before_either_write_lane(client) -> Non
     assert valid.status_code in (200, 201)
 
     nested = client.post(
-        "/r/duplicate-body",
-        content=b'{"from":"bot","text":"nested ok","meta":{"a":1,"a":2}}',
+        "/r/duplicate-nested",
+        content=b'{"from":"bot","text":"nested refused","meta":{"a":1,"a":2}}',
         headers={"content-type": "application/json"},
     )
-    assert nested.status_code in (200, 201)
+    assert nested.status_code == 400
+    assert "duplicate JSON key" in nested.text
+    assert client.get("/r/duplicate-nested?format=json").json()["messages"] == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"value":"ok","meta":{"source":"one","source":"two"}}',
+        b'{"value":"ok","meta":{"source":"one","source":"one"}}',
+        b'{"value":"ok","meta":[{"source":"one","\\u0073ource":"two"}]}',
+    ],
+)
+def test_nested_duplicate_json_names_are_refused_before_note_write(client, body) -> None:
+    response = client.post(
+        "/kv/duplicate-nested/value",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "duplicate JSON key" in response.text
+    assert client.get("/kv/duplicate-nested/value").status_code == 404
