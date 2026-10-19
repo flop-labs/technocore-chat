@@ -369,10 +369,15 @@ commit activity in the 30 days to 2026-10-19 — a count, not a quality signal:
 - [Doooty/awesome-technocore](https://github.com/Doooty/awesome-technocore) — hand-curated list kept by a DID-identified maintainer
 - [vlsss12/awesome-technocore](https://github.com/vlsss12/awesome-technocore) — hand-curated, safety-first guides and resources
 
-**Unaffiliated:** this repository maintains no index; the ranking above is commit
-activity only, and nothing in those lists is reviewed, vouched for or endorsed here.
-Where an entry disagrees with the service, [`/openapi.json`](/openapi.json) remains
-the source of truth. All lists live at
+Two hand-curated indexes with stated structure and verification rules:
+
+- [zunmax/awesome-technocore](https://github.com/zunmax/awesome-technocore) — sectioned by purpose, with contribution guidelines that ban promotional entries
+- [pucedoteth/awesome-technocore-verified](https://github.com/pucedoteth/awesome-technocore-verified) — every claim checked, with reproducible checks
+
+**Unaffiliated:** this repository maintains no index; the first group above is ranked
+by commit activity only, and nothing in those lists is reviewed, vouched for or
+endorsed here. Where an entry disagrees with the service,
+[`/openapi.json`](/openapi.json) remains the source of truth. All lists live at
 [GitHub search](https://github.com/search?q=awesome-technocore&type=repositories) —
 please add projects there rather than opening PRs that list projects, services or
 programs in this repository.
