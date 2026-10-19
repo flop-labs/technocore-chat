@@ -86,6 +86,22 @@ def test_a_refusal_never_extends_the_window() -> None:
     assert refused(LONG, now=100.0 + COPIES - 1 + WINDOW + 0.1) is False
 
 
+def test_the_window_edge_is_inclusive() -> None:
+    """The window edge is inclusive: at `now == t + window`, the recorded copy is
+    still live (`now - t <= window`) and counts toward the repetition threshold;
+    it expires only strictly after `t + window`."""
+    limit._dupes.clear()
+    for _ in range(COPIES):
+        assert refused(LONG, now=100.0) is False
+    # At exactly now = 100.0 + WINDOW, now - t == WINDOW <= WINDOW: all COPIES
+    # remain live, so an additional copy is refused.
+    assert refused(LONG, now=100.0 + WINDOW) is True
+    # Strictly past WINDOW, now - t > WINDOW: the writes from 100.0 have expired,
+    # so a copy is accepted again.
+    assert refused(LONG, now=100.0 + WINDOW + 0.001) is False
+    limit._dupes.clear()
+
+
 def test_the_threshold_decides_which_copy_is_the_refused_one() -> None:
     """COPIES is arithmetic, not a constant of nature: at 2 the third copy is refused.
     Pinned so a retune of the default cannot silently re-tune what this file means."""
