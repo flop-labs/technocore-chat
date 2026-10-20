@@ -357,13 +357,14 @@ def e2e_key(root: str, body: str) -> tuple[str, str, int] | None:
 def check_note(root: str, body: str) -> int:
     """Report every delegation in `body` against `root`. Returns the count that verify.
 
-    Prints one line per delegation and never raises on a bad one: the whole point of a
-    self-certifying record in a world-writable note is that garbage is *expected* and is
-    supposed to be visibly inert rather than fatal.
+    Verify signatures before choosing the newest record. Forged records are untrusted note
+    content and must not be able to supersede a real delegation. Authenticated expired
+    records still participate in nonce ordering, so expiry cannot revive an older grant.
     """
     key, live, now = public_key(root), 0, int(time.time())
     records = delegations(body)
-    current = newest(records)
+    verified: set[int] = set()
+
     for i, (agent, scope, expires, nonce, sig) in enumerate(records):
         try:
             key.verify(
@@ -371,28 +372,28 @@ def check_note(root: str, body: str) -> int:
                 delegation(root, agent, scope, expires, nonce).encode(),
             )
         except (InvalidSignature, ValueError, TypeError):
-            # Not "invalid": *forged, or for somebody else*. A record that fails here was
-            # signed by a key that is not this root, which in a note anyone can write to is
-            # the ordinary case and not an error.
             print(f"FORGED     {agent} {scope}  (not signed by {root[:20]}...)")
             continue
-        # DIGITS_RE and not str.isdigit(): the same trap PR #54 fixed for nonces, in the
-        # other direction. isdigit() accepts Unicode digits ('١٢٣' is True and int()s to
-        # 123) which no JavaScript /[0-9]/ will match, and it rejects spellings Number()
-        # accepts ('Infinity', '1e99', '0x7f'). Either way the two verifiers of one record
-        # disagree about whether a grant is live — and expiry is this format's only
-        # revocation, so that disagreement is the whole ballgame. One ASCII-decimal grammar,
-        # enforced identically on both sides, before anything is compared as a number.
+        verified.add(i)
+
+    # Keep expired but authentic records in the ranking: they must not revive an older grant.
+    authenticated = [record for i, record in enumerate(records) if i in verified]
+    authenticated_current = newest(authenticated)
+    current = {
+        original_i
+        for auth_i, original_i in enumerate(i for i in range(len(records)) if i in verified)
+        if auth_i in authenticated_current
+    }
+
+    for i, (agent, scope, expires, nonce, _sig) in enumerate(records):
+        if i not in verified:
+            continue
         if not DIGITS_RE.fullmatch(expires) or int(expires) <= now:
             print(f"EXPIRED    {agent} {scope}  (expired {expires})")
             continue
-        # Checked after the signature and the expiry, so a superseded record is only ever
-        # reported as superseded when it was otherwise a real, live grant.
         if i not in current:
             print(f"SUPERSEDED {agent} {scope}  (a higher nonce than {nonce} names this key)")
             continue
-        # Rounded up: a delegation issued for 30 days is "30d left" a second later, where
-        # flooring would report 29 and make every fresh delegation look already shortened.
         left = -((now - int(expires)) // 86400)
         print(f"OK         {agent} {scope}  ({left}d left, nonce {nonce})")
         live += 1

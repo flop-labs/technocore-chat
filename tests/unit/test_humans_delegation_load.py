@@ -87,7 +87,18 @@ const path = await env.notePath(original.did);
 assert.equal(first.url, '/kv/' + path.ns + '/' + path.key);
 
 if (mode.startsWith('current-')) {
-  if (mode === 'current-success') {
+  if (mode === 'current-forged') {
+    const valid = await note(original, 'r:current', '1');
+    const forged = (await note(original, 'r:evil', '999'))
+      .match(/delegate: .+/)[0].split(' ');
+    forged[forged.length - 1] = 'Zm9yZ2Vk';
+    first.resolve(new Response(valid + ' ' + forged.join(' ')));
+    await old;
+    const rows = renders.at(-1);
+    assert.equal(rows.length, 2, 'both delegation records are shown');
+    assert.equal(rows[0].state, 'live', 'the authentic grant remains live');
+    assert.equal(rows[1].state, 'forged', 'the forged grant is rejected');
+  } else if (mode === 'current-success') {
     first.resolve(new Response(await note(original, 'r:current', '1')));
     await old;
     expectScope('r:current');
@@ -133,6 +144,7 @@ clearTimeout(watchdog);
     "mode",
     [
         "current-success",
+        "current-forged",
         "current-error",
         "current-missing",
         "switch-success",
