@@ -1,0 +1,23 @@
+name: Report
+description: A bug, contract drift, or behavior finding
+body:
+  - type: input
+    id: commit
+    attributes:
+      label: Commit verified against
+      description: >-
+        `git rev-parse --short HEAD` of the fresh checkout you verified this on. main moves
+        several times a day; a report verified on a cached copy of the source describes code
+        that no longer exists.
+      placeholder: "e.g. 7707cb6"
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Report
+      description: >-
+        What you observed, what the code or a served document promises instead, and a minimal
+        reproduction. If an open pull request already addresses this, comment there instead.
+    validations:
+      required: true

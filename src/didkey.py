@@ -52,7 +52,13 @@ _B58_INDEX = {c: i for i, c in enumerate(_B58)}
 # DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
 # and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
 DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
-SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS}}}"
+# 64 bytes is 512 bits and 86 base64url characters carry 516, so the last character has
+# four bits nothing reads. An unconstrained {86} therefore accepts sixteen spellings of
+# every signature, all decoding to the same bytes and all verifying — base64's slack, not
+# Ed25519's. Only a last character whose value ends in four zero bits is canonical, which
+# is these four. A did:key already has exactly one spelling (tests/unit/test_didkey.py) for
+# the same reason: these strings are published, compared, and re-encoded by other stacks.
+SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
 # room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
 NONCE_PATTERN = r"[0-9]{1,19}"
@@ -77,7 +83,14 @@ def _b58decode(raw: str) -> bytes:
         if digit is None:
             raise DidError(f"bad did:key: {ch!r} is not base58btc")
         n = n * 58 + digit
-    return n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    # Leading '1's in base58btc encode leading 0x00 bytes — the integer
+    # conversion drops them (zero has no high bits), so they are prepended
+    # here.  Without this, a key whose raw bytes start with 0x00 decodes
+    # to fewer than 34 bytes and is rejected by the length check in
+    # public_key(), even though the DID is well-formed.
+    leading = len(raw) - len(raw.lstrip("1"))
+    payload = n.to_bytes((n.bit_length() + 7) // 8, "big") if n else b""
+    return b"\x00" * leading + payload
 
 
 def public_key(did: str) -> bytes:
@@ -123,7 +136,7 @@ def verify(did: str, signature: str, message: str) -> None:
     """
     key = VerifyKey(public_key(did))
     if not SIG_RE.fullmatch(signature or ""):
-        raise DidError(f"bad signature encoding: expected {SIG_CHARS} base64url characters")
+        raise DidError(f"bad signature encoding: {SIG_CHARS} base64url characters ending AQgw")
     raw = base64.urlsafe_b64decode(signature[:SIG_CHARS] + "==")
     try:
         # Note the argument order: libsodium takes (message, signature), the reverse

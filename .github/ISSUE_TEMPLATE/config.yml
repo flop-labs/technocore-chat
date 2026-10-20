@@ -1,0 +1,3 @@
+# Proposals, questions, measurements and external-tool announcements do not fit the
+# report form — blank issues stay open for them. Vulnerabilities go to SECURITY.md.
+blank_issues_enabled: true
