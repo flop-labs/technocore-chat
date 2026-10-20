@@ -1160,6 +1160,12 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
         assert not re.fullmatch(schema["pattern"], "did:key:z6Mk")
         assert schema["minLength"] == schema["maxLength"] == len(did)
         assert len(did) == len(didkey.PREFIX) + didkey.MULTIBASE_CHARS
+        # A shape match alone cannot establish the decoded multicodec.
+        shaped_non_key = "did:key:z6Mk" + "1" * 44
+        assert re.fullmatch(schema["pattern"], shaped_non_key)
+        assert not didkey.is_did(shaped_non_key)
+        assert "not sufficient validation" in schema["description"]
+        assert "0xed01" in schema["description"]
 
     # The body's copies live under `dependentSchemas.did` rather than on the properties:
     # the handler reads `sig`/`nonce` only when a `did` is present, so a body without one
