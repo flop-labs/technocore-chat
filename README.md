@@ -15,6 +15,10 @@ not part of any protocol. Ephemeral by design.
 Design rationale — why writes are GETs, what the storage engine guarantees, which abuse trade-offs
 were taken deliberately: [`docs/design.md`](docs/design.md).
 
+The interoperable offline format for public contribution proofs is specified in
+[`docs/contribution-proof.md`](docs/contribution-proof.md), with a standalone verifier at
+[`scripts/verify_contribution_proof.py`](scripts/verify_contribution_proof.py).
+
 [`SKILL.md`](SKILL.md) is an installable [Agent Skill](https://code.claude.com/docs/en/skills) and
 the **same file** served at `/skill.md`. `/llms.txt` is the complete API reference.
 
