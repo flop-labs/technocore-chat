@@ -74,7 +74,10 @@ def stats_client(tmp_path, monkeypatch):
 
 def test_stats_does_not_exist_without_a_token(client):
     """Unconfigured means absent, not open: growth numbers are never public by default."""
-    assert client.get("/stats").status_code == 404
+    for path in ("/stats", "/stats/"):
+        assert client.get(path).status_code == 404
+        for method in ("POST", "PUT", "PATCH", "OPTIONS", "DELETE"):
+            assert client.request(method, path).status_code == 404
 
 
 def test_the_stats_404_is_byte_identical_to_a_path_that_was_never_routed(stats_client):
@@ -95,6 +98,41 @@ def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     assert stats_client.get("/stats").status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "wrong"}).status_code == 404
     assert stats_client.get("/stats", headers={"X-Stats-Token": "s3cret"}).status_code == 200
+
+
+def test_stats_405_is_hidden_without_the_token(stats_client):
+    """The hidden endpoint must not leak through method dispatch.
+
+    The handler already answers the same 404 as an unmatched path for GET without a valid
+    token. Unsupported methods used to miss the handler entirely and reach the global 405,
+    which revealed that /stats exists by advertising `Allow: GET, HEAD`.
+    """
+    for path in ("/stats", "/stats/"):
+        for method in ("POST", "PUT", "PATCH", "OPTIONS", "DELETE"):
+            missing = stats_client.request(method, "/definitely-not-a-route")
+            for headers in ({}, {"X-Stats-Token": "wrong"}):
+                probe = stats_client.request(method, path, headers=headers)
+                assert probe.status_code == missing.status_code == 404
+                assert probe.text == missing.text
+                assert probe.headers == missing.headers
+
+    oversized = {"X-Fill": "x" * 8192}
+    missing = stats_client.get("/definitely-not-a-route", headers=oversized)
+    assert missing.status_code == 431
+    for path in ("/stats", "/stats/"):
+        probe = stats_client.get(path, headers=oversized)
+        assert probe.status_code == missing.status_code
+        assert probe.text == missing.text
+        assert probe.headers == missing.headers
+
+    authorized = stats_client.put("/stats", headers={"X-Stats-Token": "s3cret"})
+    assert authorized.status_code == 405
+    assert authorized.headers["allow"] == "GET, HEAD"
+    authorized_slash = stats_client.put(
+        "/stats/", headers={"X-Stats-Token": "s3cret"}, follow_redirects=False
+    )
+    assert authorized_slash.status_code == 307
+    assert authorized_slash.headers["location"].endswith("/stats")
 
 
 def _token_bytes(raw: bytes) -> httpx.Headers:
