@@ -396,6 +396,77 @@ def test_the_skill_states_only_constants_it_can_keep_true(client):
     assert "8 KiB" not in skill
 
 
+# A count and a character unit, in any spelling: "16 characters", "sixteen characters",
+# "a 16-character floor". Named here so the test can assert the pattern itself still
+# rejects a floor, not merely that §7 has none today.
+LENGTH_CLAIM = re.compile(
+    r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)"
+    r"[\s-]*(?:character|char)s?\b",
+    re.IGNORECASE,
+)
+
+
+def test_patterns_states_only_constants_it_can_keep_true(client):
+    """`/patterns.md` is byte-identical on every instance, so it needs the guard SKILL.md has.
+
+    `app._asset` serves it from the stored copy and `edge/snapshot.py` lists it STATIC_FIRST,
+    so unlike the manual it interpolates nothing. That makes the split in
+    `test_the_skill_states_only_constants_it_can_keep_true` apply here word for word: a code
+    constant may be stated, because it moves only with a release that reships this file; a
+    per-deployment knob may not, because the file cannot vary with the deployment and the knob
+    does.
+
+    §7 arrived stating two of them — "the sixth copy of a sentence inside a minute" — which are
+    `DUPE_MAX_COPIES` and the *default* of `DUPE_FILTER_SECONDS`. An instance setting
+    `CHAT_DUPE_FILTER_SECONDS` to anything else serves that sentence while enforcing another
+    number, and the reader has no way to tell. Naming /config instead is what SKILL.md already
+    does for `long_poll_seconds`.
+
+    The scan is scoped to §7 because the worked examples elsewhere state code constants — the
+    8192-character note cap, the 16-hex fingerprint width — and those are allowed to be stated.
+    """
+    patterns = client.get("/patterns.md").text
+    section = patterns.split("## 7.")[1]
+
+    # The pointer is what replaces the numbers, so it has to survive.
+    assert "/config" in section, "§7 has to name where the enforced values are published"
+
+    # A duration in prose is the window knob restated. `wait=10` survives: the claim is a
+    # duration with a unit, not a query parameter.
+    stated = re.search(r"\b(?:an?|one|two|three|\d+)[\s-]+(?:second|minute|hour)s?\b", section)
+    assert stated is None, (
+        f"§7 states {stated.group(0)!r}; CHAT_DUPE_FILTER_SECONDS is per deployment "
+        "— point at /config instead"
+    )
+
+    # An ordinal copy is the threshold knob restated.
+    ordinal = re.search(r"\b(?:second|third|fourth|fifth|sixth|seventh)\s+copy\b", section)
+    assert ordinal is None, (
+        f"§7 states {ordinal.group(0)!r}; CHAT_DUPE_MAX_COPIES is per deployment"
+    )
+
+    # And the third knob. The prose promises /config for the window, the copy threshold and
+    # the length floor; the first two checks left the floor unguarded, so "a 16-character
+    # floor" could go back into §7 without failing anything. Match the shape — a count and a
+    # character unit — rather than today's 16, since the point is that the value is a
+    # deployment's to choose.
+    floor = LENGTH_CLAIM.search(section)
+    assert floor is None, (
+        f"§7 states {floor.group(0)!r}; CHAT_DUPE_MIN_LENGTH is per deployment"
+    )
+
+    # Assert on the sentence that slipped past, not only on the document as it stands: a
+    # check that passes because §7 happens not to mention a floor today is not a guard.
+    slipped = "the window, copy threshold and a 16-character floor are at /config"
+    assert LENGTH_CLAIM.search(slipped), (
+        "the length-floor check stopped rejecting a hard-coded floor"
+    )
+    for spelling in ("16 characters", "sixteen characters", "a 16-character floor",
+                     "shorter than 16 chars"):
+        assert LENGTH_CLAIM.search(spelling), f"a floor spelled {spelling!r} would slip past"
+
+
 def test_skill_md_is_the_installable_skill_and_is_never_rate_limited(client, monkeypatch):
     import config
 
