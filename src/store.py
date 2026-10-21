@@ -1066,13 +1066,13 @@ def _seq_state_path(root: Path, room: str = "") -> Path:
 
 def _read_seq_state(path: Path) -> dict:
     # A shard that parses to anything but an object is not a map of rooms: `[]` used to reach
-    # `.get` and raise AttributeError out of a room read. Absent, torn and hand-edited all
-    # have to mean the same thing here — no state — because this answers a request.
-    try:
-        state = orjson.loads(path.read_bytes())
-    except (OSError, orjson.JSONDecodeError):
-        return {}
-    return state if isinstance(state, dict) else {}
+    # `.get` and raise AttributeError out of a room read. Absent, torn and hand-edited still
+    # mean no state. An I/O failure does not: a caller must not replace an unreadable shard
+    # with one room or retire a legacy map that the split never copied.
+    with suppress(FileNotFoundError, orjson.JSONDecodeError):
+        if isinstance(state := orjson.loads(path.read_bytes()), dict):
+            return state
+    return {}
 
 
 # Shard -> identity of the last copy verified to be in the writers' exact form. A verdict
@@ -1111,7 +1111,7 @@ def _seq_entry(path: Path, room: str) -> object:
     try:
         with path.open("rb") as f:
             before, raw, after = os.fstat(f.fileno()), f.read(), os.fstat(f.fileno())
-    except OSError:
+    except FileNotFoundError:
         return None
     seen = _stamp(before)
     stable = seen == _stamp(after)
@@ -1141,39 +1141,50 @@ def _seq_field(root: Path, room: str, key: str) -> int:
     still answers correctly — and it stays safe afterwards because the split renames the old
     file away rather than leaving a second copy to read.
 
-    Coerces here rather than at each caller: both fields are read on the request path, so a
-    hand-edited or truncated map must degrade to 0 (never existed) and never raise.
+    Coerces here rather than at each caller: a hand-edited or truncated map still degrades to
+    0 (never existed). An unreadable map raises instead: returning 0 could restart a reaped
+    room at seq 1 or persist a generation lower than the state that could not be read.
     """
     entry = _seq_entry(_seq_state_path(root, room), room)
     if not isinstance(entry, dict):
         entry = _read_seq_state(_seq_state_path(root)).get(room)
     value = entry.get(key) if isinstance(entry, dict) else None
-    return value if isinstance(value, int) and value >= 0 else 0
+    value = value if isinstance(value, int) and value >= 0 else 0
+    # Hide exactly one reserved epoch until its first record exists. The marker is durable,
+    # so a failed create can recover in another process without a post-write metadata step.
+    start = entry.get("start") if key == "gen" and isinstance(entry, dict) else None
+    return max(0, value - (type(start) is int and last_seq(root, room) < start))
 
 
-def _set_seq_entry(root: Path, room: str, floor: int | None) -> None:
+def _set_seq_entry(root: Path, room: str, floor: int, create: bool = False) -> None:
     """Record `room`'s floor and generation in its shard, under that shard's lock.
 
-    `floor=None` is a (re)create: the generation advances and the floor clears. An int is a
-    reap: that high-water mark becomes the floor and the generation is preserved. The old
-    generation is read *inside* the lock, so two rooms sharing a shard cannot lose each
+    `create` prepares a (re)create: reserve the next generation, retaining the old
+    floor until a record reaches `start`. Otherwise this is a reap: the high-water mark
+    becomes the floor and the effective generation is preserved. The old generation is
+    read *inside* the lock, so two rooms sharing a shard cannot lose each
     other's update — the point of a lock this narrow is that they no longer wait on the other
     255 shards' rooms, not that they stop being ordered against their own.
 
     `t` is when the entry was last touched. Nothing reads it yet: it is here so that reclaiming
     entries for rooms long gone — the half of #489 this change does not do, and the one the map
-    was unbounded for — needs no second migration to date what it finds. Best effort, like
-    `_bump`: the caller's write has already succeeded and must not be failed by bookkeeping.
+    was unbounded for — needs no second migration to date what it finds. Failures propagate:
+    the reaper must keep the room until its floor is safely recorded. Creation records its
+    intent before any message bytes, under the room lock. A failed create or restart reuses
+    that reservation; successful writes activate it without a second metadata write. The
+    marker lasts until reap, and compaction always retains the newest record as its proof.
+    It adds one bounded tail read to a generation lookup, not to an existing append. The
+    record and export formats do not change. Older workers ignore `start`, so a rolling
+    downgrade can expose the reserved epoch before its first record; this recovery protocol
+    requires upgraded writers and readers. File fsync still has the existing FSYNC policy.
     """
-    path = _seq_state_path(root, room)
-    try:
-        with _locked(path):
-            gen = _seq_field(root, room, "gen") + (1 if floor is None else 0)
-            state = _read_seq_state(path)
-            state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
-            _replace(path, orjson.dumps(state), fsync=config.FSYNC)
-    except OSError:
-        pass
+    with _locked(path := _seq_state_path(root, room)):
+        gen = _seq_field(root, room, "gen") + create
+        state = _read_seq_state(path)
+        state[room] = {"floor": floor or 0, "gen": gen, "t": int(time.time())}
+        if create:
+            state[room]["start"] = floor + 1
+        _replace(path, orjson.dumps(state), fsync=config.FSYNC)
 
 
 def last_seq(root: Path, room: str) -> int:
@@ -1189,8 +1200,7 @@ def last_seq(root: Path, room: str) -> int:
             rec = _parse(raw)
             if rec is not None:
                 return rec["seq"]
-        return 0
-    # The room file is gone (reaped). A recreated room carries the previous generation's
+    # Missing, empty or torn after a failed first write: retain the previous generation's
     # high-water mark in a root-level floor map so cursors from the old generation keep
     # seeing new messages instead of starving on a restarted sequence (#139 dir #2): a
     # reader's `since` stays below the new first_seq, so the new messages are not silently
@@ -2669,6 +2679,8 @@ def _write_record(
                     f"used in /r/{room} — a signed URL is single-use, so count up"
                 )
         rec["seq"] = last_seq(root, room) + 1
+        if created:
+            _set_seq_entry(root, room, rec["seq"] - 1, create=True)
         line = orjson.dumps(rec) + b"\n"
         # Heal a torn tail before appending. A write cut short by a crash leaves a record
         # with no trailing newline; appending straight onto it would fuse the two into one
@@ -2691,13 +2703,6 @@ def _write_record(
         # `line` gained a leading newline — so this is exact, not an estimate.
         if size + len(line) > limit:
             _compact(path, cutoff=_cutoff(room), keep=limit // 2)
-    if created:
-        # Bump the room's generation: a (re)created room is a new conversation, and the read
-        # view exposes the old generation's number so a stateful client can detect the
-        # discontinuity and resync instead of silently watching a different conversation
-        # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
-        # has taken up the sequence where the old one left off, so it must not be reused.
-        _set_seq_entry(root, room, None)
     return rec, created
 
 

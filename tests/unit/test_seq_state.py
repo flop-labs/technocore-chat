@@ -336,10 +336,10 @@ def test_creates_in_different_shards_do_not_serialise_on_one_lock(tmp_path) -> N
     real_set = store._set_seq_entry
     failed = []
 
-    def wait_inside_the_seq_write(root, room, floor):
+    def wait_inside_the_seq_write(root, room, floor, **kwargs):
         if room in rooms:
             together.wait(timeout=10)
-        return real_set(root, room, floor)
+        return real_set(root, room, floor, **kwargs)
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(store, "_set_seq_entry", wait_inside_the_seq_write)
@@ -408,13 +408,15 @@ def test_the_shard_of_a_name_is_the_shard_of_its_room_bucket(tmp_path) -> None:
 
 
 def test_seq_state_survives_a_read_only_store(tmp_path) -> None:
-    """Best effort, like `_bump`: the caller's write has already succeeded by the time the
-    floor is recorded, so an unwritable shard must not turn that success into a 500."""
+    """A failed floor write must be visible to the reaper before it removes the room;
+    a read must not turn that failure into a false sequence zero either."""
     import store
 
     store._write_record(tmp_path, "fine", "bot", "hi")
     shard = tmp_path / f".seqstate.{store._shard('nope')}"
     shard.mkdir()  # a directory where the shard file goes: every write to it fails
-    store._set_seq_entry(tmp_path, "nope", 5)  # must not raise
-    assert store.last_seq(tmp_path, "nope") == 0
+    with pytest.raises(IsADirectoryError):
+        store._set_seq_entry(tmp_path, "nope", 5)
+    with pytest.raises(IsADirectoryError):
+        store.last_seq(tmp_path, "nope")
     assert os.path.isdir(shard)
