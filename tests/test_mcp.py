@@ -1490,6 +1490,25 @@ def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_doe
     assert mcp_server.REMOTE_SECURITY.enable_dns_rebinding_protection is False
 
 
+def test_a_bracketed_ipv6_host_is_bound_without_its_brackets(monkeypatch):
+    """`HOST=[::1]` is read as loopback, and the brackets belong to the Host header, not to
+    the bind: a socket cannot resolve `[::1]`, so passing it through unchanged made the
+    server fail at startup on an address it had just accepted."""
+    from technocore_mcp import server as mcp_server
+
+    ran = []
+    monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k))
+    monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--http"])
+    for host, bind in (("[::1]", "::1"), ("[0:0:0:0:0:0:0:1]", "0:0:0:0:0:0:0:1")):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        served = ran.pop()
+        assert served["host"] == bind, host
+        # The lookup a bind makes first, and the one "[::1]" fails.
+        mcp_server.socket.getaddrinfo(served["host"], None)
+        assert "[::1]:*" in served["transport_security"].allowed_hosts
+
+
 def test_a_loopback_server_refuses_a_rebound_host_and_a_foreign_origin():
     """What a rebinding attack looks like at the server: the page's own hostname in Host,
     or its own origin in Origin. Either is refused before any tool runs; a loopback Host,

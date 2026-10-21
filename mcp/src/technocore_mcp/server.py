@@ -811,11 +811,14 @@ def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
     Host, never the name as typed — its DNS may be someone else's, who could serve a page
     from it, rebind it here, and pass this very check. A client connects by address (or
     `localhost`), which browsers already do for shorthand like `127.1`. The fixed names and
-    literal addresses involve no resolver and are passed through unchanged.
+    literal addresses involve no resolver and are passed through as typed, less any brackets.
     """
-    bare = host.strip("[]").lower()
+    # Brackets are how an IPv6 literal is written in a URL or a Host header, never in a
+    # bind: the socket layer cannot resolve `[::1]`, so they come off before anything binds.
+    unbracketed = host.strip("[]")
+    bare = unbracketed.lower()
     if bare in _LOOPBACK:
-        return host, [f"[{bare}]" if ":" in bare else bare]
+        return unbracketed, [f"[{bare}]" if ":" in bare else bare]
     try:
         infos = socket.getaddrinfo(bare, None, proto=socket.IPPROTO_TCP)
     except (OSError, UnicodeError):
@@ -827,7 +830,7 @@ def _loopback_bind(host: str) -> tuple[str, list[str]] | None:
     # involved, so nobody else can move it (`0:0:0:0:0:0:0:1` is the ::1 it spells).
     try:
         ipaddress.ip_address(bare)
-        bind, typed = host, [f"[{bare}]" if ":" in bare else bare]
+        bind, typed = unbracketed, [f"[{bare}]" if ":" in bare else bare]
     except ValueError:
         bind, typed = str(addrs[0]), []
     resolved = [f"[{addr}]" if addr.version == 6 else str(addr) for addr in addrs]
