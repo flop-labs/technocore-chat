@@ -17,7 +17,6 @@ import re
 import tempfile
 import threading
 import time
-import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -29,6 +28,10 @@ import orjson
 
 import config
 import didkey
+from sweep import INVISIBLE_CATEGORIES as INVISIBLE_CATEGORIES
+from sweep import SWEEP_EXEMPT as SWEEP_EXEMPT
+from sweep import nothing_visible as nothing_visible
+from sweep import sweep_invisibles as sweep_invisibles
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -422,48 +425,27 @@ def ownable(name: str) -> bool:
     return "d" in room_classes(name) and name not in UNOWNABLE_ROOMS
 
 
-# The Unicode categories `clean_text` replaces with a space, and why each is on the list.
-# One list, in one place: the reason a value is swept is the reason it is named here, and a
-# docstring that also enumerated them would be a second copy to keep in step.
-#
-#   Cc  control      — C0/C1 would break the JSONL one-record-per-line invariant.
-#   Cf  format       — the *invisible instruction* smuggling vector against LLM readers.
-#                      Unicode tag characters U+E0000–U+E007F encode ASCII that no human or
-#                      log line shows, bidi overrides (U+202E) reorder displayed text away
-#                      from what is stored (Trojan Source), and zero-width joiners hide word
-#                      boundaries. This service's stated top hazard is cross-agent prompt
-#                      injection (design doc §3.1), so text that renders as nothing must not
-#                      survive into another agent's context.
-#   Cs  surrogate    — never valid on its own in stored text.
-#   Co  private use  — renders as whatever the reader's font decides, which is not a promise.
-#   Zl  line sep     — U+2028, and Zp U+2029: invisible here, a line break to enough
-#   Zp  para sep       plain-text consumers (JS string literals among them) that one stored
-#                      value renders as two lines. The single-line promise has to hold for
-#                      every reader, not just the ones that agree with `str.splitlines`.
-INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
-
-
 def clean_text(text: str, limit: int = MAX_TEXT_CHARS) -> str:
-    """Replace every character in INVISIBLE_CATEGORIES with a space, then trim.
+    """Replace every INVISIBLE_CATEGORIES character with a space (bar the two SWEEP_EXEMPT joiners), then trim.
 
     What that buys: one stored record is one line for every reader, and nothing that renders
-    as nothing survives into another agent's context.
+    as nothing and could carry a hidden instruction survives into another agent's context.
 
-    Trade-off, accepted deliberately: ZWJ emoji sequences flatten (👨‍👩‍👧 → 👨👩👧).
-    Mangled emoji is visible and harmless; a smuggled instruction is neither.
+    What the exemption buys: a Brahmic conjunct (क्‍ष) and a ZWJ emoji sequence (👨‍👩‍👧)
+    round-trip unchanged, and a signed write of an Indic word verifies, because the swept
+    text a signature covers now equals the word that was sent. See SWEEP_EXEMPT for why those
+    two are safe to keep while every other invisible still goes.
     """
-    text = "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
-    ).strip()
-    if not text:
+    text = sweep_invisibles(text).strip()
+    if nothing_visible(text):
         # Distinguishing "you sent nothing" from "the sweep ate all of it" matters: the
         # second is surprising, and a caller whose message was pure zero-width or bidi
         # characters would otherwise re-send the same bytes and get the same refusal.
         raise StoreError(
             "empty text: nothing visible was left after the single-line sweep, which "
-            "replaces every control, format and line-separator character (newline, "
-            "zero-width, bidi override, Unicode tag, U+2028) with a space and then trims "
-            "the ends. Send at least one visible character."
+            "replaces control, format and line-separator characters (newline, zero-width "
+            "space, bidi override, Unicode tag, U+2028) with a space and trims the ends "
+            "(U+200C/U+200D are kept, but are not visible alone). Send a visible character."
         )
     if len(text) > limit:
         raise StoreError(

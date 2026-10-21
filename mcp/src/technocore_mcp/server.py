@@ -591,7 +591,13 @@ async def say_signed(
     # satisfies that, so nothing is read before the write.
     minted = signing.next_nonce()
     swept = signing.sweep(text)
-    if not swept and _signer is None and did is None and sig is None and nonce is None:
+    if (
+        signing.nothing_visible(swept)
+        and _signer is None
+        and did is None
+        and sig is None
+        and nonce is None
+    ):
         # A no-key caller receives the exact canonical string from _resolve_signature. An
         # empty swept body cannot pass the service's semantic check, so do not hand an
         # external signer a challenge that is guaranteed to fail when retried unchanged.

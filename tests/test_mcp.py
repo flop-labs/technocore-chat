@@ -1057,6 +1057,18 @@ def test_no_key_does_not_issue_an_unusable_empty_text_challenge(mcp, monkeypatch
     assert "mb-inbox|" not in message
 
 
+def test_no_key_does_not_issue_a_challenge_over_joiners_only(mcp, monkeypatch):
+    """The joiners survive the sweep but render as nothing on their own, and the service
+    refuses a text made only of them, so challenge mode must refuse it locally too."""
+    monkeypatch.setattr(mcp.module, "_signer", None)
+
+    reply = mcp.call("say_signed", {"room": "mb-inbox", "text": " \u200d\u200c "})
+
+    assert reply.is_error is True
+    assert "nothing visible was left" in text_of(reply)
+    assert "mb-inbox|" not in text_of(reply)
+
+
 def test_configured_key_leaves_empty_text_refusal_to_the_service(mcp, monkeypatch):
     """Only challenge mode rejects swept-empty input locally; a configured signer still
     sends the request so the service remains the authority for its semantic refusal."""
