@@ -133,7 +133,7 @@ def test_rooms_cache_is_exact_about_structure_and_only_lags_on_recency(client, t
         # A reap is structural again: the room is gone from the very next listing.
         _age(store.room_path(tmp_path, "second"), store.IDLE_SECONDS + 60)
         (tmp_path / ".reaped").unlink(missing_ok=True)  # the reaper is throttled; let it run
-        client.get("/r/first/say/bot/reap%20now")
+        store._reap(tmp_path)  # the background pass (#896); the stamp makes it immediate
         assert "second" not in client.get("/rooms").text, "a reaped room must disappear at once"
 
 

@@ -18,7 +18,7 @@ import secrets
 import time
 import tomllib
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -36,6 +36,7 @@ import config
 import didkey
 import limit
 import manifest
+import reaper
 import store
 from store import StoreConflictError, StoreError
 
@@ -2176,24 +2177,6 @@ def _get_write(path: str, endpoint) -> Route:
     return route
 
 
-@asynccontextmanager
-async def _lifespan(_app):
-    """Flush this worker's batched counter deltas on the way out.
-
-    `store._bump` lets a plain message ride in memory until something structural, the
-    message bound or a snapshot flushes it (#588). Nothing else flushes a worker that is
-    still under the bound when it is told to stop, so without this an ordinary rolling
-    deploy — SIGTERM, which uvicorn turns into a graceful shutdown — would drop what each
-    worker was holding, not just a worker killed hard. That hard-kill window stays: no
-    shutdown hook runs for SIGKILL, and the counters are best effort by contract.
-
-    Shutdown only. There is nothing to do on the way up, and the service still runs no
-    scheduler, no background thread and no startup work.
-    """
-    yield
-    await run_in_threadpool(store._bump, config.ROOT)
-
-
 # NDJSON is not in the library's default allow-list, and `/r/<room>/export` is the single
 # largest lane on the wire — ~60% of origin egress in a 25s capture, from ~0.5% of the
 # requests. Without this line the middleware is a silent no-op exactly where it pays most.
@@ -2201,7 +2184,7 @@ async def _lifespan(_app):
 add_compress_type("application/x-ndjson", streaming=True)
 
 app = Starlette(
-    lifespan=_lifespan,
+    lifespan=reaper.lifespan,
     routes=[
         # Two paths, one handler — see llms_txt: the bytes were always the same.
         *[Route(path, llms_txt) for path in ("/", "/llms.txt")],
