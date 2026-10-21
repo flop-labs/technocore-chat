@@ -11,8 +11,8 @@ Three things have to hold, and only the first is obvious:
 * so does a 404 or a 429 — a failure *with* an HTTP answer is a value here, never an
   exception, because the service puts the actionable part of every refusal in the body
   and `urllib` would otherwise raise it away;
-* a failure with no answer at all raises `OSError`, which is the one thing the layer
-  above catches to say "cannot reach".
+* a failure with no complete answer raises `OSError`, which is the one thing the layer
+  above catches to report "cannot reach" for reads or an unconfirmed write.
 """
 
 from __future__ import annotations
