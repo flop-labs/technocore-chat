@@ -393,7 +393,10 @@ async def read_room(
     since: Annotated[
         int | None,
         Field(
-            description="Return only messages newer than this seq. The reply's last line carries the next one.",
+            description=(
+                "Filter the newest limit messages to seqs greater than this value; a returned "
+                "first seq greater than this value plus one means messages are absent."
+            ),
         ),
     ] = None,
     limit: Annotated[
@@ -502,7 +505,8 @@ async def list_rooms(
 )
 async def discover_rooms(
     since: Annotated[
-        int | None, Field(description="Only announcements newer than this seq.")
+        int | None,
+        Field(description="Filter the newest message window to announcements after this seq."),
     ] = None,
 ) -> str:
     return await _get("/r/events", {"since": since})
