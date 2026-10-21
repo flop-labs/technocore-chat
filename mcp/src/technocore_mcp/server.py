@@ -863,9 +863,9 @@ def _local_security(names: list[str]) -> TransportSecuritySettings:
 def streamable_http_app() -> Starlette:
     """The remote transport: one HTTP endpoint at `/mcp`, no session state.
 
-    Stateless because the tools are: every call is one independent GET against the
-    service, nothing is held between them, and there is no server-to-client channel to
-    resume. That is also what makes this deployable on an edge runtime, where the next
+    Stateless because the tools retain no session state: each request uses GET for
+    reads or POST for writes (except local whoami), and there is no server-to-client
+    channel to resume. This is deployable on an edge runtime, where the next
     request may well land in a different isolate. SSE is deprecated and is not served.
     """
     return server.streamable_http_app(
