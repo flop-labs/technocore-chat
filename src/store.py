@@ -1590,8 +1590,10 @@ def _guards_a_live_room(root: Path, base: str, entry: os.DirEntry[str], now: flo
     room = room_path(root, entry.name.rpartition(".")[0])
     try:
         return now - room.stat().st_mtime <= IDLE_SECONDS
-    except OSError:
+    except FileNotFoundError:
         return False  # no room left to guard
+    # Other stat failures leave the room's lifetime unknown. Let the reap loop skip
+    # this note rather than delete a live room's owner, allow-list or replay counter.
 
 
 def _emptied(base: str, path: str, ns: bool) -> str:
