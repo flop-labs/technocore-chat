@@ -1,9 +1,12 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import json
 import time
 from pathlib import Path
 
 import _client
+import jsonschema
+import pytest
 from _client import (
     _age,
     _at,
@@ -34,6 +37,78 @@ def test_since_cursor_returns_only_new(client):
     view = client.get("/r/lobby?since=2&format=json").json()
     assert [m["seq"] for m in view["messages"]] == [3]
     assert client.get("/r/lobby?since=3&format=json").json()["count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("stamp", "expected"),
+    [
+        ({}, None),
+        ({"ts": None}, None),
+        ({"ts": 17}, None),
+        ({"ts": True}, None),
+        ({"ts": []}, None),
+        ({"ts": {}}, None),
+        ({"ts": ""}, ""),
+        ({"ts": "opaque legacy timestamp"}, "opaque legacy timestamp"),
+        ({"ts": "2026-01-01T00:00:00Z"}, "2026-01-01T00:00:00Z"),
+    ],
+    ids=["missing", "null", "number", "boolean", "array", "object", "empty", "opaque", "utc"],
+)
+def test_retained_timestamp_does_not_break_a_valid_tail(client, tmp_path, stamp, expected):
+    """An older legacy record outside the requested tail still owns the retained seq."""
+    import store
+
+    for text in ("legacy", "valid tail"):
+        assert client.post("/r/floor", json={"from": "bot", "text": text}).status_code == 200
+    path = store.room_path(tmp_path, "floor")
+    records = [json.loads(raw) for raw in path.read_bytes().splitlines()]
+    records[0].pop("ts")
+    records[0].update(stamp)
+    raw = b"".join(json.dumps(rec).encode() + b"\n" for rec in records)
+    path.write_bytes(raw)
+    schema = client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
+
+    for seq in (2, 3):
+        if seq == 3:
+            store.append(tmp_path, "floor", "bot", "next")
+        response = client.get("/r/floor?limit=1&since=1&format=json")
+        assert response.status_code == 200
+        view = response.json()
+        assert [rec["seq"] for rec in view["messages"]] == [seq]
+        assert view["first_seq"] == view["last_seq"] == seq
+        assert view["first_retained_seq"] == 1
+        assert view["first_retained_ts"] == expected
+        jsonschema.validate(view, schema)
+        empty = client.get(f"/r/floor?since={seq}&format=json").json()
+        assert empty["messages"] == [] and empty["last_seq"] == seq
+        assert (empty["first_retained_seq"], empty["first_retained_ts"]) == (1, expected)
+        jsonschema.validate(empty, schema)
+        assert client.get("/r/floor?limit=1&since=1").status_code == 200
+        assert client.get("/r/floor/export").content.startswith(raw)
+
+    # Once real compaction removes the legacy line, the floor follows the surviving record.
+    store._compact(path, keep=1)
+    compacted = client.get("/r/floor?limit=1&format=json").json()
+    assert compacted["first_retained_seq"] == 3
+    assert compacted["first_retained_ts"] == compacted["messages"][0]["ts"]
+    jsonschema.validate(compacted, schema)
+
+
+def test_timestamp_less_ephemeral_prefix_still_expires(client, tmp_path):
+    import store
+
+    old = store.append(tmp_path, "e-floor", "bot", "legacy")
+    newest = store.append(tmp_path, "e-floor", "bot", "fresh")
+    old.pop("ts")
+    path = store.room_path(tmp_path, "e-floor")
+    path.write_text("".join(json.dumps(rec) + "\n" for rec in (old, newest)))
+
+    view = client.get("/r/e-floor?limit=1&since=1&format=json").json()
+    assert view["messages"] == [newest]
+    assert view["first_retained_seq"] == 2
+    assert view["first_retained_ts"] == newest["ts"]
 
 
 def test_traversal_and_bad_names_rejected(client, tmp_path):

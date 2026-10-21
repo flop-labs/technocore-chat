@@ -870,21 +870,27 @@ def _expired(rec: dict, cutoff: float) -> bool:
     and a record whose age cannot be established cannot honour that promise. Elsewhere `ts`
     stays what it always was — an opaque string nothing parses."""
     ts = rec.get("ts")
-    if isinstance(ts, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-            try:
-                return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
-            except ValueError:
-                continue
+    if not isinstance(ts, str):
+        return True
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        with suppress(ValueError):
+            return datetime.strptime(ts, fmt).replace(tzinfo=UTC).timestamp() < cutoff
     return True
 
 
 def _parse(line: bytes) -> dict | None:
-    try:
+    with suppress(ValueError, UnicodeDecodeError):
         rec = orjson.loads(line)
-    except (ValueError, UnicodeDecodeError):
-        return None  # torn write at EOF, or hand-edited garbage
-    return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
+        if isinstance(rec, dict) and isinstance(rec.get("seq"), int):
+            return rec
+
+
+def _retained_floor(path: Path, cutoff: float | None) -> dict | None:
+    """Oldest readable record in the room file (not the response window). Same expiry as read."""
+    with suppress(FileNotFoundError), path.open("rb") as f:
+        for raw in f:
+            if (r := _parse(raw)) is not None and (cutoff is None or not _expired(r, cutoff)):
+                return r
 
 
 def read_messages(
@@ -898,12 +904,8 @@ def read_messages(
     # the scan stops there. `last_seq` deliberately does NOT filter — seq must keep
     # advancing past records nobody can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
-    out: list[dict] = []
-    # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
-    # `next:` that polls a dead cursor forever, and let a caller put a number of any width
-    # into every JSON reply. The newest record on disk, expired or not, for the same reason
-    # `last_seq` does not filter.
-    head_seq = 0
+    # Tail open first so a held fd still answers after a concurrent reap; floor is second.
+    out, head_seq = [], 0
     with suppress(FileNotFoundError), path.open("rb") as f:
         for raw in reverse_lines(f):
             rec = _parse(raw)
@@ -918,15 +920,22 @@ def read_messages(
             if len(out) >= limit:
                 break
     out.reverse()
-    if not head_seq and since:  # no record on disk: a reaped room resumes from its floor (#139)
+    retained = _retained_floor(path, cutoff)
+    # Reaped rooms keep a floor high-water (#139). Only apply it when the caller sent a
+    # cursor: a plain read of a reaped name still returns last_seq 0 (#585). Empty-window
+    # last_seq is the room head (on-disk or floor), never min(since, head): expired e-
+    # rooms must advance past the gap, and a past-head cursor clamps to head (#565/#910).
+    if not head_seq and since is not None:
         head_seq = _seq_field(root, room, "floor")
     return {
         "room": room,
         "count": len(out),
-        "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
-        "generation": room_generation(root, room),
         "messages": out,
+        "first_seq": out[0]["seq"] if out else None,
+        "last_seq": out[-1]["seq"] if out else head_seq,
+        "first_retained_seq": retained["seq"] if retained else None,
+        "first_retained_ts": ts if isinstance(ts := (retained or {}).get("ts"), str) else None,
+        "generation": room_generation(root, room),
     }
 
 
@@ -1269,11 +1278,8 @@ def _engagement(nicks: Sequence[str]) -> dict:
     n = len(nicks)
     if not n:  # no parsable record in the window: no data, which is not the same as zero
         return {"window": 0, "zero_response_share": None, "nick_diversity": None}
-    return {
-        "window": n,
-        "zero_response_share": round(_unanswered(nicks) / n, 4),
-        "nick_diversity": round(len(set(nicks)) / n, 4),
-    }
+    zrs, div = round(_unanswered(nicks) / n, 4), round(len(set(nicks)) / n, 4)
+    return {"window": n, "zero_response_share": zrs, "nick_diversity": div}
 
 
 def _rollup(windows: list[Sequence[str]]) -> dict:
@@ -1282,25 +1288,23 @@ def _rollup(windows: list[Sequence[str]]) -> dict:
     Nicks are pooled globally too — one bot talking to itself in forty rooms should read as low
     diversity, not as forty separate healthy-looking rooms."""
     total = sum(len(w) for w in windows)
-    if not total:
-        return {
-            "window_cap": WINDOW_MESSAGES,
-            "windowed_messages": 0,
-            "zero_response_share": None,
-            "nick_diversity": None,
-        }
-    distinct = len({nick for w in windows for nick in w})
-    return {
+    base = {
         "window_cap": WINDOW_MESSAGES,
-        "windowed_messages": total,
-        "zero_response_share": round(sum(_unanswered(w) for w in windows) / total, 4),
-        "nick_diversity": round(distinct / total, 4),
+        "windowed_messages": total or 0,
+        "zero_response_share": None,
+        "nick_diversity": None,
     }
+    if not total:
+        return base
+    base["zero_response_share"] = round(sum(_unanswered(w) for w in windows) / total, 4)
+    base["nick_diversity"] = round(len({n for w in windows for n in w}) / total, 4)
+    return base
 
 
 def list_rooms(root: Path) -> list[str]:
-    names = (e.name[: -len(".jsonl")] for e in _walk(root / "rooms", ".jsonl"))
-    return sorted(n for n in names if _listable(n))
+    return sorted(
+        n for e in _walk(root / "rooms", ".jsonl") if _listable(n := e.name[: -len(".jsonl")])
+    )
 
 
 def _time_bucket(now: float, ttl: float) -> int:
