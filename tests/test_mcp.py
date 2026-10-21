@@ -23,6 +23,7 @@ import hmac
 import json
 import sys
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -948,6 +949,144 @@ def test_two_rapid_signed_says_both_land(mcp, monkeypatch):
     for i in range(3):
         reply = mcp.call("say_signed", {"room": "mb-inbox", "text": f"burst {i}"})
         assert reply.is_error is False, text_of(reply)
+
+
+# Nanosecond-shaped, the scale live agents sign at: no millisecond clock reaches it, so a
+# key that has ever written at this scale leaves a floor `next_nonce` alone never clears.
+FLOOR = 1_790_328_000_000_000_000
+
+
+def signed_elsewhere(mcp, monkeypatch) -> tuple[str, Callable[[str], str]]:
+    """The wrapper's key, plus a fresh process-local nonce state, so a floor raised by one
+    test cannot leak into the next through the module global."""
+    from technocore_mcp import signing
+
+    did = with_key(mcp, monkeypatch)
+    monkeypatch.setattr(signing, "_last_nonce", 0)
+    return did, mcp.module._signer.sign
+
+
+def test_say_signed_clears_a_floor_another_signer_left(mcp, monkeypatch):
+    """#916: this process's clock is not the only nonce generator for its key. A peer
+    isolate holding the same key, or any client signing in nanoseconds, can leave the
+    room's floor above anything this process would mint. The refusal names that floor, so
+    the built-in signer signs once more above it instead of returning a replay error for a
+    write it composed itself."""
+    did, sign = signed_elsewhere(mcp, monkeypatch)
+    text = "from another isolate"
+    elsewhere = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": text,
+            "did": did,
+            "sig": sign(f"mb-inbox|{FLOOR}|{text}"),
+            "nonce": FLOOR,
+        },
+    )
+    assert elsewhere.is_error is False, text_of(elsewhere)
+
+    landed = mcp.call("say_signed", {"room": "mb-inbox", "text": "after the floor"})
+    assert landed.is_error is False, text_of(landed)
+    assert "after the floor" in text_of(mcp.call("read_room", {"room": "mb-inbox"}))
+    # And the process keeps the floor it learned: the next write lands on the first try.
+    posts = []
+    real = mcp.module._fetch
+
+    async def counting(method, url, headers, body, timeout):
+        if method == "POST":
+            posts.append(url)
+        return await real(method, url, headers, body, timeout)
+
+    monkeypatch.setattr(mcp.module, "_fetch", counting)
+    again = mcp.call("say_signed", {"room": "mb-inbox", "text": "no second refusal"})
+    assert again.is_error is False, text_of(again)
+    assert len(posts) == 1
+
+
+def test_set_room_allow_clears_an_ownership_counter_burnt_elsewhere(mcp, monkeypatch):
+    """The ownership lane's counter is shared by every writer for the room, and its 403
+    names the last value too — the same recovery applies."""
+    did, sign = signed_elsewhere(mcp, monkeypatch)
+    claimed = mcp.call("claim_room", {"room": "d-desk"})
+    assert claimed.is_error is False, text_of(claimed)
+    burnt = mcp.call(
+        "set_room_allow",
+        {
+            "room": "d-desk",
+            "dids": did,
+            "did": did,
+            "sig": sign(f"room-allow|d-desk|{FLOOR}|{did}"),
+            "nonce": FLOOR,
+        },
+    )
+    assert burnt.is_error is False, text_of(burnt)
+
+    allowed = mcp.call("set_room_allow", {"room": "d-desk", "dids": did})
+    assert allowed.is_error is False, text_of(allowed)
+
+
+def test_an_external_signature_is_never_re_signed(mcp, monkeypatch):
+    """The recovery belongs to the built-in signer only. An external signer chose its
+    nonce; the refusal is its answer, returned after exactly one request."""
+    did, sign = signed_elsewhere(mcp, monkeypatch)
+    text = "floor"
+    first = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": text,
+            "did": did,
+            "sig": sign(f"mb-inbox|{FLOOR}|{text}"),
+            "nonce": FLOOR,
+        },
+    )
+    assert first.is_error is False, text_of(first)
+
+    posts = []
+    real = mcp.module._fetch
+
+    async def counting(method, url, headers, body, timeout):
+        if method == "POST":
+            posts.append(url)
+        return await real(method, url, headers, body, timeout)
+
+    monkeypatch.setattr(mcp.module, "_fetch", counting)
+    stale = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "below",
+            "did": did,
+            "sig": sign("mb-inbox|9|below"),
+            "nonce": 9,
+        },
+    )
+    assert stale.is_error is True and "not greater than" in text_of(stale)
+    assert len(posts) == 1
+
+
+def test_a_floor_that_keeps_moving_is_chased_a_bounded_number_of_times(mcp, monkeypatch):
+    """A floor that rises again between the refusal and the re-sign means another writer is
+    racing this key; chasing it forever would only race harder. The re-signs stop, and the
+    last refusal reaches the model."""
+    signed_elsewhere(mcp, monkeypatch)
+    sent = []
+
+    async def racing(method, url, headers, body, timeout):
+        nonce = int(json.loads(body)["nonce"])
+        sent.append(nonce)
+        return 400, (
+            f"nonce {nonce} is not greater than {nonce + 5}, the last one this key used "
+            "in /r/mb-inbox — a signed URL is single-use, so count up"
+        )
+
+    monkeypatch.setattr(mcp.module, "_fetch", racing)
+    reply = mcp.call("say_signed", {"room": "mb-inbox", "text": "contended"})
+    assert reply.is_error is True and "not greater than" in text_of(reply)
+    assert len(sent) == 1 + mcp.module.NONCE_RETRIES
+    # Every re-sign cleared the floor the previous refusal named.
+    assert all(later > earlier + 5 for earlier, later in zip(sent, sent[1:], strict=False))
 
 
 def test_the_ownership_flow_end_to_end(mcp, monkeypatch):

@@ -18,7 +18,8 @@ are the source of truth; tests/unit/test_mcp_signing.py holds the two in lockste
   "a counter or a millisecond clock both work": `next_nonce` below is a millisecond
   clock with a monotonic bump, so it satisfies both disciplines with no state to read
   and no counter to persist — which is what keeps signing usable from a stateless edge
-  isolate.
+  isolate. What it cannot promise is order *between* isolates; a refusal names the
+  floor instead, and the server re-signs above it (`refused_floor`, #916).
 
 `cryptography` rather than the service's libsodium: it is already in this package's
 dependency tree (the SDK requires `pyjwt[crypto]`), and it ships a Pyodide wheel, so the
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import time
 import unicodedata
 
@@ -60,14 +62,45 @@ def sweep(text: str) -> str:
 def next_nonce() -> int:
     """Milliseconds since the epoch, bumped past the last value this process issued.
 
-    Strictly increasing within a process (two signs in one millisecond still order), and
-    effectively increasing across processes and isolates because wall time dominates. A
-    collision is not silent either way: the service refuses with the last value it saw,
-    and that body reaches the model.
+    Strictly increasing within a process (two signs in one millisecond still order). It is
+    *not* increasing across processes: two isolates holding one key are two generators
+    with no shared state, one of them can land a later value first, and a key that has
+    ever signed at nanosecond scale sits above every millisecond this clock will reach
+    (#916). The service names the floor it refused against, and `refused_floor` plus
+    `raise_floor` let the caller re-sign once above it — recovery with no state to share.
     """
     global _last_nonce
     _last_nonce = max(int(time.time() * 1000), _last_nonce + 1)
     return _last_nonce
+
+
+# The two refusals that name the floor a signed write has to clear, as the service words
+# them: the message lane's (store.append_message, HTTP 400) and the ownership counter's
+# (app._burn_nonce, HTTP 403). Anchored at the start of the body, after the optional status
+# the service prints, so an echo of a caller's own text further in cannot pose as one.
+# tests/test_mcp.py provokes both against the real app, which keeps this in lockstep.
+_FLOOR_REFUSAL = re.compile(
+    r"(?:\d{3} )?nonce \d+ (?:is not greater than (\d+)|was already used for /r/\S+ \(last (\d+)\))"
+)
+
+
+def refused_floor(body: str) -> int | None:
+    """The floor a nonce refusal names, or None if `body` is any other answer."""
+    match = _FLOOR_REFUSAL.match(body.strip())
+    if match is None:
+        return None
+    return int(match.group(1) or match.group(2))
+
+
+def raise_floor(floor: int) -> None:
+    """Make every later `next_nonce` in this process exceed `floor`.
+
+    Process-wide rather than per room on purpose: a floor is only ever raised, and a
+    nonce above one room's floor is still valid in every other room, so one number keeps
+    the no-state design while never minting a value this process has already seen refused.
+    """
+    global _last_nonce
+    _last_nonce = max(_last_nonce, floor)
 
 
 def note_path(did: str) -> tuple[str, str]:
