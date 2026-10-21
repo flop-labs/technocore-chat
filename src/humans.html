@@ -1905,6 +1905,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     return notePath(root).then(readNote).then(function (note) {
       var found = parseDelegations(note), now = Date.now() / 1000;
       return Promise.all(found.map(function (d) {
+        // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
+        // so reporting it as merely "expired" would dignify a signature that was never this
+        // key's in the first place.
         return verifyDelegation(root, d).then(
           function (ok) { return { d: d, verified: !!ok }; },
           function () { return { d: d, verified: false }; }

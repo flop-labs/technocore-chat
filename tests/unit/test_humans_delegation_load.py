@@ -65,8 +65,8 @@ async function identity() {
   return { did: env.didOf(new Uint8Array(raw)), key: pair.privateKey };
 }
 const [original, replacement, agent] = await Promise.all([identity(), identity(), identity()]);
-async function note(owner, scope, nonce) {
-  const expires = String(Math.floor(Date.now() / 1000) + 86400);
+async function note(owner, scope, nonce, ttl = 86400) {
+  const expires = String(Math.floor(Date.now() / 1000) + ttl);
   const canonical = env.delegationString(owner.did, agent.did, scope, expires, nonce);
   const signature = await webcrypto.subtle.sign('Ed25519', owner.key,
                                                 new TextEncoder().encode(canonical));
@@ -98,6 +98,16 @@ if (mode.startsWith('current-')) {
     assert.equal(rows.length, 2, 'both delegation records are shown');
     assert.equal(rows[0].state, 'live', 'the authentic grant remains live');
     assert.equal(rows[1].state, 'forged', 'the forged grant is rejected');
+  } else if (mode === 'current-expired-newer') {
+    const valid = await note(original, 'r:old', '1');
+    const expired = await note(original, 'r:new', '2', -60);
+    first.resolve(new Response(valid + ' ' + expired));
+    await old;
+    const rows = renders.at(-1);
+    assert.equal(rows.length, 2, 'both delegation records are shown');
+    assert.equal(rows[0].state, 'superseded',
+                 'an expired newer grant still retires the older one');
+    assert.equal(rows[1].state, 'expired', 'the newer grant has expired');
   } else if (mode === 'current-success') {
     first.resolve(new Response(await note(original, 'r:current', '1')));
     await old;
@@ -145,6 +155,7 @@ clearTimeout(watchdog);
     [
         "current-success",
         "current-forged",
+        "current-expired-newer",
         "current-error",
         "current-missing",
         "switch-success",
