@@ -29,6 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from _client import _competing_reap_after_marker_read
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
@@ -415,6 +416,37 @@ class StoreLifecycle(RuleBasedStateMachine):
 
         self._reap_model()
         self._resync()
+
+    @rule()
+    def competing_reapers(self) -> None:
+        """Two workers seeing a due marker must share one pass through this lifecycle."""
+        with (
+            patch.object(store, "REAP_EVERY", 600),
+            patch.object(store, "_reap_pass", wraps=store._reap_pass) as passes,
+            _competing_reap_after_marker_read(self.root) as raced,
+        ):
+            self.reap()
+            assert raced
+            assert passes.call_count == 1, "a competing worker repeated the store walk"
+
+    @rule(ahead=st.sampled_from([1, 3600, 86400]))
+    def reap_after_clock_rollback(self, ahead: int) -> None:
+        """A future throttle marker permits one pass, then normal throttling resumes."""
+        marker = self.root / ".reaped"
+        marker.touch()
+        future = store.time.time() + ahead
+        os.utime(marker, (future, future))
+        with (
+            patch.object(store, "REAP_EVERY", 600),
+            patch.object(store, "_reap_pass", wraps=store._reap_pass) as passes,
+        ):
+            self._reap_model()
+            store._reap(self.root)
+            assert passes.call_count == 1, "a future marker suppressed maintenance"
+            self._resync()
+            assert marker.stat().st_mtime <= store.time.time()
+            store._reap(self.root)
+            assert passes.call_count == 1, "the recovered marker did not throttle"
 
     # ------------------------------------------------------------------ invariants
 

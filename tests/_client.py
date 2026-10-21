@@ -3,6 +3,8 @@
 import os
 import time
 from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -148,6 +150,37 @@ def _set_signed(client, ns, key, did, sign, value, nonce=1):
     return client.get(
         f"/kv/{ns}/{key}/set-signed/{did}/{sign(f'{ns}|{key}|{nonce}|{value}')}/{nonce}/{value}"
     )
+
+
+# ------------------------------------------------------------------ reaper scheduling
+
+
+@contextmanager
+def _competing_reap_after_marker_read(root):
+    """Interleave a second worker after the first has read its throttle marker.
+
+    Return the first observation even if the competing pass refreshes the marker. The
+    real file lock decides whether that second worker may run; no sleeps or fake locks.
+    """
+    stat = Path.stat
+    fired = []
+
+    def interleave(path, *args, **kwargs):
+        if path != root / ".reaped" or fired:
+            return stat(path, *args, **kwargs)
+        fired.append(True)
+        import store
+
+        try:
+            observed = stat(path, *args, **kwargs)
+        except FileNotFoundError:
+            store._reap(root)
+            raise
+        store._reap(root)
+        return observed
+
+    with patch.object(Path, "stat", interleave):
+        yield fired
 
 
 # ------------------------------------------------------------------ ephemeral rooms
