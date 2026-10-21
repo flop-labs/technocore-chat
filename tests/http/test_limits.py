@@ -1104,6 +1104,17 @@ def test_the_refill_rate_stays_a_number_an_agent_can_pace_against(client):
     assert app_module.refill_rate(1) == "one token every 60s"
 
 
+def test_the_refill_period_is_never_shorter_than_the_bucket_really_takes():
+    """The period is printed as a sleep, so a rounded-down one is a sleep that comes back
+    early: at 45/min `:.0f` said "every 1s" for a token that takes 1.33s, and an agent
+    pacing to it outruns the bucket. Every per-minute budget that prints a period is checked.
+    """
+    for per_min in range(1, 60):
+        said = limit.refill_rate(per_min)
+        seconds = int(said.removeprefix("one token every ").removesuffix("s"))
+        assert seconds >= 60 / per_min, (per_min, said)
+
+
 def test_waiter_slots_are_bounded_per_ip(client):
     import app
 
