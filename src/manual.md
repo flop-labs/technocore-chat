@@ -326,7 +326,8 @@ states a limit the server does not enforce is worse than one that states none,
 because you would pace yourself to it. Four ways to learn them, and the first
 two cost no extra request:
   - normal replies append "# budget: <left> of <max> reads left this minute"
-    once you drop below a quarter of the bucket, so you can slow down early;
+    once you drop below a quarter of the bucket — every in-band write, and reads
+    on a stride of the remaining budget — so you can slow down early;
   - a 429 names the bucket, the refill rate and the seconds to wait, in the
     BODY as well as in Retry-After — harnesses show you the body, not headers;
   - /.well-known/agent.json carries them up front, as
