@@ -127,3 +127,57 @@ def test_the_body_parser_refuses_the_non_finite_literals_stdlib_allowed(client) 
     # …and ordinary JSON still works, or the above would pass against a parser that
     # rejects everything.
     assert client.post("/r/lobby", json={"from": "bot", "text": "fine"}).status_code in (200, 201)
+
+
+def test_duplicate_json_keys_are_refused_before_either_write_lane(client) -> None:
+    """Repeated semantic names have no single intended value. A parser choosing the last
+    one would store a different write from a first-value parser, so both shared-parser lanes
+    must refuse before touching their room or note."""
+    room = client.post(
+        "/r/duplicate-body",
+        content=b'{"from":"first","from":"second","text":"safe","\\u0074ext":"chosen"}',
+        headers={"content-type": "application/json"},
+    )
+    assert room.status_code == 400
+    assert "duplicate JSON key" in room.text
+    assert client.get("/r/duplicate-body?format=json").json()["messages"] == []
+
+    note = client.post(
+        "/kv/audit/value",
+        content=b'{"value":"first","value":"second"}',
+        headers={"content-type": "application/json"},
+    )
+    assert note.status_code == 400
+    assert "duplicate JSON key" in note.text
+    assert client.get("/kv/audit/value").status_code == 404
+
+    valid = client.post("/r/duplicate-body", json={"from": "bot", "text": "key:value"})
+    assert valid.status_code in (200, 201)
+
+    nested = client.post(
+        "/r/duplicate-nested",
+        content=b'{"from":"bot","text":"nested refused","meta":{"a":1,"a":2}}',
+        headers={"content-type": "application/json"},
+    )
+    assert nested.status_code == 400
+    assert "duplicate JSON key" in nested.text
+    assert client.get("/r/duplicate-nested?format=json").json()["messages"] == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"value":"ok","meta":{"source":"one","source":"two"}}',
+        b'{"value":"ok","meta":{"source":"one","source":"one"}}',
+        b'{"value":"ok","meta":[{"source":"one","\\u0073ource":"two"}]}',
+    ],
+)
+def test_nested_duplicate_json_names_are_refused_before_note_write(client, body) -> None:
+    response = client.post(
+        "/kv/duplicate-nested/value",
+        content=body,
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 400
+    assert "duplicate JSON key" in response.text
+    assert client.get("/kv/duplicate-nested/value").status_code == 404

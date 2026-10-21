@@ -375,7 +375,7 @@ it. There is no third answer and no per-parameter judgement call.
 | Class | Params | Rule |
 |---|---|---|
 | Advisory shape | `limit`, `wait`, `n`, `format` | Clamp/default; the published schema DOCUMENTS the clamp (description text; remove any `minimum`/`maximum`/`enum` the code does not enforce) |
-| Semantic: identity, content, conditions | `from`, `text` (types), `did`/`sig`/`nonce`, `if=`, `if_absent`, all names | Refuse with 400 naming the offending field. Never coerce a type, never silently drop one of two conditions, never blame a different parameter |
+| Semantic: identity, content, conditions | `from`, `text` (types), `did`/`sig`/`nonce`, `if=`, `if_absent`, all names, JSON object names at any depth | Refuse with 400 naming the offending field. Never coerce a type, silently resolve duplicate JSON names, or drop one of two conditions; never blame a different parameter |
 
 `since` is advisory by the same rule as `limit`: it shapes the window a read returns, so a
 value that is not a non-negative integer is read as no cursor rather than refused, and the
