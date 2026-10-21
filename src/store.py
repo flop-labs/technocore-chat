@@ -32,8 +32,7 @@ import didkey
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
-MAX_TEXT_CHARS = 4096
-MAX_VALUE_CHARS = 8192
+MAX_TEXT_CHARS, MAX_VALUE_CHARS = 4096, 8192
 MAX_ROOM_BYTES = 10 << 20  # 10 MiB per room, then compacted
 # Compaction keeps a byte budget, not a line count. A fixed count cannot serve both ends
 # of a 4096-char limit: at ~150-byte messages, 500 lines threw away 98% of a full 10 MiB
@@ -238,13 +237,12 @@ MAX_NOTES_TOTAL = config.MAX_NOTES_TOTAL
 # The room where the server announces new public rooms. Clients may read it like any other
 # room but may NOT write to it (app.py refuses): a discovery log anyone can forge is worse
 # than no log, because monitors would build on it. Server-written lines are the only lines.
-EVENTS_ROOM = "events"
-EVENTS_NICK = "server"
+EVENTS_ROOM, EVENTS_NICK = "events", "server"
 # Lifetime counters live here because nothing else in the store is monotonic: `seq` is
 # per-room and dies with the room, compaction drops lines, and the reaper deletes whole
 # files. Summing `last_seq` across rooms therefore *decreases* on a reap, which would make
 # a "messages since the last digest" delta negative. These four only ever go up.
-COUNTERS_FILE = ".counters"
+COUNTERS_FILE, SNAPSHOTS_FILE = ".counters", ".snapshots"
 COUNTER_KEYS = (
     "messages",
     "rooms_created",
@@ -258,18 +256,13 @@ COUNTER_KEYS = (
 # a day ago. Kept here rather than in the reader because the service is the only thing that
 # is always running — a reader that holds its own history reports "no data" for a full day
 # every time it is restarted or redeployed, and that was the failure worth designing out.
-SNAPSHOTS_FILE = ".snapshots"
 # Taken on the write path under the same throttle as the reaper (see `_snapshot`), so the
 # cadence costs one extra pass per interval on a service that is already walking these
 # directories to reap. Nothing runs in the background.
-SNAPSHOT_EVERY = 300
-# 24h is the longest window a digest reports; the surplus is what keeps a lookback sample
-# available after an interval is missed, instead of losing the window entirely.
-SNAPSHOT_KEEP_SECONDS = 30 * 3600
-IDLE_SECONDS = 7 * 86400  # untouched rooms/notes are reaped, so squatting expires
+SNAPSHOT_KEEP_SECONDS, IDLE_SECONDS = 30 * 3600, 7 * 86400  # untouched rooms/notes reaped
 # A full store walk is worth amortizing: cleanup and count repair may lag ten minutes.
 # Retention ages stay separate; making a pass less frequent does not retire data sooner.
-REAP_EVERY = 600
+SNAPSHOT_EVERY, REAP_EVERY = 300, 600
 # A room that never got past its first message is a monologue, not a conversation: someone
 # said one thing, nobody answered, and it is holding a slot against MAX_ROOMS. A week is
 # what a conversation that stopped is worth; a day is what an unanswered opener is worth.
@@ -308,24 +301,15 @@ ROOM_CLASSES = ("p", "mb", "d", "e")
 # are denied on top of that, hardcoded, because they are the rendezvous points every agent
 # is told about: a claim on either would be a claim on the front door.
 UNOWNABLE_ROOMS = ("lobby", "meta")
-OWNERS_NS = "room-owners"  # /kv/room-owners/<room> -> the owner's did:key
-ALLOW_NS = "room-allow"  # /kv/room-allow/<room>  -> space-separated did:keys
-# Server-written, world-readable: the highest nonce accepted for a room's signed kv writes.
-# Notes are durable and have no ring, so unlike a message a captured signed note URL would
-# replay forever — and replaying an *old* allow-list is how a revoked key gets itself back
-# in. This is the smallest state that closes that, and it rides the existing CAS primitive
-# for its own atomicity. MAX_NOTES_PER_NS >= MAX_ROOMS, so every room may hold an owner.
-NONCE_NS = "room-nonce"
-TOPIC_NS = "topic"  # /kv/topic/<room>      -> what the room is for
+OWNERS_NS, ALLOW_NS, NONCE_NS, TOPIC_NS = "room-owners", "room-allow", "room-nonce", "topic"
 # A topic is an ordinary note (MAX_VALUE_CHARS), and /rooms shows one per room it lists:
 # printed in full that is a reply measured in hundreds of KB, against a response budget
 # measured in kilobytes. The overview
 # carries a preview; /kv/topic/<room> carries the whole thing.
-TOPIC_PREVIEW_CHARS = 120
 # Read from CHAT_EPHEMERAL_TTL_SECONDS once, in config — the only env reader in src/ — and
 # re-bound here so the cutoff (and the tests) read a plain module global; the lazy-expiry
 # rationale moved to config with the knob.
-EPHEMERAL_TTL_SECONDS = config.EPHEMERAL_TTL_SECONDS
+TOPIC_PREVIEW_CHARS, EPHEMERAL_TTL_SECONDS = 120, config.EPHEMERAL_TTL_SECONDS
 
 
 class StoreError(ValueError):
@@ -655,13 +639,20 @@ def _locked(target: Path, shared: bool = False, nb: bool = False):
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     lock = target.with_suffix(target.suffix + ".lock")
-    with open(lock, "a+b") as lf:
-        fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
-        config._dbg(2, "flock", path=target.name)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+    while True:
+        with open(lock, "a+b") as lf:
+            fcntl.flock(lf, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB * nb)
+            try:
+                try:
+                    match = os.fstat(lf.fileno()).st_ino == os.stat(lock).st_ino
+                except OSError:
+                    match = False
+                if match:
+                    config._dbg(2, "flock", path=target.name)
+                    yield
+                    return
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
 
 
 def _replace(path: Path, data: bytes, fsync: bool = False) -> None:
@@ -1223,8 +1214,7 @@ def room_generation(root: Path, room: str) -> int:
 # limit it is 3.2 MiB / ~55 ms, and a typical ~120-byte record makes the message cap bind first at ~24 KiB
 # per room. Rooms that are *not* shown still cost only a directory stat. What this bound exists
 # to exclude is the obvious wrong implementation: a full-ring scan (10 MiB) across every room.
-WINDOW_MESSAGES = 200
-WINDOW_BYTES = 65536
+WINDOW_MESSAGES, WINDOW_BYTES = 200, 65536
 
 
 def room_window(root: Path, room: str) -> tuple[int, list[str]]:
@@ -1754,8 +1744,10 @@ def _sweep_orphan_locks(root: Path, now: float, touched: dict[str, set[str]]) ->
                 data = entry.path[: -len(".lock")]
                 if os.access(data, os.F_OK) or now - entry.stat().st_mtime <= IDLE_SECONDS:
                     continue
-                os.unlink(entry.path)
-                touched[sub].add(_emptied(base, entry.path, sub == "notes"))
+                with open(entry.path, "a+b") as s_lf:
+                    fcntl.flock(s_lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    os.unlink(entry.path)
+                    touched[sub].add(_emptied(base, entry.path, sub == "notes"))
             except OSError:
                 continue
 
@@ -1957,7 +1949,7 @@ def _reap_pass(root: Path, now: float) -> None:
                 # Sync handlers overlap in the thread pool even with one Uvicorn process.
                 # The recheck re-counts too, so the reply that lands mid-pass saves the room.
                 # It re-stats by path, never through the entry — see _reapable.
-                with _locked(p):
+                with _locked(p, nb=True):
                     reason = _reapable(p, now, stillborn_rule)
                     if reason:
                         if stillborn_rule:
@@ -2106,8 +2098,7 @@ def _scan(d: Path | str, suffix: str, sized: bool = False) -> tuple[int, int]:
     assumed anywhere here, so one pass covers a store part-way through its migration, where
     some names still sit flat and the rest are already bucketed.
     """
-    count = 0
-    size = 0
+    count = size = 0
     try:
         with os.scandir(d) as entries:
             for e in entries:
@@ -2176,8 +2167,7 @@ def _count_notes(root: Path) -> tuple[int, int]:
     gauge stop being a per-request walk, and it is the same pass `_ns_totals` makes for one
     namespace, so a per-namespace count costs its bytes for free too.
     """
-    total = 0
-    size = 0
+    total = size = 0
     try:
         with os.scandir(root / "notes") as namespaces:
             for ns in namespaces:
@@ -2750,6 +2740,7 @@ def note_set(
     value: str,
     expect: str | None = None,
     expect_absent: bool = False,
+    reap: bool = True,
 ) -> dict:
     """Write a note, optionally only if it still holds what the caller last read.
 
@@ -2767,7 +2758,7 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
-    _reap(root)
+    reap and _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
     # Reap first: the sweep can remove an idle note that existed at request entry.
