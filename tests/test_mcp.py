@@ -386,7 +386,6 @@ def test_every_tool_publishes_its_effect_annotations(mcp):
         assert published == ANNOTATED[tool.name], tool.name
 
 
-
 def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
     """#1016: tool counts, advisory bounds, and HTTP methods must not drift."""
     import re
@@ -426,7 +425,6 @@ def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
     assert "GET for reads" in readme and "POST for writes" in readme
     assert "GET for" in mcp.module.streamable_http_app.__doc__
     assert "POST for writes" in mcp.module.streamable_http_app.__doc__
-
 
 
 def test_no_tool_advertises_a_structured_output_schema(mcp):
