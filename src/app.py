@@ -2238,7 +2238,9 @@ app = Starlette(
             CORSMiddleware,
             allow_origins=config.CORS_ORIGINS,  # default: none, so no browser origin is trusted
             allow_methods=["GET", "POST"],
-            allow_credentials=False,
+            # Allowed browsers need the dump's epoch and a refusal's retry delay, not
+            # just the body. Credentials remain disabled by the middleware's default.
+            expose_headers=["X-Room-Generation", "Retry-After"],
         ),
         # Innermost, so it sees handler responses only. Every knob is left at the
         # library's default because those defaults are what measured best here
