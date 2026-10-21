@@ -23,6 +23,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from functools import lru_cache
+from itertools import chain
 from pathlib import Path
 
 import orjson
@@ -887,16 +888,28 @@ def _parse(line: bytes) -> dict | None:
     return rec if isinstance(rec, dict) and isinstance(rec.get("seq"), int) else None
 
 
+def _tail_seq(out: list[dict], since: int | None, head_seq: int) -> int:
+    """The `last_seq` a read reports, which is the cursor a client polls with next.
+
+    With no readable record, a caller-supplied `since` is clamped to the room's head (#565).
+    A fresh read (`since is None`) reports the head itself: when every `e-` record has
+    expired the room still has a high-water mark, and reporting 0 would restart the next
+    cursor at the beginning despite it (#287).
+    """
+    cursor = head_seq if since is None else min(since, head_seq)
+    return out[-1]["seq"] if out else cursor
+
+
 def read_messages(
     root: Path, room: str, limit: int = DEFAULT_LIMIT, since: int | None = None
 ) -> dict:
     """Return the newest `limit` messages (oldest-first) with seq > `since`."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     path = room_path(root, room)
-    # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. Records are
-    # append-ordered, so the first expired record means every older one is expired too and
-    # the scan stops there. `last_seq` deliberately does NOT filter — seq must keep
-    # advancing past records nobody can read any more, or an expired room would reuse seqs.
+    # Expiry is lazy and drop-on-read: no reaper thread, no per-room timer. UTC can move
+    # backwards, so an expired record does not prove that every older record also expired.
+    # `last_seq` deliberately does NOT filter — seq must keep advancing past records nobody
+    # can read any more, or an expired room would reuse seqs.
     cutoff = _cutoff(room)
     out: list[dict] = []
     # The room's head, where a cursor past it is clamped (#565): echoing it back printed a
@@ -913,7 +926,7 @@ def read_messages(
             if since is not None and rec["seq"] <= since:
                 break
             if cutoff is not None and _expired(rec, cutoff):
-                break
+                continue
             out.append(rec)
             if len(out) >= limit:
                 break
@@ -924,7 +937,7 @@ def read_messages(
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
+        "last_seq": _tail_seq(out, since, head_seq),
         "generation": room_generation(root, room),
         "messages": out,
     }
@@ -940,8 +953,9 @@ def room_stamp(root: Path, room: str) -> tuple[int, int, int, int] | None:
         return None
 
 
-# One chunk of an export in flight at a time, so a slow reader holds 64 KiB and never the
-# room: the body itself is already bounded by MAX_ROOM_BYTES.
+# One batch of an export in flight, not the whole room. Ephemeral filtering completes
+# the final physical line before parsing, so its working set is this batch plus one line
+# and the parser/split/join copies. The body is already bounded by MAX_ROOM_BYTES.
 EXPORT_CHUNK = 65536
 
 
@@ -962,29 +976,6 @@ def _snapshot_bytes(f) -> int:
     return 0
 
 
-def _export_start(f, cutoff: float | None, end: int) -> int:
-    """Where the export begins: 0, or just past an `e-` room's expired prefix.
-
-    Ephemeral expiry is drop-on-read and a raw dump is a read: streaming records the class
-    promises have stopped being readable would make export the one lane that ignores the
-    TTL. Records are append-ordered, so the expired records are a prefix, and the export
-    starts at the first line whose record is still readable — judged by the same `_expired`
-    the tail read uses, unparsable `ts` failing closed with it. Costs one forward parse of
-    the bytes being dropped, on the `e-` class only; every other room starts at 0 for free.
-    """
-    if cutoff is None:
-        return 0
-    f.seek(0)
-    pos = 0
-    while pos < end:
-        line = f.readline()
-        rec = _parse(line)
-        if rec is not None and not _expired(rec, cutoff):
-            return pos
-        pos += len(line)
-    return end
-
-
 def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
     """The room's stored JSONL, bytes as written, snapshotted at open — and the room
     generation that snapshot belongs to.
@@ -994,8 +985,12 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
     round trip through the same encoder — is a way to corrupt proofs, not a formatting
     choice. The bound is one fstat when the file is opened, truncated to the last complete
     line (`_snapshot_bytes`), so an append landing mid-export is simply outside the
-    snapshot rather than a torn record inside it. An `e-` room's expired prefix is outside
-    it too (`_export_start`): expiry is drop-on-read, and export is a read.
+    snapshot rather than a torn record inside it. An `e-` room's expired records are filtered
+    out of each batch: expiry is drop-on-read, and export is a read. Scanning every
+    record also handles a host clock moving backwards, when expired records are not a
+    prefix. The first nonempty batch is pulled before returning the iterator, so prefix
+    read errors still surface while the adapter can send an error status. This primes the
+    same iterator, not a separate scan that parses the prefix twice.
 
     Opened HERE, not when the first chunk is pulled, because two things must be settled
     while an error can still become a status code: a room that exists but cannot be read
@@ -1023,7 +1018,7 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
         return room_generation(root, room), iter(())
     try:
         end = _snapshot_bytes(f)
-        start = _export_start(f, _cutoff(room), end)
+        cutoff = _cutoff(room)
         generation = room_generation(root, room)
     except BaseException:
         f.close()
@@ -1031,16 +1026,28 @@ def export_room(root: Path, room: str) -> tuple[int, Iterator[bytes]]:
 
     def chunks() -> Iterator[bytes]:
         with f:
-            f.seek(start)
-            remaining = end - start
-            while remaining > 0:
+            f.seek(0)
+            while (remaining := end - f.tell()) > 0:
                 block = f.read(min(EXPORT_CHUNK, remaining))
                 if not block:
-                    return  # unreachable on a held inode; never spin on a short read
-                remaining -= len(block)
-                yield block
+                    return
+                if cutoff is not None:
+                    # Complete one physical line even when the byte boundary falls inside
+                    # UTF-8. A boundary already on LF includes one more line; either way
+                    # this stays within one batch plus one line, never past the snapshot.
+                    block += f.readline(end - f.tell())
+                    # LF is JSONL's delimiter; splitlines would also split valid JSON
+                    # whitespace at CR and could turn one malformed line into records.
+                    block = b"".join(
+                        line + b"\n"
+                        for line in block.split(b"\n")[:-1]
+                        if (rec := _parse(line)) is not None and not _expired(rec, cutoff)
+                    )
+                if block:
+                    yield block
 
-    return generation, chunks()
+    stream = chunks()
+    return generation, chain((next(stream, b""),), stream)
 
 
 def _seq_state_path(root: Path, room: str = "") -> Path:
@@ -2723,18 +2730,19 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
     total = 0
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
-            total += len(line) + 1  # the newline this line costs on the way back out
-            if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
-                break
+            # `and kept`: the newest record is always retained, expired or not, because
+            # `seq` is read back from it. Compacting an `e-` room to nothing would
+            # restart the sequence at 1 and silently strand every cursor pointing past
+            # it. Older expired records are skipped, not a stop: UTC can move
+            # backwards, so a live record behind an expired one must survive rotation.
             if cutoff is not None and kept:
-                # `and kept`: the newest record is always retained, expired or not, because
-                # `seq` is read back from it. Compacting an `e-` room to nothing would
-                # restart the sequence at 1 and silently strand every cursor pointing past
-                # it. Unreadable on the way out, one line on disk — the cheap side of that
-                # trade. Append-ordered, so everything further back is older still.
                 rec = _parse(line)
                 if rec is None or _expired(rec, cutoff):
-                    break
+                    continue
+            size = len(line) + 1
+            if kept and (total + size > keep or len(kept) >= COMPACT_MAX_LINES):
+                break
+            total += size
             kept.append(line)
     kept.reverse()
     # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and

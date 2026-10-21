@@ -503,6 +503,62 @@ def test_an_ephemeral_room_keeps_the_history_that_has_not_expired(tmp_path, monk
     assert seqs == list(range(seqs[0], seqs[-1] + 1))
 
 
+def test_ephemeral_read_keeps_live_record_before_a_clock_rollback(tmp_path, monkeypatch):
+    """A stale record appended after a wall-clock rollback must not hide an older live one."""
+    from datetime import UTC, datetime, timedelta
+
+    import store
+
+    store.append(tmp_path, "e-clock", "bot", "still live")
+
+    stale = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    monkeypatch.setattr(store, "_now", lambda: stale.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+    store.append(tmp_path, "e-clock", "bot", "written after clock rollback")
+
+    view = store.read_messages(tmp_path, "e-clock", limit=50)
+    assert [message["text"] for message in view["messages"]] == ["still live"]
+
+
+def test_all_expired_ephemeral_tail_keeps_head_seq(tmp_path, monkeypatch):
+    """When every record has expired, a fresh read must still report head_seq."""
+    from datetime import UTC, datetime, timedelta
+
+    import store
+
+    stale = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    with monkeypatch.context() as m:
+        m.setattr(store, "_now", lambda: stale.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+        store.append(tmp_path, "e-expired", "bot", "one")
+        store.append(tmp_path, "e-expired", "bot", "two")
+
+    view = store.read_messages(tmp_path, "e-expired", limit=50)
+    assert view["messages"] == []
+    assert view["last_seq"] == 2
+
+    clamped = store.read_messages(tmp_path, "e-expired", since=99, limit=50)
+    assert clamped["last_seq"] == 2
+
+
+def test_all_expired_tail_after_clock_rollback_keeps_head_seq(tmp_path, monkeypatch):
+    """Same invariant when the second record was written with a rolled-back clock."""
+    from datetime import UTC, datetime, timedelta
+
+    import store
+
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    older = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 600)
+    old = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    with monkeypatch.context() as m:
+        m.setattr(store, "_now", lambda: old.strftime(fmt))
+        store.append(tmp_path, "e-rollback-all", "bot", "one")
+        m.setattr(store, "_now", lambda: older.strftime(fmt))
+        store.append(tmp_path, "e-rollback-all", "bot", "two")
+
+    view = store.read_messages(tmp_path, "e-rollback-all", limit=50)
+    assert view["messages"] == []
+    assert view["last_seq"] == 2
+
+
 def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     """The reaper must recheck mtime under the lock, or it deletes live messages."""
     import store

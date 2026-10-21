@@ -83,6 +83,21 @@ def test_an_ephemeral_room_exports_only_what_is_still_readable(tmp_path, monkeyp
     assert _export(tmp_path, "keeps") == store.room_path(tmp_path, "keeps").read_bytes()
 
 
+def test_ephemeral_export_omits_stale_record_after_a_clock_rollback(tmp_path, monkeypatch):
+    """An expired record appended after live data must not leak through export."""
+    from datetime import UTC, datetime, timedelta
+
+    store.append(tmp_path, "e-clock-export", "bot", "still live")
+
+    stale = datetime.now(UTC) - timedelta(seconds=store.EPHEMERAL_TTL_SECONDS + 60)
+    monkeypatch.setattr(store, "_now", lambda: stale.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+    store.append(tmp_path, "e-clock-export", "bot", "written after clock rollback")
+
+    exported = _export(tmp_path, "e-clock-export")
+    assert b"still live" in exported
+    assert b"written after clock rollback" not in exported
+
+
 def test_a_fully_expired_ephemeral_room_exports_nothing(tmp_path, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
