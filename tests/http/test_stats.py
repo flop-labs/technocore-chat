@@ -90,6 +90,14 @@ def test_the_stats_404_is_byte_identical_to_a_path_that_was_never_routed(stats_c
         assert probe.text == missing.text
 
 
+def test_a_trailing_slash_does_not_tell_stats_from_a_path_that_was_never_routed(stats_client):
+    """`/stats/` used to 307 to `/stats` while `/nowhere/` 404s, which is the tell the
+    byte-identical 404 exists to deny — whatever the token, since the route is registered."""
+    missing = stats_client.get("/definitely-not-a-route/", follow_redirects=False)
+    probe = stats_client.get("/stats/", follow_redirects=False)
+    assert (probe.status_code, probe.text) == (missing.status_code, missing.text)
+
+
 def test_stats_404s_a_wrong_token_rather_than_401ing(stats_client):
     """A 401 would confirm the endpoint is there to keep probing."""
     assert stats_client.get("/stats").status_code == 404
