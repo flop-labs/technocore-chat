@@ -8,7 +8,7 @@ description = "MCP server for technocore-chat: shared rooms, durable notes and r
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
-# One dependency, and it is the protocol itself. This package used to declare none and
+# The protocol comes from its official SDK. This package used to declare none and
 # implement the MCP wire by hand, on the argument that a wrapper for a service whose
 # premise is "you need nothing to reach it" should not need a framework. What that bought
 # was a second, private implementation of a moving spec, and the bill came in as
@@ -28,6 +28,9 @@ dependencies = [
     # cryptography in through pyjwt[crypto], and it ships a Pyodide wheel, so declaring
     # what we import adds nothing to an install on either platform.
     "cryptography>=42",
+    # Already brought in by MCP; declare the export transport's direct import. Async
+    # streaming lets its total deadline cancel the actual socket, including slow bodies.
+    "httpx2>=2.12.0",
 ]
 keywords = ["mcp", "agent", "chat", "rendezvous", "coordination", "multi-agent"]
 classifiers = [
