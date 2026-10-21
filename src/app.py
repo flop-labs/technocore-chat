@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 import orjson
 from starlette.applications import Starlette
@@ -431,7 +432,7 @@ def who(name: str) -> str:
     return didkey.abbreviate(name) if didkey.is_did(name) else f"~{name}"
 
 
-def render(view: dict) -> str:
+def render(view: dict, suffix: str = "") -> str:
     lines = [
         f"# room {view['room']}  messages {view['count']}  "
         f"range {view['first_seq']}..{view['last_seq']}",
@@ -449,11 +450,13 @@ def render(view: dict) -> str:
         if store.is_mailbox(view["room"])
         else f"say:  /r/{view['room']}/say/<nick>/<text%20url%20encoded>"
     )
-    lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}", say]
+    lines += ["", f"next: /r/{view['room']}?since={view['last_seq']}{suffix}", say]
     return "\n".join(lines)
 
 
-def respond(request: Request, view: dict, body_text: str | None = None, note: str = "") -> Response:
+def respond(
+    request: Request, view: dict, body_text: str | None = None, note: str = "", suffix: str = ""
+) -> Response:
     if request.query_params.get("format") == "json":
         # orjson, compact, not stdlib `indent=1`: any indent drops stdlib onto its pure-Python
         # encoder, and this is the hottest encode in the service (every JSON read, long-poll
@@ -468,7 +471,7 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
-    return text((body_text if body_text is not None else render(view)) + note)
+    return text((body_text if body_text is not None else render(view, suffix)) + note)
 
 
 def _shareable(resp: Response, private: object) -> Response:
@@ -1029,6 +1032,20 @@ def __getattr__(name: str):
     return getattr(limit, name)
 
 
+def _filter(writer: str | None, signed: str | None) -> tuple[store.Keep, str]:
+    """The read filters: `store.read_filter`'s predicate plus the query suffix the `next:`
+    footer must carry, so a caller following it keeps the same collection.
+
+    The suffix is echoed URL-encoded, valid or not, so the footer keeps exactly the
+    asked-for collection (a matches-nothing filter stays one) and no caller-chosen byte
+    reaches the line format.
+    """
+    if writer is None and signed != "1":
+        return None, ""
+    suffix = f"&from={quote(writer, safe=':')}" if writer is not None else ""
+    return store.read_filter(writer), suffix + ("&signed=1" if signed == "1" else "")
+
+
 async def room_read(request: Request) -> Response:
     left, retry = take(request, "read", RATE_READ)
     if retry:
@@ -1038,35 +1055,42 @@ async def room_read(request: Request) -> Response:
     # `tail`, not `limit`: the query param keeps its published name, the local must not
     # shadow the limit module the refusal two lines above calls into.
     tail = _cursor(q.get("limit"), 50)
+    keep, suffix = _filter(q.get("from"), q.get("signed"))
     room = request.path_params["room"]
     # Tail reads are blocking file IO. This route is async for the waiting half, so the
     # read has to go to a thread explicitly — as a sync route Starlette did that for us.
-    view = await run_in_threadpool(store.read_messages, config.ROOT, room, limit=tail, since=since)
+    view = await run_in_threadpool(store.read_messages, config.ROOT, room, tail, since, keep)
 
     # Waiting only means anything with a cursor: without `since` a read always returns the
-    # newest messages, so there is nothing to wait *for*.
+    # newest messages, so there is nothing to wait *for*. Under a filter the wait ends on
+    # the next *matching* line: "wake me when this key speaks".
     wait = _seconds(q.get("wait"))
     unheld = ""
     if wait and since is not None and not view["messages"]:
-        fresh, unheld = await _await_messages(request, room, tail, since, wait)
+        fresh, unheld = await _await_messages(request, room, tail, since, view, wait, keep)
         # The JSON lane's half of the note below, since a program gets no footer and must
-        # not infer a refusal from latency. Only when a wait returned nothing: one that
-        # produced messages was held by definition.
-        view = fresh if fresh is not None else {**view, "wait_held": not unheld}
+        # not infer a refusal from latency. Only when the wait returned nothing: one that
+        # produced messages was held by definition. A wait that ended empty still comes
+        # back as a view — its cursor moved past the lines it scanned — so the test is
+        # whether messages arrived, not whether `fresh` was None.
+        view = fresh if fresh is not None else view
+        view = view if view["messages"] else {**view, "wait_held": not unheld}
     # Ahead of the budget footer: a wait that did not happen is what the caller must act
     # on first, and acting on it is what stops the next request being an instant re-poll.
     note = unheld + budget_note("read", left, RATE_READ)
-    return _shareable(respond(request, view, note=note), note or wait)
+    return _shareable(respond(request, view, note=note, suffix=suffix), note or wait)
 
 
 async def _await_messages(
-    request: Request, room: str, limit: int, since: int, wait: float
+    request: Request, room: str, limit: int, since: int, view: dict, wait: float, keep=None
 ) -> tuple[dict | None, str]:
-    """Poll the room until something arrives past `since`, or the budget runs out.
+    """Poll the room until something arrives past `since` and the empty `view`'s cursor, or
+    the budget runs out.
 
-    Returns the messages (or None) and, when no waiter slot was free, the note saying so:
-    both exits are empty, but one waited and the other never did, and a caller told only
-    "nothing" cannot tell which — see `limit.waiter_note`.
+    Returns the newest view, or None when nothing arrived and there is no scan to report
+    (an unfiltered wait, a caller that hung up, no free waiter slot), and in the last case
+    the note saying so: both exits are empty, but one waited and the other never did, and a
+    caller told only "nothing" cannot tell which — see `limit.waiter_note`.
 
     Polling rather than watching: inotify would need a per-room watch table and a wakeup
     fan-out, which is state this service does not otherwise keep. A tick costs one stat;
@@ -1081,6 +1105,19 @@ async def _await_messages(
     A cross-process wakeup bus would buy the rest of that interval for a background task, a
     lifespan hook and a broadcast primitive that actually fans out (a FIFO does not: one
     reader consumes each byte, so N-1 workers miss it).
+
+    Each empty poll moves the cursor to the newest line it scanned, so under a filter the
+    next poll reads only what arrived since — never the same unmatched tail again. The
+    reply describes the whole wait as one scan: `first_seq` is the oldest line any poll
+    saw, `last_seq` the newest, whether a match arrived or the wait ran out. The one
+    exceptions are a poll that ran out of budget itself and a poll that crossed into a new
+    `generation` — each is returned as is, because its gap (or its epoch) is the news and a
+    single scan's `first_seq` cannot span two of them. A room reaped and recreated under a
+    waiter is precisely what `generation` exists to announce, so the wait ends rather than
+    carrying a cursor from the conversation that is gone. The cursor never drops below the
+    caller's `since`, even where the reply clamps `last_seq` to the room's head (#565): a
+    dead cursor must not hand back lines the caller asked to skip. An unfiltered wait that
+    runs out returns None, so the caller keeps the view it started from, as before.
     """
     ip = client_ip(request)  # once: client_ip counts proxy evidence as a side effect
     with _waiter_slot(ip) as granted:
@@ -1088,22 +1125,29 @@ async def _await_messages(
             return None, waiter_note(ip, MAX_WAITERS_TOTAL, MAX_WAITERS_PER_IP, wait)
         deadline = time.monotonic() + wait
         last: object = object()  # the stamp the last read saw; none yet, so the first reads
+        since, first = max(since, view["last_seq"]), view["first_seq"]
         while time.monotonic() < deadline:
             await asyncio.sleep(min(WAIT_POLL, max(0.0, deadline - time.monotonic())))
             # Stop burning tail reads on a caller that has already hung up.
             if await request.is_disconnected():
                 return None, ""
-            # Taken before the read, so a write racing it moves the next tick's stamp.
+            # Taken before the read, so a write racing it moves the next tick's stamp. An
+            # unchanged file holds nothing past the cursor, filtered or not, so a skipped tick
+            # cannot leave a matching line behind.
             stamp = await run_in_threadpool(store.room_stamp, config.ROOT, room)
             if stamp == last:
                 continue
             last = stamp
-            view = await run_in_threadpool(
-                store.read_messages, config.ROOT, room, limit=limit, since=since
+            fresh = await run_in_threadpool(
+                store.read_messages, config.ROOT, room, limit=limit, since=since, keep=keep
             )
-            if view["messages"]:
-                return view, ""
-    return None, ""
+            if fresh["generation"] != view["generation"] or (fresh["first_seq"] or 0) > since + 1:
+                return fresh, ""
+            first = fresh["first_seq"] if first is None else first
+            if fresh["messages"]:
+                return {**fresh, "first_seq": first}, ""
+            view, since = fresh, max(since, fresh["last_seq"])
+    return ({**view, "first_seq": first} if keep else None), ""
 
 
 def room_export(request: Request) -> Response:
