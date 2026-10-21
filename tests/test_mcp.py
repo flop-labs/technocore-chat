@@ -426,6 +426,18 @@ def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
     assert "GET for" in mcp.module.streamable_http_app.__doc__
     assert "POST for writes" in mcp.module.streamable_http_app.__doc__
 
+    # The Cloudflare adapter shares the same handlers and method-aware fetch seam.
+    # Keep its deployment-specific docs aligned with the actual wrapper behavior.
+    worker_readme = (ROOT / "mcp" / "worker" / "README.md").read_text(encoding="utf-8")
+    worker_source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "`GET` for reads and `POST` for writes" in worker_readme
+    assert "GET for network reads and POST for writes" in worker_source
+    assert "Every tool call is one independent GET" not in worker_readme
+    assert "every operation is a plain `GET`" not in worker_readme
+    assert "tool call is one independent GET" not in worker_source
+
 
 def test_no_tool_advertises_a_structured_output_schema(mcp):
     """Text, not JSON. The SDK would read `-> str` as "publish an outputSchema and send
