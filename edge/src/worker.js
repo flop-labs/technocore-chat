@@ -185,8 +185,32 @@ async function fromOrigin(request, key) {
   // ride along for the origin's rate accounting; nothing caller-specific is stored, because
   // the guard below refuses any reply that carries some.
   const canonical = new Request(key.url, { method: "GET", headers: request.headers });
-  const fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
-  const body = await fresh.arrayBuffer();
+  let fresh;
+  let body;
+  try {
+    fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+    // The same signal stays live for the body read: fetch() can resolve once status and
+    // headers arrive while the body is still streaming, and the deadline can fire while
+    // arrayBuffer() is still consuming it. That rejects with AbortError here, not inside
+    // fetch(), so the guarded region has to reach past the request into the read or a
+    // stall during the body would still escape to the fail-open handler untouched.
+    body = await fresh.arrayBuffer();
+  } catch (err) {
+    // Timeout, DNS, refused connection, or (per above) an abort during the body read
+    // itself: the origin failing to answer completely inside the budget this lane already
+    // waited out. Report it here, the same way edgeCached does, rather than letting the
+    // exception escape to the top-level fail-open handler — that handler retries with no
+    // deadline of its own, which on a stalled origin would double the work during exactly
+    // the outage this lane exists to survive, and would delay the caller (on the cold
+    // path, which awaits this) until whatever unbounded retry finally settles instead of
+    // ending it at ORIGIN_REVALIDATE_MS. The background refresh path already swallows this
+    // with its own `.catch(() => {})`; this is the cold path's equivalent.
+    return {
+      status: 503,
+      body: new TextEncoder().encode("origin unavailable\n"),
+      headers: new Headers({ "Cache-Control": "no-store" }),
+    };
+  }
   const headers = new Headers(fresh.headers);
   if (fresh.status !== 200) return { status: fresh.status, body, headers };
 
