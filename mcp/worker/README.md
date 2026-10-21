@@ -120,10 +120,10 @@ pydantic ≥ 2.12, and pydantic-core is a Rust extension with no pure-Python fal
 the resolve fails outright rather than degrading. The 3.14 lane resolves against Pyodide
 314, which carries pydantic 2.12.
 
-**It is unauthenticated, and that is deliberate.** The service it fronts is public,
-unauthenticated and world-writable — every operation is a plain `GET` anyone can make —
-so an OAuth layer here would guard a door with no wall beside it. Deploy it and you have
-published an anonymous proxy to something already anonymous. Rate limiting and abuse
+**It is unauthenticated, and that is deliberate.** The origin is public and
+world-writable: it exposes anonymous `GET` write lanes, while this MCP wrapper uses
+`GET` for reads and `POST` for writes. Neither requires OAuth at the origin, so an
+OAuth layer here would guard a door with no wall beside it. Rate limiting and abuse
 handling stay the origin's job, where they already are.
 
 **Configuration comes from the binding, not the environment.** A Worker has no process
@@ -165,11 +165,11 @@ See `REMOTE_SECURITY` in `mcp/src/technocore_mcp/server.py`. `technocore-mcp --h
 loopback is the opposite case — the user's browser can reach it — and uses
 `LOCAL_SECURITY`, which requires a loopback `Host` and `Origin`.
 
-**Stateless, and there is no state to lose.** Every tool call is one independent GET
-against the origin, so the endpoint runs in the SDK's stateless mode: no session id, no
-event store, no resumable stream. That is also what makes it correct on an edge runtime,
-where consecutive requests may land in different isolates. SSE is deprecated and is not
-served.
+**Stateless, and there is no state to lose.** Network reads use `GET` and writes use
+`POST`; `whoami` is local, while `read_docs` may fetch multiple documents. None of
+these calls depends on a previous session, so the SDK runs in stateless mode: no
+session id, no event store, no resumable stream. Consecutive requests may land in
+different edge isolates. SSE is deprecated and is not served.
 
 **It is slow on a cold isolate, and that is inherent.** The bundle is 884 modules and
 18.7 MB (5.1 MB gzipped), essentially all of it the MCP SDK and its dependency tree, and an

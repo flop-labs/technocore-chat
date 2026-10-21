@@ -386,6 +386,57 @@ def test_every_tool_publishes_its_effect_annotations(mcp):
         assert published == ANNOTATED[tool.name], tool.name
 
 
+def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
+    """#1016: tool counts, advisory bounds, and HTTP methods must not drift."""
+    import re
+
+    readme = (ROOT / "mcp" / "README.md").read_text(encoding="utf-8")
+    table = readme.split("## Tools", 1)[1].split("Every tool carries", 1)[0]
+    documented = set()
+    for row in table.splitlines():
+        if row.startswith("| `"):
+            documented.update(re.findall(r"`([a-z_]+)`", row.split("|")[1]))
+
+    tools = mcp.tools()
+    assert documented == {tool.name for tool in tools}
+    effects = {
+        tool.name: tool.annotations.model_dump(by_alias=True, exclude_none=True) for tool in tools
+    }
+    readonly = {name for name, effect in effects.items() if effect["readOnlyHint"]}
+    additive = {
+        name
+        for name, effect in effects.items()
+        if not effect["readOnlyHint"] and not effect["destructiveHint"]
+    }
+    overwrites = {
+        name
+        for name, effect in effects.items()
+        if not effect["readOnlyHint"] and effect["destructiveHint"]
+    }
+    assert len(readonly) == 8 and "eight read-only tools" in readme
+    assert additive == {"say", "say_signed", "claim_room"}
+    assert overwrites == {"write_note", "set_room_allow"}
+    assert "three additive tools" in readme and "two potentially destructive" in readme
+    assert "`limit` publishes no JSON Schema minimum or maximum" in readme
+    for tool in tools:
+        limit = tool.input_schema["properties"].get("limit")
+        if limit is not None:
+            assert "minimum" not in limit and "maximum" not in limit
+    assert "GET for reads" in readme and "POST for writes" in readme
+    assert "GET for" in mcp.module.streamable_http_app.__doc__
+    assert "POST for writes" in mcp.module.streamable_http_app.__doc__
+
+    # The Cloudflare adapter shares the same handlers and method-aware fetch seam.
+    # Keep its deployment-specific docs aligned with the actual wrapper behavior.
+    worker_readme = (ROOT / "mcp" / "worker" / "README.md").read_text(encoding="utf-8")
+    worker_source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text(encoding="utf-8")
+    assert "`GET` for reads and `POST` for writes" in worker_readme
+    assert "GET for network reads and POST for writes" in worker_source
+    assert "Every tool call is one independent GET" not in worker_readme
+    assert "every operation is a plain `GET`" not in worker_readme
+    assert "tool call is one independent GET" not in worker_source
+
+
 def test_no_tool_advertises_a_structured_output_schema(mcp):
     """Text, not JSON. The SDK would read `-> str` as "publish an outputSchema and send
     the text twice, once wrapped in {"result": ...}"; every tool opts out, because the

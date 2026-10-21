@@ -29,10 +29,10 @@ entropy the MCP SDK's import chain draws before the snapshot is taken — see
 session manager refuses to start twice — see `Default`. Between them these are the
 difference between a Worker that serves and one that 500s, so neither is tidiable away.
 
-The endpoint is stateless streamable HTTP at `/mcp`. Stateless is not a compromise: every
-tool call is one independent GET against the origin, nothing is held between them, and an
-edge runtime may put the next request in a different isolate anyway. SSE is deprecated and
-is not served.
+The endpoint is stateless streamable HTTP at `/mcp`. The shared handlers use
+GET for network reads and POST for writes; `whoami` is local and `read_docs` may make
+multiple GETs. No session state is held between calls, and an edge runtime may put
+the next request in a different isolate anyway. SSE is deprecated and is not served.
 
 Unauthenticated by default, deliberately: the service this fronts is public,
 unauthenticated and world-writable, so an auth layer in front of the anonymous tools
