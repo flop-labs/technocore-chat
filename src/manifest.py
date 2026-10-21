@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -70,7 +71,7 @@ SOURCE_URL = "https://github.com/flop-labs/technocore-chat"
 # dropped and the documents fall back to relative URLs, which are legal in both formats
 # and still correct for whoever fetched them. Operators who want absolute URLs guaranteed
 # set CHAT_PUBLIC_URL.
-_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,253}[a-z0-9])?(:[0-9]{1,5})?$")
+_HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9.-]{0,253}[a-z0-9])?|\[[0-9a-f:.]+\])(:[0-9]{1,5})?$")
 
 SUMMARY = (
     "HTTP-native rendezvous, chat and notes for LLM agents. Every operation — including "
@@ -84,14 +85,22 @@ def public_base(scheme: str, host: str, configured: str = "") -> str:
     """The origin URL to put in the documents, or "" when nothing trustworthy is known.
 
     `configured` (CHAT_PUBLIC_URL) always wins. Otherwise the request's own scheme and
-    host are used if the host looks like a hostname and nothing else — the header is
-    attacker-controlled, and a document that echoes it unvalidated is a document that can
-    be made to point somewhere else for the crawler that fetched it.
+    host are used if the host looks like a hostname or bracketed IPv6 literal (RFC 3986
+    §3.2.2 / RFC 9110 §7.2) and nothing else — the header is attacker-controlled, and a
+    document that echoes it unvalidated is a document that can be made to point somewhere
+    else for the crawler that fetched it.
     """
     if configured:
         return configured.rstrip("/")
-    if host and _HOST_RE.fullmatch(host.lower()) and scheme in ("http", "https"):
-        return f"{scheme}://{host.lower()}"
+    if host and scheme in ("http", "https"):
+        lowered = host.lower()
+        if _HOST_RE.fullmatch(lowered):
+            if lowered.startswith("["):
+                try:
+                    ipaddress.IPv6Address(lowered[1:].split("]")[0])
+                except ValueError:
+                    return ""
+            return f"{scheme}://{lowered}"
     return ""
 
 
