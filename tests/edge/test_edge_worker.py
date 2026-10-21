@@ -14,6 +14,8 @@ import importlib.util
 import json
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 
 import _client
@@ -514,3 +516,42 @@ def test_the_icon_is_built_from_the_tracked_brand_mark():
     assert 'SOURCE = HERE.parent / "docs" / "brand" / "technocore_Icon_Accent.svg"' in script
     assert ".." not in script.split("SOURCE =")[1].split("\n")[0]
     assert "icon-source.png" not in script, "the raster intermediate is gone; do not bring it back"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "cold-429",
+        "cold-no-store",
+        "cold-private",
+        "cold-public",
+        "cold-private-followers",
+        "warm-429",
+        "warm-no-store",
+        "warm-public",
+    ],
+)
+def test_pending_room_fills_only_share_public_replies(scenario):
+    """Execute the Worker: refusing cache.put alone does not prevent promise-result sharing."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is needed to execute the edge Worker")
+    snapshot = _snapshot_module()
+    routing = {
+        "static_first": list(snapshot.STATIC_FIRST),
+        "edge_revalidate": snapshot.EDGE_REVALIDATE,
+        "edge_key": snapshot.rooms_key(),
+    }
+    run = subprocess.run(
+        [
+            node,
+            str(pathlib.Path(__file__).with_name("rooms_fill_probe.mjs")),
+            scenario,
+            str(EDGE / "src" / "worker.js"),
+            json.dumps(routing),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr

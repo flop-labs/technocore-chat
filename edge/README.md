@@ -88,6 +88,11 @@ the origin is failing and the Worker is doing its job.
 document routes against each other. A document route added to `app.py` and not to this
 Worker fails there rather than in an outage.
 
+With Node.js 18 or newer available, `uv run pytest tests/edge/test_edge_worker.py -q` also
+executes the Worker against controlled origin and Cache API responses. It checks that
+concurrent cold reads share only public replies, while stale reads keep sharing one
+background refresh. These tests use no network requests or extra Node packages.
+
 ## JavaScript, unlike `mcp/worker`
 
 That Worker is Python because it wraps the Python MCP SDK and there is one implementation of
