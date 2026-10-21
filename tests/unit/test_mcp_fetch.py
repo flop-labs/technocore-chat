@@ -34,6 +34,13 @@ class _Handler(BaseHTTPRequestHandler):
     """Echoes the method, path, User-Agent and any body; takes its status from the path."""
 
     def _answer(self):
+        if self.path == "/moved":
+            # What the public instance does for any request over plain http.
+            self.send_response(301)
+            self.send_header("Location", "/r/lobby")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         status = 429 if self.path.startswith("/slow-down") else 200
         length = int(self.headers.get("Content-Length") or 0)
         received = self.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -100,6 +107,26 @@ def test_an_http_failure_comes_back_as_a_value_with_its_body_intact(origin):
     status, body = fetch(f"{origin}/slow-down")
     assert status == 429
     assert "for GET /slow-down" in body
+
+
+def test_a_redirected_write_is_not_resent_as_a_read(origin):
+    """urllib's default answer to a 301 on a POST is a GET of the new URL with the body
+    dropped: the write never happens and the reply is a 200. The redirect has to come
+    back as the answer instead, so the layer above can refuse it."""
+    status, body = fetch(
+        f"{origin}/moved",
+        {"Content-Type": "application/json"},
+        method="POST",
+        body=b'{"from": "a", "text": "hello"}',
+    )
+    assert status == 301
+    assert "for GET" not in body
+
+
+def test_a_redirected_read_is_still_followed(origin):
+    status, body = fetch(f"{origin}/moved")
+    assert status == 200
+    assert "for GET /r/lobby" in body
 
 
 def test_no_answer_at_all_raises_oserror():

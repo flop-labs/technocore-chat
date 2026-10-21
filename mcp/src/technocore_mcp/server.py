@@ -265,6 +265,19 @@ async def _request(
         status, text = await _fetch(method, url, headers, body, timeout or TIMEOUT)
     except OSError as exc:
         raise ToolError(f"cannot reach {BASE_URL}: {exc}") from None
+    if 300 <= status < 400:
+        # Neither transport follows write redirects. A redirect does not prove the
+        # origin skipped the write: it can commit and then answer 303. Do not promise
+        # that retrying is safe; a read with an unfollowable redirect also ends here.
+        outcome = (
+            "this request was not completed"
+            if method in ("GET", "HEAD")
+            else "this write was not confirmed; check whether it landed before retrying"
+        )
+        raise ToolError(
+            f"HTTP {status}: {BASE_URL} returned a redirect, so {outcome}. "
+            "Set TECHNOCORE_URL to the final instance address."
+        )
     if status >= 400:
         raise ToolError(text.strip() or f"HTTP {status}")
     return text

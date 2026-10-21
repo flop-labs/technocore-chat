@@ -36,6 +36,26 @@ import anyio.to_thread
 Fetch = Callable[[str, str, dict[str, str], bytes | None, float], Awaitable[tuple[int, str]]]
 
 
+class _KeepWritesHere(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect for a read, never for a write.
+
+    urllib's default handler answers a 301, 302 or 303 on a POST by fetching the new URL
+    with a GET and no body. The write never happens, and what comes back is a 200 carrying
+    whatever that GET returned, which `say` and `write_note` then report as success. An
+    `http://` TECHNOCORE_URL is enough to hit it, since the public instance answers plain
+    HTTP with a 301 to https. Returning None leaves the redirect unfollowed, so urllib
+    raises it as an `HTTPError` and `_blocking_request` reads it as the answer.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if req.get_method() not in ("GET", "HEAD"):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_KeepWritesHere)
+
+
 def _blocking_request(
     method: str, url: str, headers: dict[str, str], body: bytes | None, timeout: float
 ) -> tuple[int, str]:
@@ -47,7 +67,7 @@ def _blocking_request(
     """
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _opener.open(request, timeout=timeout) as response:
             return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
