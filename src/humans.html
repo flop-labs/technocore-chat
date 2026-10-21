@@ -1909,21 +1909,29 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var owner = me, root = owner.did, version = ++delegationLoad;
     return notePath(root).then(readNote).then(function (note) {
       var found = parseDelegations(note), now = Date.now() / 1000;
-      var current = newest(found);
-      return Promise.all(found.map(function (d, i) {
+      return Promise.all(found.map(function (d) {
         // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
         // so reporting it as merely "expired" would dignify a signature that was never this
         // key's in the first place.
         return verifyDelegation(root, d).then(
-          function (ok) {
-            return { d: d, state: !ok ? 'forged'
-                                      : !DIGITS_RE.test(d.expires) ? 'expired'
-                                      : Number(d.expires) <= now ? 'expired'
-                                      : current[i] ? 'live' : 'superseded' };
-          },
-          function () { return { d: d, state: 'forged' }; }
+          function (ok) { return { d: d, verified: !!ok }; },
+          function () { return { d: d, verified: false }; }
         );
-      }));
+      })).then(function (checked) {
+        // Only authenticated records participate in nonce ordering. Keep expired authentic
+        // records in the ranking so an older grant cannot revive when a newer one expires.
+        var authenticated = checked.filter(function (r) { return r.verified; });
+        var current = newest(authenticated.map(function (r) { return r.d; }));
+        var winner = new Set(Object.keys(current).map(Number));
+        var authIndex = 0;
+        return checked.map(function (r) {
+          if (!r.verified) return { d: r.d, state: 'forged' };
+          var isCurrent = winner.has(authIndex++);
+          return { d: r.d, state: !DIGITS_RE.test(r.d.expires) ? 'expired'
+                                : Number(r.d.expires) <= now ? 'expired'
+                                : isCurrent ? 'live' : 'superseded' };
+        });
+      });
     }).then(function (rows) {
       if (me === owner && version === delegationLoad) renderDelegations(rows);
     }, function (e) {

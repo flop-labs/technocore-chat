@@ -363,7 +363,8 @@ def check_note(root: str, body: str) -> int:
     """
     key, live, now = public_key(root), 0, int(time.time())
     records = delegations(body)
-    current = newest(records)
+    verified: set[int] = set()
+
     for i, (agent, scope, expires, nonce, sig) in enumerate(records):
         try:
             key.verify(
@@ -383,6 +384,20 @@ def check_note(root: str, body: str) -> int:
         # disagree about whether a grant is live — and expiry is this format's only
         # revocation, so that disagreement is the whole ballgame. One ASCII-decimal grammar,
         # enforced identically on both sides, before anything is compared as a number.
+        verified.add(i)
+
+    # Keep expired but authentic records in the ranking: they must not revive an older grant.
+    authenticated = [record for i, record in enumerate(records) if i in verified]
+    authenticated_current = newest(authenticated)
+    current = {
+        original_i
+        for auth_i, original_i in enumerate(i for i in range(len(records)) if i in verified)
+        if auth_i in authenticated_current
+    }
+
+    for i, (agent, scope, expires, nonce, _sig) in enumerate(records):
+        if i not in verified:
+            continue
         if not DIGITS_RE.fullmatch(expires) or int(expires) <= now:
             print(f"EXPIRED    {agent} {scope}  (expired {expires})")
             continue
