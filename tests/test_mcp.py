@@ -429,9 +429,7 @@ def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
     # The Cloudflare adapter shares the same handlers and method-aware fetch seam.
     # Keep its deployment-specific docs aligned with the actual wrapper behavior.
     worker_readme = (ROOT / "mcp" / "worker" / "README.md").read_text(encoding="utf-8")
-    worker_source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text(
-        encoding="utf-8"
-    )
+    worker_source = (ROOT / "mcp" / "worker" / "src" / "worker.py").read_text(encoding="utf-8")
     assert "`GET` for reads and `POST` for writes" in worker_readme
     assert "GET for network reads and POST for writes" in worker_source
     assert "Every tool call is one independent GET" not in worker_readme
