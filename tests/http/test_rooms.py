@@ -892,6 +892,499 @@ def test_ownership_cannot_be_taken_by_overwriting_the_note(client):
     assert _say_signed(client, "d-bounty", thief, thief_sign, "mine now").status_code == 200
 
 
+def test_an_ownership_handover_does_not_inherit_sellers_allow_list(client):
+    """An allow-list belongs to the owner who authorized it. Handing a room over to a new
+    owner clears the previous owner's allow-list so keys authorized by the seller cannot
+    continue posting in the buyer's room without the buyer's authorization."""
+    alice, alice_sign = _keypair(1)
+    carol, carol_sign = _keypair(2)
+    bob, bob_sign = _keypair(3)
+    dave, dave_sign = _keypair(4)
+    stranger, stranger_sign = _keypair(5)
+
+    assert _claim(client, "d-w", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(client, "room-allow", "d-w", alice, alice_sign, carol, nonce=2).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-w", carol, carol_sign, "carol before handover").status_code == 200
+
+    # Alice hands over ownership to Bob
+    assert (
+        _set_signed(client, "room-owners", "d-w", alice, alice_sign, bob, nonce=3).status_code
+        == 200
+    )
+    assert client.get("/kv/room-owners/d-w").text.strip().endswith(bob)
+    assert client.get("/kv/room-allow/d-w").text.strip().endswith("none")
+
+    # Carol and Alice can no longer write
+    assert _say_signed(client, "d-w", carol, carol_sign, "carol after handover").status_code == 403
+    assert _say_signed(client, "d-w", alice, alice_sign, "alice after handover").status_code == 403
+    assert (
+        _say_signed(client, "d-w", stranger, stranger_sign, "stranger rejected").status_code == 403
+    )
+
+    # Bob (the new owner) can write
+    assert _say_signed(client, "d-w", bob, bob_sign, "bob room now").status_code == 200
+
+    # Bob can establish a fresh allow-list authorizing Dave
+    assert _set_signed(client, "room-allow", "d-w", bob, bob_sign, dave, nonce=4).status_code == 200
+    assert _say_signed(client, "d-w", dave, dave_sign, "dave allowed").status_code == 200
+    assert _say_signed(client, "d-w", carol, carol_sign, "carol still rejected").status_code == 403
+
+
+def test_an_ownership_handover_over_post_clears_sellers_allow_list(client):
+    """The POST lane for ownership handover resets the allow-list under the same owner lock."""
+    alice, alice_sign = _keypair(11)
+    carol, carol_sign = _keypair(12)
+    bob, bob_sign = _keypair(13)
+
+    assert _claim(client, "d-posthandover", alice, alice_sign).status_code == 200
+    allow_payload = _signed_note_payload(
+        "room-allow", "d-posthandover", alice, alice_sign, carol, nonce=2
+    )
+    assert client.post("/kv/room-allow/d-posthandover", json=allow_payload).status_code == 200
+    assert _say_signed(client, "d-posthandover", carol, carol_sign, "carol in").status_code == 200
+
+    handover_payload = _signed_note_payload(
+        "room-owners", "d-posthandover", alice, alice_sign, bob, nonce=3
+    )
+    assert client.post("/kv/room-owners/d-posthandover", json=handover_payload).status_code == 200
+    assert client.get("/kv/room-owners/d-posthandover").text.strip().endswith(bob)
+    assert client.get("/kv/room-allow/d-posthandover").text.strip().endswith("none")
+
+    assert (
+        _say_signed(client, "d-posthandover", carol, carol_sign, "carol blocked").status_code == 403
+    )
+    assert _say_signed(client, "d-posthandover", bob, bob_sign, "bob in").status_code == 200
+
+
+def test_ownership_handover_without_prior_allow_list_leaves_allow_note_absent(client):
+    """A handover on a room without an existing allow-list does not synthesize an empty one."""
+    alice, alice_sign = _keypair(14)
+    bob, bob_sign = _keypair(15)
+    stranger, stranger_sign = _keypair(16)
+
+    assert _claim(client, "d-noallow", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(client, "room-owners", "d-noallow", alice, alice_sign, bob, nonce=2).status_code
+        == 200
+    )
+    assert client.get("/kv/room-owners/d-noallow").text.strip().endswith(bob)
+    assert client.get("/kv/room-allow/d-noallow").status_code == 404
+    assert _say_signed(client, "d-noallow", bob, bob_sign, "bob writes").status_code == 200
+    assert (
+        _say_signed(client, "d-noallow", stranger, stranger_sign, "stranger blocked").status_code
+        == 403
+    )
+
+
+def test_failed_handover_due_to_spent_nonce_preserves_owner_and_grants(client):
+    """When an ownership handover fails because of a spent nonce (403), the current
+    owner remains owner and their existing allow-list grants remain fully functional."""
+    alice, alice_sign = _keypair(31)
+    carol, carol_sign = _keypair(32)
+    bob, _ = _keypair(33)
+
+    assert _claim(client, "d-spentnonce", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(
+            client, "room-allow", "d-spentnonce", alice, alice_sign, carol, nonce=2
+        ).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-spentnonce", carol, carol_sign, "carol before").status_code == 200
+
+    # Alice attempts handover to Bob with spent nonce 1 (last was 2)
+    failed = _set_signed(client, "room-owners", "d-spentnonce", alice, alice_sign, bob, nonce=1)
+    assert failed.status_code == 403 and "already used" in failed.text
+
+    # Alice is still owner
+    assert client.get("/kv/room-owners/d-spentnonce").text.strip().endswith(alice)
+    # Allow list is preserved
+    assert client.get("/kv/room-allow/d-spentnonce").text.strip().endswith(carol)
+    # Carol can still write
+    assert (
+        _say_signed(
+            client, "d-spentnonce", carol, carol_sign, "carol still allowed", nonce=2
+        ).status_code
+        == 200
+    )
+    # Bob cannot write
+    assert (
+        _say_signed(client, "d-spentnonce", bob, _keypair(33)[1], "bob rejected").status_code == 403
+    )
+
+
+def test_failed_handover_due_to_failed_condition_preserves_owner_and_grants(client):
+    """When an ownership handover fails because of an if= condition conflict (409), the
+    current owner remains owner and their existing allow-list grants remain unchanged."""
+    alice, alice_sign = _keypair(41)
+    carol, carol_sign = _keypair(42)
+    bob, _ = _keypair(43)
+    stranger, _ = _keypair(44)
+
+    assert _claim(client, "d-badif", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(client, "room-allow", "d-badif", alice, alice_sign, carol, nonce=2).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-badif", carol, carol_sign, "carol before").status_code == 200
+
+    # Alice attempts handover to Bob with condition if=<stranger> (does not match current owner)
+    handover_sig = alice_sign(f"room-owners|d-badif|3|{bob}")
+    url = f"/kv/room-owners/d-badif/set-signed/{alice}/{handover_sig}/3/{bob}?if={stranger}"
+    failed = client.get(url)
+    assert failed.status_code == 409
+
+    # Alice is still owner
+    assert client.get("/kv/room-owners/d-badif").text.strip().endswith(alice)
+    # Allow list is preserved
+    assert client.get("/kv/room-allow/d-badif").text.strip().endswith(carol)
+    # Carol can still write
+    assert (
+        _say_signed(
+            client, "d-badif", carol, carol_sign, "carol still allowed", nonce=2
+        ).status_code
+        == 200
+    )
+
+
+def test_failed_handover_due_to_owner_write_error_fails_closed(client, monkeypatch):
+    """When an ownership handover fails due to an I/O error during the owner note write,
+    the room fails closed: the old owner remains, the allow-list remains 'none', and
+    delegates cannot write."""
+    import errno
+
+    import pytest
+
+    import store
+
+    alice, alice_sign = _keypair(51)
+    carol, carol_sign = _keypair(52)
+    bob, _ = _keypair(53)
+
+    assert _claim(client, "d-failclosed", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(
+            client, "room-allow", "d-failclosed", alice, alice_sign, carol, nonce=2
+        ).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-failclosed", carol, carol_sign, "carol before").status_code == 200
+
+    real_replace = store._replace
+
+    def fail_replace(path, data, fsync=False):
+        if "room-owners" in str(path) and "d-failclosed" in str(path):
+            raise OSError(errno.EIO, "Injected owner write error")
+        return real_replace(path, data, fsync=fsync)
+
+    monkeypatch.setattr(store, "_replace", fail_replace)
+
+    with pytest.raises(OSError):
+        _set_signed(client, "room-owners", "d-failclosed", alice, alice_sign, bob, nonce=3)
+
+    monkeypatch.setattr(store, "_replace", real_replace)
+
+    # Alice is still owner (not Bob)
+    assert client.get("/kv/room-owners/d-failclosed").text.strip().endswith(alice)
+    # Allow list is retired to "none" (fail-closed: no compensating restore)
+    assert client.get("/kv/room-allow/d-failclosed").text.strip().endswith("none")
+    # Carol cannot write
+    assert (
+        _say_signed(client, "d-failclosed", carol, carol_sign, "carol blocked", nonce=2).status_code
+        == 403
+    )
+    # Alice can still write as owner
+    assert (
+        _say_signed(client, "d-failclosed", alice, alice_sign, "alice writes", nonce=4).status_code
+        == 200
+    )
+
+
+def test_failed_handover_due_to_allow_retirement_error_preserves_owner_and_grants(
+    client, monkeypatch
+):
+    """When allow-list retirement itself fails with an I/O error, the handover is aborted
+    before the owner note is modified, preserving the current owner and allow-list."""
+    import errno
+
+    import pytest
+
+    import store
+
+    alice, alice_sign = _keypair(71)
+    carol, carol_sign = _keypair(72)
+    bob, _ = _keypair(73)
+
+    assert _claim(client, "d-retirefail", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(
+            client, "room-allow", "d-retirefail", alice, alice_sign, carol, nonce=2
+        ).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-retirefail", carol, carol_sign, "carol before").status_code == 200
+
+    real_replace = store._replace
+
+    def fail_replace(path, data, fsync=False):
+        if "room-allow" in str(path) and "d-retirefail" in str(path) and data == b"none":
+            raise OSError(errno.EIO, "Injected retirement error")
+        return real_replace(path, data, fsync=fsync)
+
+    monkeypatch.setattr(store, "_replace", fail_replace)
+
+    with pytest.raises(OSError):
+        _set_signed(client, "room-owners", "d-retirefail", alice, alice_sign, bob, nonce=3)
+
+    monkeypatch.setattr(store, "_replace", real_replace)
+
+    # Alice is still owner
+    assert client.get("/kv/room-owners/d-retirefail").text.strip().endswith(alice)
+    # Allow list remains intact
+    assert client.get("/kv/room-allow/d-retirefail").text.strip().endswith(carol)
+    # Carol can still write
+    assert (
+        _say_signed(
+            client, "d-retirefail", carol, carol_sign, "carol still allowed", nonce=2
+        ).status_code
+        == 200
+    )
+
+
+def test_same_owner_rewrite_preserves_allow_list(client):
+    """Writing the owner note with the same owner does not retire or alter the allow-list."""
+    alice, alice_sign = _keypair(91)
+    carol, carol_sign = _keypair(92)
+
+    assert _claim(client, "d-sameowner", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(
+            client, "room-allow", "d-sameowner", alice, alice_sign, carol, nonce=2
+        ).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-sameowner", carol, carol_sign, "carol in").status_code == 200
+
+    # Alice rewrites her own owner note
+    assert (
+        _set_signed(
+            client, "room-owners", "d-sameowner", alice, alice_sign, alice, nonce=3
+        ).status_code
+        == 200
+    )
+    assert client.get("/kv/room-owners/d-sameowner").text.strip().endswith(alice)
+    assert client.get("/kv/room-allow/d-sameowner").text.strip().endswith(carol)
+    assert (
+        _say_signed(
+            client, "d-sameowner", carol, carol_sign, "carol still allowed", nonce=2
+        ).status_code
+        == 200
+    )
+
+
+def test_concurrent_handovers_prevent_stale_allow_resurrection(client, monkeypatch):
+    """When a handover fails during owner persistence, it must never restore a stale
+    allow-list snapshot over a concurrent successful handover."""
+    import errno
+
+    import pytest
+
+    import store
+
+    alice, alice_sign = _keypair(101)
+    carol, carol_sign = _keypair(102)
+    bob, _ = _keypair(103)
+    dave, dave_sign = _keypair(104)
+
+    assert _claim(client, "d-concur", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(client, "room-allow", "d-concur", alice, alice_sign, carol, nonce=2).status_code
+        == 200
+    )
+    assert _say_signed(client, "d-concur", carol, carol_sign, "carol initial").status_code == 200
+
+    real_replace = store._replace
+
+    # Interleaving simulation: Handover 1 (Alice -> Bob) retires allow-list, but fails owner write.
+    # Meanwhile, Handover 2 (Alice -> Dave) succeeds.
+    def fail_bob_owner_replace(path, data, fsync=False):
+        if "room-owners" in str(path) and "d-concur" in str(path) and data == bob.encode():
+            # Before failing Bob's write, Handover 2 (Alice -> Dave) runs to completion
+            monkeypatch.setattr(store, "_replace", real_replace)
+            h2_res = _set_signed(
+                client, "room-owners", "d-concur", alice, alice_sign, dave, nonce=4
+            )
+            assert h2_res.status_code == 200
+            # Now fail Bob's owner write
+            raise OSError(errno.EIO, "Injected failure for Bob owner write")
+        return real_replace(path, data, fsync=fsync)
+
+    monkeypatch.setattr(store, "_replace", fail_bob_owner_replace)
+
+    # Run Handover 1 (Alice -> Bob)
+    with pytest.raises(OSError):
+        _set_signed(client, "room-owners", "d-concur", alice, alice_sign, bob, nonce=3)
+
+    monkeypatch.setattr(store, "_replace", real_replace)
+
+    # Final state: Dave is owner, allow-list is NOT resurrected to Carol
+    assert client.get("/kv/room-owners/d-concur").text.strip().endswith(dave)
+    assert client.get("/kv/room-allow/d-concur").text.strip().endswith("none")
+    # Carol's authorization is gone
+    assert (
+        _say_signed(client, "d-concur", carol, carol_sign, "carol should fail", nonce=2).status_code
+        == 403
+    )
+    # Dave is valid owner
+    assert (
+        _say_signed(client, "d-concur", dave, dave_sign, "dave can speak", nonce=1).status_code
+        == 200
+    )
+
+
+def test_concurrent_delegate_update_not_overwritten_by_failed_handover(client, monkeypatch):
+    """A failed handover must not overwrite a newer delegate grant with a stale allow-list snapshot."""
+    import errno
+
+    import pytest
+
+    import store
+
+    alice, alice_sign = _keypair(111)
+    carol, carol_sign = _keypair(112)
+    bob, _ = _keypair(113)
+    eve, eve_sign = _keypair(114)
+
+    assert _claim(client, "d-concur-grant", alice, alice_sign).status_code == 200
+    assert (
+        _set_signed(
+            client, "room-allow", "d-concur-grant", alice, alice_sign, carol, nonce=2
+        ).status_code
+        == 200
+    )
+
+    real_replace = store._replace
+
+    # Handover 1 (Alice -> Bob) retires allow-list, but before owner write fails,
+    # Alice issues a new allow-list grant to Eve.
+    def fail_handover_after_grant(path, data, fsync=False):
+        if "room-owners" in str(path) and "d-concur-grant" in str(path):
+            monkeypatch.setattr(store, "_replace", real_replace)
+            # Alice grants Eve
+            g_res = _set_signed(
+                client, "room-allow", "d-concur-grant", alice, alice_sign, eve, nonce=4
+            )
+            assert g_res.status_code == 200
+            # Now fail Bob's owner write
+            raise OSError(errno.EIO, "Injected failure for Bob owner write")
+        return real_replace(path, data, fsync=fsync)
+
+    monkeypatch.setattr(store, "_replace", fail_handover_after_grant)
+
+    with pytest.raises(OSError):
+        _set_signed(client, "room-owners", "d-concur-grant", alice, alice_sign, bob, nonce=3)
+
+    monkeypatch.setattr(store, "_replace", real_replace)
+
+    # Alice remains owner, Eve's grant is preserved and Carol is not resurrected
+    assert client.get("/kv/room-owners/d-concur-grant").text.strip().endswith(alice)
+    assert client.get("/kv/room-allow/d-concur-grant").text.strip().endswith(eve)
+    assert (
+        _say_signed(client, "d-concur-grant", eve, eve_sign, "eve allowed", nonce=2).status_code
+        == 200
+    )
+    assert (
+        _say_signed(
+            client, "d-concur-grant", carol, carol_sign, "carol blocked", nonce=2
+        ).status_code
+        == 403
+    )
+
+
+def test_failed_ownership_handover_over_post_fails_closed_on_storage_error(client, monkeypatch):
+    """Failed handover via POST preserves owner on validation failure and fails closed on storage error."""
+    import errno
+
+    import pytest
+
+    import store
+
+    alice, alice_sign = _keypair(61)
+    carol, carol_sign = _keypair(62)
+    bob, _ = _keypair(63)
+    stranger, _ = _keypair(64)
+
+    assert _claim(client, "d-postfail", alice, alice_sign).status_code == 200
+    allow_payload = _signed_note_payload(
+        "room-allow", "d-postfail", alice, alice_sign, carol, nonce=2
+    )
+    assert client.post("/kv/room-allow/d-postfail", json=allow_payload).status_code == 200
+    assert _say_signed(client, "d-postfail", carol, carol_sign, "carol in").status_code == 200
+
+    # 1. Spent nonce over POST -> validation failure before allow retirement -> grants preserved
+    bad_nonce_payload = _signed_note_payload(
+        "room-owners", "d-postfail", alice, alice_sign, bob, nonce=1
+    )
+    failed_nonce = client.post("/kv/room-owners/d-postfail", json=bad_nonce_payload)
+    assert failed_nonce.status_code == 403
+
+    assert client.get("/kv/room-owners/d-postfail").text.strip().endswith(alice)
+    assert client.get("/kv/room-allow/d-postfail").text.strip().endswith(carol)
+    assert (
+        _say_signed(client, "d-postfail", carol, carol_sign, "carol still in", nonce=2).status_code
+        == 200
+    )
+
+    # 2. Failed conditional over POST -> validation failure before allow retirement -> grants preserved
+    bad_cond_payload = _signed_note_payload(
+        "room-owners", "d-postfail", alice, alice_sign, bob, nonce=3, **{"if": stranger}
+    )
+    failed_cond = client.post("/kv/room-owners/d-postfail", json=bad_cond_payload)
+    assert failed_cond.status_code == 409
+
+    assert client.get("/kv/room-owners/d-postfail").text.strip().endswith(alice)
+    assert client.get("/kv/room-allow/d-postfail").text.strip().endswith(carol)
+    assert (
+        _say_signed(
+            client, "d-postfail", carol, carol_sign, "carol still in 2", nonce=3
+        ).status_code
+        == 200
+    )
+
+    # 3. Storage error during owner write over POST -> allow retired, fail-closed
+    real_replace = store._replace
+
+    def fail_replace(path, data, fsync=False):
+        if "room-owners" in str(path) and "d-postfail" in str(path):
+            raise OSError(errno.EIO, "Injected POST I/O error")
+        return real_replace(path, data, fsync=fsync)
+
+    monkeypatch.setattr(store, "_replace", fail_replace)
+
+    handover_payload = _signed_note_payload(
+        "room-owners", "d-postfail", alice, alice_sign, bob, nonce=4
+    )
+    with pytest.raises(OSError):
+        client.post("/kv/room-owners/d-postfail", json=handover_payload)
+
+    monkeypatch.setattr(store, "_replace", real_replace)
+
+    # Alice is still owner; allow list remains retired to "none"
+    assert client.get("/kv/room-owners/d-postfail").text.strip().endswith(alice)
+    assert client.get("/kv/room-allow/d-postfail").text.strip().endswith("none")
+    assert (
+        _say_signed(client, "d-postfail", carol, carol_sign, "carol blocked", nonce=4).status_code
+        == 403
+    )
+    assert (
+        _say_signed(client, "d-postfail", alice, alice_sign, "alice writes", nonce=5).status_code
+        == 200
+    )
+
+
 def test_an_allow_list_needs_an_owner_and_fails_closed_on_junk(client):
     owner, owner_sign = _keypair()
     r = _set_signed(client, "room-allow", "d-orphan", owner, owner_sign, owner)
