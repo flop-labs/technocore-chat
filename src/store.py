@@ -77,18 +77,20 @@ MAX_TOTAL_ROOM_BYTES = 5 << 30
 # The budget above is only a real bound if rooms cannot grow past it after they are made.
 # Gating *creation* alone does not do that: 5120 rooms created while usage is low can each
 # then grow to MAX_ROOM_BYTES, which is 51 GiB — ten times the number the operator was told
-# to provision. So the ring itself yields under pressure. Every room is guaranteed this
-# much; above it a room keeps up to MAX_ROOM_BYTES only while the service has headroom, and
-# compacts back to its guaranteed floor on the next append once the budget is spent.
+# to provision. So the ring itself yields under pressure: above this a room keeps up to
+# MAX_ROOM_BYTES only while the service has headroom, and once the budget is spent this is
+# its whole ring — the append that would take it past this compacts it to half, as every
+# compaction does, so what a room keeps is its newest records that fit in half of this,
+# never fewer than one (#990).
 #
 # That is what closes the hole, because growing a room *requires appending to it*: the
-# write that would push a room past its floor is the same write that compacts it. Rooms
+# write that would push a room past this size is the same write that compacts it. Rooms
 # already large when the budget is reached stay large until they are written to or reaped,
 # but they were counted in the budget that triggered this, so the total does not climb.
 # Overshoot is one refresh interval of writes, and writes are rate limited.
 #
-# = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: the floor times the cap is the budget, so
-# even the worst case — every room at its floor — lands exactly on the number.
+# = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS on purpose: this times the cap is the budget, so even
+# the worst case — every room at this size — lands exactly on the number.
 RESERVED_ROOM_BYTES = MAX_TOTAL_ROOM_BYTES // MAX_ROOMS
 # How many rooms exist and how many bytes they occupy — "count bytes", the same two-integer
 # format and the same machinery as NOTES_FILE below, so one atomic replace keeps both halves
@@ -2346,7 +2348,7 @@ def room_bytes_used(root: Path) -> int:
 
 
 def _ring_limit(root: Path) -> int:
-    """How much ring a room may keep right now — the full ring, or its guaranteed floor
+    """How much ring a room may keep right now — the full ring, or RESERVED_ROOM_BYTES
     once the service is over its total room-byte budget. See RESERVED_ROOM_BYTES."""
     if room_bytes_used(root) < MAX_TOTAL_ROOM_BYTES:
         return MAX_ROOM_BYTES
