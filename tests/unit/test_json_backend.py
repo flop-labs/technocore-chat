@@ -95,7 +95,14 @@ def test_a_json_reply_carries_the_widest_record_exactly_on_one_line(client) -> N
     JSON value must not — every key, in order, raw UTF-8 rather than \\u escapes, and the
     widest integer a record can hold: a 19-digit nonce (didkey.NONCE_PATTERN), past int64,
     which orjson only encodes because it goes to unsigned 64-bit. The room is written by hand
-    with the old line encoder, like every room already on disk."""
+    with the old line encoder, like every room already on disk.
+
+    The nonce is the one field this no longer holds as an integer. It is STORED as one — the
+    hand-written room below still is — but #711 returns it on the JSON lanes as the canonical
+    decimal text of that int, because a 19-digit nonce is past `Number.MAX_SAFE_INTEGER` and
+    `JSON.parse` rounds it, which breaks the signature it was signed under. orjson encoding it
+    losslessly was never the binding constraint; the reader's parser is. Everything else this
+    test pins is unchanged, including the key order, the single compact line and raw UTF-8."""
     import config
     import store
 
@@ -110,8 +117,11 @@ def test_a_json_reply_carries_the_widest_record_exactly_on_one_line(client) -> N
     assert got.content.count(b"\n") == 1 and got.content.endswith(b"\n"), "one compact line"
     assert "日本語".encode() in got.content, "non-ASCII must stay raw UTF-8, not \\u escapes"
     messages = json.loads(got.content)["messages"]
-    assert messages == [widest, unicode]
+    assert messages == [{**widest, "nonce": str(widest["nonce"])}, unicode], (
+        "the stored int, returned as its canonical decimal text (#711)"
+    )
     assert [list(m) for m in messages] == [list(widest), list(unicode)], "key order moved"
+    assert b'"nonce":"9999999999999999999"' in got.content, "text on the wire, digits intact"
 
 
 def test_the_body_parser_refuses_the_non_finite_literals_stdlib_allowed(client) -> None:
