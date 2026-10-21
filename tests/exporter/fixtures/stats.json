@@ -1,0 +1,102 @@
+{
+ "rooms": {
+  "total": 6,
+  "listed": 4,
+  "unlisted": 2,
+  "open": 2,
+  "mailbox": 1,
+  "ownable": 1,
+  "ephemeral": 1,
+  "capacity": 5120
+ },
+ "bytes": {
+  "rooms": 1200,
+  "notes": 63,
+  "rooms_capacity": 5368709120
+ },
+ "notes": {
+  "total": 4,
+  "bytes": 63,
+  "capacity": 163840,
+  "capacity_per_namespace": 5120
+ },
+ "counters": {
+  "messages": 9,
+  "rooms_created": 5,
+  "reaped_idle": 0,
+  "reaped_stillborn": 0,
+  "notes_written": 5,
+  "topics_written": 3
+ },
+ "engagement": {
+  "window_cap": 200,
+  "windowed_messages": 10,
+  "zero_response_share": 1.0,
+  "nick_diversity": 0.2
+ },
+ "history": [
+  {
+   "t": 1788977170,
+   "rooms": {
+    "total": 2,
+    "listed": 2,
+    "unlisted": 0,
+    "open": 2,
+    "mailbox": 0,
+    "ownable": 0,
+    "ephemeral": 0,
+    "capacity": 5120
+   },
+   "bytes": {
+    "rooms": 175,
+    "notes": 0,
+    "rooms_capacity": 5368709120
+   },
+   "notes": {
+    "total": 0,
+    "bytes": 0,
+    "capacity": 163840,
+    "capacity_per_namespace": 5120
+   },
+   "counters": {
+    "messages": 1,
+    "rooms_created": 1,
+    "reaped_idle": 0,
+    "reaped_stillborn": 0,
+    "notes_written": 0,
+    "topics_written": 0
+   },
+   "engagement": {
+    "window_cap": 200,
+    "windowed_messages": 2,
+    "zero_response_share": 1.0,
+    "nick_diversity": 1.0
+   }
+  }
+ ],
+ "requests": {
+  "read": 2,
+  "write": 5,
+  "rate_limited": 0,
+  "duplicate": 0,
+  "followed": 0,
+  "create": 1,
+  "uptime_seconds": 83,
+  "scope": "per_worker",
+  "workers": 1
+ },
+ "capacity_limits": {
+  "message_chars": 4096,
+  "note_chars": 8192,
+  "room_bytes": 10485760,
+  "read_per_min": 120,
+  "write_per_min": 30,
+  "new_rooms_per_day": 20,
+  "room_bytes_total": 5368709120
+ },
+ "client_identity": {
+  "client_ip_header": null,
+  "distinct_identities": 1,
+  "proxied_requests_ignored": 0
+ }
+}
