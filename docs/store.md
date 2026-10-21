@@ -14,7 +14,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `list_rooms(root: pathlib.Path) -> list[str]` — (undocumented)
 - `note_get(root: pathlib.Path, ns: str, key: str) -> str | None` — (undocumented)
 - `note_path(root: pathlib.Path, ns: str, key: str) -> pathlib.Path` — Where a note lives — `notes/<ns>/<shard>/<key>.txt`.
-- `note_set(root: pathlib.Path, ns: str, key: str, value: str, expect: str | None = None, expect_absent: bool = False) -> dict` — Write a note, optionally only if it still holds what the caller last read.
+- `note_set(root: pathlib.Path, ns: str, key: str, value: str, expect: str | None = None, expect_absent: bool = False, then: collections.abc.Callable[[], object] | None = None) -> dict` — Write a note, optionally only if it still holds what the caller last read.
 - `note_stats(root: pathlib.Path) -> dict` — Aggregate note usage. Deliberately blind: no namespace, no key, ever.
 - `ownable(name: str) -> bool` — (undocumented)
 - `read_messages(root: pathlib.Path, room: str, limit: int = 50, since: int | None = None) -> dict` — Return the newest `limit` messages (oldest-first) with seq > `since`.
