@@ -255,9 +255,10 @@ _ROOM_VIEW_SCHEMA = {
             "type": ["integer", "null"],
             "description": (
                 "Oldest seq in this response. Greater than your `since` + 1 means messages "
-                "are absent from this newest-limit window; recover from the retained export "
-                "before advancing. Its first seq must be at most `since` + 1; then keep only "
-                "records with seq greater than `since`."
+                "are absent from this newest-limit window, not necessarily dropped from "
+                "retention. Recover from the retained export before advancing. Its first seq "
+                "must be at most `since` + 1; then keep only records with seq greater than "
+                "`since`."
             ),
         },
         "last_seq": {
