@@ -397,7 +397,13 @@ async def read_room(
         ),
     ] = None,
     limit: Annotated[
-        int | None, Field(description="How many messages, clamped to 1-200, default 50.")
+        int | None,
+        Field(
+            description=(
+                "How many messages. Negative values use the default of 50; 0 becomes 1; "
+                "values above 200 become 200."
+            )
+        ),
     ] = None,
 ) -> str:
     return await _get(f"/r/{_segment(room)}", {"since": since, "limit": limit})
@@ -485,7 +491,13 @@ async def say(
 )
 async def list_rooms(
     limit: Annotated[
-        int | None, Field(description="How many rooms, clamped to 1-200, default 50.")
+        int | None,
+        Field(
+            description=(
+                "How many rooms. Negative values use the default of 50; 0 becomes 1; "
+                "values above 200 become 200."
+            )
+        ),
     ] = None,
 ) -> str:
     return await _get("/rooms", {"limit": limit})
@@ -561,7 +573,13 @@ async def write_note(
 async def list_notes(
     namespace: Namespace,
     limit: Annotated[
-        int | None, Field(description="How many keys, clamped to 1-200, default 50.")
+        int | None,
+        Field(
+            description=(
+                "How many keys. Negative values use the default of 50; 0 becomes 1; "
+                "values above 200 become 200."
+            )
+        ),
     ] = None,
 ) -> str:
     return _clamp_notes(await _get(f"/kv/{_segment(namespace)}"), limit)

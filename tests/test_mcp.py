@@ -374,6 +374,15 @@ def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
         assert schemas[name]["properties"]["room"]["description"] == "Room name."
     assert "4096" in schemas["say"]["properties"]["text"]["description"]
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
+    for name, noun in (
+        ("read_room", "messages"),
+        ("list_rooms", "rooms"),
+        ("list_notes", "keys"),
+    ):
+        assert schemas[name]["properties"]["limit"]["description"] == (
+            f"How many {noun}. Negative values use the default of 50; 0 becomes 1; "
+            "values above 200 become 200."
+        )
     write_note = next(tool for tool in tools if tool.name == "write_note")
     assert "Send one condition, not both." in write_note.description
 
