@@ -1784,7 +1784,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function notePath(did) {
     return crypto.subtle.digest('SHA-256', new TextEncoder().encode(did)).then(function (buf) {
       var fp = bytesHex(new Uint8Array(buf)).slice(0, 16);
-      return { ns: 'did-' + fp.slice(0, 2), key: fp.slice(2) };
+      return { ns: 'did-' + fp.slice(0, 2), key: fp.slice(2),
+               legacy: { ns: 'did', key: fp } };
     });
   }
 
@@ -1815,13 +1816,34 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     return (footer === -1 ? value : value.slice(0, footer)).replace(/\s+$/, '');
   }
 
-  function readNote(path) {
+  function readNoteAt(path) {
     return fetch('/kv/' + path.ns + '/' + path.key).then(function (r) {
-      // 404 is the ordinary state, not a failure: a note exists because someone wrote it,
-      // and this reader has not delegated to anyone yet.
-      if (r.status === 404) return '';
+      if (r.status === 404) return null;
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.text().then(stripNote);
+    });
+  }
+
+  // New identities publish to the sharded path, but readers fall back to the legacy path
+  // exactly as the manual promises. `targetExists` belongs to the sharded target: a legacy
+  // value is copied forward with if_absent rather than compared against a different note.
+  function readNote(path) {
+    return readNoteAt(path).then(function (value) {
+      if (value !== null) return { value: value, targetExists: true };
+      return readNoteAt(path.legacy).then(function (legacy) {
+        return { value: legacy === null ? '' : legacy, targetExists: false };
+      });
+    });
+  }
+
+  function writeNote(path, previous, next) {
+    var payload = { value: next };
+    if (previous.targetExists) payload['if'] = previous.value;
+    else payload.if_absent = true;
+    return fetch('/kv/' + path.ns + '/' + path.key, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
   }
 
@@ -1908,7 +1930,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // Comparing the object also distinguishes signing back in with the same seed.
     var owner = me, root = owner.did, version = ++delegationLoad;
     return notePath(root).then(readNote).then(function (note) {
-      var found = parseDelegations(note), now = Date.now() / 1000;
+      var found = parseDelegations(note.value), now = Date.now() / 1000;
       var current = newest(found);
       return Promise.all(found.map(function (d, i) {
         // Verify first, expiry second. A forged line's expiry is whatever the forger typed,
@@ -1959,20 +1981,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             // Replace this agent's previous grant rather than appending beside it. Expiry
             // is the only revocation, so re-issuing is routine, and appending would grow the
             // note by a record a week per agent against a cap of about forty.
-            var kept = previous ? withoutAgent(previous, agent) : '';
+            var kept = previous.value ? withoutAgent(previous.value, agent) : '';
             var next = kept ? kept + ' ' + record : record;
-            // Compare-and-swap on the previous body, never a blind overwrite. This note is
-            // world-writable and may hold a `mailbox:` line or another delegation that
-            // arrived between the read and the write; a 409 here means re-read, not retry.
-            // The condition is the *untrimmed* previous body: it is what the server holds,
-            // and a compare-and-swap against anything else can only ever fail.
-            var payload = { value: next };
-            if (previous) payload['if'] = previous; else payload.if_absent = true;
-            return fetch('/kv/' + path.ns + '/' + path.key, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            });
+            // Compare-and-swap when the sharded note existed, never a blind overwrite. This
+            // note is world-writable and may hold a `mailbox:` line or another delegation
+            // that arrived between the read and the write; a 409 here means re-read, not retry.
+            // A legacy-only value is copied to the absent sharded target under if_absent: the
+            // two paths are different notes, so comparing the legacy body there cannot work.
+            return writeNote(path, previous, next);
           });
         });
       })
