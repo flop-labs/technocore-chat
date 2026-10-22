@@ -200,3 +200,26 @@ def test_the_bucket_samples_time_after_entering_the_lock(monkeypatch):
     assert sorted(waits) == [0.0, 50.0]
     assert balance == 1 / 6
     assert last == 20.0
+
+
+def test_a_late_refund_does_not_recreate_an_evicted_bucket():
+    """A refund cannot restore accounting state that the bounded cache already evicted.
+
+    Recreating that state would grow the mapping past the bound `take()` just enforced.
+    The next request from the evicted IP will receive a fresh bucket either way, so the
+    only bounded and conservative result for its late refund is to leave the cache alone.
+    """
+    saved = limit._buckets
+    limit._buckets = OrderedDict()
+    first = _Request("192.0.2.1")
+    second = _Request("192.0.2.2")
+    try:
+        limit.take(first, "create", PER_MIN, CAP, ip_header=IP_HEADER, max_buckets=1)
+        limit.take(second, "create", PER_MIN, CAP, ip_header=IP_HEADER, max_buckets=1)
+        assert list(limit._buckets) == [("192.0.2.2", "create")]
+
+        limit.refund(first, "create", PER_MIN, CAP, ip_header=IP_HEADER)
+
+        assert list(limit._buckets) == [("192.0.2.2", "create")]
+    finally:
+        limit._buckets = saved
