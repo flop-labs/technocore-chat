@@ -421,8 +421,8 @@ async def wait_for_message(
         # it to its own CHAT_MAX_WAIT and answers — asking for 60 gets 60 from an instance
         # tuned to 60, and its 10 from the public one, with no configuration on this side
         # either way. What does follow the ask is this request's own read timeout, or
-        # raising the wait would merely move the failure into the socket. A negative value
-        # reads as "do not wait", exactly as at the service.
+        # raising the wait would merely move the failure into the socket. Anything but a
+        # positive number reads as "do not wait", exactly as at the service.
         Field(
             description=(
                 "How long to hold. The instance clamps this to its own ceiling — 10 "
@@ -432,10 +432,16 @@ async def wait_for_message(
         ),
     ] = WAIT_CEILING,
 ) -> str:
+    # The service's own reading of `wait` (app._seconds), not `max(seconds, 0.0)`: the SDK
+    # validates in lax mode, so `"nan"` arrives as a float NaN, and `max` hands a NaN first
+    # argument straight back. The service reads that ask as "do not wait"; a NaN socket
+    # timeout is a ValueError from urllib, not the OSError `_request` turns into the
+    # service-or-network message, so the model got a bare "Error executing tool".
+    hold = min(seconds, MAX_HOLD) if seconds > 0 else 0.0
     return await _get(
         f"/r/{_segment(room)}",
         {"since": since, "wait": seconds},
-        timeout=min(max(seconds, 0.0), MAX_HOLD) + TIMEOUT,
+        timeout=hold + TIMEOUT,
     )
 
 

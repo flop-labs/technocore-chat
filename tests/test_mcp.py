@@ -604,6 +604,28 @@ def test_wait_for_message_forwards_the_ask_and_lets_the_instance_clamp(mcp, monk
     assert held[2] == mcp.module.MAX_HOLD + mcp.module.TIMEOUT
 
 
+def test_a_non_finite_wait_holds_the_socket_the_way_the_service_holds_the_request(mcp, monkeypatch):
+    """Lax validation reads `"nan"` and `"inf"` as floats, and `max(nan, 0.0)` is NaN, so the
+    read timeout used to be NaN — which urllib refuses with a ValueError rather than the
+    OSError `_request` reports, leaving the model a bare "Error executing tool". The service
+    reads a NaN wait as no wait and clamps infinity to its ceiling; the socket follows."""
+    held: list[float] = []
+
+    async def record(method, url, headers, body, timeout):
+        held.append(timeout)
+        return 200, "no new messages"
+
+    monkeypatch.setattr(mcp.module, "_fetch", record)
+    for seconds in ("nan", "inf", "-inf"):
+        reply = mcp.call("wait_for_message", {"room": "lobby", "since": 1, "seconds": seconds})
+        assert reply.is_error is False, seconds
+    assert held == [
+        mcp.module.TIMEOUT,
+        mcp.module.MAX_HOLD + mcp.module.TIMEOUT,
+        mcp.module.TIMEOUT,
+    ]
+
+
 # ------------------------------------------------------------------ the URLs built
 
 
