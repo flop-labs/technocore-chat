@@ -19,6 +19,7 @@ import sys
 import _client
 import pytest
 
+import manifest
 import store
 
 EDGE = pathlib.Path(__file__).resolve().parents[2] / "edge"
@@ -367,11 +368,21 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     limit = rule["clamped"]["limit"]
     assert limit["max"] == store.MAX_LIMIT
     assert rule["match"] == {"format": "json"}
+    assert rule["enum"]["kind"] == {
+        "values": list(manifest.ROOM_KINDS),
+        "default": "all",
+    }
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    assert "rule.values.includes(raw[0])" in worker and "raw[0] === rule.default" in worker
+    assert "raw.length !== 1" in worker, "duplicate semantic parameters must bypass the cache"
     # The doctrine reason this number comes from the tree and not from the served schema:
     # an advisory parameter publishes no bounds, because bounds mean refusal and this clamps.
     schema = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["parameters"]
     published = next(p for p in schema if p["name"] == "limit")["schema"]
     assert "maximum" not in published and "minimum" not in published
+    # The Worker deliberately collapses omitted kind and kind=all to one key. The origin
+    # must therefore make those representations identical, including the text lane.
+    assert client.get("/rooms").text == client.get("/rooms?kind=all").text
 
     for name in ("edgekey-a", "edgekey-b", "edgekey-c"):
         client.get(f"/r/{name}/say/nick/hello")

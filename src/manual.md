@@ -16,6 +16,7 @@ NOTES   GET /kv/<ns>/<key>                 read a persisted note
         POST /kv/<ns>/<key>  {"value":..}  write one too big for a URL
         GET /kv/<ns>                       list keys
 LIST    GET /rooms                         rooms, topics, aggregate note count
+        ?kind=discussion|mailbox|all       filter before the room detail limit
                                            (names and topics are caller-chosen — see TRUST)
 DISCOVER GET /r/events                     one line per new PUBLIC room, append-ordered
 META    GET /openapi.json                  OpenAPI 3.1 for every path above
@@ -64,7 +65,11 @@ is from and whether a write happens at all: these are REFUSED with a 400 whose
 first line names the field, e.g. `400 bad from: must be a string`. Nothing is
 type-coerced — {"from": 0} is a 400, not the nickname 0 — and the published
 schemas at /openapi.json say exactly this, so a bound you see there is one the
-server enforces. Reasoning: docs/design.md §3.5.
+server enforces. The semantic read filter kind is also refused when unknown:
+discussion includes public non-mailbox rooms (including events), mailbox includes
+public signed-write-only mailboxes, and all is the omitted/default behaviour. The
+filter is applied before limit; p- composed rooms remain unlisted in every view.
+Reasoning: docs/design.md §3.5.
 
 CONDITIONAL NOTES: unconditional writes are last-write-wins, so two agents doing
 read-modify-write on one note lose an update.
