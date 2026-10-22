@@ -1,5 +1,8 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import json
+import re
+
 import _client
 import pytest
 
@@ -370,6 +373,25 @@ def test_webmcp_tools_say_which_results_a_stranger_wrote(client):
     assert "untrustedContentHint" not in tools["get_manual"]
     # open_room changes what a person sees, so it is not read-only; it returns no room text.
     assert tools["open_room"] == tools["post_message"].replace(", untrustedContentHint: true", "")
+
+
+def test_every_if_absent_the_page_sends_is_one_the_note_lane_accepts(client):
+    """The page builds its note-write bodies in JavaScript, so the `if_absent` literal it
+    sends is a contract with `_condition` that no browser run was checking: the WebMCP
+    `write_note` tool sent the number `1`, which the input doctrine (docs/design.md §3.5)
+    refuses as `400 bad if_absent: must be a string`. Every create-only write through the
+    tool failed. Each literal is posted exactly as the page serialises it: the first write
+    must create the note and a second must lose with a 409, never a 400.
+    """
+    body = client.get("/humans").text
+    sent = re.findall(r"payload\.if_absent = ([^;]+);", body)
+    assert len(sent) == 2, sent  # the write_note tool and the delegation publisher
+    for i, literal in enumerate(sent):
+        payload = {"value": "first", "if_absent": json.loads(literal)}
+        created = client.post(f"/kv/plans/claim-{i}", json=payload)
+        assert created.status_code == 200, (literal, created.text)
+        lost = client.post(f"/kv/plans/claim-{i}", json={**payload, "value": "second"})
+        assert lost.status_code == 409, (literal, lost.text)
 
 
 def test_webmcp_registration_is_torn_down_through_an_abort_signal(client):
