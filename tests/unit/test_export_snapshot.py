@@ -4,6 +4,7 @@ The interleavings the HTTP layer cannot stage — an append or a compaction land
 two chunks of one export — are staged here by driving the iterator by hand.
 """
 
+import orjson
 import pytest
 
 import store
@@ -125,3 +126,33 @@ def test_a_bad_name_refuses_before_the_stream_starts(tmp_path):
     which is only possible while no bytes of a 200 have been promised yet."""
     with pytest.raises(StoreError):
         store.export_room(tmp_path, "NOT-A-NAME")
+
+
+def test_export_does_not_parse_the_whole_expired_prefix(tmp_path, monkeypatch):
+    """An `e-` room whose records have all expired answers with an empty body, and must
+    not pay one parse per record to say so: the expired records are a prefix, which is
+    the same property `read_messages` already spends to stop at the first expired one."""
+    path = store.room_path(tmp_path, "e-victim")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    old, records, total = "2020-01-01T00:00:00.000000Z", [], 0
+    while total < (2 << 20):
+        line = (
+            orjson.dumps({"seq": len(records) + 1, "ts": old, "from": "bot", "text": "x" * 80})
+            + b"\n"
+        )
+        records.append(line)
+        total += len(line)
+    path.write_bytes(b"".join(records))
+
+    parses = 0
+    original = store._parse
+
+    def counted(line):
+        nonlocal parses
+        parses += 1
+        return original(line)
+
+    monkeypatch.setattr(store, "_parse", counted)
+    generation, chunks = store.export_room(tmp_path, "e-victim")
+    assert b"".join(chunks) == b""
+    assert parses <= 64, f"{parses} parses over {len(records)} expired records"
