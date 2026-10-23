@@ -204,6 +204,9 @@ class StoreLifecycle(RuleBasedStateMachine):
             records = _on_disk(self.root, room)
             seqs = [rec["seq"] for rec in records]
             assert seqs == sorted(seqs), f"{room}: records are out of order on disk"
+            # The model ages the whole world, never steps its write clock backwards.
+            stamps = [rec["ts"] for rec in records]
+            assert stamps == sorted(stamps), f"{room}: timestamps disagree with append order"
             assert len(set(seqs)) == len(seqs), f"{room}: a seq appears twice on disk"
             if seqs:
                 assert seqs == list(range(seqs[0], seqs[-1] + 1)), (

@@ -971,6 +971,63 @@ def test_ephemeral_expiry_is_lazy_but_rotation_reclaims_the_disk(tmp_path, monke
     assert store.room_path(tmp_path, "e-chat").stat().st_size <= 4096
 
 
+@pytest.mark.parametrize("signed", [False, True], ids=["unsigned", "signed"])
+def test_concurrent_writers_cannot_put_an_expired_record_after_a_fresh_one(
+    tmp_path, monkeypatch, signed
+):
+    """A timestamp taken before the room lock can disagree with append order.
+
+    Ephemeral reads walk newest-first and stop at the first expired record, relying on every
+    older seq having an older timestamp. Make the first caller pause before the lock while a
+    later caller appends, and advance the clock between its two reads.
+    """
+    from datetime import UTC, datetime
+
+    import store
+
+    now = 2_000_000_000.0
+    expired = now - store.EPHEMERAL_TTL_SECONDS - 1
+
+    def stamp(epoch):
+        return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+    stamps = iter((stamp(expired), stamp(now)))
+    monkeypatch.setattr(store, "_now", lambda: next(stamps))
+    monkeypatch.setattr(store.time, "time", lambda: now)
+    # Match the reaper's filesystem clock to the frozen clock. Otherwise the nested
+    # append reaps while the outer create holds the shared create-span lock.
+    marker = tmp_path / ".reaped"
+    marker.touch()
+    os.utime(marker, (now, now))
+    room = "e-p-order"
+    path = store.room_path(tmp_path, room)
+    did, _ = _keypair()
+
+    def append(nick, text, nonce):
+        return store.append(
+            tmp_path, room, nick, text, did=did if signed else None, nonce=nonce if signed else None
+        )
+
+    fired = _race_before_lock(
+        monkeypatch,
+        store,
+        path,
+        lambda: append("later", "committed-first", 1),
+    )
+
+    append("first", "committed-second", 2)
+
+    assert fired
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [record["text"] for record in records] == ["committed-first", "committed-second"]
+    assert [record["ts"] for record in records] == [stamp(expired), stamp(now)]
+    view = store.read_messages(tmp_path, room)
+    assert [message["text"] for message in view["messages"]] == ["committed-second"]
+    _, chunks = store.export_room(tmp_path, room)
+    exported = [json.loads(line) for line in b"".join(chunks).splitlines()]
+    assert [record["text"] for record in exported] == ["committed-second"]
+
+
 @pytest.mark.parametrize("stamp", ["whenever", None, 0, {}, []])
 def test_an_unparseable_timestamp_counts_as_expired(tmp_path, stamp):
     """Fail closed for malformed JSON types as well as malformed timestamp strings.
