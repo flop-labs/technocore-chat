@@ -180,7 +180,12 @@ def main() -> int:
         "--depth", type=int, default=store.WINDOW_MESSAGES, help="records in a deep room"
     )
     p.add_argument("--reps", type=int, default=5, help="timed calls per point")
-    p.add_argument("--writers", type=int, default=0, help="concurrent appenders, cold arm")
+    p.add_argument(
+        "--writers",
+        type=int,
+        default=0,
+        help="concurrent appenders: one thread per deep room, so 0..--deep",
+    )
     p.add_argument("--limits", type=int, nargs="+", default=list(LADDER))
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
