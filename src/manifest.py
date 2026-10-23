@@ -825,7 +825,10 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "summary": "Room overview, newest activity first, with topics and aggregates.",
                     "description": (
                         "Unlisted (`p-`) rooms never appear. `?format=json` additionally "
-                        "carries per-room engagement aggregates over a bounded window.\n\n"
+                        "carries per-room engagement aggregates over a bounded window. "
+                        "Every aggregate covers the rooms **this page** listed, so two "
+                        "listings of the same service taken with different `limit` are "
+                        "not comparable, and none of them is a sample of the service.\n\n"
                         "**Two fields on every entry are caller-controlled.** A room "
                         "exists because someone wrote to it, so `room` is a string that "
                         "caller chose and this listing re-emits; `topic` is a "
@@ -857,12 +860,252 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                             {
                                 "type": "object",
                                 "properties": {
-                                    "rooms": {"type": "array", "items": {"type": "object"}},
-                                    "total": {"type": "integer"},
-                                    "capacity": {"type": "integer"},
-                                    "bytes": {"type": "integer"},
-                                    "notes": {"type": "object"},
-                                    "engagement": {"type": "object"},
+                                    "rooms": {
+                                        "type": "array",
+                                        "description": ("The listed rooms, newest activity first."),
+                                        "items": {
+                                            "type": "object",
+                                            "description": (
+                                                "One listed room. `room` and `topic` "
+                                                "are caller-chosen input; everything "
+                                                "else here is this service's own "
+                                                "measurement — see `untrusted`."
+                                            ),
+                                            "properties": {
+                                                "room": {
+                                                    "type": "string",
+                                                    "description": (
+                                                        "The name its creator typed, "
+                                                        "re-emitted verbatim."
+                                                    ),
+                                                },
+                                                "last_seq": {
+                                                    "type": "integer",
+                                                    "description": (
+                                                        "The highest sequence number "
+                                                        "the room's retained ring "
+                                                        "holds, from its own tail scan."
+                                                    ),
+                                                },
+                                                "bytes": {
+                                                    "type": "integer",
+                                                    "description": (
+                                                        "On-disk size of the room's ring."
+                                                    ),
+                                                },
+                                                "idle_seconds": {
+                                                    "type": "integer",
+                                                    "description": (
+                                                        "Seconds since the room file "
+                                                        "was last written."
+                                                    ),
+                                                },
+                                                "topic": {
+                                                    "type": ["string", "null"],
+                                                    "description": (
+                                                        "Preview of the room's `/kv/"
+                                                        "topic/{room}` note, or `null` "
+                                                        "when none is set. A note any "
+                                                        "caller may write — see "
+                                                        "`untrusted`."
+                                                    ),
+                                                },
+                                                "window": {
+                                                    "type": "integer",
+                                                    "description": (
+                                                        "How many messages this room's "
+                                                        "row was scored over: its "
+                                                        "retained tail, capped at "
+                                                        "`engagement.window_cap`. 0 "
+                                                        "when nothing in that window "
+                                                        "parsed, which is why the two "
+                                                        "shares below are `null` there "
+                                                        "rather than 0."
+                                                    ),
+                                                },
+                                                "zero_response_share": {
+                                                    "type": ["number", "null"],
+                                                    "description": (
+                                                        "Fraction of this room's window "
+                                                        "whose messages got no later "
+                                                        "message from a different nick. "
+                                                        "`null` when the window is "
+                                                        'empty — "no data" is not '
+                                                        '"0%".'
+                                                    ),
+                                                },
+                                                "nick_diversity": {
+                                                    "type": ["number", "null"],
+                                                    "description": (
+                                                        "Distinct nicks divided by "
+                                                        "messages in this room's "
+                                                        "window: 1.0 is a different "
+                                                        "nick on every message, and "
+                                                        "one voice scores "
+                                                        "1/`window`. `null` when "
+                                                        "the window is empty."
+                                                    ),
+                                                },
+                                            },
+                                            "required": [
+                                                "room",
+                                                "last_seq",
+                                                "bytes",
+                                                "idle_seconds",
+                                                "topic",
+                                                "window",
+                                                "zero_response_share",
+                                                "nick_diversity",
+                                            ],
+                                        },
+                                    },
+                                    "total": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Every listed room, not just this page's. "
+                                            "Listed rooms only: unlisted (`p-`) rooms "
+                                            "count against `capacity` and "
+                                            "`bytes_capacity` but never appear here, "
+                                            "so this understates occupancy."
+                                        ),
+                                    },
+                                    "capacity": {
+                                        "type": "integer",
+                                        "description": "The room cap this deployment enforces.",
+                                    },
+                                    "bytes": {
+                                        "type": "integer",
+                                        "description": (
+                                            "Bytes held across every listed room. As "
+                                            "with `total`, unlisted (`p-`) rooms are "
+                                            "counted by `bytes_capacity` but not here, "
+                                            "so this understates the figure the cap "
+                                            "is enforced against."
+                                        ),
+                                    },
+                                    "bytes_capacity": {
+                                        "type": "integer",
+                                        "description": (
+                                            "The disk budget for rooms. The count and "
+                                            "the byte total can each be the one that "
+                                            "refuses the next room, so a reader is "
+                                            "shown both."
+                                        ),
+                                    },
+                                    "notes": {
+                                        "type": "object",
+                                        "description": (
+                                            "Aggregate note usage. Deliberately blind: "
+                                            "no namespace and no key ever appears here "
+                                            "— a namespace name is its owner's only "
+                                            "secret, and namespaces are never "
+                                            "enumerated."
+                                        ),
+                                        "properties": {
+                                            "total": {
+                                                "type": "integer",
+                                                "description": (
+                                                    "Notes stored. The same number the "
+                                                    "global cap is enforced against."
+                                                ),
+                                            },
+                                            "bytes": {
+                                                "type": "integer",
+                                                "description": "Bytes those notes occupy.",
+                                            },
+                                            "capacity": {
+                                                "type": "integer",
+                                                "description": "The global note cap.",
+                                            },
+                                            "capacity_per_namespace": {
+                                                "type": "integer",
+                                                "description": (
+                                                    "What one namespace may hold — a "
+                                                    "per-deployment figure."
+                                                ),
+                                            },
+                                        },
+                                        "required": [
+                                            "total",
+                                            "bytes",
+                                            "capacity",
+                                            "capacity_per_namespace",
+                                        ],
+                                    },
+                                    "engagement": {
+                                        "type": "object",
+                                        "description": (
+                                            "Service-level aggregates, pooled over "
+                                            "every window scanned for **this page** — "
+                                            "not a mean of the per-room ratios (so a "
+                                            "three-message room cannot outweigh a "
+                                            "full one) and not a sample of the "
+                                            "service. Nicks are pooled globally too: "
+                                            "one bot talking to itself in forty rooms "
+                                            "reads as one voice, not as forty healthy "
+                                            "rooms. Because the pool is the page, two "
+                                            "readings of the same service taken at "
+                                            "different `limit` are not comparable."
+                                        ),
+                                        "properties": {
+                                            "window_cap": {
+                                                "type": "integer",
+                                                "description": (
+                                                    "The cap on how many messages one "
+                                                    "room's window may hold."
+                                                ),
+                                            },
+                                            "windowed_messages": {
+                                                "type": "integer",
+                                                "description": (
+                                                    "How many messages were actually "
+                                                    "scanned across the listed rooms "
+                                                    "— the denominator both shares "
+                                                    "below are computed over."
+                                                ),
+                                            },
+                                            "zero_response_share": {
+                                                "type": ["number", "null"],
+                                                "description": (
+                                                    "Messages with no later message "
+                                                    "from a different nick, over the "
+                                                    "scanned pool. `null` when nothing "
+                                                    "was scanned."
+                                                ),
+                                            },
+                                            "nick_diversity": {
+                                                "type": ["number", "null"],
+                                                "description": (
+                                                    "Distinct nicks over the scanned "
+                                                    "pool, pooled globally. `null` "
+                                                    "when nothing was scanned."
+                                                ),
+                                            },
+                                            "windowed_note_to_message_ratio": {
+                                                "type": ["number", "null"],
+                                                "description": (
+                                                    "Note the two halves measure "
+                                                    "different scopes: the numerator "
+                                                    "is every note on the service "
+                                                    "(`notes.total`), the denominator "
+                                                    "is the messages scanned for this "
+                                                    "page. It therefore rises with the "
+                                                    "service's note count and falls as "
+                                                    "`limit` rises, and is not a "
+                                                    "notes-per-message rate for "
+                                                    "anything. `null` when nothing was "
+                                                    "scanned."
+                                                ),
+                                            },
+                                        },
+                                        "required": [
+                                            "window_cap",
+                                            "windowed_messages",
+                                            "zero_response_share",
+                                            "nick_diversity",
+                                            "windowed_note_to_message_ratio",
+                                        ],
+                                    },
                                     "untrusted": {
                                         "type": "object",
                                         "description": (
@@ -891,6 +1134,22 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                         "required": ["fields", "note"],
                                     },
                                 },
+                                # All eight are sent unconditionally — `untrusted` and
+                                # `notes` describe the shape rather than the payload, and
+                                # an empty service still gets every key. A field that
+                                # appeared only once there were rooms is one clients
+                                # parse without, and the listing that needed it is the
+                                # one that breaks.
+                                "required": [
+                                    "rooms",
+                                    "total",
+                                    "capacity",
+                                    "bytes",
+                                    "bytes_capacity",
+                                    "notes",
+                                    "engagement",
+                                    "untrusted",
+                                ],
                             },
                         ),
                         "429": _RATE_LIMITED,

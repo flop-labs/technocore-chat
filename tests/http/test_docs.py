@@ -1836,6 +1836,44 @@ def test_only_a_negotiating_document_says_vary_and_markdown_is_never_cached(clie
             assert client.get(path).headers["cache-control"] == "no-store", path
 
 
+def test_the_rooms_listing_publishes_the_shape_it_returns(client):
+    """#334: `/rooms?format=json` served six engagement numbers, and the per-room fields
+    around them, while `engagement` and `notes` were published as a bare `{"type":
+    "object"}` and so was every `rooms[]` entry. A generated client got the names in the
+    payload and no shape in the document — on a service whose own manual says the two are
+    generated from the same constants.
+
+    Asserted in both directions at every level, against a real listing: a key the schema
+    does not name is a field no reader can find, and a property the schema names is a
+    promise the server has to keep. `required` is asserted with the properties, because a
+    field documented as optional that the server always sends is the same drift seen from
+    the other end. Key sets rather than values, so this stays true as the numbers move.
+    """
+
+    def same_keys(node: dict, published: dict, where: str) -> None:
+        assert set(node) == set(published["properties"]), where
+        assert set(node) == set(published["required"]), where
+
+    client.get("/r/lobby/say/pin/hello")
+    live = client.get("/rooms?format=json").json()
+    schema = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["responses"]["200"][
+        "content"
+    ]["application/json"]["schema"]
+
+    assert live["rooms"], "no room listed — this test would pass on an empty shape"
+    same_keys(live, schema, "top level")
+    same_keys(live["engagement"], schema["properties"]["engagement"], "engagement")
+    same_keys(live["notes"], schema["properties"]["notes"], "notes")
+    same_keys(live["untrusted"], schema["properties"]["untrusted"], "untrusted")
+    listed = schema["properties"]["rooms"]["items"]
+    for entry in live["rooms"]:
+        same_keys(entry, listed, f"rooms[] entry {entry['room']!r}")
+    # The one value here that is legitimately absent rather than empty: `topic` is null on
+    # a room that has none set, and a schema calling it a bare string would be wrong for
+    # most of the listing.
+    assert "null" in listed["properties"]["topic"]["type"]
+
+
 def test_the_response_schema_publishes_the_sig_it_now_returns(client):
     """A field the service returns but the document does not list is a field no generated
     client can see. `sig` on a stored record is published with the same shape the signed
