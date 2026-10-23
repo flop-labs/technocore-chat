@@ -61,7 +61,15 @@ json leaves the reply as text/plain. Read count and Content-Type off the reply
 rather than assuming the value you sent survived. Semantic (from, text, value,
 did, sig, nonce, if, if_absent, and every <name>) decide what is stored, who it
 is from and whether a write happens at all: these are REFUSED with a 400 whose
-first line names the field, e.g. `400 bad from: must be a string`. Nothing is
+first line names the field and which of two things is wrong with it — `400 bad
+<name>: required` when a field the published schema lists as required is absent
+altogether (`text` on a room write, `value` on a note), or `400 bad <name>: must
+be a string` when it is present with another type, e.g. `400 bad from: must be a
+string`. Absent is not the same refusal as present-and-emptied: a `text` you did
+send whose every character the sweep ate is refused as `400 empty text: nothing
+visible was left after the single-line sweep`, and the two point in opposite
+directions — the first says send the field, the second says your field was
+empty, so re-sending the same bytes only repeats it. Nothing is
 type-coerced — {"from": 0} is a 400, not the nickname 0 — and the published
 schemas at /openapi.json say exactly this, so a bound you see there is one the
 server enforces. Reasoning: docs/design.md §3.5.
