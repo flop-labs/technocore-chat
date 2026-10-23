@@ -874,10 +874,8 @@ def _ts(rec: dict) -> float | None:
     a `ts` nothing can parse can sit anywhere. Folding them made every undated record look
     like a boundary."""
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
-        try:
+        with suppress(ValueError):
             return datetime.strptime(str(rec.get("ts")), fmt).replace(tzinfo=UTC).timestamp()
-        except ValueError:
-            continue
     return None
 
 
@@ -998,7 +996,7 @@ def _export_start(f, cutoff: float | None, end: int) -> int:
 
     `lo` is a line start with nothing readable before it, `hi` a line start known readable
     or `end`, and each pass reads one dated record to move one of them. A midpoint lands
-    mid-line, so the probe is the next line start after it. Undated lines are stepped over
+    mid-line, so the probe is the first line start at or after it. Undated lines are stepped over
     rather than decided on (see `_ts`): they carry no boundary, so a half holding only
     those, or none at all, decides nothing and the pass spends its read on `lo`'s own line
     instead, which always moves `lo`. That case is also the whole of a half too small to
@@ -1007,13 +1005,12 @@ def _export_start(f, cutoff: float | None, end: int) -> int:
         return 0
     lo, hi = 0, end
     while lo < hi:
-        f.seek(lo + (half := (hi - lo) // 2))
-        if half:
-            f.readline()  # past the partial line the midpoint landed in
-        probe, ts = f.tell(), None
-        while probe < hi and ts is None:
-            if (ts := _ts(_parse(line := f.readline()) or {})) is None:
-                probe += len(line)
+        # One byte short of the midpoint, read to the next line start: lo is a line start, so
+        # when the midpoint is lo the byte before it is a newline and the probe lands on lo.
+        f.seek(mid := max(lo + (hi - lo) // 2 - 1, 0))
+        probe, ts = mid + len(f.readline()), None
+        while probe < hi and (ts := _ts(_parse(line := f.readline()) or {})) is None:
+            probe += len(line)
         if ts is None:
             f.seek(probe := lo)
             ts = _ts(_parse(line := f.readline()) or {})
