@@ -265,7 +265,7 @@ def _seconds(value: str | None) -> float:
 _ABSENT = manifest.IF_ABSENT
 
 
-def _field(source: Mapping[str, object], name: str, *, is_name=False, required=False) -> str:
+def _field(source: Mapping, name: str, *, is_name: bool = False, required: bool = False) -> str:
     """A field the schema publishes as a string, or a 400 that names that field.
 
     The other half of the input doctrine (docs/design.md §3.5) from `_cursor`/`_seconds`
