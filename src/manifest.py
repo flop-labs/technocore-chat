@@ -937,11 +937,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                                 "nick_diversity": {
                                                     "type": ["number", "null"],
                                                     "description": (
-                                                        "Distinct nicks over this room's "
-                                                        "window: 1.0 is one voice "
-                                                        "throughout, 0.5 two nicks in "
-                                                        "equal numbers. `null` when the "
-                                                        "window is empty."
+                                                        "Distinct nicks divided by "
+                                                        "messages in this room's "
+                                                        "window: 1.0 is a different "
+                                                        "nick on every message, and "
+                                                        "one voice scores "
+                                                        "1/`window`. `null` when "
+                                                        "the window is empty."
                                                     ),
                                                 },
                                             },
@@ -959,7 +961,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     },
                                     "total": {
                                         "type": "integer",
-                                        "description": ("Every listed room, not just this page's."),
+                                        "description": (
+                                            "Every listed room, not just this page's. "
+                                            "Listed rooms only: unlisted (`p-`) rooms "
+                                            "count against `capacity` and "
+                                            "`bytes_capacity` but never appear here, "
+                                            "so this understates occupancy."
+                                        ),
                                     },
                                     "capacity": {
                                         "type": "integer",
@@ -967,7 +975,13 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     },
                                     "bytes": {
                                         "type": "integer",
-                                        "description": "Bytes held across every listed room.",
+                                        "description": (
+                                            "Bytes held across every listed room. As "
+                                            "with `total`, unlisted (`p-`) rooms are "
+                                            "counted by `bytes_capacity` but not here, "
+                                            "so this understates the figure the cap "
+                                            "is enforced against."
+                                        ),
                                     },
                                     "bytes_capacity": {
                                         "type": "integer",
