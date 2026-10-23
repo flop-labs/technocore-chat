@@ -23,12 +23,13 @@ const mode = process.argv[1];
 const moveRoom = process.argv[2] === 'move';
 const html = readFileSync('src/humans.html', 'utf8');
 const send = html.match(/  function send\(\) \{[\s\S]*?\n  \}/)?.[0];
+const textRules = html.match(/  var INVISIBLE = [^\n]+\n  function swept[^\n]+\n  var TEXT_LIMIT = \d+;/)?.[0];
 const logout = html.match(/keyOutEl\.addEventListener\('click', function \(\) \{([\s\S]*?)\n  \}\);/)?.[1];
 // Sign-out now starts the next identity attempt, so the extracted handler needs the
 // page's real counter and ceremony guard in scope as well.
 const attemptVar = html.match(/  var identityAttempt = 0;\n/)?.[0];
 const beginIdentity = html.match(/  function beginIdentity\(\) \{[\s\S]*?\n  \}/)?.[0];
-assert.ok(send && logout && attemptVar && beginIdentity, 'send and sign-out handlers exist');
+assert.ok(send && textRules && logout && attemptVar && beginIdentity, 'send and sign-out handlers exist');
 const watchdog = setTimeout(() => { throw new Error('send did not settle'); }, 5000);
 
 async function identity() {
@@ -49,7 +50,7 @@ const env = {
   TextEncoder, Promise, String, encodeURIComponent,
   me: original, room: 'identityprobe', draftRevision: 0,
   textEl: { value: 'hello', focus() {} }, nickEl: { value: 'guest' },
-  swept: value => value, nextNonce: () => 123,
+  nextNonce: () => 123,
   bytesB64u: value => Buffer.from(value).toString('base64url'),
   crypto: { subtle: { sign(...args) {
     started();
@@ -68,7 +69,7 @@ const env = {
   SEED_KEY: 'seed', drop() {}, renderIdentity() {}, say() {},
 };
 vm.createContext(env);
-vm.runInContext(send + '\nsend();', env);
+vm.runInContext(textRules + '\n' + send + '\nsend();', env);
 await signing;
 if (mode !== 'unchanged')
   vm.runInContext(attemptVar + 'var ceremony = null; function hold() {}\n' + beginIdentity + '\n' + logout, env);
@@ -125,9 +126,10 @@ import vm from 'node:vm';
 const mode = process.argv[1];
 const html = readFileSync('src/humans.html', 'utf8');
 const send = html.match(/  function send\(\) \{[\s\S]*?\n  \}/)?.[0];
+const textRules = html.match(/  var INVISIBLE = [^\n]+\n  function swept[^\n]+\n  var TEXT_LIMIT = \d+;/)?.[0];
 const initial = html.match(/  var room = 'lobby'[^\n]+/)?.[0];
 const input = html.match(/  textEl\.addEventListener\('input', [^\n]+/)?.[0] || '';
-assert.ok(send && initial, 'execute the actual composer state and send handler');
+assert.ok(send && textRules && initial, 'execute the actual composer state and send handler');
 const handlers = {}, posts = [], errors = [];
 let focuses = 0, polls = 0;
 const env = {
@@ -146,7 +148,7 @@ const env = {
   stopPoll() {}, pump() { polls++; }, fail(message) { errors.push(message); },
 };
 vm.createContext(env);
-vm.runInContext(initial + '\n' + input + '\n' + send, env);
+vm.runInContext(textRules + '\n' + initial + '\n' + input + '\n' + send, env);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function edit(value) {
   env.textEl.value = value;

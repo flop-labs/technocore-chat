@@ -1804,6 +1804,74 @@ for (const [label, initial, target] of [
   await context.close();
 }
 
+// --------------------------------------------------------- Unicode message input limits
+// Use native insertion, not fill/value assignment: the latter can bypass maxlength and
+// let a UTF-16 truncation regression pass. Reuse an existing room to stay within room caps.
+for (const signed of [false, true]) {
+  const lane = signed ? "signed" : "nickname";
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  let posts = 0;
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("request", request => {
+    if (request.method() === "POST" && request.url() === `${BASE}/r/ime-compose`) posts++;
+  });
+  await page.goto(`${BASE}/humans#r/ime-compose`, { waitUntil: "domcontentloaded" });
+  if (signed) {
+    await page.waitForSelector("#identity:not([hidden])");
+    await page.click("#keymore summary");
+    await page.fill("#seed", "41".repeat(32));
+    await page.click("#keyuse");
+    await page.waitForFunction(() => document.getElementById("me").textContent !== "Not signed in");
+  }
+  const insert = async text => {
+    await page.fill("#text", "");
+    await page.locator("#text").focus();
+    await page.keyboard.insertText(text);
+  };
+  const accepted = [
+    ["ASCII", "a".repeat(4096)],
+    ["non-BMP", "😀".repeat(4096)],
+    ["mixed", "a😀".repeat(2048)],
+    // Sweeping and trimming remove these edge invisibles before applying the limit.
+    ["swept", "\u200b" + "😀".repeat(4096) + "\u200b"],
+  ];
+  for (const [label, text] of accepted) {
+    await insert(text);
+    check(`${lane} ${label}: native input preserves the complete draft`,
+          (await page.inputValue("#text")) === text);
+    const [response] = await Promise.all([
+      page.waitForResponse(response =>
+        response.request().method() === "POST" && response.url() === `${BASE}/r/ime-compose`),
+      page.click("#send"),
+    ]);
+    check(`${lane} ${label}: a server-limit message is accepted`, response.ok(),
+          await page.textContent("#status"));
+    const view = await (await page.request.get(`${BASE}/r/ime-compose?format=json`)).json();
+    const stored = view.messages.at(-1);
+    check(`${lane} ${label}: the full message is stored`,
+          stored?.text === text.replace(/\u200b/g, ""));
+    check(`${lane} ${label}: the expected identity lane was used`,
+          signed ? stored?.from.startsWith("did:key:") : stored?.from === "human");
+    await page.waitForFunction(() => document.getElementById("text").value === "");
+  }
+  for (const [label, text] of accepted.slice(0, 3)) {
+    const oversized = text + "a", before = posts;
+    await insert(oversized);
+    check(`${lane} ${label}: oversized insertion is not silently truncated`,
+          (await page.inputValue("#text")) === oversized);
+    await page.click("#send");
+    await page.waitForFunction(() => document.getElementById("status").textContent.includes(
+      "text too long: 4097 characters, and the limit is 4096"));
+    check(`${lane} ${label}: oversized send makes no POST`, posts === before);
+    check(`${lane} ${label}: refusal preserves the draft`,
+          (await page.inputValue("#text")) === oversized);
+  }
+  check(`${lane} message limits: no page errors`, errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

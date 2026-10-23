@@ -32,19 +32,24 @@ def test_humans_name_inputs_match_the_server_name_limit(field: str):
         store.valid_name("a" * (limit + 1))
 
 
-def test_humans_message_input_matches_the_server_text_limit():
+@pytest.mark.parametrize("unit", ["a", "\U0001f600", "a\U0001f600"])
+def test_humans_message_input_matches_the_server_text_limit(unit: str):
     import app as app_module
     import store
 
-    # The page states this limit twice: once for the human typing into #text, and once in
-    # the maxLength its own WebMCP `say` tool publishes. Both drive the same POST /r/<room>
-    # lane, so a smaller box is a silent truncation at the one place there is a person to
-    # notice it — maxlength gives no feedback, it just stops accepting characters.
+    # Native maxlength counts UTF-16 units, not Python's code points. The message box
+    # must keep the whole draft; the browser gate exercises the submit-time check.
     html = TestClient(app_module.app).get("/humans").text
-    limit = _maxlength(html, "text")
+    field = re.search(r'<input id="text"[^>]*>', html)
+    assert field is not None
+    assert "maxlength" not in field.group()
+    match = re.search(r"var TEXT_LIMIT = (\d+);", html)
+    assert match is not None
+    limit = int(match.group(1))
+    assert "maxLength: TEXT_LIMIT" in html
 
-    accepted = "a" * limit
+    accepted = (unit * limit)[:limit]
     assert store.clean_text(accepted) == accepted
 
     with pytest.raises(store.StoreError):
-        store.clean_text("a" * (limit + 1))
+        store.clean_text(accepted + "a")
