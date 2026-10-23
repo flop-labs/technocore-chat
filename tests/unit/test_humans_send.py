@@ -132,6 +132,7 @@ const handlers = {}, posts = [], errors = [];
 let focuses = 0, polls = 0;
 const env = {
   Promise, String, encodeURIComponent, me: null,
+  swept: value => value, // the extracted handler uses the page's shared sweep
   textEl: {
     value: '  original draft  ',
     focus() { focuses++; },
