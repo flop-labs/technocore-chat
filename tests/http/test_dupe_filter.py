@@ -495,3 +495,19 @@ def test_one_text_takes_one_slot_however_many_lanes_it_arrives_on(client) -> Non
     assert set(_view(client)) == {"one more copy of this sentence than allowed is refused, swept"}
     # The lanes that got in are not all one lane, or the rotation proved nothing.
     assert len({name for name, _ in accepted}) > 1, "the rotation did not actually rotate"
+
+
+def test_a_message_under_the_floor_as_typed_is_never_refused(client) -> None:
+    """The floor's promise is made to the caller, in the caller's units: the manual says
+    messages shorter than the floor are never refused, and a caller can only count what
+    they typed. The ring keys on the NFKC form, and NFKC can GROW a text - U+FDFA is one
+    character that decomposes to eighteen - so an exemption that measured only the
+    normalised form refused the shortest message there is. Both lengths have to clear the
+    floor to filter."""
+    salawat = "ﷺ"  # one character as typed; its NFKC form is well past the floor
+    assert len(limit.normalize_text(salawat)) > FLOOR
+    with _filter_on():
+        for i in range(COPIES + 3):
+            r = _say(client, "lobby", "n" + str(i), salawat)
+            assert r.status_code == 200, "copy " + str(i + 1) + " refused: " + r.text[:80]
+    assert len(_view(client)) == COPIES + 3
