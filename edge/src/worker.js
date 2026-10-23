@@ -181,11 +181,16 @@ async function fromOrigin(request, key) {
   // Always a GET of the canonical URL, never the caller's own request: route() admits HEAD
   // and the key is a GET, so fetching the request would store a HEAD's empty body under it
   // and every later GET would read an empty /rooms until the copy was replaced. Fetching the
-  // key also makes the stored body provably the reply that key names. The caller's headers
-  // ride along for the origin's rate accounting; nothing caller-specific is stored, because
-  // the guard below refuses any reply that carries some.
-  const canonical = new Request(key.url, { method: "GET", headers: request.headers });
-  const fresh = await fetch(canonical, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+  // key also names the stored body because the origin ignores `_tc_revalidate`; making it unique
+  // prevents Cloudflare's HTTP cache from handing this refresh an older copy of the same URL.
+  // The caller's headers ride along for origin rate accounting; caller-specific replies are
+  // refused by the guard below.
+  const origin = new URL(key.url);
+  origin.searchParams.set("_tc_revalidate", crypto.randomUUID());
+  const canonical = new Request(origin, { method: "GET", headers: request.headers });
+  const fresh = await fetch(canonical, {
+    signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS),
+  });
   const body = await fresh.arrayBuffer();
   const headers = new Headers(fresh.headers);
   if (fresh.status !== 200) return { status: fresh.status, body, headers };

@@ -398,12 +398,27 @@ def test_a_head_request_can_never_become_the_stored_body():
         "function fill(",
     )
     assert "fetch(request" not in origin, "a fill must not fetch the caller's own request"
-    assert 'new Request(key.url, { method: "GET"' in origin, (
-        "the fill must fetch a GET of the canonical key it is about to write"
+    assert 'new Request(origin, { method: "GET"' in origin, (
+        "the fill must fetch a GET of the cache-busted canonical URL"
     )
     assert origin.index("const canonical") < origin.index("await fetch("), (
         "the canonical GET must be what is fetched, not built after the fact"
     )
+
+
+def test_a_revalidation_fetch_cannot_hit_its_previous_http_cache(client):
+    """A unique ignored query reaches origin without changing the reply stored canonically."""
+    origin = _between(
+        (EDGE / "src" / "worker.js").read_text(encoding="utf-8"),
+        "async function fromOrigin(",
+        "function fill(",
+    )
+    assert "cf: { cacheTtl: 0 }" not in origin
+    assert 'searchParams.set("_tc_revalidate", crypto.randomUUID())' in origin
+    assert origin.index("searchParams.set") < origin.index("new Request") < origin.index("fetch(")
+    one = client.get("/rooms?format=json&_tc_revalidate=one").json()
+    two = client.get("/rooms?format=json&_tc_revalidate=two").json()
+    assert one == two
 
 
 def test_the_snapshot_script_needs_nothing_but_the_standard_library():
