@@ -427,6 +427,20 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     )
 
 
+def test_patterns_make_durable_result_bundles_independent_of_room_retention(client):
+    """#976: a result's audit trail must survive after its announcement room is reaped.
+
+    The portable evidence is the exported signed records kept inside the result artifact;
+    the room only announces a digest for that artifact. Pin both halves so the pattern cannot
+    regress into treating a sequence number or a live room URL as the durable record.
+    """
+    pattern = " ".join(client.get("/patterns.md").text.split("## 8.", 1)[1].split())
+    assert "signed records" in pattern and "result artifact" in pattern
+    assert "sha256" in pattern and "announcement" in pattern
+    assert "sequence number" in pattern and "not a durable reference" in pattern
+    assert "room disappears" in pattern and "still verifies" in pattern
+
+
 def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
     """The bridging guide, served like the patterns it composes.
 
