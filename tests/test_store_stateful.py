@@ -27,6 +27,7 @@ import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
@@ -203,6 +204,9 @@ class StoreLifecycle(RuleBasedStateMachine):
             records = _on_disk(self.root, room)
             seqs = [rec["seq"] for rec in records]
             assert seqs == sorted(seqs), f"{room}: records are out of order on disk"
+            # The model ages the whole world, never steps its write clock backwards.
+            stamps = [rec["ts"] for rec in records]
+            assert stamps == sorted(stamps), f"{room}: timestamps disagree with append order"
             assert len(set(seqs)) == len(seqs), f"{room}: a seq appears twice on disk"
             if seqs:
                 assert seqs == list(range(seqs[0], seqs[-1] + 1)), (
@@ -265,7 +269,10 @@ class StoreLifecycle(RuleBasedStateMachine):
         if since is not None:
             assert all(s > since for s in seqs), "`since` returned something already seen"
         assert view["first_seq"] == (seqs[0] if seqs else None)
-        assert view["last_seq"] == (seqs[-1] if seqs else (since or 0))
+        if seqs:
+            assert view["last_seq"] == seqs[-1]
+        else:
+            assert view["last_seq"] <= (since or 0), "last_seq must clamp to head, not echo since"
         for message in view["messages"]:
             assert (message["from"], message["text"]) == self.said[room][message["seq"]]
 
@@ -298,6 +305,26 @@ class StoreLifecycle(RuleBasedStateMachine):
         rewrites the file. It restarts only when the file is gone — expiry hiding every
         record is not that, which is why `_compact` keeps the newest one regardless."""
         assert store.last_seq(self.root, room) == self.seq[room]
+
+    @rule(room=st.sampled_from(ROOMS))
+    def read_seq_during_reap(self, room: str) -> None:
+        """Reaping between path resolution and open must preserve the sequence floor."""
+        target = store.room_path(self.root, room)
+        if not target.exists():
+            return
+        real_open = Path.open
+        fired = False
+
+        def open_after_reap(path, *args, **kwargs):
+            nonlocal fired
+            if path == target and not fired:
+                fired = True
+                self.reap()
+            return real_open(path, *args, **kwargs)
+
+        with patch.object(Path, "open", open_after_reap):
+            self.last_seq_never_goes_backwards(room)
+        assert fired
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
     def write_note(self, key: tuple[str, str], value: str) -> None:
