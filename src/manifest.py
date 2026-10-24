@@ -179,7 +179,8 @@ _DID_SCHEMA = {
         "identifier is the key, so verification is offline and no registration exists. "
         "The pattern is a necessary shape check, not sufficient validation: the base58btc "
         "payload must decode to 34 bytes starting with the ed25519-pub multicodec prefix "
-        "0xed01, followed by the 32-byte public key."
+        "0xed01, followed by the 32-byte public key. The published pattern is anchored; "
+        "clients must also enforce the exact length and decoded payload checks."
     ),
 }
 _SIG_SCHEMA = {
