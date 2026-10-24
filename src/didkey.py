@@ -49,8 +49,9 @@ _B58_INDEX = {c: i for i, c in enumerate(_B58)}
 # Unanchored: everything here uses `fullmatch`, and manifest.py anchors them for JSON
 # Schema.
 #
-# DID_PATTERN is exactly what `public_key` accepts: `[1-9A-HJ-NP-Za-km-z]` is base58btc,
-# and the multibase tag is always `z6Mk` because the ed25519-pub prefix is fixed.
+# DID_PATTERN is a necessary shape check, not sufficient validation: `z6Mk` plus
+# base58btc characters does not guarantee the decoded ed25519-pub prefix. `public_key`
+# additionally checks the decoded length and multicodec bytes.
 DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 # 64 bytes is 512 bits and 86 base64url characters carry 516, so the last character has
 # four bits nothing reads. An unconstrained {86} therefore accepts sixteen spellings of
