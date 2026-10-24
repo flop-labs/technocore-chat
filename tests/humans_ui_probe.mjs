@@ -1734,7 +1734,11 @@ for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
   check("Unicode: server stores the full 3000-emoji message",
         view.messages.some((message) => message.text === emoji.repeat(3000)));
 
-  await page.fill("#text", emoji.repeat(4097));
+  await page.fill("#text", "");
+  await page.locator("#text").focus();
+  await cdp.send("Input.insertText", { text: emoji.repeat(4097) });
+  check("Unicode: native insertion retains all 4097 over-limit code points",
+        (await page.inputValue("#text")) === emoji.repeat(4097));
   const before = posts;
   await page.click("#send");
   check("Unicode: over-limit draft is not posted", posts === before);
@@ -1747,7 +1751,11 @@ for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
   await page.fill("#text", "a".repeat(3000));
   check("Unicode: ASCII control remains intact",
         (await page.inputValue("#text")) === "a".repeat(3000));
-  await page.fill("#text", emoji.repeat(4096));
+  await page.fill("#text", "");
+  await page.locator("#text").focus();
+  await cdp.send("Input.insertText", { text: emoji.repeat(4096) });
+  check("Unicode: native insertion retains all 4096 boundary code points",
+        (await page.inputValue("#text")) === emoji.repeat(4096));
   await Promise.all([
     page.waitForResponse((response) =>
       response.request().method() === "POST" &&
