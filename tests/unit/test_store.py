@@ -514,7 +514,9 @@ def test_ephemeral_compaction_skips_a_torn_line_without_losing_older_history(tmp
         f.write(b'{"seq":999,"ts":"torn')
     store.append(tmp_path, "e-torn", "bot", "third")  # heals the torn tail
 
-    store._compact(path, cutoff=time.time() - 1, keep=10_000)
+    valid = path.read_bytes().splitlines()
+    keep = sum(len(line) + 1 for line in valid if b"torn" not in line)
+    store._compact(path, cutoff=time.time() - 1, keep=keep)
 
     view = store.read_messages(tmp_path, "e-torn", limit=10)
     assert [message["text"] for message in view["messages"]] == [
