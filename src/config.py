@@ -99,9 +99,9 @@ EDGE_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_EDGE_CACHE_SECONDS", "1")))
 # bounded well under the 15-minute autoupdate poll so the edge can never hold a manual older
 # than the deploy that changed it. 0 restores no-store; a CDN must still mark them eligible.
 STATIC_CACHE_SECONDS = max(0, int(os.environ.get("CHAT_STATIC_CACHE_SECONDS", "300")))
-# Whether a room append fsyncs before the 200 — the write-throughput ceiling on one
-# disk. 0 trades a host-crash window (the final moments of appends) for headroom;
-# torn-tail healing bounds a cut-short write to one record. Compaction always fsyncs.
+# Whether a room append and its directory chain fsync before the 200 — the write-throughput
+# ceiling on one disk. 0 may lose final appends, a new room entry, or a newly created rooms/;
+# torn-tail healing bounds damage only inside a file that survives. Compaction always fsyncs.
 FSYNC = os.environ.get("CHAT_FSYNC", "1") != "0"
 # Empty by default, and that default is a security property rather than a convenience.
 # A client-supplied header is only trustworthy when the origin cannot be reached except
