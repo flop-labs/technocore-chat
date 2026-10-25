@@ -103,6 +103,24 @@ const browser = await chromium.launch({
   ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
 });
 
+// The probe creates independent browser contexts for independent reader scenarios. Give
+// each one a documentation-only test address when the test server is configured to trust
+// this header, so an entire CI suite does not pretend to be one reader and exhaust that
+// reader's production-default budget. Production ignores the header unless explicitly
+// configured, and the rate-limiter's own regression tests still exercise the 120/min cap.
+let probeClient = 0;
+function newProbeContext(options = {}) {
+  const { extraHTTPHeaders = {}, ...contextOptions } = options;
+  probeClient += 1;
+  return browser.newContext({
+    ...contextOptions,
+    extraHTTPHeaders: {
+      ...extraHTTPHeaders,
+      "x-technocore-probe-ip": `192.0.2.${probeClient}`,
+    },
+  });
+}
+
 // ---------------------------------------------------------------- seed a store worth reading
 {
   const page = await browser.newPage();
@@ -119,7 +137,7 @@ const browser = await chromium.launch({
 
 // ---------------------------------------------------------------------------------- desktop
 {
-  const context = await browser.newContext({
+  const context = await newProbeContext({
     viewport: { width: 900, height: 1200 },
     permissions: ["clipboard-read", "clipboard-write"],
   });
@@ -199,7 +217,7 @@ const browser = await chromium.launch({
 
 // ---------------------------------------------------------- category switch loading window
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 1200 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 1200 } });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
   const view = (room, values = {}) => Object.assign({
@@ -525,7 +543,7 @@ const browser = await chromium.launch({
 // changing the seeded room order used by the other checks.
 {
   console.log("IME confirmation");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   await page.addInitScript(() => {
     const original = window.fetch;
@@ -599,7 +617,7 @@ const browser = await chromium.launch({
 
 // ----------------------------------------------------------------------------------- mobile
 {
-  const context = await browser.newContext({
+  const context = await newProbeContext({
     viewport: { width: 390, height: 850 },
     isMobile: true,
     hasTouch: true,
@@ -624,7 +642,7 @@ const browser = await chromium.launch({
 {
   console.log("horizontal overflow");
   for (const width of [320, 390, 560, 700, 900, 1280]) {
-    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    const context = await newProbeContext({ viewport: { width, height: 900 } });
     const page = await context.newPage();
     await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(500);
@@ -681,7 +699,7 @@ const browser = await chromium.launch({
     Object.defineProperty(navigator, "modelContext", { value: mc, configurable: true });
   };
 
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -844,7 +862,7 @@ const browser = await chromium.launch({
       });
     }],
   ]) {
-    const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+    const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -864,7 +882,7 @@ const browser = await chromium.launch({
 // scrolling, updating without waiting. All three used to be false — the rooms directory came
 // first and could be 200 rows tall, and the log was refreshed on a five-second timer.
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -951,7 +969,7 @@ const browser = await chromium.launch({
 
 // ----------------------------------------------------------- resolved permalink scrolling
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const room = `permalink-scroll-${Date.now().toString(36)}`;
   const errors = [];
@@ -1042,7 +1060,7 @@ const browser = await chromium.launch({
 // plain HTTP to any other host, so a probe against a LAN address would fail here for a
 // reason that is not a bug.
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1150,7 +1168,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const sentRoom = moved ? `pending${Date.now().toString(36)}` : "lobby";
   const nextRoom = moved ? `${sentRoom}next` : sentRoom;
   const nextDraft = "a draft for the other room";
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1299,7 +1317,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const [a, b] = identities;
   for (const lateError of [false, true]) {
     const label = `delegation display (${lateError ? "late error" : "late success"})`;
-    const context = await browser.newContext();
+    const context = await newProbeContext();
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -1393,7 +1411,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // a valid registrable domain to WebAuthn.
 {
   const HOST = BASE.replace("127.0.0.1", "localhost");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1690,7 +1708,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
   const errors = [];
   for (const outcome of ["success", "failure", "logout", "import"]) {
-    const context = await browser.newContext();
+    const context = await newProbeContext();
     const page = await context.newPage();
     page.on("pageerror", (e) => errors.push(String(e)));
     // Keep the room heartbeat from replacing the status being measured here.
@@ -1827,7 +1845,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // the same reason the pump checks it: with the poll parked, the only timer this section can
 // be measuring is the one under test.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1872,7 +1890,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // not do is leave a reader holding a credential that cannot derive a key without telling
 // them, or sign anybody in on a seed it never got.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1915,7 +1933,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // prose naming them goes with them, while a pasted seed still yields the DID the command
 // line derives.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1965,7 +1983,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // deterministically before send() completes. Run after the other writes and timed passkey
 // checks, retaining the service's normal write limit rather than changing its configuration.
 for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
@@ -2046,7 +2064,7 @@ for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
 // Keep this after the directory checks: the successful send really writes to the store.
 {
   console.log("browser-engine IME");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   let posts = 0;
   page.on("request", (request) => {
@@ -2095,7 +2113,7 @@ for (const [label, initial, target] of [
   ["ordinary room", 2, 0],
   ["valid permalink", 2, 2],
 ]) {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const room = `cursor-${initial}-${target}-${Date.now().toString(36)}`;
   const errors = [], cursors = [];
