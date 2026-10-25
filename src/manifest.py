@@ -550,7 +550,11 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                 "Return only messages with a greater seq. Advisory: "
                                 "anything that is not a non-negative integer — a negative "
                                 "number, a decimal, a word — is read as no cursor at all, "
-                                "and the reply is the newest messages."
+                                "and the reply is the newest messages. A cursor past the "
+                                "room's newest seq is clamped to it: an empty reply's "
+                                "`last_seq` is the room's real head, so the next poll "
+                                "resumes there instead of waiting on a seq that will not "
+                                "come."
                             ),
                         },
                         {

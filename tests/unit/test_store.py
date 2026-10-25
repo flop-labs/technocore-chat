@@ -1,8 +1,10 @@
 """Run: uv run --group dev python -m pytest tests"""
 
+import fcntl
 import json
 import os
 import stat
+import threading
 import time
 from contextlib import contextmanager
 
@@ -759,6 +761,43 @@ def test_torn_final_line_costs_only_that_record(tmp_path):
     assert store.read_messages(tmp_path, "crash", limit=1)["messages"][0]["text"] == "after"
 
 
+@pytest.mark.parametrize(
+    ("kind", "reader", "empty"),
+    (
+        ("room", lambda store, root: store.read_messages(root, "gone")["messages"], []),
+        ("room", lambda store, root: store.last_seq(root, "gone"), 0),
+        ("room", lambda store, root: store.room_window(root, "gone"), (0, [])),
+        ("note", lambda store, root: store.note_get(root, "plans", "gone"), None),
+    ),
+)
+def test_readers_tolerate_a_reap_between_path_resolution_and_open(
+    tmp_path, monkeypatch, kind, reader, empty
+):
+    """A concurrent reaper may unlink after a reader chose the path but before open().
+
+    That state is externally indistinguishable from an already-absent room or note, so it
+    must return the ordinary empty result instead of turning an idle cleanup into a 500.
+    """
+    import store
+
+    if kind == "room":
+        store.append(tmp_path, "gone", "bot", "hi")
+        target = store.room_path(tmp_path, "gone")
+    else:
+        store.note_set(tmp_path, "plans", "gone", "hi")
+        target = store.note_path(tmp_path, "plans", "gone")
+    path_type = type(target)
+    real_open = path_type.open
+
+    def open_after_reap(self, *args, **kwargs):
+        if self == target:
+            target.unlink(missing_ok=True)
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "open", open_after_reap)
+    assert reader(store, tmp_path) == empty
+
+
 def test_concurrent_appends_never_duplicate_a_seq(tmp_path):
     import threading
 
@@ -1078,6 +1117,37 @@ def test_snapshots_survive_a_torn_line(tmp_path, monkeypatch):
     assert len(store.snapshots(tmp_path)) == 1
 
 
+def test_a_writer_never_waits_for_a_snapshot_pass_in_another_worker(tmp_path):
+    """A pass walks every room — ~4.7 s at ~239k rooms on the live box — and every writer that
+    found it due used to queue behind it on the lock, holding a threadpool token while it did:
+    91 at once, measured on 0.14.2. A writer that cannot have the lock is one whose sample is
+    already being taken, so it returns, exactly as a second reap pass does.
+
+    The lock is held here the way another worker's pass holds it: `flock` is per open file
+    description, so a second fd contends exactly as a second process does. Joined with a bound,
+    and released in `finally`, so a writer that queues fails here rather than hanging the suite.
+    """
+    import store
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path / (store.SNAPSHOTS_FILE + ".lock"), "a+b") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            writer = threading.Thread(
+                target=store.append, args=(tmp_path, "lobby", "bot", "hi"), daemon=True
+            )
+            writer.start()  # no marker yet, so the sample is due
+            writer.join(5)
+            assert not writer.is_alive(), "the append queued behind the snapshot pass"
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+    writer.join(10)
+    assert store.read_messages(tmp_path, "lobby")["last_seq"] == 1, "the write itself landed"
+    assert store.snapshots(tmp_path) == [], "the sample is the running pass's to take"
+    store.append(tmp_path, "lobby", "bot", "again")
+    assert len(store.snapshots(tmp_path)) == 1, "and the next writer takes it once it is free"
+
+
 def test_corrupt_aggregate_metadata_is_ignored_without_inventing_usage(tmp_path):
     """Counters and snapshots are diagnostics, never authority. A corrupt sidecar must not
     take down writes or be interpreted as a huge/negative value that changes enforcement.
@@ -1211,6 +1281,71 @@ def test_root_ancestor_sync_resolves_symlinked_roots(tmp_path, monkeypatch):
     durability.fsync_ancestors(link)
 
     assert synced[0] == target.resolve() and link not in synced
+
+
+def test_symlinked_root_repairs_ancestors_once_across_rooms(tmp_path, monkeypatch):
+    import durability
+
+    target = tmp_path / "volume" / "chat"
+    rooms = target / "rooms"
+    rooms.mkdir(parents=True)
+    link = tmp_path / "data"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(durability, "_synced_room_directories", set())
+    real_ancestors = durability.fsync_ancestors
+    repaired = []
+
+    def ancestors(path, **kwargs):
+        repaired.append(path)
+        real_ancestors(path, **kwargs)
+
+    monkeypatch.setattr(durability, "fsync_ancestors", ancestors)
+    for root, bucket in [(link, "a"), (link, "b"), (target, "c")]:
+        path = root / "rooms" / bucket / "room.jsonl"
+        path.parent.mkdir()
+        path.touch()
+        durability.sync_room_entry(root, path)
+
+    assert repaired == [target.resolve()]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_compaction_syncs_the_replaced_files_parent_with_fsync_disabled(
+    tmp_path, monkeypatch, legacy
+):
+    import config
+    import store
+
+    with config.override(FSYNC=False):
+        store.append(tmp_path, "p-compact", "bot", "retained")
+        path = store.room_path(tmp_path, "p-compact")
+        if legacy:
+            path = path.rename(tmp_path / "rooms" / "p-compact.jsonl")
+        parent = path.parent.stat()
+        expected_parent = (parent.st_dev, parent.st_ino)
+        events = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def synced(fd):
+            info = os.fstat(fd)
+            if stat.S_ISDIR(info.st_mode):
+                events.append(("directory", (info.st_dev, info.st_ino)))
+            else:
+                events.append("file")
+            return real_fsync(fd)
+
+        def replaced(src, dst):
+            result = real_replace(src, dst)
+            events.append("replace")
+            return result
+
+        monkeypatch.setattr(os, "fsync", synced)
+        monkeypatch.setattr(os, "replace", replaced)
+        store._compact(path)
+
+    assert events == ["file", "replace", ("directory", expected_parent)]
+    assert b"retained" in path.read_bytes()
 
 
 def test_root_ancestor_sync_stops_at_an_unreadable_provisioning_boundary(tmp_path, monkeypatch):
@@ -1586,3 +1721,36 @@ def test_service_stats_measures_room_bytes_until_a_reap_settles_them(tmp_path):
     store.append(tmp_path, "openroom", "nick", "hi")
     assert store.room_bytes_used(tmp_path) == 0  # nothing reaped yet
     assert store.service_stats(tmp_path)["bytes"]["rooms"] == store._count_rooms(tmp_path)[1] > 0
+
+
+def test_a_cursor_past_the_room_head_clamps_so_text_polling_can_progress(tmp_path):
+    """A future cursor must settle on the room's actual head, or the text lane keeps
+    printing a dead next: URL forever (#565)."""
+    import store
+
+    store.append(tmp_path, "cursor", "bot", "one")
+
+    view = store.read_messages(tmp_path, "cursor", since=999)
+
+    assert view["count"] == 0
+    assert view["last_seq"] == 1
+
+
+def test_a_cursor_on_a_reaped_room_clamps_to_its_floor_not_to_zero(tmp_path):
+    """A reaped room has no file, but its head is not 0: the next write continues from the
+    floor the reaper left (#139). Clamping to the newest line on disk would rewind a caller
+    who is exactly caught up to `last_seq: 0` — the rewind #287 is about — and hand the text
+    lane a `next:` that no longer matches the cursor it was given."""
+    import store
+
+    for i in range(6):
+        store.append(tmp_path, "d-talk", "alice", f"msg {i}")
+    p = store.room_path(tmp_path, "d-talk")
+    _age(p, store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not p.exists(), "premise: the room was reaped"
+
+    assert store.read_messages(tmp_path, "d-talk", since=6)["last_seq"] == 6, "caught up: kept"
+    assert store.read_messages(tmp_path, "d-talk", since=999)["last_seq"] == 6, "past it: clamped"
+    assert store.read_messages(tmp_path, "d-talk")["last_seq"] == 0, "no cursor: as before"
