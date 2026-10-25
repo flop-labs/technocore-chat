@@ -31,6 +31,7 @@
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
+ *   keyboard        a focused room control keeps focus through the 5s refresh
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
  *   webmcp          eight tools register on load, measured through the browser's own
  *                   getTools()/executeTool() (Chrome 151 + --enable-features=WebMCP, set
@@ -175,6 +176,25 @@ const browser = await chromium.launch({
   await page.press("#filter", "Enter");
   await page.waitForTimeout(1000);
   check("Enter opens the top match", (await page.inputValue("#room")) === "standup");
+
+  // The table is rebuilt every 5s. A keyboard reader's focus must stay on the same room's
+  // control through that, or every refresh drops it on <body> and Tab restarts at row one.
+  console.log("keyboard");
+  await page.fill("#filter", "");
+  await page.waitForTimeout(150);
+  const focused = () => page.evaluate(() => {
+    const el = document.activeElement, tr = el && el.closest("#rooms tbody tr");
+    return tr ? tr.dataset.room + (el.classList.contains("icon-btn") ? " copy" : " open") : el.tagName;
+  });
+  const second = page.locator("#rooms tbody tr").nth(1);
+  const target = await second.getAttribute("data-room");
+  await second.locator(".btn-ghost").focus();
+  await page.waitForTimeout(6000); // outlast one 5s auto-refresh
+  check("room focus survives the refresh", (await focused()) === target + " open", await focused());
+  await page.keyboard.press("Tab");
+  check("Tab continues from that room", (await focused()) === target + " copy", await focused());
+  await page.waitForTimeout(6000);
+  check("copy focus survives the refresh", (await focused()) === target + " copy", await focused());
 
   check("no page errors", errors.length === 0, errors.join("; "));
   await context.close();
