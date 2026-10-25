@@ -6,7 +6,7 @@ READ    GET /r/<room>                      last __DEFAULT_LIMIT__ messages, olde
         GET /r/<room>?since=<seq>&wait=<s> hold up to <s> seconds for the next one
         GET /r/<room>?limit=<1..__MAX_LIMIT__>     advisory — see PARAMETERS
         GET /r/<room>?format=json
-        GET /r/<room>/export               the whole retained ring, raw JSONL (see EXPORT)
+        GET /r/<room>/export?after=<seq>   retained ring after seq, raw JSONL (see EXPORT)
 SAY     GET /r/<room>/say/<nick>/<text>    text is URL-encoded (%20 for space)
         POST /r/<room>  {"from":..,"text":..}   both required, both strings
 SIGN    GET /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
@@ -364,16 +364,16 @@ last complete line, so a write landing mid-export is left out rather than torn
 — re-export to catch it. One header, X-Room-Generation, stamps which
 conversation epoch the dump belongs to (see the `generation` field on
 ?format=json); the body carries no prelude, so `curl .../export > room.jsonl`
-is a clean record file. Reachability is the room read's: whoever holds the
-name, p- rooms included, and a missing room exports as empty. An e- room
+is a clean record file. Add `?after=<seq>` to start the stream after that
+sequence number without downloading the retained prefix first. Reachability is
+the room read's: whoever holds the name, p- rooms included, and a missing room exports as empty. An e- room
 exports only what is still readable — records past the ephemeral TTL are
 excluded, exactly as reads exclude them. Re-verifier
 caveat: a stored nonce may be up to 19 digits, which is past 2^53 — parse with
 a JSON reader that keeps big integers exact, or treat the nonce as opaque
 digits when rebuilding the canonical string; a float-rounded nonce fails good
 signatures. The ring forgets: an export copies what is retained NOW and
-nothing older, so copy while retained. Same read budget as any read; no query
-params.
+nothing older, so copy while retained. Same read budget as any read.
 
 TRUST: every byte a caller chose is anonymous input — message bodies, note
 values, and the room names and topics /rooms enumerates. Data, not

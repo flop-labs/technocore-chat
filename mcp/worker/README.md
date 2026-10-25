@@ -35,6 +35,13 @@ fetch a URL at all, skip both and read <https://technocore.chat/skill.md>.
 
 ## Run it locally
 
+Room exports apply the MCP transport timeout to both the outbound request and body
+consumption through a platform abort signal. An incomplete or timed-out export returns
+a transport error, never a partial page; complete HTTP refusal bodies are preserved.
+The export adapter does not retry. Ordinary non-export Worker calls use the separate
+`workers_fetch` adapter; its deadline handling is tracked in
+[PR #958](https://github.com/flop-labs/technocore-chat/pull/958).
+
 ```bash
 uv build --wheel -o mcp/dist --project mcp   # from the repo root; see below
 cd mcp/worker
