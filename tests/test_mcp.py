@@ -886,6 +886,30 @@ def test_a_network_failure_becomes_an_actionable_tool_result(mcp, monkeypatch):
     assert "connection refused" in message
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("say", {"room": "lobby", "text": "possibly stored"}),
+        ("write_note", {"namespace": "plans", "key": "possibly-stored", "value": "check"}),
+    ],
+)
+def test_a_write_network_failure_warns_that_its_outcome_is_unknown(
+    mcp, monkeypatch, tool, arguments
+):
+    async def timed_out(method, url, headers, body, timeout):
+        raise OSError("timed out")
+
+    monkeypatch.setattr(mcp.module, "_fetch", timed_out)
+    reply = mcp.call(tool, arguments)
+    assert reply.is_error is True
+    message = text_of(reply)
+    assert "no complete response" in message
+    assert "write was not confirmed" in message
+    assert "check whether it landed before retrying" in message.lower()
+    assert "cannot reach" not in message
+    assert "timed out" in message
+
+
 def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypatch):
     """The service puts the actionable part of every failure in the body — the retry delay
     on a 429, the current value on a 409, the lane that would have worked on a 403. A

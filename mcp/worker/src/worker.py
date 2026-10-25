@@ -142,8 +142,8 @@ async def workers_fetch(
 
     An HTTP answer is a value whatever its status — the service puts the actionable part
     of a 429, a 409 or a 403 in the *body*, and raising on the status would throw exactly
-    that away. Only a failure with no answer at all raises, as `OSError`, which is what
-    the caller catches to say "cannot reach".
+    that away. Only a failure with no complete answer raises, as `OSError`, which is what
+    the caller catches to report "cannot reach" for reads or an unconfirmed write.
 
     `timeout` is accepted and not used: a Worker's outbound requests are bounded by the
     platform's own request lifetime, and `fetch` exposes no per-request deadline to set.
