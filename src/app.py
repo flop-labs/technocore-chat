@@ -1160,17 +1160,11 @@ def _reject_if_events_room(room: str) -> Response | None:
     return None
 
 
-def _allowed_keys(room: str) -> set[str]:
+def _allowed_keys(room: str, owner: str) -> set[str]:
     """The keys an owned room accepts writes from: the owner plus /kv/room-allow/<room>."""
-    owner = store.note_get(config.ROOT, store.OWNERS_NS, room)
-    if owner is None:
-        return set()
-    # A note that is not a DID cannot own anything, so the room fails closed rather than
-    # falling back to open. note_write refuses to write one; this covers a value that
-    # reached the volume some other way.
-    keys = {owner} if didkey.is_did(owner) else set()
-    allow = store.note_get(config.ROOT, store.ALLOW_NS, room) or ""
-    return keys | {k for k in allow.split() if didkey.is_did(k)}
+    auth, _, allow = (store.note_get(config.ROOT, store.ALLOW_NS, room) or "").partition("\n")
+    keys = {k for k in allow.split() if didkey.is_did(k)} if auth == owner else set()
+    return ({owner} if didkey.is_did(owner) else set()) | keys
 
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
@@ -1186,15 +1180,14 @@ def _room_write_gate(request: Request, room: str, signer: str | None) -> Respons
             f"send: GET /r/{room}/say-signed/<did:key>/<sig>/<nonce>/<text> — see /llms.txt",
             403,
         )
-    if store.note_get(config.ROOT, store.OWNERS_NS, room) is not None:
-        allowed = _allowed_keys(room)
+    if (owner := store.note_get(config.ROOT, store.OWNERS_NS, room)) is not None:
         if signer is None:
             return text(
                 f"403 /r/{room} is owned: writes must be signed by a key the owner listed.\n"
                 f"owner: /kv/{store.OWNERS_NS}/{room} · allowed: /kv/{store.ALLOW_NS}/{room}",
                 403,
             )
-        if signer not in allowed:
+        if signer not in _allowed_keys(room, owner):
             return text(
                 f"403 {didkey.abbreviate(signer)} is not listed for /r/{room}. The owner adds "
                 f"keys with a signed write to /kv/{store.ALLOW_NS}/{room}.",
@@ -1537,6 +1530,8 @@ def note_read(request: Request) -> Response:
             "and a note idle for 7 days is reclaimed, so this may be one that expired.",
             404,
         )
+    if p["ns"] == store.ALLOW_NS and value and "\n" in value:
+        value = value.partition("\n")[2]
     note = budget_note("read", left, RATE_READ)
     # Shareable now: a note's bytes are the same for every caller that can name it, and an
     # unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly the
@@ -1598,6 +1593,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 400,
             )
         return None
+    owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if ns == store.OWNERS_NS:
         if not store.ownable(key):
             return text(
@@ -1612,8 +1608,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 "they hold cannot own anything. Claim with the key you sign with.",
                 400,
             )
-        current = store.note_get(config.ROOT, store.OWNERS_NS, key)
-        if current is not None and signer != current:
+        if owner is not None and signer != owner:
             return text(
                 f"403 /r/{key} is already owned. Only the current owner can hand it over, "
                 f"with a signed write: /kv/{store.OWNERS_NS}/{key}/set-signed/...",
@@ -1627,38 +1622,21 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
         # Hand-over is the other case and is deliberately not held to this: there the
         # signer is the current owner and `value` is the recipient, who cannot sign for a
         # room they do not yet hold. The check above already proved the signer is the owner.
-        if current is None and signer != value:
+        if owner is None and signer != value:
             return text(
                 f"403 claiming /r/{key} takes a signed write proving you hold that key: "
                 f"/kv/{store.OWNERS_NS}/{key}/set-signed/<did:key>/<sig>/<nonce>/<the same did:key>. "
                 "Anyone can type a did:key; only its holder can sign with it.",
                 403,
             )
-        # "Claiming a room people are already talking in would lock them out" was documented
-        # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
-        if current is None and store.last_seq(config.ROOT, key) > 0:
+        if owner is None and store.last_seq(config.ROOT, key) > 0:
             return text(
                 f"403 /r/{key} already has messages, so it can no longer be claimed — "
                 "a room is ownable from birth or not at all, or claiming becomes a way to "
                 "take over a conversation already in progress.",
                 403,
             )
-        # No owner, so no allow-list here can be current: only an owner writes one. The
-        # reaper retires an owner note on its own clock, so a list planted just before its
-        # owner aged out would otherwise be inherited by whoever claims the name next — and
-        # kept for good once their room is live. Emptied rather than deleted: `none` names
-        # no key, and overwriting keeps the note and its count, so the new owner's own list
-        # is an overwrite too — an unlink would leave the count one high and refuse it at a
-        # full namespace until the next reap. The room's nonce is left alone.
-        #
-        # Under the owner note's own lock, re-checked: a claim that raced this one and won
-        # writes its owner note under that lock, and can only write a list after it, so a
-        # claimant that read "no owner" before losing can never empty the winner's list.
-        with store._locked(owner := store.note_path(config.ROOT, store.OWNERS_NS, key)):
-            if not owner.exists() and store.note_get(config.ROOT, store.ALLOW_NS, key):
-                store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
         return None
-    owner = store.note_get(config.ROOT, store.OWNERS_NS, key)
     if owner is None:
         return text(
             f"403 /r/{key} has no owner, so it has no allow-list. Claim it first, signing "
@@ -1683,14 +1661,38 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
     return None
 
 
+def _retire_room_allow(ns: str, key: str, value: str, condition: tuple[str | None, bool]) -> dict:
+    """Write a note, binding allow-lists to the owner or retiring on ownership handover.
+
+    An allow-list belongs to the owner who authorized it. Handing over ownership to a new
+    key immediately invalidates the previous owner's grants: delegates are accepted only
+    when the allow-list's recorded owner matches the room's current owner.
+
+    The owner note is published first: if that write fails, ownership did not change, so the
+    existing owner and grants are preserved intact. If allow-list retirement subsequently
+    hits an I/O error or the process crashes, the new owner is still safe: the un-retired
+    record carries the previous owner's DID and is rejected by the authorization gate.
+    """
+    if ns == store.ALLOW_NS:
+        owner, (expect, absent) = store.note_get(config.ROOT, store.OWNERS_NS, key), condition
+        if expect is not None:
+            c = store.note_get(config.ROOT, ns, key) or ""
+            expect = c if (c.split("\n")[-1] if c else None) == expect else f"{owner}\n{expect}"
+        return store.allow_set(config.ROOT, key, owner, value, expect, absent)
+    cur = store.note_get(config.ROOT, ns, key)
+    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    if cur != value and (a := store.note_get(config.ROOT, store.ALLOW_NS, key)) and a != "none":
+        store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
+    return meta
+
+
 def note_write(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
         return limit.limited("write", RATE_WRITE, retry, text=text, max_wait=MAX_WAIT)
     p = request.path_params
     value = store.clean_text(p["value"], store.MAX_VALUE_CHARS)
-    denied = _note_write_gate(p["ns"], p["key"], value, None)
-    if denied:
+    if denied := _note_write_gate(p["ns"], p["key"], value, None):
         return denied
     meta = store.note_set(config.ROOT, p["ns"], p["key"], value, *_condition(request.query_params))
     return respond(
@@ -1740,14 +1742,10 @@ def note_write_signed(request: Request) -> Response:
     signer = _signer(p["did"], p["sig"], nonce, f"{ns}|{key}|{nonce}|{value}")
     if isinstance(signer, Response):
         return signer
-    denied = _note_write_gate(ns, key, value, signer)
-    if denied:
-        return denied
     condition = _condition(request.query_params)
-    denied = _burn_nonce(key, nonce)
-    if denied:
+    if (denied := _note_write_gate(ns, key, value, signer)) or (denied := _burn_nonce(key, nonce)):
         return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    meta = _retire_room_allow(ns, key, value, condition)
     return respond(
         request,
         meta,
@@ -1783,14 +1781,11 @@ async def note_post(request: Request) -> Response:
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
-        denied = _note_write_gate(ns, key, value, signer)
-        if denied:
+        if (denied := _note_write_gate(ns, key, value, signer)) or (
+            signer is not None and (denied := _burn_nonce(key, nonce))
+        ):
             return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
-                return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        meta = _retire_room_allow(ns, key, value, condition)
         return respond(
             request,
             meta,
