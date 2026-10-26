@@ -1162,8 +1162,9 @@ def _reject_if_events_room(room: str) -> Response | None:
 
 def _allowed_keys(room: str, owner: str) -> set[str]:
     """The keys an owned room accepts writes from: the owner plus /kv/room-allow/<room>."""
-    allow = (store.note_get(config.ROOT, store.ALLOW_NS, room) or "").split()
-    return ({owner} if didkey.is_did(owner) else set()) | {k for k in allow if didkey.is_did(k)}
+    auth, _, allow = (store.note_get(config.ROOT, store.ALLOW_NS, room) or "").partition("\n")
+    keys = {k for k in allow.split() if didkey.is_did(k)} if auth == owner else set()
+    return ({owner} if didkey.is_did(owner) else set()) | keys
 
 
 def _room_write_gate(request: Request, room: str, signer: str | None) -> Response | None:
@@ -1529,6 +1530,8 @@ def note_read(request: Request) -> Response:
             "and a note idle for 7 days is reclaimed, so this may be one that expired.",
             404,
         )
+    if p["ns"] == store.ALLOW_NS and value and "\n" in value:
+        value = value.partition("\n")[2]
     note = budget_note("read", left, RATE_READ)
     # Shareable now: a note's bytes are the same for every caller that can name it, and an
     # unlisted `p-` key is a capability URL, so a copy keyed on that URL reaches exactly the
@@ -1659,23 +1662,28 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
 
 
 def _retire_room_allow(ns: str, key: str, value: str, condition: tuple[str | None, bool]) -> dict:
-    """Write a note, retiring any delegated allow-list before an ownership handover.
+    """Write a note, binding allow-lists to the owner or retiring on ownership handover.
 
     An allow-list belongs to the owner who authorized it. Handing over ownership to a new
-    key must not allow the previous owner's grants to survive. Retiring the allow-list
-    before writing the new owner guarantees fail-closed semantics: under no failure can a
-    new owner inherit an active delegate list. If the owner write fails, the allow-list
-    remains retired. This intentionally leaves the room fail-closed rather than
-    restoring a potentially stale allow-list snapshot.
+    key immediately invalidates the previous owner's grants: delegates are accepted only
+    when the allow-list's recorded owner matches the room's current owner.
+
+    The owner note is published first: if that write fails, ownership did not change, so the
+    existing owner and grants are preserved intact. If allow-list retirement subsequently
+    hits an I/O error or the process crashes, the new owner is still safe: the un-retired
+    record carries the previous owner's DID and is rejected by the authorization gate.
     """
-    if ns != store.OWNERS_NS or (cur := store.note_get(config.ROOT, ns, key)) == value:
-        return store.note_set(config.ROOT, ns, key, value, *condition)
-    expect, expect_absent = condition
-    if (expect_absent and cur is not None) or (expect is not None and cur != expect):
-        return store.note_set(config.ROOT, ns, key, value, *condition)
-    if (a := store.note_get(config.ROOT, store.ALLOW_NS, key)) and a != "none":
+    if ns == store.ALLOW_NS:
+        owner, (expect, absent) = store.note_get(config.ROOT, store.OWNERS_NS, key), condition
+        if expect is not None:
+            c = store.note_get(config.ROOT, ns, key) or ""
+            expect = c if (c.split("\n")[-1] if c else None) == expect else f"{owner}\n{expect}"
+        return store.allow_set(config.ROOT, key, owner, value, expect, absent)
+    cur = store.note_get(config.ROOT, ns, key)
+    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    if cur != value and (a := store.note_get(config.ROOT, store.ALLOW_NS, key)) and a != "none":
         store.note_set(config.ROOT, store.ALLOW_NS, key, "none")
-    return store.note_set(config.ROOT, ns, key, value, *condition)
+    return meta
 
 
 def note_write(request: Request) -> Response:

@@ -541,11 +541,9 @@ def _migrate(legacy: Path, sharded: Path) -> None:
     under the lock, so a file migrated out from under it fails that stat and is skipped rather
     than deleted.
     """
-    try:
+    with suppress(OSError):
         sharded.parent.mkdir(parents=True, exist_ok=True)
         os.replace(legacy, sharded)
-    except OSError:
-        return  # lost the race, or cannot write: `_resolve` falls back to what is on disk
 
 
 def _resolve(d: Path, name: str, suffix: str) -> Path:
@@ -934,10 +932,9 @@ def room_stamp(root: Path, room: str) -> tuple[int, int, int, int] | None:
     """The room file's (inode, size, mtime, ctime), or None when there is no room. Anything
     `read_messages` could answer differently moves it: an append grows the file, and a
     compaction or a recreate is a new inode. Expiry only ever removes messages."""
-    try:
+    with suppress(FileNotFoundError):
         return _stamp(room_path(root, room).stat())
-    except FileNotFoundError:
-        return None
+    return None
 
 
 # One chunk of an export in flight at a time, so a slow reader holds 64 KiB and never the
@@ -2065,11 +2062,9 @@ def _snapshot(root: Path) -> None:
         with _locked(marker, nb=True):
             # Re-check under the lock: two writers racing the stat above would otherwise
             # both take a sample, and the file is the throttle as well as the data.
-            try:
+            with suppress(FileNotFoundError):
                 if time.time() - marker.stat().st_mtime < SNAPSHOT_EVERY:
                     return
-            except FileNotFoundError:
-                pass
             # Flush this worker's batched counter deltas first: `_bump` lets a plain message
             # ride in memory, and a sample taken over the unflushed bucket is exactly the
             # reading this ring exists to get right — one window short, the next one long.
@@ -2078,8 +2073,6 @@ def _snapshot(root: Path) -> None:
             kept = [r for r in snapshots(root) if now - r["t"] <= SNAPSHOT_KEEP_SECONDS]
             kept.append({"t": int(now), **service_stats(root)})
             _replace(marker, b"".join(orjson.dumps(r) + b"\n" for r in kept))
-    except BlockingIOError:
-        return  # a pass is already running in another worker; nothing here waits for it
     except OSError:
         pass
 
@@ -2176,17 +2169,12 @@ def _count_notes(root: Path) -> tuple[int, int]:
     gauge stop being a per-request walk, and it is the same pass `_ns_totals` makes for one
     namespace, so a per-namespace count costs its bytes for free too.
     """
-    total = 0
-    size = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                    total += count
-                    size += ns_bytes
-    except FileNotFoundError:
-        pass
+    total = size = 0
+    with suppress(FileNotFoundError), os.scandir(root / "notes") as namespaces:
+        for ns in namespaces:
+            if ns.is_dir():
+                count, ns_bytes = _scan(ns.path, ".txt", sized=True)
+                total, size = total + count, size + ns_bytes
     return total, size
 
 
@@ -2750,6 +2738,7 @@ def note_set(
     value: str,
     expect: str | None = None,
     expect_absent: bool = False,
+    allow_owner: str | None = None,
 ) -> dict:
     """Write a note, optionally only if it still holds what the caller last read.
 
@@ -2766,7 +2755,16 @@ def note_set(
     """
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
-    value = clean_text(value, MAX_VALUE_CHARS)
+    if allow_owner is not None:
+        if ns != ALLOW_NS or not (allow_owner and didkey.is_did(allow_owner)):
+            raise StoreError(f"invalid allow-list owner: {allow_owner!r}")
+        val = clean_text(value, MAX_VALUE_CHARS)
+        if not (val == "none" or (val.split() and all(didkey.is_did(k) for k in val.split()))):
+            raise StoreError(f"invalid allow-list delegates: {value!r}")
+        value = f"{clean_text(allow_owner, MAX_VALUE_CHARS)}\n{val}"
+        clean_text(value.replace("\n", " "), MAX_VALUE_CHARS)
+    else:
+        value = clean_text(value, MAX_VALUE_CHARS)
     _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
@@ -2808,6 +2806,11 @@ def note_set(
     return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
 
 
+def allow_set(root: Path, room: str, owner: str | None, val: str, *cond) -> dict:
+    """Store an owner-bound allow-list. Dedicated internal write path."""
+    return note_set(root, ALLOW_NS, room, val, *cond, allow_owner=owner)
+
+
 def note_get(root: Path, ns: str, key: str) -> str | None:
     with suppress(FileNotFoundError):
         return note_path(root, ns, key).read_text(encoding="utf-8")
@@ -2818,10 +2821,8 @@ def topic(root: Path, room: str) -> str | None:
     """A room's topic, previewed. Reserved note, no new write surface: it is set with the
     ordinary note lane (`/kv/topic/<room>/set/...`), which means it already passes the
     single-line sweep and `if=` already settles a topic-clobber race."""
-    value = note_get(root, TOPIC_NS, room)
-    if value is None:
-        return None
-    return value if len(value) <= TOPIC_PREVIEW_CHARS else value[:TOPIC_PREVIEW_CHARS] + "…"
+    v = note_get(root, TOPIC_NS, room)
+    return v if v is None or len(v) <= TOPIC_PREVIEW_CHARS else v[:TOPIC_PREVIEW_CHARS] + "…"
 
 
 def note_stats(root: Path) -> dict:
