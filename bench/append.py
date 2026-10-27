@@ -63,16 +63,22 @@ def _single(root: Path, room: str, warm: int, n: int) -> list[float]:
 
 def _contended(root: Path, room: str, threads: int, per_thread: int) -> tuple[list[float], float]:
     lat: list[float] = []
+    errors: list[BaseException] = []
     guard = threading.Lock()
 
     def worker() -> None:
         mine = []
-        for _ in range(per_thread):
-            t = time.perf_counter()
-            store.append(root, room, "bot", TEXT)
-            mine.append((time.perf_counter() - t) * 1e6)
-        with guard:
-            lat.extend(mine)
+        try:
+            for _ in range(per_thread):
+                t = time.perf_counter()
+                store.append(root, room, "bot", TEXT)
+                mine.append((time.perf_counter() - t) * 1e6)
+        except BaseException as error:  # thread exits must invalidate the round too
+            with guard:
+                errors.append(error)
+        else:
+            with guard:
+                lat.extend(mine)
 
     ts = [threading.Thread(target=worker) for _ in range(threads)]
     start = time.perf_counter()
@@ -80,6 +86,11 @@ def _contended(root: Path, room: str, threads: int, per_thread: int) -> tuple[li
         t.start()
     for t in ts:
         t.join()
+    # A thread exception does not fail its parent. Join everyone before failing the round,
+    # or a partial workload becomes "threads * per_thread" successful appends per second.
+    # Wrap the cause so even a worker's SystemExit(0) cannot turn failure into exit zero.
+    if errors:
+        raise RuntimeError("benchmark worker failed") from errors[0]
     return lat, (threads * per_thread) / (time.perf_counter() - start)
 
 

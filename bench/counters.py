@@ -179,6 +179,7 @@ store._replace = _counting_replace
 
 rooms = json.loads(sys.argv[8])
 latency = [[] for _ in range(threads)]
+errors = [None for _ in range(threads)]
 
 
 def room_for(t, i):
@@ -193,13 +194,16 @@ def room_for(t, i):
 
 def worker(t):
     mine = latency[t]
-    for i in range(writes):
-        if burst and i and i % burst == 0:
-            time.sleep(0.025)  # idle between spikes: the shape a steady stream never makes
-        room = room_for(t, i)
-        started = time.perf_counter()
-        store.append(root, room, "bench", "m%d-%d-%d" % (index, t, i))
-        mine.append(time.perf_counter() - started)
+    try:
+        for i in range(writes):
+            if burst and i and i % burst == 0:
+                time.sleep(0.025)  # idle between spikes: the shape a steady stream never makes
+            room = room_for(t, i)
+            started = time.perf_counter()
+            store.append(root, room, "bench", "m%d-%d-%d" % (index, t, i))
+            mine.append(time.perf_counter() - started)
+    except BaseException as error:
+        errors[t] = error
 
 
 while not go.exists():
@@ -212,6 +216,12 @@ for th in pool:
 for th in pool:
     th.join()
 ended = time.time()
+
+# Thread exceptions alone leave this process successful. Fail before emitting a report:
+# the parent counts requested writes, and the `none` arm has no counter to catch a shortfall.
+for error in errors:
+    if error is not None:
+        raise RuntimeError("benchmark worker failed") from error
 
 # The test-only drain: flush what this process still holds before it exits, so the parent can
 # check the persisted total is exact. A hard exit here is exactly the loss `_bump` documents.
@@ -281,9 +291,11 @@ def _round(
     ]
     time.sleep(0.6)  # let every worker reach the rendezvous before any of them starts writing
     go.write_text("")
+    # Reap every child before inspecting a failed one. Otherwise the caller removes the
+    # temporary store while the remaining processes are still appending to it.
+    outputs = [proc.communicate()[0] for proc in running]
     reports = []
-    for proc in running:
-        out, _ = proc.communicate()
+    for proc, out in zip(running, outputs, strict=True):
         if proc.returncode != 0:
             raise SystemExit(f"worker failed ({proc.returncode}): {out[-2000:]}")
         reports.append(json.loads(out))
