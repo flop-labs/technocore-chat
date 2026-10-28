@@ -62,6 +62,10 @@ ends in `.md` too.
 
 `deploy.sh` runs `snapshot.py` first deliberately: publishing without it ships whatever
 copies were last on this disk, which for a versioned surface means last release's numbers.
+A configuration-dependent document marked `X-Origin-Fallback` is refused even with HTTP 200:
+that is the deployed Worker's old outage copy, not an origin response to capture. Restore the
+origin and rerun the snapshot before deploying. Static-first documents still use this
+checkout's bytes. This check does not bypass or invalidate ordinary CDN caching.
 
 `edge/public/` and `edge/src/types.json` are generated and gitignored for the same reason —
 a snapshot committed to the repo is one that goes stale quietly.
