@@ -1264,7 +1264,12 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     could re-verify. `room`, `ns`, `key` and `nonce` cannot contain the separator, and the
     free-form field is last, so the canonical string parses one way only.
     """
-    if not NONCE_RE.fullmatch(nonce):
+    # The DID is checked first, through the same anchored shape `public_key` enforces: a
+    # `did` of `" "` is truthy, so it reaches here from both POST lanes, and answering it
+    # with `bad nonce` names a parameter the caller never sent (§3.5: a refusal names the
+    # field that failed). With a malformed `did` this falls through to `verify`, whose
+    # DidError names it; a good DID with a bad nonce still reads as `bad nonce` (#740).
+    if not NONCE_RE.fullmatch(nonce) and didkey.is_did(did):
         return text(f"400 nonce must be 1-19 digits, got {nonce!r}", 400)
     try:
         didkey.verify(did, sig, canonical)
