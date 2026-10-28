@@ -855,7 +855,11 @@ def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = READ_BUDGET):
         for line in reversed(parts):
             if line:
                 yield line
-    if head and pos == 0:
+    # `head` is also a whole record when the budget stopped the scan exactly on a record
+    # edge: the byte in front of it is then the newline that ended the older one. Reading
+    # that byte (seek returns the new offset, so `>= 0` only sequences it before the read)
+    # happens in that case alone, so a scan that reached the start of the file pays nothing.
+    if head and (pos == 0 or (f.seek(pos - 1) >= 0 and f.read(1) == b"\n")):
         yield head
 
 
