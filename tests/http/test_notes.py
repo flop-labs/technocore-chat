@@ -408,6 +408,72 @@ def test_signed_post_rejects_padding_and_replays_without_appending(client):
     assert client.get("/r/lobby?format=json").json()["count"] == 2
 
 
+def test_padded_credentials_are_refused_rather_than_trimmed(client):
+    """A credential spelling the published schema rejects must be refused, not normalized.
+
+    Both POST lanes trimmed `did`, `sig` and `nonce` before validating them, so `" did "`
+    was stored as `did` under a signature the caller made for the untrimmed body — against
+    the anchored DID/signature/nonce schemas in `/openapi.json` and against the signed GET
+    lanes, which read their credentials off path segments and never trimmed (#740). The
+    doctrine is docs/design.md §3.5: identity is a semantic input, so it refuses.
+    """
+    did, sign = _keypair()
+    good = sign("lobby|7|once")
+
+    for field in ("did", "sig", "nonce"):
+        payload = {"did": did, "sig": good, "nonce": "7", "text": "once"}
+        payload[field] = f" {payload[field]} "
+        refused = client.post("/r/lobby", json=payload)
+        assert refused.status_code == 400, (field, refused.status_code, refused.text)
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
+
+    # The note lane reads the same three fields, so it gets the same boundary. It only
+    # takes a signed write in a namespace the signer owns, hence the claim first.
+    owner, owner_sign = _keypair(seed=3)
+    room = "d-padded-owned"
+    assert _claim(client, room, owner, owner_sign).status_code == 200  # burns nonce 1
+    note = {
+        "did": owner,
+        "sig": owner_sign(f"room-allow|{room}|2|{owner}"),
+        "nonce": "2",
+        "value": owner,
+    }
+
+    for field in ("did", "sig", "nonce"):
+        payload = dict(note, **{field: f" {note[field]} "})
+        refused = client.post(f"/kv/room-allow/{room}", json=payload)
+        assert refused.status_code == 400, (field, refused.status_code, refused.text)
+    assert client.get(f"/kv/room-allow/{room}").status_code == 404  # nothing was written
+
+    # Unpadded, the identical request is accepted, and the stored identity is the caller's.
+    assert client.post(f"/kv/room-allow/{room}", json=note).status_code == 200
+    assert client.get(f"/kv/room-allow/{room}").text.strip().endswith(owner)
+
+
+def test_a_whitespace_only_did_is_refused_naming_did(client):
+    """Refusing a blank `did` must not answer about `nonce`.
+
+    A `did` of `" "` is truthy, so it travels to `_signer`, which checks `nonce` first: the
+    caller who sent no nonce at all was answered about the one parameter it had not sent.
+    docs/design.md §3.5 says a semantic field refuses *naming that field*, so the padded
+    `did` is refused before the credential check sees it (#740).
+    """
+    blank = {"did": " ", "from": "bob", "text": "hi"}
+    refused = client.post("/r/lobby", json=blank)
+    assert refused.status_code == 400, refused.text
+    assert "did" in refused.text and "nonce" not in refused.text
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
+
+    # The note lane reads the same field through the same helper, so it refuses alike.
+    note = {"did": "\t", "value": "x"}
+    refused = client.post("/kv/room-allow/d-blank-did", json=note)
+    assert refused.status_code == 400, refused.text
+    assert "did" in refused.text and "nonce" not in refused.text
+
+    # An absent or empty `did` still selects the unsigned lane, unchanged.
+    assert client.post("/r/lobby", json={"from": "bob", "text": "unsigned"}).status_code == 200
+
+
 def test_a_did_with_a_non_base58_character_fails_closed_and_names_the_encoding(client):
     """Prefix and length checks are not enough: characters such as 0/O/I/l are outside
     base58btc. A malformed identity must never fall back to the unsigned lane.
