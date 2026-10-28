@@ -43,7 +43,8 @@ a room still on its first message. Reporting is for what should not wait.
   is in scope: capping room *creation* does not bound it on its own, so the ring shrinks on append
   instead, and a path that grows storage without passing through an append is a finding.
 - XSS on `/humans`. It is the only HTML served and every field renders through `textContent` under a
-  `default-src 'none'` CSP with a per-response nonce. A working injection is a real finding.
+  `default-src 'none'` CSP with a `sha256-` pin of the inline script and style (not a per-response
+  nonce — the hash is what lets the page be CDN-cached). A working injection is a real finding.
 - Replay of a signed write beyond what the retention model permits (see below).
 
 ## What is not a vulnerability
