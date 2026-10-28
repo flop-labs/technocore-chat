@@ -57,7 +57,7 @@ import statistics
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -328,7 +328,8 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
         raw = rec.get("ts")
         if isinstance(raw, str):
             try:
-                return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+                parsed = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ")
+                return parsed.replace(tzinfo=timezone.utc).timestamp()
             except ValueError:
                 pass
         return 1000.0 + i * (SPAN / len(records))
