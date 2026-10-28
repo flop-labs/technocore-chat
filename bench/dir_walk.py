@@ -17,8 +17,8 @@ Two things this measures that bound the fix:
   and `os.stat(name, dir_fd=)` land within ~1.2x of each other and Path is 2.5x off all
   three, so there is no cleverer syscall to reach for — the representation is the whole
   cost. That is also why the sweep uses a plain absolute path rather than threading a
-  directory fd out of the walk: on the prod box dir_fd is 4.55 us against os.stat(path)'s
-  5.55, a fifth of one microsecond per file against an fd lifetime per namespace.
+  directory fd out of the walk: on the prod box dir_fd is 9.10 us against os.stat(path)'s
+  11.10, a fifth of the per-file cost against an fd lifetime per namespace.
 - readdir alone is the floor: 15% of the as-written cost on the prod box, 24% on a fast
   desktop. That is what tells you the remaining time is the kernel doing stats rather than
   Python doing pathlib — and that no rewrite of this loop can go below it.
@@ -34,8 +34,8 @@ makes the Python half ~5x cheaper while making the syscall only ~3x cheaper, so 
 the ratio the change is argued from. Measured both ways, same image, same 10,000 files:
 
                                   prod container   M4 Mac
-    Path(e.path).stat()             12.14 us       2.81 us
-    e.stat()                         4.81 us       1.59 us
+    Path(e.path).stat()             24.28 us       5.62 us
+    e.stat()                         9.62 us       3.18 us
     Path.stat() vs DirEntry.stat()   2.52x         1.77x
     sweep, as written               25.75 us       5.62 us
     sweep, os.access                 4.45 us       1.93 us
@@ -61,6 +61,10 @@ import time
 from pathlib import Path
 
 FILES = 10_000
+# build() unlinks half the data files to make orphan locks, so this -- not FILES -- is
+# what every walk arm visits, and what their per-file cost must be divided by. The sweep
+# arms inspect all FILES locks and keep per_file_us's default.
+DATA_FILES = FILES // 2
 BATCHES = 7
 
 
@@ -202,15 +206,15 @@ def sweep_os_access(root: str) -> int:
 def main() -> None:
     with tempfile.TemporaryDirectory() as root:
         build(root)
-        print(f"{FILES} data files + {FILES} lock sidecars in {root}")
+        print(f"{DATA_FILES} data files + {FILES} lock sidecars in {root}")
         print(f"median of {BATCHES} full passes, first pass discarded\n")
 
-        floor = per_file_us(readdir_only, root)
+        floor = per_file_us(readdir_only, root, n=DATA_FILES)
         walk = {
-            "Path(e.path).stat()": per_file_us(path_stat, root),
-            "e.stat()": per_file_us(direntry_stat, root),
-            "os.stat(e.path)": per_file_us(os_stat_path, root),
-            "os.stat(e.name, dir_fd=)": per_file_us(os_stat_dir_fd, root),
+            "Path(e.path).stat()": per_file_us(path_stat, root, n=DATA_FILES),
+            "e.stat()": per_file_us(direntry_stat, root, n=DATA_FILES),
+            "os.stat(e.path)": per_file_us(os_stat_path, root, n=DATA_FILES),
+            "os.stat(e.name, dir_fd=)": per_file_us(os_stat_dir_fd, root, n=DATA_FILES),
         }
         base = walk["Path(e.path).stat()"]
         print("the walk — one mtime per data file")
