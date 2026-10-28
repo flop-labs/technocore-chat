@@ -310,6 +310,30 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
     if not records:
         print("no parsable records in", path)
         return
+    # Mixing store epoch timestamps with synthetic 1000s times can move the
+    # replay clock backwards by decades and falsely refuse an old duplicate.
+    # A fully synthetic file still uses the historical even-spacing fallback.
+    def _parsed_time(rec: dict) -> float | None:
+        raw = rec.get("ts")
+        if isinstance(raw, str):
+            try:
+                return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+            except ValueError:
+                pass
+        return None
+
+    parsed_times = [_parsed_time(rec) for rec in records]
+    times = [t for t in parsed_times if t is not None]
+    if times:
+        skipped = len(records) - len(times)
+        if skipped:
+            records = [
+                rec for rec, t in zip(records, parsed_times, strict=True) if t is not None
+            ]
+            print(f"skipped {skipped} records with missing or invalid timestamps")
+    else:
+        times = [1000.0 + i * (SPAN / len(records)) for i in range(len(records))]
+
     counts = Counter(limit.normalize_text(r["text"]) for r in records)
     redundant = sum(v - 1 for v in counts.values() if v > 1)
     pct = lambda n: n / len(records) * 100  # noqa: E731
@@ -321,22 +345,10 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
     for text, n in counts.most_common(6):
         print(f"  x{n:<4} len={len(text):<4} {text[:70]}")
 
-    # Record timestamps when they parse (the store writes UTC microseconds), so the
-    # window arithmetic runs on the room's real pacing; even index spacing only as the
-    # fallback for a file this store did not write.
-    def _when(i: int, rec: dict) -> float:
-        raw = rec.get("ts")
-        if isinstance(raw, str):
-            try:
-                return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
-            except ValueError:
-                pass
-        return 1000.0 + i * (SPAN / len(records))
-
     limit._dupes.clear()
     refused = 0
-    for i, rec in enumerate(records):
-        if limit.dupe_refused("room", rec["text"], _when(i, rec), window, min_length, max_copies):
+    for rec, when in zip(records, times, strict=True):
+        if limit.dupe_refused("room", rec["text"], when, window, min_length, max_copies):
             refused += 1
     print(
         f"filter at min{min_length}/N{max_copies}/T{window:g}s over this file: "
