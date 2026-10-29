@@ -78,7 +78,9 @@ def test_room_analysis_preserves_valid_timestamps(
     assert "skipped" not in output
 
 
-@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires POSIX timezone conversion")
+@pytest.mark.skipif(
+    not hasattr(time, "tzset"), reason="requires POSIX timezone conversion"
+)
 def test_room_analysis_uses_utc_for_dst_boundary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
