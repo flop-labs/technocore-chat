@@ -57,7 +57,7 @@ import statistics
 import sys
 import tempfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -310,6 +310,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
     if not records:
         print("no parsable records in", path)
         return
+
     # Mixing store epoch timestamps with synthetic 1000s times can move the
     # replay clock backwards by decades and falsely refuse an old duplicate.
     # A fully synthetic file still uses the historical even-spacing fallback.
@@ -318,9 +319,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
         if isinstance(raw, str):
             try:
                 return (
-                    datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ")
-                    .replace(tzinfo=timezone.utc)
-                    .timestamp()
+                    datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC).timestamp()
                 )
             except ValueError:
                 pass
@@ -331,9 +330,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
     if times:
         skipped = len(records) - len(times)
         if skipped:
-            records = [
-                rec for rec, t in zip(records, parsed_times, strict=True) if t is not None
-            ]
+            records = [rec for rec, t in zip(records, parsed_times, strict=True) if t is not None]
             print(f"skipped {skipped} records with missing or invalid timestamps")
     else:
         times = [1000.0 + i * (SPAN / len(records)) for i in range(len(records))]
