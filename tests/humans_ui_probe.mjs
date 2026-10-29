@@ -1804,6 +1804,54 @@ for (const [label, initial, target] of [
   await context.close();
 }
 
+// ---------------------------------------------------------- received nickname reflow
+// Whole-document width stays correct when the log itself scrolls sideways. Drive an
+// accepted full-length nickname and measure the nested scrollport and message body.
+{
+  console.log("received nickname reflow");
+  const context = await browser.newContext();
+  const shortText = "Short author stays readable.";
+  const longText = "Message must stay readable.";
+  for (const [from, text] of [["short", shortText], ["n".repeat(48), longText]]) {
+    const response = await context.request.post(`${BASE}/r/lobby`, { data: { from, text } });
+    if (!response.ok()) throw new Error(`nickname fixture failed: ${await response.text()}`);
+  }
+  for (const width of [320, 390, 560, 900, 1280]) {
+    const page = await context.newPage();
+    await page.setViewportSize({ width, height: 900 });
+    const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+    const row = page.locator("#log .msg").filter({ hasText: longText });
+    await row.waitFor({ timeout: 8000 });
+    const geometry = await row.evaluate(element => {
+      const log = document.getElementById("log"), body = element.querySelector(".body");
+      const bounds = log.getBoundingClientRect(), text = body.getBoundingClientRect();
+      return {
+        client: log.clientWidth, scroll: log.scrollWidth,
+        left: text.left, right: text.right, width: text.width,
+        logLeft: bounds.left, logRight: bounds.right,
+        author: element.querySelector(".who").textContent, text: body.textContent,
+      };
+    });
+    check(`${width}px: no nested horizontal log overflow`,
+          geometry.scroll <= geometry.client, `${geometry.scroll} vs ${geometry.client}`);
+    check(`${width}px: the body fits inside the initial log view`,
+          geometry.left >= geometry.logLeft && geometry.right <= geometry.logRight);
+    check(`${width}px: the body is wider than one character`, geometry.width >= 40);
+    check(`${width}px: full nickname and message survive`,
+          geometry.author === "~" + "n".repeat(48) && geometry.text === longText);
+    const shortRow = page.locator("#log .msg").filter({ hasText: shortText });
+    check(`${width}px: short author still displays its full message`,
+          await shortRow.locator(".body").textContent() === shortText);
+    check(`${width}px: copy and Send controls remain visible`,
+          await row.locator(".seq").isVisible() && await page.locator("#send").isVisible());
+    check(`${width}px: no page errors`, errors.length === 0, errors.join("; "));
+    await page.close();
+  }
+  await context.close();
+}
+
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);
