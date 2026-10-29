@@ -57,7 +57,7 @@ _SKIP_TOKENS = {
 
 
 def _docstring_spans(tree):
-    """Line numbers covered by module/class/function docstrings."""
+    """UTF-8 byte-coordinate spans of module/class/function docstring expressions."""
     spans = set()
 
     def visit(node):
@@ -69,8 +69,8 @@ def _docstring_spans(tree):
                 and isinstance(body[0].value, ast.Constant)
                 and isinstance(body[0].value.value, str)
             ):
-                for line in range(body[0].lineno, body[0].end_lineno + 1):
-                    spans.add(line)
+                doc = body[0]
+                spans.add(((doc.lineno, doc.col_offset), (doc.end_lineno, doc.end_col_offset)))
         for child in ast.iter_child_nodes(node):
             visit(child)
 
@@ -83,12 +83,25 @@ def measure(path):
     tree = ast.parse(source)
     docstrings = _docstring_spans(tree)
 
+    lines = source.split("\n")
     code_lines = set()
     comment_lines = set()
     tokens = 0
+    after_docstring = False
     for tok in tokenize.generate_tokens(io.StringIO(source).readline):
-        if tok.type in _SKIP_TOKENS or tok.start[0] in docstrings:
+        if tok.type in _SKIP_TOKENS:
             continue
+        # AST columns are UTF-8 byte offsets; tokenize columns count characters. Keep
+        # code before/after an inline docstring, including a non-ASCII function name.
+        row, column = tok.start
+        position = (row, len(lines[row - 1][:column].encode("utf-8")))
+        if any(start <= position < end for start, end in docstrings):
+            after_docstring = True
+            continue
+        if after_docstring and tok.string == ";":
+            after_docstring = False
+            continue
+        after_docstring = False
         code_lines.add(tok.start[0])
         tokens += 1
 
