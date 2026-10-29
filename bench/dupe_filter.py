@@ -317,7 +317,11 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
         raw = rec.get("ts")
         if isinstance(raw, str):
             try:
-                return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp()
+                return (
+                    datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S.%fZ")
+                    .replace(tzinfo=timezone.utc)
+                    .timestamp()
+                )
             except ValueError:
                 pass
         return None
