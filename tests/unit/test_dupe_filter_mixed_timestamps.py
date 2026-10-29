@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -74,3 +76,32 @@ def test_room_analysis_preserves_valid_timestamps(
 
     assert "1 of 6 refused" in output
     assert "skipped" not in output
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="requires POSIX timezone conversion")
+def test_room_analysis_uses_utc_for_dst_boundary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Z is UTC, even when the host's local DST clock falls back between records.
+    old_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")
+    time.tzset()
+    try:
+        phrase = "a genuine repeated room message"
+        stamps = ["2026-11-01T01:59:59.000000Z"] * 5 + [
+            "2026-11-01T02:00:01.000000Z"
+        ]
+        path = tmp_path / "dst.jsonl"
+        _room(path, [{"text": phrase, "ts": stamp} for stamp in stamps])
+
+        dupe_filter.analyse_room_file(str(path), min_length=16, max_copies=5, window=60)
+        output = capsys.readouterr().out
+        assert "6 records" in output
+        # A naive local conversion sees 3602s, but the UTC gap is only 2s.
+        assert "1 of 6 refused" in output
+    finally:
+        if old_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", old_tz)
+        time.tzset()
