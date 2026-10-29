@@ -19,6 +19,9 @@ def test_sustained_evasion_remains_textually_distinct_and_unfiltered():
     assert len(set(evasion)) == len(evasion)
 
     bench.limit._dupes.clear()
-    refused, total = bench.replay_timed(rows, [0] * len(rows), *bench.CHOSEN)
-    assert total["evasion"] == len(evasion)
-    assert refused["evasion"] == 0
+    try:
+        refused, total = bench.replay_timed(rows, [0] * len(rows), *bench.CHOSEN)
+        assert total["evasion"] == len(evasion)
+        assert refused["evasion"] == 0
+    finally:
+        bench.limit._dupes.clear()
