@@ -14,6 +14,10 @@ every one of those is O(store) and none of them shows up on a small store.
         uv run uvicorn app:app --app-dir src --port 8099
     python tests/capacity_bench.py --keep /tmp/bench-store --port 8099
 
+HTTP measurements require a complete 200 response for every read and write. A refused,
+redirected or failed request aborts the run instead of becoming a fast sample; each curl
+request has a 30-second total deadline. No request is retried (a write may have landed).
+
 Measured 2026-08-19 on the session container (tmpfs), MAX_ROOMS=5120,
 MAX_NOTES_TOTAL=40960 — expected shape. Left at the caps it was taken under, because a
 measurement re-labelled with today's constants is a fabricated measurement. Three things
@@ -413,9 +417,21 @@ def _scan_notes(root: Path) -> int:
     return total
 
 
+def _curl(url: str, *args: str) -> None:
+    """A failed or refused request is not a fast sample. Bound stalled origins too."""
+    response = subprocess.run(
+        ["curl", "-sS", "-o", "/dev/null", "--max-time", "30", "-w", "%{http_code}", *args, url],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if response.stdout.strip() != "200":
+        raise RuntimeError(f"benchmark request to {url} returned HTTP {response.stdout.strip()}")
+
+
 def _get(url: str) -> float:
     start = time.perf_counter()
-    subprocess.run(["curl", "-s", "-o", "/dev/null", url], check=False)
+    _curl(url)
     return (time.perf_counter() - start) * 1000
 
 
@@ -426,7 +442,7 @@ def http_bench(port: int, room: str) -> None:
     # An EXISTING room on purpose. At the cap a new one is refused, and an append is what
     # this should time regardless: the reap runs inside append either way, and appending is
     # what the service spends its life doing.
-    subprocess.run(["curl", "-s", "-o", "/dev/null", f"{base}/r/{room}/say/b/hi"], check=False)
+    _curl(f"{base}/r/{room}/say/b/hi")
     # Cold because nothing has asked yet, not because of the write above: a message does not
     # end the cache window any more (see app._rooms_stamp). Run this against a fresh server.
     print(f"  {'GET /rooms cold':<38} {_get(base + '/rooms'):7.1f} ms")
@@ -434,18 +450,25 @@ def http_bench(port: int, room: str) -> None:
     print(f"  {'GET /rooms cached':<38} {cached:7.1f} ms")
 
     print("\n  event loop unserved during one write (probing /healthz, which touches no disk)")
-    for label, cmd in (
-        ("GET /r/<room>/say/... (sync)", f"curl -s -o /dev/null '{base}/r/{room}/say/b/x'"),
+    for label, write_args in (
+        ("GET /r/<room>/say/... (sync)", (f"{base}/r/{room}/say/b/x",)),
         (
             "POST /r/<room> (async)",
-            f"curl -s -o /dev/null -X POST -H 'Content-Type: application/json' "
-            f'-d \'{{"from":"b","text":"x"}}\' \'{base}/r/{room}\'',
+            (
+                f"{base}/r/{room}",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                '{"from":"b","text":"x"}',
+            ),
         ),
     ):
-        print(f"  {label:<38} {_loop_stall(base, cmd):7.1f} ms")
+        print(f"  {label:<38} {_loop_stall(base, write_args):7.1f} ms")
 
 
-def _loop_stall(base: str, write_cmd: str) -> float:
+def _loop_stall(base: str, write_args: tuple[str, ...]) -> float:
     """Worst /healthz latency observed while one write runs. A sync endpoint should cost the
     loop nothing; an async one that blocks shows the whole write here."""
     import threading
@@ -453,18 +476,31 @@ def _loop_stall(base: str, write_cmd: str) -> float:
     latencies: list[float] = []
     stop = threading.Event()
 
+    errors: list[Exception] = []
+
     def probe() -> None:
-        while not stop.is_set():
-            latencies.append(_get(base + "/healthz"))
+        try:
+            while not stop.is_set():
+                latencies.append(_get(base + "/healthz"))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            errors.append(exc)
+            stop.set()
 
     thread = threading.Thread(target=probe)
     thread.start()
-    time.sleep(0.3)
-    subprocess.run(write_cmd, shell=True, capture_output=True, check=False)
-    time.sleep(0.3)
-    stop.set()
-    thread.join()
-    return max(latencies) if latencies else float("inf")
+    try:
+        time.sleep(0.3)
+        if not errors:
+            _curl(*write_args)
+            time.sleep(0.3)
+    finally:
+        stop.set()
+        thread.join()
+    if errors:
+        raise errors[0]
+    if not latencies:
+        raise RuntimeError("benchmark sampler collected no latency samples")
+    return max(latencies)
 
 
 def main() -> None:
