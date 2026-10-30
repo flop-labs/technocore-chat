@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import ipaddress
 import re
 import threading
 import time
@@ -271,16 +272,16 @@ def client_ip(request: Request, ip_header: str = "") -> str:
     different notions of "IP" would each be bypassable by whichever header the other
     ignored.
     """
-    if ip_header:
-        forwarded = request.headers.get(ip_header, "").split(",")[0].strip()
-        if forwarded:
-            return forwarded
-        return request.client.host if request.client else "?"
-    # Not configured to read one. Note whether the request looks proxied anyway, so a
-    # misconfiguration is visible in /stats instead of only in a support ticket.
-    if any(h in request.headers for h in PROXY_IP_HEADERS):
+    raw = request.headers.get(ip_header, "").split(",")[0].strip() if ip_header else ""
+    if not ip_header and any(h in request.headers for h in PROXY_IP_HEADERS):
         _proxy_evidence["proxied_requests"] += 1
-    return request.client.host if request.client else "?"
+    try:
+        addr = ipaddress.ip_address(raw := raw or (request.client.host if request.client else "?"))
+        if isinstance(addr, ipaddress.IPv6Address):
+            return str(addr.ipv4_mapped or ipaddress.ip_network(f"{addr}/64", False))
+    except ValueError:
+        pass
+    return raw
 
 
 def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BUCKETS):
