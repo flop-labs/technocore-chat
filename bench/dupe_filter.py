@@ -217,12 +217,13 @@ def build_corpus(rng: random.Random) -> list[tuple[str, str]]:
 
 
 def senders_for(rows: list[tuple[str, str]], rng: random.Random) -> list[str]:
-    """~82% distinct senders: every farm copy from its own identity, legit traffic from
-    a smaller pool with reuse - the measured shape, and the worst case for anything
-    keyed per sender, which is why this filter is not."""
+    """~82% distinct senders: every farm or evasion copy has its own identity;
+    legit traffic comes from a smaller pool with reuse. Evasion is farm traffic too,
+    even though its label does not start with "farm". This measured shape is the
+    worst case for anything keyed per sender, which is why this filter is not."""
     return [
         f"did:key:farm{i:06d}"
-        if label.startswith("farm")
+        if label.startswith("farm") or label == "evasion"
         else f"did:key:peer{rng.randrange(3200):06d}"
         for i, (_, label) in enumerate(rows)
     ]
