@@ -21,8 +21,23 @@ def test_evasion_senders_match_the_measured_distinct_identity_shape():
         if label == "evasion"
     ]
 
+    farm_senders = [
+        sender
+        for sender, (_, label) in zip(senders, rows, strict=True)
+        if label.startswith("farm")
+    ]
+    peer_senders = [
+        sender
+        for sender, (_, label) in zip(senders, rows, strict=True)
+        if not label.startswith("farm") and label != "evasion"
+    ]
+
     assert len(evasion_senders) == 720
     assert len(set(evasion_senders)) == len(evasion_senders)
-    # The corpus claims roughly 82% distinct senders, not the ~74% caused by
-    # mistakenly assigning all evasion writes to the reusable legitimate pool.
+    assert all(sender.startswith("did:key:evade") for sender in evasion_senders)
+    assert all(sender.startswith("did:key:farm") for sender in farm_senders)
+    assert all(sender.startswith("did:key:peer") for sender in peer_senders)
+    # The farm/evasion identities are one-per-write, while legitimate traffic
+    # reuses peers. Count every distinct identity exactly, not just a ratio floor.
+    assert len(set(senders)) == len(farm_senders) + len(evasion_senders) + len(set(peer_senders))
     assert len(set(senders)) / len(senders) >= 0.80
