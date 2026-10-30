@@ -91,7 +91,14 @@ def build(root: Path, rooms: int, deep: int, depth: int) -> float:
     The deep rooms are written last, so they are the ones a recency-sorted listing reaches
     first. That ordering is the whole point: a store whose deep rooms sort last would let
     every limit below `rooms - deep` skip the tail reads entirely.
+
+    A deep room exists only once its first record is written, so `depth < 1` with any deep
+    rooms builds none of them: the store holds `rooms - deep` rooms while the report still
+    names `rooms` and `deep`. `depth` is unused when `deep` is 0, so a shallow-only store
+    accepts any value. Refused before the mkdir, so a refused call leaves nothing behind.
     """
+    if deep > 0 and depth < 1:
+        raise ValueError(f"depth ({depth}) must be at least 1 when deep ({deep}) is not 0")
     (root / "rooms").mkdir(parents=True, exist_ok=True)
     t = time.perf_counter()
     for i in range(max(0, rooms - deep)):
@@ -174,6 +181,14 @@ def main() -> int:
     p.add_argument("--limits", type=int, nargs="+", default=list(LADDER))
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
+
+    # Refused here as well as in build(), so a CLI caller gets a usage error naming the flag
+    # and exit 2 before any tempdir exists, rather than a ValueError traceback out of setup.
+    if args.deep > 0 and args.depth < 1:
+        p.error(
+            f"--depth {args.depth} with --deep {args.deep} builds no deep rooms: "
+            "--depth must be >= 1 when --deep > 0"
+        )
 
     with tempfile.TemporaryDirectory(prefix="bench-rooms-") as tmp:
         root = Path(tmp)
