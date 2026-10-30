@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
 
-from bench import dupe_filter
+# The CLI pytest entry point does not put the repository root on sys.path.
+# Load the standalone benchmark by path, as the other benchmark tests do.
+spec = importlib.util.spec_from_file_location(
+    "dupe_filter_bench", Path(__file__).resolve().parents[2] / "bench" / "dupe_filter.py"
+)
+assert spec is not None and spec.loader is not None
+dupe_filter = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(dupe_filter)
 
 
 def test_room_analysis_skips_json_values_that_are_not_records(
