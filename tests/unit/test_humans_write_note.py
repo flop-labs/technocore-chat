@@ -27,8 +27,28 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
 const html = readFileSync('src/humans.html', 'utf8');
-const tool = html.match(/name: 'write_note',[\s\S]*?\n      run: (function \(input, signal\) \{[\s\S]*?\n      \})/);
-assert.ok(tool, 'the write_note tool and its run function exist');
+// Locate the tool by its name, then take `run` as a balanced-brace span (skipping string
+// literals and comments), so a formatting change inside the function cannot break the
+// extraction: only a missing tool or a missing `run` fails here.
+const at = html.indexOf("name: 'write_note'");
+assert.ok(at >= 0, 'the write_note tool exists');
+const start = html.indexOf('run: function', at);
+assert.ok(start >= 0, 'the write_note tool has a run function');
+const open = html.indexOf('{', start);
+let depth = 0, end = -1;
+for (let i = open; i < html.length && end < 0; i++) {
+  const c = html[i];
+  if (c === "'" || c === '"' || c === '`') {
+    for (i++; i < html.length && html[i] !== c; i++) if (html[i] === '\\') i++;
+  } else if (c === '/' && html[i + 1] === '/') {
+    i = html.indexOf('\n', i);
+  } else if (c === '/' && html[i + 1] === '*') {
+    i = html.indexOf('*/', i + 2) + 1;
+  } else if (c === '{') depth++;
+  else if (c === '}' && --depth === 0) end = i + 1;
+}
+assert.ok(end > open, 'the run function closes');
+const tool = [null, html.slice(start + 'run: '.length, end)];
 const sent = [];
 const env = {
   String, JSON, encodeURIComponent,
