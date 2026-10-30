@@ -305,7 +305,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
             rec = json.loads(line)
         except ValueError:
             continue
-        if isinstance(rec.get("text"), str):
+        if isinstance(rec, dict) and isinstance(rec.get("text"), str):
             records.append(rec)
     if not records:
         print("no parsable records in", path)
