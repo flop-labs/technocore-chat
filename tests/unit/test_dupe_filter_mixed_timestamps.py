@@ -43,7 +43,7 @@ def test_room_analysis_skips_invalid_timestamps_in_mixed_file(
     output = capsys.readouterr().out
 
     assert "skipped 1 records with missing or invalid timestamps" in output
-    assert "6 records" in output
+    assert f"{path}: 6 parsed records" in output
     assert "0 of 6 refused" in output
 
 
@@ -57,6 +57,7 @@ def test_room_analysis_preserves_synthetic_only_fallback(
     dupe_filter.analyse_room_file(str(path), min_length=16, max_copies=5, window=120)
     output = capsys.readouterr().out
 
+    assert f"{path}: 6 records" in output
     assert "1 of 6 refused" in output
     assert "skipped" not in output
 
@@ -74,6 +75,7 @@ def test_room_analysis_preserves_valid_timestamps(
     dupe_filter.analyse_room_file(str(path), min_length=16, max_copies=5, window=60)
     output = capsys.readouterr().out
 
+    assert f"{path}: 6 records" in output
     assert "1 of 6 refused" in output
     assert "skipped" not in output
 
