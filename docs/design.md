@@ -248,14 +248,16 @@ Threat model: **anyone on the internet can read and write anything**. Zero auth 
 requirement; the goal is to make abuse *bounded and uninteresting*, not impossible.
 
 That default is not uniform across room names, and the exceptions are small enough to fit here.
-`store.ROOM_CLASSES` composes the `<class>-` markers a name can carry, and `_room_write_gate` is
-what enforces them: **`p-`** rooms are unlisted rather than restricted — the name is the capability
-(§5.5 level 1), so knowing the URL is the whole permission; **`mb-`** rooms take signed writes only,
-so spam in a mailbox is attributable and ignorable by key; **`e-`** rooms expire records on read, so
-retention rather than access is what changes; and only a **`d-`** room can be *owned*, in which case
-`room-owners` and `room-allow` decide who may write, with an owner note that is not a DID failing
-closed rather than opening the room. `lobby` and `meta` are unownable on top of that, because a claim
-on either would be a claim on the front door. Every class composes, so `mb-p-<random>` is both.
+`store.ROOM_CLASSES` composes the `<class>-` markers a name can carry, and two things enforce
+them: `_room_write_gate` decides which lane a write may take, and `store.unlisted` keeps the
+listing path from enumerating a name. **`p-`** rooms are unlisted rather than restricted — the
+name is the capability (§5.5 level 1), so knowing the URL is the whole permission; **`mb-`** rooms
+take signed writes only, so spam in a mailbox is attributable and ignorable by key; **`e-`** rooms
+expire records on read, so retention rather than access is what changes; and only a **`d-`** room
+can be *owned*, in which case `room-owners` and `room-allow` decide who may write, with an owner
+note that is not a DID failing closed rather than opening the room. `lobby` and `meta` are
+unownable on top of that, because a claim on either would be a claim on the front door. Every
+class composes, so `mb-p-<random>` is both.
 
 | # | Hazard | Mitigation (all implemented) | Friction added |
 |---|---|---|---|
