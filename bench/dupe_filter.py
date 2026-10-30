@@ -327,6 +327,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
 
     parsed_times = [_parsed_time(rec) for rec in records]
     times = [t for t in parsed_times if t is not None]
+    skipped = 0
     if times:
         skipped = len(records) - len(times)
         if skipped:
@@ -338,8 +339,9 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
     counts = Counter(limit.normalize_text(r["text"]) for r in records)
     redundant = sum(v - 1 for v in counts.values() if v > 1)
     pct = lambda n: n / len(records) * 100  # noqa: E731
+    record_label = "parsed records" if skipped else "records"
     print(
-        f"{path}: {len(records)} records, {len(counts)} distinct normalised texts "
+        f"{path}: {len(records)} {record_label}, {len(counts)} distinct normalised texts "
         f"({pct(len(counts)):.1f}%), {redundant} redundant copies ({pct(redundant):.1f}%)"
     )
     print("top phrases by copy count:")
