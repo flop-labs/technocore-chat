@@ -1402,6 +1402,23 @@ def _dupe_slot(room: str, body: str):
         raise
 
 
+def _room_append(request: Request, room: str, nick: str, body: str, left, **signed) -> Response:
+    """Commit one room write behind the duplicate filter and answer with the room's tail.
+
+    The commit every room-write lane shares — /say, /say-signed and POST /r/<room> — so the
+    dupe slot, the append, the room budget and the 200 cannot drift apart between them.
+    `signed` carries the verified lane's did/nonce/sig through to store.append unchanged.
+    """
+    with _dupe_slot(room, body) as refused:
+        if refused:
+            return _dupe_refusal(request, room)
+        rec = store.append(config.ROOT, room, nick, body, **signed)
+    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
+    limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
+    view = store.read_messages(config.ROOT, room, limit=20)
+    return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
+
+
 def room_say(request: Request) -> Response:
     left, retry = take(request, "write", RATE_WRITE)
     if retry:
@@ -1411,14 +1428,7 @@ def room_say(request: Request) -> Response:
     if denied:
         return denied
     nick, body = request.path_params["nick"], request.path_params["text"]
-    with _dupe_slot(room, body) as refused:
-        if refused:
-            return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, nick, body)
-    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
-    limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
-    view = store.read_messages(config.ROOT, room, limit=20)
-    return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
+    return _room_append(request, room, nick, body, left)
 
 
 def room_say_signed(request: Request) -> Response:
@@ -1442,14 +1452,7 @@ def room_say_signed(request: Request) -> Response:
     denied = _room_write_gate(request, room, signer)
     if denied:
         return denied
-    with _dupe_slot(room, body) as refused:
-        if refused:
-            return _dupe_refusal(request, room)
-        rec = store.append(config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=p["sig"])
-    config._dbg(3, "write", room=room, seq=rec["seq"], chars=len(rec["text"]))
-    limit._settle_room_budget(request, rec, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
-    view = store.read_messages(config.ROOT, room, limit=20)
-    return respond(request, {**view, "posted": rec}, note=budget_note("write", left, RATE_WRITE))
+    return _room_append(request, room, "", body, left, did=signer, nonce=int(nonce), sig=p["sig"])
 
 
 async def read_json(request: Request) -> dict | Response:
@@ -1543,24 +1546,8 @@ async def room_post(request: Request) -> Response:
             return denied
         if signer is None:
             nick = _field(payload, "from", is_name=True)
-            with _dupe_slot(room, sent) as refused:
-                if refused:
-                    return _dupe_refusal(request, room)
-                posted = store.append(config.ROOT, room, nick, sent)
-        else:
-            with _dupe_slot(room, body) as refused:
-                if refused:
-                    return _dupe_refusal(request, room)
-                posted = store.append(
-                    config.ROOT, room, "", body, did=signer, nonce=int(nonce), sig=sig
-                )
-        config._dbg(3, "write", room=room, seq=posted["seq"], chars=len(posted["text"]))
-        limit._settle_room_budget(request, posted, RATE_ROOMS_PER_DAY, ip_header=CLIENT_IP_HEADER)
-        return respond(
-            request,
-            {**store.read_messages(config.ROOT, room, limit=20), "posted": posted},
-            note=budget_note("write", left, RATE_WRITE),
-        )
+            return _room_append(request, room, nick, sent, left)
+        return _room_append(request, room, "", body, left, did=signer, nonce=int(nonce), sig=sig)
 
     return await run_in_threadpool(write)
 
