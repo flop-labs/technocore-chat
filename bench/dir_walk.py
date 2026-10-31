@@ -23,15 +23,18 @@ Two things this measures that bound the fix:
   desktop. That is what tells you the remaining time is the kernel doing stats rather than
   Python doing pathlib — and that no rewrite of this loop can go below it.
 
-Builds its own store in a tempfile directory — never read a real one. 10,000 files is enough
-to be stable and is close to the production rooms directory's 10,240.
+Builds its own store in a tempfile directory — never read a real one. 10,000 is enough to be
+stable and is close to the production rooms directory's 10,240. It is the lock count: `build()`
+unlinks the odd data files, so the tree holds 5,000 of those beside the 10,000 locks.
 
 The absolute microseconds move with the filesystem and the load, so the ratios are the claim
 — but the headline ratio moves too, and predictably enough to say how. It is
 `1 + pathlib_overhead / stat_cost`: pathlib is Python and scales with the CPU, the stat is a
 syscall and scales with the filesystem, and the two do not move together. A fast desktop core
 makes the Python half ~5x cheaper while making the syscall only ~3x cheaper, so it *shrinks*
-the ratio the change is argued from. Measured both ways, same image, same 10,000 files:
+the ratio the change is argued from. Measured both ways, same image, same tree: 10,000 locks
+over the 5,000 data files that survive `build()`. The walk rows below are per data file, the
+sweep rows per lock, which is what each arm visits:
 
                                   prod container   M4 Mac
     Path(e.path).stat()             24.28 us       5.62 us
