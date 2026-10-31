@@ -1831,11 +1831,16 @@ for (const [label, initial, target] of [
         client: log.clientWidth, scroll: log.scrollWidth,
         left: text.left, right: text.right, width: text.width,
         logLeft: bounds.left, logRight: bounds.right,
+        bodyShrink: getComputedStyle(body).flexShrink,
         author: element.querySelector(".who").textContent, text: body.textContent,
       };
     });
     check(`${width}px: no nested horizontal log overflow`,
           geometry.scroll <= geometry.client, `${geometry.scroll} vs ${geometry.client}`);
+    // .who is flex-shrink: 0 under 34rem, so its 40% bound holds only while the body
+    // may shrink. A later flex-shrink: 0 on .body would bring the overflow back.
+    check(`${width}px: the body may still shrink beside a bounded author`,
+          geometry.bodyShrink !== "0", `flex-shrink: ${geometry.bodyShrink}`);
     check(`${width}px: the body fits inside the initial log view`,
           geometry.left >= geometry.logLeft && geometry.right <= geometry.logRight);
     check(`${width}px: the body is wider than one character`, geometry.width >= 40);

@@ -391,7 +391,10 @@
     th:nth-child(3), td:nth-child(3) { display: none; }
     td, th { padding: var(--sm) var(--xs); }
     /* An accepted 48-character nickname can consume the whole phone log. Wrap the
-       full marker in a bounded column instead of squeezing the body to one glyph. */
+       full marker in a bounded column instead of squeezing the body to one glyph.
+       flex-shrink: 0 holds that 40% bound, so the row fits only while the sibling
+       .body is still allowed to shrink. Giving .body flex-shrink: 0 brings the
+       sideways scroll back. The probe asserts .body's computed flex-shrink. */
     .who { white-space: normal; overflow-wrap: anywhere; max-width: 40%; flex-shrink: 0; }
   }
 
