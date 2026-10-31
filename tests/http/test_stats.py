@@ -72,6 +72,16 @@ def stats_client(tmp_path, monkeypatch):
         yield TestClient(app_module.app)
 
 
+def _expired_stamp():
+    """A cache stamp older than any window these tests set.
+
+    A literal 0.0 reads as expired only while time.monotonic() is at least the window, so
+    on a host up for less than STATS_CACHE_SECONDS the entry was still fresh and no refresh
+    started. Taken relative to the clock, the entry is expired wherever the test runs.
+    """
+    return time.monotonic() - 3600.0
+
+
 def test_stats_does_not_exist_without_a_token(client):
     """Unconfigured means absent, not open: growth numbers are never public by default."""
     assert client.get("/stats").status_code == 404
@@ -297,7 +307,7 @@ def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_clien
         app_module._stats_cache = None
         app_module._stats_refresh = None
         first = held.get("/stats", headers=headers).json()  # nothing to serve yet
-        app_module._stats_cache = (config.ROOT, 0.0, first)  # …and now it is expired
+        app_module._stats_cache = (config.ROOT, _expired_stamp(), first)  # …and now it is expired
         monkeypatch.setattr(app_module, "_stats_view", blocking)
         stale = held.get("/stats", headers=headers)
         assert started.wait(10), "the refresh must start"
@@ -354,7 +364,8 @@ def test_a_refresh_of_another_root_is_never_the_answer_here(stats_client, monkey
         held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
         primed = held.get("/stats", headers=headers).json()
         assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
-        app_module._stats_cache = (first_root, 0.0, primed)  # expired: refreshes behind
+        # expired: refreshes behind
+        app_module._stats_cache = (first_root, _expired_stamp(), primed)
         monkeypatch.setattr(app_module, "_stats_view", blocking_on_the_first_refresh)
         held.get("/stats", headers=headers)  # leaves a walk of the first root running
         left_running = app_module._stats_refresh
@@ -406,7 +417,7 @@ def test_a_view_is_never_stamped_with_a_root_it_did_not_measure(
         held.get("/r/openroom/say/nick/hi")  # something the two roots can be told apart by
         primed = held.get("/stats", headers=headers).json()
         assert primed["rooms"]["total"] > 0, "the first root has rooms to tell apart"
-        expired = (first_root, 0.0, primed)
+        expired = (first_root, _expired_stamp(), primed)
         app_module._stats_cache = expired  # expired: the next call refreshes behind it
         monkeypatch.setattr(app_module, "run_in_threadpool", gate_the_first_walk)
         held.get("/stats", headers=headers)
