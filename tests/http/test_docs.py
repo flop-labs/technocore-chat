@@ -719,6 +719,31 @@ def test_every_negotiable_response_publishes_the_switch_that_negotiates_it(clien
     )
 
 
+def test_the_discovery_lane_publishes_the_parameters_it_reads(client):
+    """`/r/events` is served by the `/r/{room}` handler, and its own description says
+    `since`, `format` and `wait` all apply. It published `format` alone, so a client
+    generated from the contract could not pass the cursor the operation promises, and the
+    long-poll the manual tells a reader to use was undiscoverable. Derived from the room
+    read lane now, so the two cannot drift apart again.
+    """
+    doc = client.get("/openapi.json").json()
+    events = doc["paths"]["/r/events"]["get"]
+    room = doc["paths"]["/r/{room}"]["get"]
+
+    published = [p["name"] for p in events["parameters"] if p["in"] == "query"]
+    assert published == [p["name"] for p in room["parameters"] if p["in"] == "query"]
+    assert {"since", "limit", "wait", "format"} <= set(published)
+
+    # And they are the ones the server honours on that path, not just names in a document.
+    client.get("/r/one-event-room/say/bot/hello")
+    full = client.get("/r/events?format=json").json()
+    assert full["count"] >= 1
+    assert client.get("/r/events?format=json&limit=1").json()["count"] == 1
+    head = client.get(f"/r/events?format=json&since={full['last_seq']}").json()
+    assert head["count"] == 0
+    assert head["last_seq"] == full["last_seq"]
+
+
 def test_a_published_ceiling_is_a_number_json_can_carry(client, monkeypatch):
     """`float()` accepts `inf` and `nan` where the `int()` beside it raises, and this setting's
     value is published. A non-finite ceiling reaches /openapi.json and
