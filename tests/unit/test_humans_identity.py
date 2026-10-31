@@ -149,6 +149,24 @@ def test_the_pages_sweep_holds_out_the_same_joiners_the_server_keeps(page):
     assert "SWEEP_EXEMPT.indexOf(c)" in page
 
 
+def test_the_command_line_signers_sweep_holds_out_the_same_joiners_the_server_keeps():
+    """`scripts/sign.py` names its own SWEEP_EXEMPT, so pin the set itself, not only its effect.
+
+    The page's copy is pinned above and the two Python copies are checked by value over sample
+    texts, which catches a dropped joiner only when a sample happens to carry it. This asserts
+    the set, so a codepoint added to the server and forgotten in the signer goes red here
+    instead of waiting for someone to add a sample for it. The category list goes with it: the
+    signer sweeps `INVISIBLE_CATEGORIES` minus `SWEEP_EXEMPT`, so either half drifting alone
+    makes the signer sign bytes the service will not store.
+    """
+    import store
+
+    sign = _signer()
+
+    assert sign.SWEEP_EXEMPT == store.SWEEP_EXEMPT
+    assert sign.INVISIBLE_CATEGORIES == store.INVISIBLE_CATEGORIES
+
+
 # Texts that keep only the exempt joiners, or the joiners and whitespace, after the sweep. On
 # main the sweep turned every one into spaces and the empty check refused it; the exemption
 # keeps the joiners, so each copy needs the joiner-aware check or it starts storing blanks.
