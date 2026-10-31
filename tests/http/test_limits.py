@@ -596,7 +596,7 @@ def test_limit_is_clamped_to_the_response_budget(client):
 def test_cursor_past_the_end_returns_an_empty_but_usable_view(client):
     client.get("/r/lobby/say/bot/hi")
     view = client.get("/r/lobby?since=999&format=json").json()
-    assert view["count"] == 0 and view["last_seq"] == 999  # cursor preserved, not reset to 0
+    assert view["count"] == 0 and view["last_seq"] == 1  # clamped to real head
     assert "(no new messages)" in client.get("/r/lobby?since=999").text
 
 
@@ -663,6 +663,47 @@ def test_chunked_body_is_stopped_at_the_same_cap_and_says_how_to_split_it(client
     body = bytes(response.body).decode()
     assert "the stream passed it before it ended" in body
     assert "multiple room lines" in body and "multiple keys" in body
+
+
+def test_the_single_oversize_stream_chunk_is_refused_before_buffer_growth_so_that_the_cap_holds(
+    monkeypatch,
+):
+    """A server can provide one chunk larger than the cap, so reject it before extending raw.
+    The streaming promise is about the bytes held, not only the response status.
+    """
+    import asyncio
+    from typing import cast
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import Response
+
+    import app as app_module
+
+    class RequestStub:
+        headers = {}
+
+        async def stream(self):
+            yield b"x" * (app_module.MAX_BODY + 1)
+
+    class TrackingBytearray:
+        def __init__(self):
+            self.data = bytearray()
+            self.max_length = 0
+
+        def extend(self, chunk):
+            self.data.extend(chunk)
+            self.max_length = max(self.max_length, len(self.data))
+
+        def __len__(self):
+            return len(self.data)
+
+    raw = TrackingBytearray()
+    monkeypatch.setattr(app_module, "bytearray", lambda: raw, raising=False)
+    response = asyncio.run(app_module.read_json(cast(StarletteRequest, RequestStub())))
+
+    assert isinstance(response, Response)
+    assert response.status_code == 413
+    assert raw.max_length <= app_module.MAX_BODY
 
 
 def test_malformed_payload_shapes_are_400_not_500(client):
@@ -800,6 +841,33 @@ def test_long_poll_surfaces_a_message_that_arrives_after_the_request(client, mon
 
     assert [message["text"] for message in response.json()["messages"]] == ["second"]
     assert app_module._waiters_total == 0 and app_module._waiters_by_ip == {}
+
+
+def test_a_long_poll_rereads_the_room_only_when_its_file_changes(client, monkeypatch):
+    """Messages come only from the room file, so an unchanged file is an unchanged answer:
+    a waiter on a quiet room reads it once, not once per CHAT_WAIT_POLL."""
+    import app as app_module
+    import store
+
+    client.get("/r/quiet/say/bot/first")
+    reads = []
+    real = store.read_messages
+    monkeypatch.setattr(store, "read_messages", lambda *a, **k: reads.append(1) or real(*a, **k))
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0.01)
+    assert client.get("/r/quiet?since=1&wait=0.3&format=json").json()["messages"] == []
+    assert len(reads) == 2, f"{len(reads)} reads: the handler's and the first tick's, then none"
+
+
+def test_a_long_poll_wakes_when_its_room_is_created(client, monkeypatch):
+    """No file is a stamp too: creating the room is the change that ends the wait."""
+    import threading
+
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "WAIT_POLL", 0.01)
+    threading.Timer(0.2, client.get, args=("/r/newborn/say/bot/hello",)).start()
+    held = client.get("/r/newborn?since=0&wait=3&format=json").json()
+    assert [m["text"] for m in held["messages"]] == ["hello"]
 
 
 def test_long_poll_refuses_excess_slots_immediately_and_releases_disconnects(client, monkeypatch):
