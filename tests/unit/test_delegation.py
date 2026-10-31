@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -311,11 +314,63 @@ def test_the_page_supersedes_and_replaces_the_same_way(page, sign):
     grow the note by a record per re-issue against a cap of about forty."""
     assert "function newest(records)" in page
     assert "function withoutAgent(note, agent)" in page
+    # Nonces up to 19 digits exceed Number.MAX_SAFE_INTEGER; BigInt preserves precision.
+    assert "var rank = DIGITS_RE.test(d.nonce) ? BigInt(d.nonce) : -1n;" in page
     # Ties go to the last record written, on both sides.
     assert "rank >= best[d.agent][0]" in page
     assert "rank >= best[agent][0]" in _signer_source()
     # And the publish path drops the agent's previous grant rather than appending to it.
     assert "withoutAgent(previous, agent)" in page
+
+
+def test_newest_preserves_nonce_precision_above_max_safe_integer(page, sign):
+    """DIGITS_RE allows up to 19 decimal digits (the int64 ceiling), but Number.MAX_SAFE_INTEGER
+    is 9,007,199,254,740,991 (16 digits). Parsing with Number() rounds adjacent 19-digit
+    nonces (like nanosecond timestamps) to the same float, which causes rank >= best to
+    incorrectly overwrite a newer delegation with an older one. BigInt preserves exact ordering."""
+    assert "BigInt(d.nonce) : -1n" in page
+
+    # Nanosecond nonces: distinct integers that collide under float64 (JS Number).
+    newer = "1788508890862745605"
+    older = "1788508890862745604"
+    assert int(newer) > int(older)
+    assert float(newer) == float(older)
+
+    rec_newer = ("did:key:z6MkuRoot", "r:lobby", "1999999999", newer, "sig1")
+    rec_older = ("did:key:z6MkuRoot", "*", "1999999999", older, "sig2")
+
+    # In sign.py, the newer record wins regardless of order in the note.
+    assert sign.newest([rec_newer, rec_older]) == {0}
+    assert sign.newest([rec_older, rec_newer]) == {1}
+
+    if shutil.which("node"):
+        # When Node is available, verify that newest() extracted from page matches sign.py.
+        digits_match = re.search(r"var DIGITS_RE = [^;]+;", page)
+        newest_match = re.search(r"function newest\(records\) \{[\s\S]*?\n  \}", page)
+        assert digits_match and newest_match
+        script = f"""
+        {digits_match.group(0)}
+        {newest_match.group(0)}
+        const records1 = [
+            {{agent: "root", nonce: "{newer}"}},
+            {{agent: "root", nonce: "{older}"}}
+        ];
+        const records2 = [
+            {{agent: "root", nonce: "{older}"}},
+            {{agent: "root", nonce: "{newer}"}}
+        ];
+        console.log(JSON.stringify([
+            Object.keys(newest(records1)).map(Number),
+            Object.keys(newest(records2)).map(Number)
+        ]));
+        """
+        res = subprocess.run(
+            ["node", "-e", script],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert json.loads(res.stdout.strip()) == [[0], [1]]
 
 
 def _signer_source() -> str:
