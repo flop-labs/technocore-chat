@@ -1217,7 +1217,15 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function open(next, seq) {
-    room = (next || 'lobby').trim().toLowerCase();
+    var name = (next || 'lobby').trim().toLowerCase();
+    // The Room box passes whatever was typed. The server 400s a name outside NAME_RE on
+    // every read, and the pump retries a failed read every 3 s, so a typo would poll a
+    // bare "HTTP 400" forever. Refuse it here, with the rule, and stay in this room.
+    if (!NAME_RE.test(name)) {
+      fail('room names are lowercase letters, digits, - and _ (' + NAME_RE.source + ')');
+      return;
+    }
+    room = name;
     targetSeq = seq || 0;
     // Start the cursor just before the target so the first fetch contains it: the default
     // tail is the newest 50, which a permalink into older history would miss entirely.
