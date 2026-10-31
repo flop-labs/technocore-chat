@@ -49,6 +49,13 @@ def _run(tmp_path: Path, *options: str) -> subprocess.CompletedProcess[str]:
         ("batched", "lobby,loby", "unknown --mixes name: 'loby'"),
         ("every", "spread", "invalid --arms interval: 'every'"),
         ("everybad", "spread", "invalid --arms interval: 'everybad'"),
+        # float() accepts these, the interval does not: the arm would never flush.
+        ("everynan", "spread", "invalid --arms interval: 'everynan'"),
+        ("everyinf", "spread", "invalid --arms interval: 'everyinf'"),
+        ("everyNaN", "spread", "invalid --arms interval: 'everyNaN'"),
+        ("every-inf", "spread", "invalid --arms interval: 'every-inf'"),
+        ("everyInfinity", "spread", "invalid --arms interval: 'everyInfinity'"),
+        ("every50,everynan", "spread", "invalid --arms interval: 'everynan'"),
     ],
 )
 def test_invalid_selection_refuses_the_whole_run(tmp_path, arms, mixes, error):
@@ -67,6 +74,7 @@ def test_valid_static_and_interval_arms_still_run_all_mixes(tmp_path):
         "none",
         "deferred",
         "every50",
+        "every0",  # A zero interval flushes on every bump, so it stays valid.
         "every0.5",
         "every1e2",
         "every+50",
@@ -75,7 +83,7 @@ def test_valid_static_and_interval_arms_still_run_all_mixes(tmp_path):
     result = _run(tmp_path, "--arms", ",".join(arms), "--mixes", "lobby,mixed,spread")
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stderr == ""
-    assert result.stdout.count("exact in 1/1") == 27
+    assert result.stdout.count("exact in 1/1") == 30
     assert result.stdout.count("no counter") == 3
     for mix in ("lobby", "mixed", "spread"):
         assert f"--- {mix}\n" in result.stdout

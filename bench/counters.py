@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -377,8 +378,13 @@ def main() -> None:
             continue
         if arm.startswith("every"):
             try:
-                float(arm[5:])  # Keep the interval grammar the worker already accepts.
+                value = float(arm[5:])  # Keep the interval grammar the worker already accepts.
             except ValueError:
+                value = math.nan  # Not a number; the finite test below reports both cases.
+            # float() also accepts nan and inf, and `now - last[0] >= every` is then never
+            # true, so such an arm would publish a result for a workload that never flushed.
+            # 0 stays valid: `every0` flushes on every bump.
+            if not math.isfinite(value):
                 ap.error(f"invalid --arms interval: {arm!r}")
         else:
             ap.error(f"unknown --arms name: {arm!r}")
