@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -368,9 +369,31 @@ def main() -> None:
     ap.add_argument("--fsync", default="1", choices=("0", "1"), help="CHAT_FSYNC for the run")
     ap.add_argument("--burst", type=int, default=0, help="idle 25ms every N writes (0: steady)")
     args = ap.parse_args()
+    # A typo must not run batching or spread traffic under a different result label.
+    # Validate both complete lists before run() can seed a store or launch workers.
+    arms = [a for a in args.arms.split(",") if a]
+    mixes = [m for m in args.mixes.split(",") if m]
+    for arm in arms:
+        if arm in (*ARMS, "deferred"):
+            continue
+        if arm.startswith("every"):
+            try:
+                value = float(arm[5:])  # Keep the interval grammar the worker already accepts.
+            except ValueError:
+                value = math.nan  # Not a number; the finite test below reports both cases.
+            # float() also accepts nan and inf, and `now - last[0] >= every` is then never
+            # true, so such an arm would publish a result for a workload that never flushed.
+            # 0 stays valid: `every0` flushes on every bump.
+            if not math.isfinite(value):
+                ap.error(f"invalid --arms interval: {arm!r}")
+        else:
+            ap.error(f"unknown --arms name: {arm!r}")
+    for mix in mixes:
+        if mix not in MIXES:
+            ap.error(f"unknown --mixes name: {mix!r}")
     run(
-        [a for a in args.arms.split(",") if a],
-        [m for m in args.mixes.split(",") if m],
+        arms,
+        mixes,
         args.procs,
         args.threads,
         args.writes,
