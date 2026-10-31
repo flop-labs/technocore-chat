@@ -50,6 +50,9 @@ const env = {
   me: original, room: 'identityprobe', draftRevision: 0,
   textEl: { value: 'hello', focus() {} }, nickEl: { value: 'guest' },
   swept: value => value, nextNonce: () => 123,
+  // The page's own emptiness check, kept byte-identical to nothingVisible in src/humans.html
+  // so the signed branch runs the same guard it runs in a browser.
+  nothingVisible: value => !value.replace(/[\u200c\u200d]/g, '').trim(),
   bytesB64u: value => Buffer.from(value).toString('base64url'),
   crypto: { subtle: { sign(...args) {
     started();

@@ -132,6 +132,85 @@ def test_the_pages_sweep_covers_exactly_the_categories_the_server_replaces(page)
     assert categories == set(store.INVISIBLE_CATEGORIES)
 
 
+def test_the_pages_sweep_holds_out_the_same_joiners_the_server_keeps(page):
+    """The page keeps the two joiners the server exempts (store.SWEEP_EXEMPT), or a signed-in
+    reader typing a Brahmic conjunct signs the respelled word while the server stores the word
+    as sent, and the signature over one is checked against the other. The category test above
+    cannot catch this: both joiners are Cf, so a category-shaped assertion passes whether the
+    page holds them out or sweeps them.
+    """
+    import store
+
+    match = re.search(r"var SWEEP_EXEMPT = '([^']*)';", page)
+    assert match is not None, "the page no longer names the sweep exemption"
+    exempt = frozenset(chr(int(h, 16)) for h in re.findall(r"\\u([0-9a-fA-F]{4})", match.group(1)))
+    assert exempt == store.SWEEP_EXEMPT
+    # ...and the sweep consults it, rather than declaring a constant it never reads.
+    assert "SWEEP_EXEMPT.indexOf(c)" in page
+
+
+def test_the_command_line_signers_sweep_holds_out_the_same_joiners_the_server_keeps():
+    """`scripts/sign.py` names its own SWEEP_EXEMPT, so pin the set itself, not only its effect.
+
+    The page's copy is pinned above and the two Python copies are checked by value over sample
+    texts, which catches a dropped joiner only when a sample happens to carry it. This asserts
+    the set, so a codepoint added to the server and forgotten in the signer goes red here
+    instead of waiting for someone to add a sample for it. The category list goes with it: the
+    signer sweeps `INVISIBLE_CATEGORIES` minus `SWEEP_EXEMPT`, so either half drifting alone
+    makes the signer sign bytes the service will not store.
+    """
+    import store
+
+    sign = _signer()
+
+    assert sign.SWEEP_EXEMPT == store.SWEEP_EXEMPT
+    assert sign.INVISIBLE_CATEGORIES == store.INVISIBLE_CATEGORIES
+
+
+# Texts that keep only the exempt joiners, or the joiners and whitespace, after the sweep. On
+# main the sweep turned every one into spaces and the empty check refused it; the exemption
+# keeps the joiners, so each copy needs the joiner-aware check or it starts storing blanks.
+JOINER_ONLY = ("\u200c", "\u200d", "\u200c\u200d", " \u200d ", "\u200d\n\u200c", "\u200b\u200d")
+# The other side of the line: one visible letter beside a joiner is real text and is kept.
+JOINER_WITH_TEXT = ("\u0915\u094d\u200d\u0937", "a\u200d", "\u200cb", "\U0001f468\u200d\U0001f469")
+
+
+def test_every_copy_of_the_sweep_refuses_joiner_only_text_and_keeps_joined_words(page):
+    """Four places sweep before signing or storing: store.clean_text, scripts/sign.py, the MCP
+    signer and this page. They must agree on what is "nothing visible", or a client signs and
+    sends a blank the server refuses (or, before this check, a blank the server stored).
+
+    Each joiner-only sample must be refused by all four, and each joined word accepted by all
+    four. Drop the check from any one copy and its column of this test goes red; the
+    category-shaped parity tests cannot see it, because every sample's invisibles are Cf.
+    """
+    import store
+
+    sys.path.insert(0, str(ROOT / "mcp" / "src"))
+    from technocore_mcp import signing
+
+    sign = _signer()
+
+    # The page: its check strips exactly the server's exempt set, and the send path uses it.
+    match = re.search(r"function nothingVisible\(s\) \{ return !s\.replace\(/\[([^\]]*)\]/g", page)
+    assert match is not None, "the page no longer has the joiner-aware emptiness check"
+    page_set = frozenset(chr(int(h, 16)) for h in re.findall(r"\\u([0-9a-fA-F]{4})", match[1]))
+    assert page_set == store.SWEEP_EXEMPT
+    assert "if (nothingVisible(clean))" in page
+
+    for text in JOINER_ONLY:
+        with pytest.raises(store.StoreError, match="empty text"):
+            store.clean_text(text)
+        with pytest.raises(SystemExit):
+            sign.swept(text, sign.MAX_TEXT_CHARS)
+        assert signing.nothing_visible(signing.sweep(text)), repr(text)
+
+    for text in JOINER_WITH_TEXT:
+        assert store.clean_text(text) == text, repr(text)
+        assert sign.swept(text, sign.MAX_TEXT_CHARS) == text, repr(text)
+        assert not signing.nothing_visible(signing.sweep(text)), repr(text)
+
+
 def test_the_page_only_offers_seeds_the_command_line_signer_would_also_accept(page):
     """scripts/sign.py takes 64 hex characters *or* hashes anything else into a seed. The
     page deliberately takes only the first: hashing whatever was pasted turns a mistyped
