@@ -1987,6 +1987,12 @@ def _reap_pass(root: Path, now: float) -> None:
                             # (#139 dir #3): a silently-repaired cursor is fine for a stateless
                             # reader, but a stateful one needs to know the conversation changed.
                             # (Rooms only: notes are not sequenced, so they carry no floor/gen.)
+                            # Gated on stillborn_rule, not stillborn_here: the exemption
+                            # above defers the events log to the idle rule rather than
+                            # sparing it forever, so the floor must still be written when
+                            # that rule takes it. Threading stillborn_here in here would
+                            # make the events log the one room reaped without a floor,
+                            # restarting it at seq 1 and recreating the break above.
                             room = p.name[: -len(".jsonl")]
                             _set_seq_entry(root, room, max(0, last_seq(root, room)))
                         p.unlink(missing_ok=True)
