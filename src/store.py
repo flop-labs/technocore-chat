@@ -855,7 +855,17 @@ def reverse_lines(f, chunk_size: int = 65536, max_bytes: int = READ_BUDGET):
         for line in reversed(parts):
             if line:
                 yield line
-    if head and pos == 0:
+    # `head` is also a whole record when the budget stopped the scan exactly on a record
+    # edge: the byte in front of it is then the newline that ended the older one. Reading
+    # that byte (seek returns the new offset, so `>= 0` only sequences it before the read)
+    # happens in that case alone, so a scan that reached the start of the file pays nothing.
+    # No path here restores `f`'s position. The scan leaves it mid file and this probe then
+    # seeks to `pos - 1` and reads that byte, so the generator ends with the position at
+    # `pos`, the first byte of `head`. Every caller in this module opens a handle "rb" for
+    # one scan and drops it, so that costs nothing today. A caller that kept reading from
+    # the same handle after the generator finished would get that offset and not EOF, so it
+    # has to seek for itself.
+    if head and (pos == 0 or (f.seek(pos - 1) >= 0 and f.read(1) == b"\n")):
         yield head
 
 
