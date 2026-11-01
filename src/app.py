@@ -285,7 +285,12 @@ def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) ->
     the wrong one, which is the failure the doctrine's last clause names.
     """
     value = source.get(name, None if is_name else "")
-    if not isinstance(value, str):
+    # `?if=A&if=B` is a list on the wire, but `QueryParams.get` hands on only its last item,
+    # so the GET lanes ran a compare-and-set against `B` alone and read
+    # `?if_absent=1&if_absent=0` as an overwrite the caller had also asked to be create-only
+    # (#925). Refused as the list it is, with the answer `{"if": ["A", "B"]}` already gets.
+    # Only QueryParams has `getlist`: a JSON body's repeated names are the parser's to refuse.
+    if not isinstance(value, str) or len(getattr(source, "getlist", lambda _: ())(name)) > 1:
         raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
     if is_name and not store.NAME_RE.fullmatch(value):
         raise StoreError(f"bad {name}: {value!r} must match /{store.NAME_RE.pattern}/")
