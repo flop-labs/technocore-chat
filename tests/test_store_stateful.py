@@ -180,8 +180,8 @@ class StoreLifecycle(RuleBasedStateMachine):
         return "gone"
 
     def _reap_model(self) -> None:
-        """Apply the reaper's rules to the model, wherever the store would have run a pass
-        — which, with REAP_EVERY at zero, is before every append and every note write."""
+        """Apply the reaper's rules to the model, wherever the store runs a pass — which is
+        only the `reap` rule now: writes no longer reap on their way in (#896)."""
         for room in ROOMS:
             if self._room_verdict(room) == "gone":
                 # #139: a reaped room leaves its high-water mark in a floor map so a
@@ -239,7 +239,6 @@ class StoreLifecycle(RuleBasedStateMachine):
     def say(self, room: str, nick: str, texts: list[str]) -> None:
         """A burst rather than one line: a step budget spent one message at a time never
         fills a ring, and compaction is only reachable from a room with a history."""
-        self._reap_model()
         for text in texts:
             record = store.append(self.root, room, nick, text)
             assert record["seq"] == self.seq[room] + 1, (
@@ -325,7 +324,6 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
     def write_note(self, key: tuple[str, str], value: str) -> None:
-        self._reap_model()
         store.note_set(self.root, *key, value)
         self.notes[key] = value
         self.note_age[key] = 0
@@ -336,7 +334,6 @@ class StoreLifecycle(RuleBasedStateMachine):
         """The only ordering primitive a note has, and what an accumulator is built on: it
         must win exactly when the value it was handed is still there, and lose with the
         *actual* value attached so the loser can rebase without a second read."""
-        self._reap_model()
         current = self.notes.get(key)
         expect = current if (use_current and current is not None) else f"stale-{value}"
         try:
@@ -354,7 +351,6 @@ class StoreLifecycle(RuleBasedStateMachine):
 
     @rule(key=st.sampled_from(NOTES), value=SAFE_TEXT)
     def create_if_absent(self, key: tuple[str, str], value: str) -> None:
-        self._reap_model()
         existed = self.notes.get(key)
         try:
             store.note_set(self.root, *key, value, expect_absent=True)

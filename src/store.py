@@ -790,8 +790,8 @@ def _bump(root: Path, **deltas: int) -> None:
 
     What it costs: `.counters` lags by whatever is pending while the lock is contended
     (bounded by one holder's read-modify-replace, and caught up by the next bump), and a
-    worker killed hard loses its own unflushed batch — hard specifically, since app.py's
-    lifespan flushes this bucket on a graceful stop, which is what a rolling deploy sends. Both are the undercount this
+    worker killed hard loses its own unflushed batch — hard specifically, since
+    `reaper.lifespan` flushes this bucket on a graceful stop, which is what a rolling deploy sends. Both are the undercount this
     function's contract already allows — deeper by one flush than before, never wrong in
     the direction that matters, and never able to make a counter go backwards.
     """
@@ -1464,7 +1464,7 @@ def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
     one reap interval; here it is the gauge itself, and a fresh store that reported zero
     bytes against rooms it can see would be reporting something it knows to be false. That
     walk is the one this pass just dropped, so it is bounded by the same thing that bounds
-    an unreaped store: appends run reaps.
+    an unreaped store: every worker's reaper thread runs a pass each REAP_EVERY.
     """
     # `ownable`, not `owned`: the `d-` prefix only makes a room *claimable* — until
     # /kv/room-owners/<room> exists the write gate treats it as an ordinary open room, so
@@ -1699,8 +1699,8 @@ def _split_seq_state(root: Path) -> None:
 
     Best effort and idempotent: a failure leaves the map in place, `_seq_entry` keeps reading
     it as the fallback, and the next reap tries again. Runs once in the life of a store — and
-    the reap it rides is throttled, so the window where reads still pay the old parse is at
-    most one REAP_EVERY after the first write.
+    the reap it rides runs one REAP_EVERY after a worker starts, so the window where reads
+    still pay the old parse is at most that interval.
     """
     legacy = _seq_state_path(root)
     shards: dict[Path, dict] = {}
@@ -1833,8 +1833,8 @@ def _drop_emptied_namespaces(
     Per namespace rather than once around the loop: a create only ever needs the directory it
     is entering to stand still, so holding the span across all of them would queue creates
     behind namespaces they have nothing to do with. Inside the `try` for the reason this whole
-    tail is best effort — `_reap` runs on the request path, and a pass that cannot take the
-    span must skip a cleanup, never fail the create that triggered it.
+    tail is best effort — a pass that cannot take the span skips a cleanup the next pass
+    repeats, rather than abandoning the rest of this one.
     """
     try:
         with os.scandir(root / "notes") as namespaces:
@@ -1876,8 +1876,8 @@ def _reap(root: Path) -> None:
     One pass at a time across the whole service, which the timestamp alone did not buy:
     reading the marker and touching it are two unserialised operations, so two of the ~230
     workers arriving together on an interval boundary both passed the check — and a walk that
-    takes longer than REAP_EVERY is overlapped by the next writer however the check is
-    written. Two passes interleaved write a count *below* the disk: the second deletes and
+    takes longer than REAP_EVERY is overlapped by the next worker's reaper however the check
+    is written. Two passes interleaved write a count *below* the disk: the second deletes and
     settles while the first is still walking, and the first then installs a figure measured
     against a window the second has already spent (see `_settle_count`). So the marker
     carries a lock as well as a timestamp, taken non-blocking around the whole pass — a caller
@@ -2030,12 +2030,11 @@ def _snapshot(root: Path) -> None:
     """Append one aggregate sample, at most once per SNAPSHOT_EVERY, pruning past
     SNAPSHOT_KEEP_SECONDS.
 
-    Throttled off a marker's mtime exactly like `_reap`, and called from the same place, so
-    this service still has no background thread, no scheduler and no lifespan hook — the
-    two periodic jobs are both "whoever writes next, if it is due". The cost is one extra
-    directory walk per interval on a path that is already walking those directories to
-    reap, and it is what lets `/stats` answer a growth question with stored numbers rather
-    than the caller keeping its own history.
+    Throttled off a marker's mtime exactly like `_reap`, but still run by "whoever writes
+    next, if it is due" (`_write_record`, after the write): `_reap` moved to each worker's
+    reaper thread in `reaper.py` (#896), and this did not. The cost is one extra directory
+    walk per interval on that write, and it is what lets `/stats` answer a growth question
+    with stored numbers rather than the caller keeping its own history.
 
     A consequence worth naming: an idle service takes no samples. That is correct — with
     no writes there is no new traffic to record — but it means the newest sample can be
@@ -2331,12 +2330,13 @@ def room_bytes_used(root: Path) -> int:
     """Total room bytes at the last reap pass, or 0 if none has run yet.
 
     0 means "no pressure", which is the right default: on a fresh store there is none, and
-    the first write runs a reap and establishes the real figure. A file written by a build
-    before USAGE_FILE carried a count is a single integer, so it has no second field and
-    reads as that same 0 — the one write this figure gates is a *compaction*, so failing open
-    keeps a full ring for at most one reap interval, where failing closed would compact every
-    room in the store back to its floor on the strength of a parse error. The first reap
-    rewrites it in the two-integer format and it never parses short again.
+    the first pass — one REAP_EVERY after a worker starts — establishes the real figure. A
+    file written by a build before USAGE_FILE carried a count is a single integer, so it has
+    no second field and reads as that same 0 — the one write this figure gates is a
+    *compaction*, so failing open keeps a full ring for at most one reap interval, where
+    failing closed would compact every room in the store back to its floor on the strength
+    of a parse error. The first reap rewrites it in the two-integer format and it never
+    parses short again.
 
     Shares `_read_counts`' parse and deliberately not `_note_totals`, which rebuilds by
     walking what that parse rejects: this runs on the append path, and a walk of every room
@@ -2640,7 +2640,6 @@ def _write_record(
         # a missing one means "not re-verifiable", never "invalid".
         if sig is not None:
             rec["sig"] = sig
-    _reap(root)
     # No check before the gate any more. That one existed because taking the gate meant
     # queueing behind every other create in the store, so a rotating room name flooding
     # rejections had to be shed before it got there — and because the check it repeated was a
@@ -2767,12 +2766,11 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
-    _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
-    # Reap first: the sweep can remove an idle note that existed at request entry.
     # This is a valid observation even if another caller creates immediately afterwards;
-    # existing notes still compare under the lock below.
+    # existing notes still compare under the lock below. No reap runs here any more
+    # (#896): an idle note the background pass has not reached yet is still a note.
     if expect is not None and not path.exists():
         raise StoreConflictError(f"note {ns}/{key} changed since you read it", None)
     # No cap check before the gate any more. One ran here to shed a full store's worth of
