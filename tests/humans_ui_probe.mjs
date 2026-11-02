@@ -1703,6 +1703,49 @@ for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
   await context.close();
 }
 
+// ------------------------------------------------------------- duplicate Send entry points
+// A held response keeps the draft visible: a rapid click followed by Enter must not
+// enqueue the same write twice. Release it, then intentionally send the text again.
+{
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(String(error)));
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+  await page.evaluate(() => {
+    const realFetch = window.fetch.bind(window);
+    window.__pendingSends = [];
+    window.fetch = (url, options) => {
+      if (options?.method !== "POST") return realFetch(url, options);
+      return new Promise((resolve) => {
+        window.__pendingSends.push({
+          url: String(url),
+          payload: JSON.parse(options.body),
+          release: () => resolve({ ok: true }),
+        });
+      });
+    };
+  });
+  const message = `send guard ${Date.now()}`;
+  await page.fill("#text", message);
+  await page.click("#send");
+  await page.locator("#text").press("Enter");
+  await page.waitForFunction(() => window.__pendingSends.length === 1);
+  check("click + Enter while pending posts the same draft only once",
+        (await page.evaluate(() => window.__pendingSends.length)) === 1);
+  await page.evaluate(() => window.__pendingSends[0].release());
+  await page.waitForFunction(() => document.getElementById("text").value === "");
+  await page.fill("#text", message);
+  await page.click("#send");
+  await page.waitForFunction(() => window.__pendingSends.length === 2);
+  check("the same message can be sent again after the first settles",
+        (await page.evaluate(() => window.__pendingSends[1].payload.text)) === message);
+  await page.evaluate(() => window.__pendingSends[1].release());
+  await page.waitForFunction(() => document.getElementById("text").value === "");
+  check("duplicate-send guard has no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
 // --------------------------------------------------------------- browser-engine composition
 // Unlike the synthetic compatibility events above, CDP starts composition inside Blink.
 // Keep this after the directory checks: the successful send really writes to the store.
