@@ -229,21 +229,25 @@ def senders_for(rows: list[tuple[str, str]], rng: random.Random) -> list[str]:
 
 
 def replay(rows, assignment, min_length, max_copies, window):
-    """Run the real filter over the corpus; returns per-label refused counts.
+    """Run the real filter on independent per-worker rings; return refused/total counts.
 
-    Sharding is simulated by routing each message to one of W rings (the room name
-    tagged per worker), which is what per-worker state means: no cross-worker
-    visibility, no shared lock. limit._dupes is reset by the caller between runs.
+    Each production worker owns its own bounded _dupes map. Tagging room names with
+    a worker id in ONE map would share MAX_DUPE_KEYS across all workers, causing
+    early evictions that do not happen in the deployment this benchmark models.
     """
     refused = Counter()
     total = Counter()
     step = SPAN / TOTAL
-    for i, (text, label) in enumerate(rows):
-        total[label] += 1
-        if limit.dupe_refused(
-            "lobby#" + str(assignment[i]), text, 1000.0 + i * step, window, min_length, max_copies
-        ):
-            refused[label] += 1
+    for worker in sorted(set(assignment)):
+        limit._dupes.clear()
+        for i, (text, label) in enumerate(rows):
+            if assignment[i] != worker:
+                continue
+            total[label] += 1
+            if limit.dupe_refused(
+                "lobby", text, 1000.0 + i * step, window, min_length, max_copies
+            ):
+                refused[label] += 1
     return refused, total
 
 
@@ -273,16 +277,24 @@ def sustained_corpus(rng: random.Random, duration: float) -> list[tuple[float, s
 
 
 def replay_timed(rows, assignment, min_length, max_copies, window):
-    """replay, for a corpus that carries its own arrival times."""
+    """Replay timed traffic with a separate bounded ring for each worker.
+
+    Return the largest end-of-pass worker ring too: a combined count would not
+    indicate whether any single process hit MAX_DUPE_KEYS.
+    """
     refused = Counter()
     total = Counter()
-    for i, (when, text, label) in enumerate(rows):
-        total[label] += 1
-        if limit.dupe_refused(
-            "lobby#" + str(assignment[i]), text, when, window, min_length, max_copies
-        ):
-            refused[label] += 1
-    return refused, total
+    largest_ring = 0
+    for worker in sorted(set(assignment)):
+        limit._dupes.clear()
+        for i, (when, text, label) in enumerate(rows):
+            if assignment[i] != worker:
+                continue
+            total[label] += 1
+            if limit.dupe_refused("lobby", text, when, window, min_length, max_copies):
+                refused[label] += 1
+        largest_ring = max(largest_ring, len(limit._dupes))
+    return refused, total, largest_ring
 
 
 def shape(rows):
@@ -449,7 +461,7 @@ def sweep(min_length: int, max_copies: int) -> None:
 
     Each point is a fresh corpus SWEEP_SPANS windows long at the measured rates, so a
     bigger window is tested against proportionally more copies rather than against the
-    same 4000 spread thin. `ring` reports whether the live key count reached MAX_DUPE_KEYS
+    same 4000 spread thin. `ring` reports whether any worker's live key count reached MAX_DUPE_KEYS
     during the pass — the point where the ring's own bound, not the window, is what
     limits what it remembers.
     """
@@ -472,7 +484,9 @@ def sweep(min_length: int, max_copies: int) -> None:
                 rows = sustained_corpus(rng, duration)
                 assignment = [rng.randrange(workers) for _ in rows]
                 limit._dupes.clear()
-                refused, total = replay_timed(rows, assignment, min_length, max_copies, window)
+                refused, total, largest_ring = replay_timed(
+                    rows, assignment, min_length, max_copies, window
+                )
                 farm = sum(refused[k] for k in FARM)
                 farm_all = sum(total[k] for k in FARM)
                 legit = sum(refused[k] for k in LEGIT)
@@ -481,7 +495,7 @@ def sweep(min_length: int, max_copies: int) -> None:
                 fps.append(legit / legit_all)
                 short_fps.append(refused["legit_short"] / total["legit_short"])
                 borders.append(refused["borderline"] / total["borderline"])
-                sizes.append(len(limit._dupes))
+                sizes.append(largest_ring)
                 msgs.append(len(rows))
             ring = statistics.median(sizes)
             at_cap = "at cap" if ring >= limit.MAX_DUPE_KEYS else f"{ring:.0f} keys"
