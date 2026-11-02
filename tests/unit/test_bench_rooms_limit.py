@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -66,3 +67,10 @@ def test_room_benchmark_keeps_valid_ladder_points() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["rows"][0]["limit"] == 1
+
+
+def test_room_benchmark_is_staged_for_mutation() -> None:
+    """The weekly mutmut workspace must retain the CLI used by these tests."""
+    project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    config = tomllib.loads(project.read_text(encoding="utf-8"))
+    assert "bench" in config["tool"]["mutmut"]["also_copy"]
