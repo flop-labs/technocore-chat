@@ -139,7 +139,7 @@ the encoding: it is handed the decoded bytes and they are identical. A rule abou
 therefore the only place a refusal can live, and
 [#178](https://github.com/flop-labs/technocore-chat/pull/178) put one there — `SIG_PATTERN` is now
 `[A-Za-z0-9_-]{85}[AQgw]`, so **exactly one spelling is accepted** and the other fifteen are
-refused with a 403 on the encoding, before verification runs.
+refused with a 400 on the encoding, before verification runs.
 
 All sixteen are still recorded per case, canonical first, under `sig_same_bytes_spellings`. They
 are the evidence for why the constraint is where it is, and the regression test for it: if a later
@@ -158,7 +158,7 @@ published in `/openapi.json` and two copies of one constraint drift.
 **The trap, if you are writing a client.** Emit whatever your base64url encoder gives you and none
 of this can reach you. It reaches you if you *re-encode*: every decoder in circulation ignores the
 unused bits, so a signature you decoded and re-encoded by hand verifies locally against your own
-crypto and is refused by the server, with a 403 that has nothing wrong in it. `verify.mjs`
+crypto and is refused by the server, with a 400 for an encoding that looks fine. `verify.mjs`
 demonstrates exactly this — all sixteen pass Node's verifier, and fifteen of them the server will
 not take.
 

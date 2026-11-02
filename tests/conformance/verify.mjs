@@ -93,7 +93,7 @@ for (const c of v.signature_cases) {
   // of them here, in a second runtime, so there is no verifier anywhere that could reject
   // them. It also names the live trap for a JS client: if this loop is green, then decoding a
   // received signature and re-encoding it by hand produces a string your own verifier accepts
-  // and the server answers 403 on. Send `Buffer.toString('base64url')` output unmodified.
+  // and the server answers 400 on. Send `Buffer.toString('base64url')` output unmodified.
   for (const spelling of c.sig_same_bytes_spellings) {
     check(`${c.name} spelling ${spelling.slice(-1)}`, key, payload, spelling);
   }

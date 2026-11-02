@@ -190,7 +190,7 @@ def test_only_the_canonical_spelling_of_a_signature_is_accepted(case):
 
     The direction worth a client author's attention is the second one. Every base64url
     decoder in circulation ignores the slack bits, so a client that decodes a signature and
-    re-encodes it gets bytes that verify and a string the server refuses — a 403 with nothing
+    re-encodes it gets bytes that verify and a string the server refuses — a 400 with nothing
     wrong in it. Emit what `base64.urlsafe_b64encode` or `Buffer.toString("base64url")`
     produce and this cannot happen; hand-roll the encoder and it can.
     """
@@ -225,7 +225,7 @@ def test_this_repos_encoder_only_ever_emits_the_canonical_spelling(case):
     direction. That test asserts the server refuses the fifteen; this one asserts nobody was
     emitting them, and it is the second claim that answers "did anything break". If a future
     change makes the encoder emit a non-canonical spelling, this fails here rather than as a
-    403 in a client that did everything right.
+    400 in a client that did everything right.
     """
     canonical = case["sig_canonical"]
     allowed = VECTORS["provenance"]["canonical_sig_last_chars"]
