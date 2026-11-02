@@ -98,6 +98,8 @@ jobs:
       # Shipped rate limits stay in force. The probe's browser contexts model independent
       # readers, so the isolated test service trusts their documentation-only client header
       # instead of charging the entire suite to the runner's one socket address.
+      # TEST ONLY: browsers can forge x-technocore-probe-ip. This CHAT_CLIENT_IP_HEADER
+      # setting must never be copied to production or any service exposed to real traffic.
       - name: Start the service
         run: |
           CHAT_ROOT="$(mktemp -d)" CHAT_CLIENT_IP_HEADER=x-technocore-probe-ip \

@@ -35,6 +35,8 @@
  *   capacity        category counts stay scoped; count warnings do not change views,
  *                   last-reap bytes are labelled as a snapshot rather than live headroom,
  *                   and an old edge payload without whole_store still renders and recovers
+ *   shared limit    two contexts without the test client header share one socket-IP bucket;
+ *                   a 429 is shown without crashing and the next poll recovers after refill
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -2158,6 +2160,86 @@ for (const [label, initial, target] of [
         cursors.slice(1).includes(initial), JSON.stringify(cursors));
   check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
   await context.close();
+}
+
+// --------------------------------------------------------------- shared socket-IP limit
+// Every scenario above uses a distinct test-only client address so one long suite does not
+// turn into one production reader. Keep one explicit exception: two ordinary contexts with
+// no override header must really share the socket IP, reach the shipped 120/min read limit,
+// and prove the page recovers after that bucket refills. This belongs last because the Node
+// fixtures use the same loopback address and must not inherit the deliberately empty bucket.
+{
+  console.log("shared socket-IP read limit");
+  const firstContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const secondContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const firstPage = await firstContext.newPage();
+  const secondPage = await secondContext.newPage();
+  const errors = [];
+  secondPage.on("pageerror", error => errors.push(error.message));
+
+  await Promise.all([
+    firstPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" }),
+    secondPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" }),
+  ]);
+  await Promise.all([
+    firstPage.locator("#rooms tbody .btn-ghost").first().waitFor(),
+    secondPage.locator("#rooms tbody .btn-ghost").first().waitFor(),
+  ]);
+  check("two contexts sharing the socket IP initially render",
+        (await firstPage.locator("#rooms tbody .btn-ghost").count()) > 0
+        && (await secondPage.locator("#rooms tbody .btn-ghost").count()) > 0);
+
+  const exhausted = await firstPage.evaluate(async () => {
+    for (let attempt = 0; attempt < 140; attempt++) {
+      const response = await fetch(
+        `/rooms?format=json&limit=1&kind=discussion&shared_probe=${attempt}`,
+        { cache: "no-store" },
+      );
+      if (response.status === 429) {
+        return { attempts: attempt + 1, retryAfter: response.headers.get("retry-after") };
+      }
+    }
+    return null;
+  });
+  check("the production-default read bucket reaches HTTP 429", exhausted !== null,
+        exhausted ? `${exhausted.attempts} reads, retry after ${exhausted.retryAfter}s` : "no 429");
+
+  const limitedRefresh = secondPage.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === "/rooms" && url.searchParams.get("kind") === "all"
+      && response.status() === 429;
+  });
+  const secondResult = await secondPage.evaluate(async () => {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const status = (await fetch(
+        `/rooms?format=json&limit=1&kind=discussion&shared_probe=second-${attempt}`,
+        { cache: "no-store" },
+      )).status;
+      if (status === 429) {
+        const kind = document.getElementById("kind");
+        kind.value = "all";
+        kind.dispatchEvent(new Event("change", { bubbles: true }));
+        return { attempts: attempt + 1, status };
+      }
+    }
+    return { attempts: 10, status: 0 };
+  });
+  check("a second context shares the exhausted socket-IP bucket", secondResult.status === 429,
+        `HTTP ${secondResult.status} after ${secondResult.attempts} request(s)`);
+  await limitedRefresh;
+  await firstContext.close();
+  await secondPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+  check("the page reports a rate-limited room refresh without crashing",
+        errors.length === 0 && (await secondPage.locator("#rooms tbody").innerText())
+          .includes("Could not load"), errors.join("; "));
+
+  await secondPage.locator("#rooms tbody .btn-ghost").first().waitFor({ timeout: 10000 });
+  check("the next room poll recovers after the shared bucket refills",
+        (await secondPage.inputValue("#kind")) === "all"
+        && (await secondPage.locator("#rooms tbody .btn-ghost").count()) > 0);
+  check("the recovered page has no asynchronous errors", errors.length === 0,
+        errors.join("; "));
+  await secondContext.close();
 }
 
 await browser.close();
