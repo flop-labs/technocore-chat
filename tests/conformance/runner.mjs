@@ -198,7 +198,7 @@ function checkSignatureSpellings() {
     if (!canonicalLast.has(canonical.slice(-1))) {
       problems.push(`canonical ends ${canonical.slice(-1)}, not in the canonical set`);
     }
-    // Emit any of these and the server answers 403 on the encoding, before any crypto runs.
+    // Emit any of these and the server answers 400 on the encoding, before any crypto runs.
     const wrong = others.filter((s) => canonicalLast.has(s.slice(-1)));
     if (wrong.length) problems.push(`${wrong.length} of the fifteen end in the canonical set`);
     if (others.length !== 15) problems.push(`${others.length} alternatives, expected 15`);
@@ -215,7 +215,7 @@ function checkSignatureSpellings() {
       "  bits carry no signature and sixteen strings decode to the same bytes. Ed25519 accepts\n" +
       "  all sixteen because it never sees the encoding, so the server constrains the string:\n" +
       "  `sig` must end in one of `provenance.canonical_sig_last_chars` or it is refused with a\n" +
-      "  403 before verification. Emit whatever your base64url encoder produces and you are\n" +
+      "  400 before verification. Emit whatever your base64url encoder produces and you are\n" +
       "  fine — every zero-filling encoder lands on the canonical one. The trap is re-encoding:\n" +
       "  decoders ignore the unused bits, so a signature you decoded and re-encoded by hand can\n" +
       "  verify locally and still be refused.",
