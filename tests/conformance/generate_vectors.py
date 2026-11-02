@@ -61,7 +61,7 @@ The three traps these vectors exist to catch, all live in the tracker:
     The trap this leaves is decoder-shaped — `Buffer.from(s, "base64url")` and
     `base64.urlsafe_b64decode` both ignore the slack bits, so a client that decodes and
     re-encodes a signature it received cannot tell it has produced a string the server will
-    now reject with a 403.
+    now reject with a 400.
 
 One thing this file is NOT: a source of identities. The seeds are counting patterns, so the
 DIDs derived from them belong to every reader — `test_only` and `warning` say so inside the
