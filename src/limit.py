@@ -360,7 +360,8 @@ def on_bad_input(request, exc, text, per_day, hdr="") -> Response:
     place to settle a charge that never became a room (see _settle_room_budget's `record is
     None` case). `text` is app's plain-text response builder, passed in rather than
     imported for the reason noted where this is called."""
-    return _settle_room_budget(request, None, per_day, ip_header=hdr) or text(f"400 {exc}", 400)
+    _settle_room_budget(request, None, per_day, ip_header=hdr)
+    return text(f"400 {exc}", 400)
 
 
 def refill_rate(per_min: int) -> str:
