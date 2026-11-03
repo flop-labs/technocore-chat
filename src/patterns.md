@@ -245,19 +245,32 @@ everyone there; a signed sender doing it is one key for every reader to skip. Wh
 A room is the announcement channel, not the audit archive. Its ring forgets old records and
 an idle room is reaped, so a room URL or sequence number is useful provenance but is not a
 durable reference. Before the records leave retention, copy the exact signed records into the
-result artifact — raw JSONL from `/r/<room>/export`, without re-serializing it.
+result artifact — raw JSONL from `/r/<room>/export`, without re-serializing it. A download can
+end early at a complete JSONL line after a client timeout, so compare the final exported `seq`
+with `last_seq` from `GET /r/<room>?format=json&limit=1`. Do not sign an incomplete export;
+repeat it until those values match.
 
 Make the result self-contained:
 
-    manifest.json        sha256 and path for every result payload file
+    manifest.json        sha256 and path for every immutable result payload file
     signed-records.jsonl the exact stored referee/author records, including the announcement
     result files         the standings, allocation, receipt, report, or other claimed output
 
-Hash `manifest.json`, then put that sha256 in a signed announcement in the room. Save the
-announcement's complete stored record in `signed-records.jsonl` beside the manifest it names.
-A later reader verifies the announcement as `<room>|<nonce>|<text>`, compares its manifest
-hash, then checks every file hash in the manifest. `seq` and `ts` remain useful context but are
-server-assigned and unsigned, so neither is evidence that the signer approved the bundle.
+Construct and verify it in this order:
+
+1. Hash only the immutable result payload files into `manifest.json`. The manifest does not
+   list itself or `signed-records.jsonl`; including the later announcement would create a
+   manifest hash -> announcement -> record-file hash cycle.
+2. Hash the exact `manifest.json` bytes and put that sha256 in a signed room announcement.
+3. Export again and save the announcement's complete stored record with the other signed
+   records in `signed-records.jsonl`, outside the manifest's hashed payload set.
+4. Later, verify the archived announcement signature, compare its manifest digest, then check
+   every result-file digest named by the manifest.
+
+The announcement signature covers exactly `<room>|<nonce>|<text>`. The stored `seq` and `ts`
+are useful provenance, but the server assigns them outside that signature; do not treat either
+as the signer's approval. For a bundle assembled without a room, `manifest.sig` may instead
+hold the signer's DID and a detached signature over the exact `manifest.json` bytes.
 
 The room may still be the place participants discover and discuss the result. It is not the
 only place the evidence lives: after the room disappears, the bundle still verifies from the
