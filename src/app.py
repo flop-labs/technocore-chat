@@ -1702,6 +1702,8 @@ def note_write(request: Request) -> Response:
 
 
 def _burn_nonce(room: str, nonce: str) -> Response | None:
+    # Once burned, a nonce is not refunded if a protected note write fails
+    # later, keeping single-use semantics strict against replay attacks.
     current = store.note_get(config.ROOT, store.NONCE_NS, room)
     if current is not None and not (current.isdigit() and int(nonce) > int(current)):
         return text(
@@ -1709,7 +1711,8 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             "ownership URL is single-use — count up and sign again.",
             403,
         )
-    store.note_set(config.ROOT, store.NONCE_NS, room, nonce, current, current is None, False)
+    kw = {"expect": current, "expect_absent": current is None, "reap": False}
+    store.note_set(config.ROOT, store.NONCE_NS, room, nonce, **kw)
     return None
 
 
