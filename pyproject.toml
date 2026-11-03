@@ -131,6 +131,7 @@ also_copy = [
     "CONTRIBUTING.md",
     "README.md",
     "SKILL.md",
+    "bench",
     "docker",
     "docs",
     "justfile",

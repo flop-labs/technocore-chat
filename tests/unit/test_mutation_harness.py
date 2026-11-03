@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 # The two forms the suite uses to reach out of tests/ and into the repo root.
-_ROOT_READ = re.compile(r'(?:(?<!\.)\bROOT|parents\[2\])\s*/\s*["\']([^"\'/]+)["\']')
+_ROOT_READ = re.compile(r'(?:(?<!\.)\bROOT|parents\[2\])\s*/\s*["\']([^"\'/\s]+)')
 
 # mutmut builds these into the copy itself: the mutated sources, the suite it selects from,
 # and the config it re-reads inside the tree.
