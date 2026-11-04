@@ -81,10 +81,24 @@ def test_room_benchmark_accepts_both_range_endpoints(limit: int) -> None:
     """Both inclusive endpoints must be measured without a clamp."""
     result = subprocess.run(
         [
-            sys.executable, str(BENCH), "--rooms", "1", "--deep", "1",
-            "--depth", "1", "--reps", "1", "--limits", str(limit), "--json",
+            sys.executable,
+            str(BENCH),
+            "--rooms",
+            "1",
+            "--deep",
+            "1",
+            "--depth",
+            "1",
+            "--reps",
+            "1",
+            "--limits",
+            str(limit),
+            "--json",
         ],
-        check=False, capture_output=True, text=True, timeout=30,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["rows"][0]["limit"] == limit
@@ -94,8 +108,20 @@ def test_room_benchmark_rejects_mixed_valid_and_invalid_ladder() -> None:
     """One invalid point must reject the entire ladder before measurement."""
     result = subprocess.run(
         [
-            sys.executable, str(BENCH), "--rooms", "1", "--deep", "1",
-            "--depth", "1", "--reps", "1", "--limits", "5", "0", "--json",
+            sys.executable,
+            str(BENCH),
+            "--rooms",
+            "1",
+            "--deep",
+            "1",
+            "--depth",
+            "1",
+            "--reps",
+            "1",
+            "--limits",
+            "5",
+            "0",
+            "--json",
         ],
         check=False, capture_output=True, text=True, timeout=30,
     )
