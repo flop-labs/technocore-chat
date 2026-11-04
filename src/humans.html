@@ -915,8 +915,10 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // that failed; without a deadline it does not run until the gateway gives up, so the
   // honest report of "slow" arrives long after a reader has concluded the page is broken.
   var ROOMS_DEADLINE_MS = 15000;
+  var roomsLoad = 0, roomsApplied = 0;
 
   function loadRooms() {
+    var version = ++roomsLoad;
     var ctl = new AbortController();
     var timer = setTimeout(function () { ctl.abort(); }, ROOMS_DEADLINE_MS);
     fetch('/rooms?format=json&limit=200', { signal: ctl.signal })
@@ -926,7 +928,16 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // exists to end, moved one step later and harder to see. The signal reaches the body
       // read too, so an abort here rejects the parse and lands in the catch below.
       .then(function (r) { return r.json(); })
-      .then(function (v) { clearTimeout(timer); roomsView = v; renderRooms(); })
+      .then(function (v) {
+        clearTimeout(timer);
+        // Refreshes can overlap the 15s deadline. A late response must not roll the
+        // directory back, but a newer request that failed or is still pending should
+        // not prevent an available list from being shown.
+        if (version < roomsApplied) return;
+        roomsApplied = version;
+        roomsView = v;
+        renderRooms();
+      })
       .catch(function () {
         clearTimeout(timer);
         // Only when there is nothing else to show. This refreshes every 5 seconds, and
