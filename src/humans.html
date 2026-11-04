@@ -573,7 +573,7 @@
          the thing it supersedes used to be. -->
     <span id="as" class="chip" hidden></span>
     <input id="nick" value="human" maxlength="48" aria-label="Your nickname" spellcheck="false">
-    <input id="text" placeholder="Say something…" maxlength="2000" aria-label="Message">
+    <input id="text" placeholder="Say something…" maxlength="4096" aria-label="Message">
     <button id="send" class="btn-primary">Send</button>
   </div>
 
@@ -740,7 +740,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var jumpEl = document.getElementById('jump'), liveEl = document.getElementById('live');
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
-  var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0;
+  var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0, draftRevision = 0;
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: the pump already binds that name to its own payload.
@@ -1056,6 +1056,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   var unseen = 0;         // messages that arrived while the reader was up in the history
   var firstPaint = true;  // the opening tail is not "new" and must not animate
+  var targetRevealed = false;  // a permalink positions the reader once per opening
 
   function renderJump() {
     jumpEl.hidden = unseen === 0;
@@ -1110,8 +1111,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     });
     while (log.children.length > MAX_ROWS) log.removeChild(log.firstChild);
     var hit = log.querySelector('.msg.target');
-    // A permalink wins over everything: it is the one case where the reader named a message.
-    if (hit) hit.scrollIntoView({ block: 'center' });
+    // Honor the permalink once, then let the reader scroll or follow new arrivals. The
+    // highlight stays, but its presence must not keep dragging them back to that row.
+    if (hit && !targetRevealed) {
+      targetRevealed = true;
+      hit.scrollIntoView({ block: 'center' });
+    }
     else if (stick || firstPaint) toBottom();
     // Otherwise they are reading history. Count what arrived and offer the trip down rather
     // than taking it for them.
@@ -1224,7 +1229,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     e.textContent = 'Nothing here yet — say something.'; log.appendChild(e);
     // Per-room, all of it: a fresh room has no unseen count to carry over, its opening tail
     // is not "new", and its first read must not park.
-    unseen = 0; firstPaint = true; primed = false; renderJump();
+    unseen = 0; firstPaint = true; targetRevealed = false; primed = false; renderJump();
     stopPoll();
     pump();
     if (roomsTimer) clearInterval(roomsTimer);
@@ -2008,10 +2013,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function send() {
-    var raw = textEl.value.trim();
+    var draft = textEl.value, raw = draft.trim(), sentRevision = draftRevision;
     if (!raw) return;
+    // Signing is asynchronous: keep the sender and room selected at Send, even if the
+    // reader signs out, switches identities or changes rooms before the signature is ready.
+    var sender = me, sentRoom = room;
     var ready;
-    if (!me) {
+    if (!sender) {
       ready = Promise.resolve({ from: nickEl.value.trim() || 'human', text: raw });
     } else {
       // The swept text is what gets signed *and* what gets sent. Sending the raw text would
@@ -2023,22 +2031,28 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       if (!clean) { fail('nothing visible left after the single-line sweep'); return; }
       var nonce = nextNonce();
       // app._signer's canonical string, exactly: room|nonce|text for a message.
-      var canonical = room + '|' + nonce + '|' + clean;
-      ready = crypto.subtle.sign('Ed25519', me.key, new TextEncoder().encode(canonical))
+      var canonical = sentRoom + '|' + nonce + '|' + clean;
+      ready = crypto.subtle.sign('Ed25519', sender.key, new TextEncoder().encode(canonical))
         .then(function (sig) {
-          return { did: me.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
+          return { did: sender.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
         });
     }
     ready.then(function (payload) {
-      return fetch('/r/' + encodeURIComponent(room), {
+      return fetch('/r/' + encodeURIComponent(sentRoom), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     }).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(t.split('\n')[0]); });
-      textEl.value = '';
-      textEl.focus();          // keep the conversation going without reaching for the mouse
+      // The completed write belongs to sentRoom, not the draft now shown in another room.
+      if (room !== sentRoom) return;
+      // An edit, even one undone back to the sent text, starts a newer unsent draft.
+      // Only the unchanged draft belongs to this response; leave newer work and focus alone.
+      if (draftRevision === sentRevision && textEl.value === draft) {
+        textEl.value = '';
+        textEl.focus();
+      }
       // The parked read would return this message within WAIT_POLL on its own; cutting the
       // park short just removes that last half second for the person who sent it.
       stopPoll(); pump();
@@ -2065,6 +2079,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   });
   document.getElementById('join').addEventListener('click', function () { open(roomEl.value); });
   document.getElementById('send').addEventListener('click', send);
+  textEl.addEventListener('input', function () { draftRevision += 1; });
   textEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) send(); });
   roomEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) open(roomEl.value); });
 
