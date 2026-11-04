@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # The forms the suite uses to reach out of tests/ and into the repo root.
 _ROOT_READ = re.compile(r'(?:(?<!\.)\bROOT|parents\[2\])\s*/\s*["\']([^"\'/\s]+)')
 _RUN_PATH = re.compile(r'(?:run_path|runpy\.run_path)\(\s*["\']([^"\'/\s]+)')
-_FROM_IMPORT = re.compile(r'^\s*from\s+([a-zA-Z0-9_]+)[\.\s]')
+_FROM_IMPORT = re.compile(r"^\s*from\s+([a-zA-Z0-9_]+)[\.\s]")
 
 # mutmut builds these into the copy itself: the mutated sources, the suite it selects from,
 # and the config it re-reads inside the tree.
