@@ -20,11 +20,14 @@ OPEN = r"""
 const vm = require('node:vm');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const html = input.html;
-for (const m of ['  var NAME_RE =', '  function parseHash()', '  function open(']) {
+for (const m of ['  var NAME_RE =', '  function parseHash()', '/* open:start */', '/* open:end */']) {
   if (html.indexOf(m) < 0) throw new Error('marker missing from humans.html: ' + m);
 }
 const re = html.slice(html.indexOf('  var NAME_RE ='), html.indexOf('  function parseHash()'));
-const source = html.slice(html.indexOf('  function open('), html.indexOf('  // ---', html.indexOf('  function open(')));
+// open() is fenced by explicit markers, so a comment or a function added next to it cannot
+// silently truncate what is executed here.
+const source = html.slice(html.indexOf('/* open:start */'), html.indexOf('/* open:end */'));
+if (!source.includes('function open(')) throw new Error('open() is not between its markers');
 let calls, failed;
 const context = vm.createContext({
   roomEl: {value: ''}, log: {textContent: '', appendChild: () => {}},
@@ -51,22 +54,29 @@ console.log(JSON.stringify(out));
 """
 
 
-@pytest.mark.skipif(NODE is None, reason="Node is needed to execute the served JavaScript")
-def test_room_box_refuses_a_name_the_server_cannot_read(client):
-    bad = ["My Room", "café", "-lead", "a.b"]
-    for name in bad:
-        assert client.get(f"/r/{name.lower()}?format=json").status_code == 400
+def _open(client, typed):
     assert NODE is not None
     result = subprocess.run(
         [NODE, "-e", OPEN],
-        input=json.dumps({"html": client.get("/humans").text, "typed": [*bad, " Standup "]}),
+        input=json.dumps({"html": client.get("/humans").text, "typed": typed}),
         capture_output=True,
         text=True,
         check=True,
         timeout=10,
     )
-    observed = {r["typed"]: r for r in json.loads(result.stdout)}
+    return {r["typed"]: r for r in json.loads(result.stdout)}
+
+
+@pytest.mark.skipif(NODE is None, reason="Node is needed to execute the served JavaScript")
+def test_room_box_refuses_a_name_the_server_cannot_read(client):
+    bad = ["My Room", "café", "-lead", "a.b"]
     for name in bad:
+        assert client.get(f"/r/{name.lower()}?format=json").status_code == 400
+    # Whitespace-only is truthy, so it is not the lobby: it trims to "", which NAME_RE
+    # refuses, and must take the same no-side-effects path as the names above.
+    blank = [" "]
+    observed = _open(client, [*bad, *blank, " Standup "])
+    for name in [*bad, *blank]:
         r = observed[name]
         # Refused with the rule, not a bare HTTP status.
         assert len(r["failed"]) == 1, r
@@ -83,3 +93,12 @@ def test_room_box_refuses_a_name_the_server_cannot_read(client):
     assert ok["room"] == "standup"
     assert [c for c in ok["calls"] if c.startswith("pump")] == ["pump:standup"]
     assert "stopPoll" in ok["calls"] and "setHash" in ok["calls"]
+
+
+@pytest.mark.skipif(NODE is None, reason="Node is needed to execute the served JavaScript")
+def test_an_empty_room_box_still_opens_the_lobby(client):
+    # open() reads `next || 'lobby'`, so an empty box is the lobby, not a refused name.
+    r = _open(client, [""])[""]
+    assert r["failed"] == [], r
+    assert r["room"] == "lobby" and r["roomEl"] == "lobby"
+    assert [c for c in r["calls"] if c.startswith("pump")] == ["pump:lobby"]

@@ -1216,6 +1216,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       });
   }
 
+  /* open:start */
   function open(next, seq) {
     var name = (next || 'lobby').trim().toLowerCase();
     // The Room box passes whatever was typed. The server 400s a name outside NAME_RE on
@@ -1246,6 +1247,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       loadRooms();
     }, 5000);
   }
+  /* open:end */
 
   // -------------------------------------------------------------------------- identity
   // "Sign in" here is not a session, because this server has none to offer. design.md §5.3
