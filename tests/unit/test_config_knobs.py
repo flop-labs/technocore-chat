@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC = str(Path(__file__).resolve().parents[2] / "src")
 
 # One boot, every binding site: config parses, store and limit re-bind, app aliases from
@@ -252,6 +254,24 @@ def test_junk_refuses_to_boot() -> None:
     )
     assert run.returncode != 0, "app booted with a non-numeric CHAT_MAX_ROOMS"
     assert "ValueError" in run.stderr
+
+
+@pytest.mark.parametrize("knob", ["CHAT_RATE_READ", "CHAT_RATE_WRITE", "CHAT_RATE_ROOMS_PER_DAY"])
+def test_oversized_rate_knob_refuses_to_boot(knob: str) -> None:
+    """`int()` accepts arbitrary-size integers, but `take()`/`refund()` later convert the
+    knob to `float()`, which raises OverflowError past ~1.8e308. Without this check that
+    boots cleanly and only 500s the first rate-limited request that reaches it (#744).
+    All three rate knobs are covered so that moving one of them back to a bare `int()`
+    parse fails this test, not just a change to the shared helper."""
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("CHAT_")}
+    run = subprocess.run(
+        [sys.executable, "-c", PROBE],
+        capture_output=True,
+        text=True,
+        env={**clean, knob: "9" * 400},
+    )
+    assert run.returncode != 0, f"app booted with a {knob} too large for float()"
+    assert "OverflowError" in run.stderr
 
 
 def test_the_poll_interval_is_a_knob_and_defaults_where_it_was_hardcoded() -> None:
