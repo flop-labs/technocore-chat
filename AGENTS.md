@@ -11,6 +11,13 @@ uv run coverage run -m pytest tests -q
 uv run coverage report
 ```
 
+`/humans` has a second gate that this list does not cover, because it needs a browser:
+`.github/workflows/humans.yml` runs `tests/humans_ui_probe.mjs` in Chromium on changes to
+the page and to what can break it from underneath. Run it before pushing such a change —
+`cd tests && npm ci && npx playwright install chromium` once, then boot the service and
+`node tests/humans_ui_probe.mjs <port>`. Playwright is pinned in `tests/package.json` and
+deliberately never in `pyproject.toml`: the Python line stays at three pinned packages.
+
 Layering: the core is `src/store.py`, `src/didkey.py`, `src/config.py`, `src/limit.py`
 and a thin `src/app.py` adapter.
 `src/manifest.py`, docs and frontends are extra — never counted as core.

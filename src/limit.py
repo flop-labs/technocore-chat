@@ -67,6 +67,13 @@ FREE_PATHS = "/, /llms.txt, /skill.md, /patterns.md, /interop.md, /auth.md, /ope
 # limiter state — which is why the authoritative limit belongs in the proxy (see README).
 MAX_BUCKETS = 20_000
 _buckets: OrderedDict[tuple[str, str], tuple[float, float]] = OrderedDict()
+# take() and refund() run from Starlette's threadpool (their callers are sync def), so two
+# requests from one IP can read the same bucket before either writes it back. The lock
+# guards only that read-modify-write — get, compute, assign, and the LRU touch/eviction
+# that rides along with it in take() — never I/O, so a held lock is always microseconds.
+# Scope: this covers _buckets only. The duplicate ring keeps its own _dupes_lock below,
+# and the waiter counters stay unlocked on the event loop.
+_buckets_lock = threading.Lock()
 
 # Request counters for /stats. Deliberately in-process (the store's counters are the
 # durable ones): traffic is only ever read as a rate, and a rate needs the uptime that
@@ -103,11 +110,12 @@ MAX_IDENTITIES = 50_000  # bounded like _buckets; a counter that OOMs is not a d
 # drag its own window open by hammering: the phrase becomes acceptable again exactly
 # `window` after the last copy that landed, never later.
 #
-# Guarded by a lock, unlike every other structure in this module. The waiter counters are
-# safe unlocked because they are only ever touched by the single-threaded event loop, and
-# the buckets are read-modify-write on ONE key so a lost update costs a fraction of a
-# token. This one is neither: both write lanes reach it from a threadpool (the GETs are
-# sync endpoints, the POST goes through run_in_threadpool), and the sweep walks and
+# Guarded by its own leaf lock, like the token buckets above -- but its own, not
+# _buckets_lock. The waiter counters are the one unlocked structure left, safe because
+# only the single-threaded event loop touches them. A bucket mutation is a swap on ONE
+# key; this ring's write is not, which is why it needs more than the buckets' lock gives.
+# Both write lanes reach it from a threadpool (the GETs are sync endpoints, the POST goes
+# through run_in_threadpool), and unlike a bucket's single-key swap, the sweep walks and
 # deletes from the front while another thread may be inserting — which is an
 # `OrderedDict mutated during iteration` RuntimeError, or a KeyError on a key the other
 # thread just evicted, i.e. a 500 on exactly the write path the filter exists to protect.
@@ -289,19 +297,25 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     ip = client_ip(request, ip_header)
     if len(_identities) < MAX_IDENTITIES:
         _identities.add(ip)
-    now = time.monotonic()
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, now))
-    tokens = min(cap, tokens + (now - last) * per_min / 60.0)
-    if tokens >= 1.0:  # granted: no wait, even when this was the last token
-        tokens -= 1.0
-        wait = 0.0
-    else:
-        wait = (1.0 - tokens) * 60.0 / per_min
-    _buckets[(ip, kind)] = (tokens, now)
-    _buckets.move_to_end((ip, kind))
-    while len(_buckets) > max_buckets:
-        _buckets.popitem(last=False)
+    with _buckets_lock:
+        # The clock sample lives inside the lock: sampled outside, two callers can sample
+        # and acquire in opposite orders, and the stale `now` then computes a negative
+        # refill against a newer `last` — refusing an available bucket with a false
+        # Retry-After and rewinding `last`. Inside the lock, timestamp order matches
+        # mutation order, so `now - last >= 0` holds.
+        now = time.monotonic()
+        tokens, last = _buckets.get((ip, kind), (cap, now))
+        tokens = min(cap, tokens + (now - last) * per_min / 60.0)
+        if tokens >= 1.0:  # granted: no wait, even when this was the last token
+            tokens -= 1.0
+            wait = 0.0
+        else:
+            wait = (1.0 - tokens) * 60.0 / per_min
+        _buckets[(ip, kind)] = (tokens, now)
+        _buckets.move_to_end((ip, kind))
+        while len(_buckets) > max_buckets:
+            _buckets.popitem(last=False)
     # Counted at the one point every rate-limited route already funnels through, so a new
     # route cannot forget to count itself. In-process, so these reset on restart — /stats
     # reports them next to `uptime_seconds`, which is what makes them readable.
@@ -319,8 +333,9 @@ def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
     """
     ip = client_ip(request, ip_header)
     cap = float(per_min if burst is None else burst)
-    tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-    _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+    with _buckets_lock:
+        tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
+        _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
     config._dbg(1, "refund", ip=ip, kind=kind)
 
 
@@ -394,8 +409,39 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
 
 
 def budget_note(kind: str, left: int, per_min: int) -> str:
-    """Warn before the wall, not at it — only once the budget is nearly gone."""
-    if left * 4 > per_min:
+    """Warn before the wall, not at it — and on a stride, so the warning stays shareable.
+
+    The footer is one caller's pacing, so a reply carrying one is `no-store` and the CDN
+    bypasses it (see the read paths in app.py). That is fine for a warning nobody sees
+    twice, and it was not: a client polling at its ceiling sits permanently inside the
+    last quarter of its budget, so *every* reply it got carried a footer and *none* of them
+    could be cached. Measured on production, 47.7% of room reads were `bypass` at the edge
+    against a 7.2% hit rate — the cache switched itself off for exactly the callers
+    generating the most load.
+
+    Lowering the threshold does not fix that: a client pinned at its ceiling is permanently
+    inside whatever band is chosen. What fixes it is emitting on a *stride* of the remaining
+    budget — roughly every `per_min // 24` requests, so about six warnings across the warning
+    band and the rest of the replies shareable. At the production read budget of 600/min that
+    is one footer every 25 requests; the other 24 can be served from the edge.
+
+    The stride scales with the budget rather than being a constant, because a deployment with
+    a small budget has no requests to spare: at anything under 24/min it is 1, which is the
+    every-reply behaviour this replaces. A caller cannot step over a stride without landing
+    on it, so the warning is never skipped, only thinned.
+
+    `(left + 1) % stride` rather than `left % stride` so that the multiple is never *zero
+    left*: a caller pinned at its ceiling is granted a token the instant one refills and
+    would otherwise sit on the one value that always warns, which is the case this exists to
+    remove. It lands on stride-1 instead — 24, 49, 74 … at 600/min.
+
+    Reads only. A write reply is `no-store` whatever it carries — it mutates — so thinning
+    its footer buys no cacheability and costs a writer its pacing. Sharing one helper made
+    that easy to miss: at the production write budget of 300/min the stride is 12, which
+    silently took write warnings from every in-band reply to 7.9% of them, and the test
+    default of 30/min has a stride of 1 so nothing failed.
+    """
+    if left * 4 > per_min or (kind == "read" and (left + 1) % max(1, per_min // 24)):
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "

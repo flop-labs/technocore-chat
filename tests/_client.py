@@ -88,12 +88,15 @@ def _multibase(raw: bytes) -> str:
     keys with the decoder's own inverse could not catch the decoder being wrong.
     """
     alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    # Leading 0x00 bytes encode as leading '1's in base58btc — the integer
+    # conversion loses them, so they are counted and prepended afterwards.
+    leading = len(raw) - len(raw.lstrip(b"\x00"))
     n = int.from_bytes(raw, "big")
     out = ""
     while n:
         n, rem = divmod(n, 58)
         out = alphabet[rem] + out
-    return out
+    return "1" * leading + out
 
 
 def _keypair(seed: int = 1):

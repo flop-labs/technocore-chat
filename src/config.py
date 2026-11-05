@@ -196,6 +196,20 @@ MAX_NOTES_PER_NS = max(MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_PER_NS", MA
 # provision grows with it — which is the whole reason this is an operator's decision and not
 # a constant.
 MAX_NOTES_TOTAL = max(4 * MAX_ROOMS, int(os.environ.get("CHAT_MAX_NOTES_TOTAL", 32 * MAX_ROOMS)))
+# How long a room that never got past its first message keeps its slot. The reasoning for
+# the rule itself is at store.py's STILLBORN_SECONDS; this is only where the number lives.
+#
+# It became a knob for the reason MAX_ROOMS did, one level down. On technocore.chat 63% of
+# rooms are one-message, so this window — not the ceiling — is what sets the room turnover
+# rate: creates and stillborn reaps ran 1:1 over a 30 h sample, which means the create rate
+# an operator can measure IS the reaper's rate. A deployment at its cap can therefore free
+# slots faster by shortening this than by raising any ceiling, and raising the ceiling is
+# what it had to do instead, four times in six days, because this was a release to move.
+#
+# Floored at an hour rather than at 1 second: the manual publishes it in whole hours
+# (`__STILLBORN_HOURS__`), so a sub-hour window would print as "0 hours" — a document
+# saying the opposite of what the reaper does is worse than a knob that will not go there.
+STILLBORN_SECONDS = max(3600, int(os.environ.get("CHAT_STILLBORN_SECONDS", "86400")))
 # Long-poll waiter slots, globally and per IP. Per *process*, so under `--workers N` the
 # real ceiling is N times these — which is the reason they are knobs at all: an operator
 # adding workers has no other way to hold the total where it was. 0 is meaningful here and
