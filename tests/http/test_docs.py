@@ -316,6 +316,12 @@ def test_public_base_rejects_a_host_that_matches_only_before_a_trailing_newline(
 
     assert manifest.public_base("https", "example.com") == "https://example.com"
     assert manifest.public_base("https", "example.com\n") == ""
+    assert manifest.public_base("https", "example.com:443") == "https://example.com:443"
+    assert manifest.public_base("http", "example.com:8080") == "http://example.com:8080"
+    assert manifest.public_base("http", "example.com:65535") == "http://example.com:65535"
+    assert manifest.public_base("http", "example.com:0") == ""
+    assert manifest.public_base("http", "example.com:65536") == ""
+    assert manifest.public_base("http", "example.com:99999") == ""
 
 
 def test_the_room_budget_is_published_where_agents_look(client):
