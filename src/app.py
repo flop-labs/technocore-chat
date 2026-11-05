@@ -37,6 +37,7 @@ import didkey
 import limit
 import manifest
 import store
+from route_hiding import HideStatsRoute
 from store import StoreConflictError, StoreError
 
 # The CHAT_* knobs are read from the environment exactly once, in config — the only
@@ -1951,22 +1952,6 @@ async def stats(request: Request) -> Response:
     a failing one raises into whichever caller had nothing to serve, and is logged by the
     loop for the rest, who keep the last good view until a later refresh succeeds.
     """
-    # Compared as BYTES, on both sides. `compare_digest` refuses non-ASCII *strings* with a
-    # TypeError, and Starlette hands the header over as latin-1 text, so any byte above 0x7F
-    # in the token raised — and an unhandled TypeError is a 500, which is the one answer an
-    # unrouted path never gives. That undid the paragraph below: a prober who could not tell
-    # this route from a missing one by its 404 could tell by sending a single high byte.
-    # latin-1 round-trips the wire bytes exactly, so this compares what was actually sent to
-    # the token's UTF-8; it stays constant-time, and a token an operator set to non-ASCII —
-    # which the string compare could never match, on either side — now can be.
-    supplied = request.headers.get("x-stats-token", "").encode("latin-1")
-    # `and` order matters: with no token configured the endpoint must not exist at all,
-    # and compare_digest(b"", b"") is True.
-    # The same bytes an unmatched path gets. The point of answering 404 rather than 401 is
-    # that a prober cannot tell this endpoint from a path that was never routed, and a
-    # distinctive body would give that back — so the two must not drift apart.
-    if not config.STATS_TOKEN or not secrets.compare_digest(supplied, config.STATS_TOKEN.encode()):
-        return text(NOT_FOUND, 404)
     global _stats_refresh
     hit = _stats_cache if _stats_cache and _stats_cache[0] == config.ROOT else None
     if hit and time.monotonic() - hit[1] < config.STATS_CACHE_SECONDS:
@@ -2240,7 +2225,8 @@ app = Starlette(
             allow_methods=["GET", "POST"],
             allow_credentials=False,
         ),
-        # Innermost, so it sees handler responses only. Every knob is left at the
+        # Compression wraps both routed responses and the hidden pre-router stats response.
+        # Every knob is left at the
         # library's default because those defaults are what measured best here
         # (bench/compression.py): brotli q=4 and gzip level 4. The CDN in front asks the
         # origin for `gzip, br` on every request — measured, 16,782 of 16,782 in one
@@ -2249,6 +2235,9 @@ app = Starlette(
         # only: a caller decodes to the same bytes, which is what keeps the export's
         # byte-exact re-verification promise (design §5.1-§5.2) intact.
         Middleware(CompressMiddleware),
+        # Innermost: decide hiddenness before method/slash routing, while the shared header,
+        # CORS and compression middleware still shape this exactly like an unknown route.
+        Middleware(HideStatsRoute, response_factory=lambda: text(NOT_FOUND, 404)),
     ],
     exception_handlers={
         StoreError: on_bad_input,
