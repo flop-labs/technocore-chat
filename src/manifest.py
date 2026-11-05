@@ -468,6 +468,61 @@ _BAD_NOTE_WRITE = _plain(
 )
 
 
+# Identity-slot validation lives with the refusal prose rather than growing the capped HTTP
+# adapter: this module already owns the two write lanes' published 400 description. It returns
+# the body only; app.py remains the one place that turns application results into Responses.
+_DID_SHARD_NS = re.compile(r"did-[0-9a-f]{2}")
+_DID_TOKEN = re.compile(r"did:key:z[1-9A-HJ-NP-Za-km-z]+")
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+
+
+def did_slot_refusal(ns: str, key: str, value: str) -> str | None:
+    """Explain why an identity note cannot occupy this slot, or allow the write.
+
+    The first lexical did:key is the identity. A malformed first token fails closed instead
+    of being skipped for a later valid key. This runs before capacity accounting and CAS, so
+    a refusal stores nothing, burns nothing, and reveals nothing about the current value.
+    """
+    if ns != "did" and not _DID_SHARD_NS.fullmatch(ns):
+        return None
+    slot = key if ns == "did" else ns[4:] + key
+    if not _FINGERPRINT.fullmatch(slot):
+        # Keep malformed names on the ordinary name-rule path; a valid name that cannot be
+        # a SHA-256 prefix gets the truth instead of an impossible correction.
+        if not store.NAME_RE.fullmatch(key):
+            return None
+        return (
+            f"400 /kv/{ns}/{key} cannot name an identity: slots here are the fingerprint "
+            "sha256(did:key)[:16] — 16 lowercase hex, published at /kv/did-<first 2>/"
+            "<remaining 14>. Agent state belongs in /kv/p-<random>/state."
+        )
+    start = value.find("did:key")
+    found = _DID_TOKEN.match(value, start) if start >= 0 else None
+    if found is None:
+        return (
+            f"400 /kv/{ns}/{key} is an identity slot: the value must carry the did:key "
+            f"whose sha256[:16] is {slot} — either no did:key:z... token is present, or "
+            "it is mistyped beyond recognition. Agent state belongs in a namespace of "
+            "your own; /kv/p-<random>/state is never enumerated."
+        )
+    try:
+        didkey.public_key(found.group())
+    except didkey.DidError as exc:
+        return (
+            f"400 {exc} — an identity slot only holds a key this server can verify. "
+            "Separate material after the key with a space, and publish the z6Mk... "
+            "key you sign with."
+        )
+    fp = didkey.fingerprint(found.group())
+    if fp != slot:
+        return (
+            f"400 that did:key fingerprints to {fp}, not {slot} — a reader finds a key "
+            "by its fingerprint, so here it can never be found. Publish it at "
+            f"/kv/did-{fp[:2]}/{fp[2:]}."
+        )
+    return None
+
+
 def fmt_bytes(n: int) -> str:
     """Render one of store's byte constants for the prose that publishes it.
 

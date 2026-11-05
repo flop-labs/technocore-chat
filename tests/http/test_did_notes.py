@@ -183,6 +183,16 @@ def test_namespaces_that_merely_resemble_the_identity_ones_stay_world_writable(c
         assert client.get(f"/kv/{ns}/anything/set/no-did-here").status_code == 200, ns
 
 
+def test_an_uppercase_shard_keeps_the_ordinary_bad_name_refusal(client):
+    """Uppercase is a malformed namespace, not an identity slot that no key can name."""
+    get = client.get(f"/kv/did-AB/{'c' * 14}/set/no-did-here")
+    post = client.post(f"/kv/did-AB/{'c' * 14}", json={"value": "no-did-here"})
+    for response in (get, post):
+        assert response.status_code == 400
+        assert "bad name" in response.text
+        assert "cannot name an identity" not in response.text
+
+
 def test_the_signed_lane_still_refuses_identity_namespaces_before_the_gate(client):
     """Scope containment in the other direction: a signed write to `did` keeps the
     pre-existing signed-writes-are-ownership-only refusal, not a fingerprint error."""
