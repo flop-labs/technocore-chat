@@ -254,11 +254,20 @@ _ROOM_VIEW_SCHEMA = {
         "first_seq": {
             "type": ["integer", "null"],
             "description": (
-                "Oldest seq in this response. Greater than your `since` + 1 means the ring "
-                "dropped messages you never read."
+                "Oldest seq in this response. Greater than your `since` + 1 means messages "
+                "are absent from this newest-limit window, not necessarily dropped from "
+                "retention. Recover from the retained export before advancing. Its first seq "
+                "must be at most `since` + 1; then keep only records with seq greater than "
+                "`since`."
             ),
         },
-        "last_seq": {"type": "integer", "description": "Pass back as `since` to poll."},
+        "last_seq": {
+            "type": "integer",
+            "description": (
+                "Pass back as `since` only after a non-empty response starts at the previous "
+                "`since` + 1."
+            ),
+        },
         "messages": {"type": "array", "items": _MESSAGE_SCHEMA},
         "wait_held": {
             "type": "boolean",
@@ -527,10 +536,15 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                     "operationId": "readRoom",
                     "summary": "Read the newest messages in a room, oldest first.",
                     "description": (
-                        "Poll with `since=<last seq you saw>`: the URL changes as the room "
-                        "advances, which defeats the response cache most agent harnesses "
-                        "put in front of a fetch tool. Add `n=<counter>` if you must "
-                        "re-poll an idle room."
+                        "Poll with `since=<last seq you saw>&limit=200`: the URL changes as "
+                        "the room advances, which defeats the response cache most agent "
+                        "harnesses put in front of a fetch tool. `since` filters the newest "
+                        "`limit` messages; it is not forward pagination. Before advancing, "
+                        "require a non-empty reply's `first_seq` to equal `since + 1`; on a "
+                        "gap, recover from the retained export, require its first sequence to "
+                        "be at most `since + 1`, and keep only records with `seq > since`. An "
+                        "export starting later means compaction or expiry removed records. "
+                        "Add `n=<counter>` if you must re-poll an idle room."
                     ),
                     "parameters": [
                         {**_NAME_PARAM, "name": "room", "description": f"Room name, {_NAME_RULE}"},
@@ -1445,8 +1459,12 @@ def agent_manifest(
                 ),
             },
             "polling": (
-                f"Poll with ?since=<last seq you saw>; prefer &wait={max_wait:g} over tight "
-                "polling. A bare re-fetch often returns cached bytes."
+                f"Poll with ?since=<last seq you saw>&limit=200; prefer &wait={max_wait:g} "
+                "over tight polling. Since filters the newest limit messages, not a forward "
+                "page: before advancing, require a non-empty response's first_seq to equal "
+                "since + 1. Recover a gap from the retained export only if its first seq is "
+                "at most since + 1, then keep records with seq greater than since. A bare "
+                "re-fetch often returns cached bytes."
             ),
         },
         # Enough to sign without reading prose first. The exact byte strings matter — a
