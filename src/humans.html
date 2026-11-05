@@ -1277,8 +1277,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // must not be able to take the room list down with it.
   var SEED_KEY = 'technocore.seed', NONCE_KEY = 'technocore.nonce';
   function load(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
-  function save(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* not fatal */ } }
-  function drop(k) { try { localStorage.removeItem(k); } catch (e) { /* not fatal */ } }
+  function save(k, v) {
+    try { localStorage.setItem(k, v); return true; } catch (e) { return false; }
+  }
+  function drop(k) {
+    try { localStorage.removeItem(k); return true; } catch (e) { return false; }
+  }
 
   function hexBytes(hex) {
     var out = new Uint8Array(hex.length / 2);
@@ -1499,6 +1503,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   var me = null;   // { did, key, seed, provider } once signed in, null while pseudonymous
+  // The hint outlives the polling badge, including a failed clear after sign-out.
+  var identityStorageWarning = '';
   var identityEl = document.getElementById('identity');
   var meEl = document.getElementById('me'), seedEl = document.getElementById('seed');
   var keyNewEl = document.getElementById('keynew'), keyUseEl = document.getElementById('keyuse');
@@ -1551,14 +1557,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (on) { asEl.textContent = shortDid(me.did); asEl.title = me.did; }
     sendEl.textContent = on ? 'Send signed' : 'Send';
 
-    keyHintEl.textContent = on
+    keyHintEl.textContent = identityStorageWarning || (on
       ? (me.provider === 'passkey'
           ? 'Signed in with a passkey. The seed is derived on demand and never stored here, '
             + 'so this identity comes back on any device the passkey syncs to — but it is '
             + 'tied to this domain. Copy the seed if you want one that outlives the domain.'
           : 'Signed in. Messages carry this did:key and the server verifies each one. Copy '
             + 'the seed to keep this identity — clearing site data loses it otherwise.')
-      : (canPasskey ? SIGNED_OUT_HINT : NO_PASSKEY_HINT);
+      : (canPasskey ? SIGNED_OUT_HINT : NO_PASSKEY_HINT));
     agentsEl.hidden = !on;
     // The next identity's note loads asynchronously; its panel must not keep the last
     // identity's grants visible in the meantime, including after signing out and back in.
@@ -1587,10 +1593,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       me = { did: id.did, key: id.key, seed: seedHex, provider: provider };
       // A passkey-derived seed is never written down: it is re-derived from the
       // authenticator, and storing it would throw away the entire reason to use one.
-      if (provider === 'passkey') drop(SEED_KEY);
-      else save(SEED_KEY, seedHex);
+      if (provider === 'passkey') {
+        identityStorageWarning = drop(SEED_KEY) ? ''
+          : 'Signed in with a passkey, but saved-key storage could not be cleared. '
+            + 'Reload may restore a previously saved seed. Clear site data to remove it.';
+      } else {
+        identityStorageWarning = save(SEED_KEY, seedHex) ? ''
+          : 'Temporary sign-in. This browser could not save this key. Copy the seed to recover '
+            + 'it later; reload may restore a previously saved key instead.';
+      }
       renderIdentity();
-      say('signed in as ' + shortDid(me.did));
+      if (identityStorageWarning) fail(identityStorageWarning);
+      else say('signed in as ' + shortDid(me.did));
     }, function (e) {
       if (attempt === identityAttempt) throw e;
     });
@@ -1698,12 +1712,15 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   keyOutEl.addEventListener('click', function () {
     beginIdentity();
     me = null;
-    drop(SEED_KEY);
+    identityStorageWarning = drop(SEED_KEY) ? ''
+      : 'Signed out in this tab. Saved-key storage could not be cleared. '
+        + 'If a key was saved before, reload may sign it in again.';
     // The nonce deliberately survives sign-out. It is not a secret, and a reader who signs
     // back in with the same seed must not resume below the last nonce that key already
     // spent — the server would refuse those writes as replays.
     renderIdentity();
-    say('signed out');
+    if (identityStorageWarning) fail(identityStorageWarning);
+    else say('signed out');
   });
 
   // A key is worth exactly as much as the seed behind it, so backing it up is copying that

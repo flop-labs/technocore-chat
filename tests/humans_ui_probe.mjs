@@ -692,6 +692,141 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ---------------------------------------------------------------------- storage failures
+// The existing public signing fixture stays inside an isolated local context. These
+// controls exercise both identity entry and exit without creating a new key or posting.
+{
+  // Storage behavior needs no room traffic. Intercept reads in these isolated contexts so
+  // the added reload controls cannot consume the live probe's default read budget.
+  const storageHtml = await (await fetch(`${BASE}/humans`)).text();
+  async function storageContext() {
+    const context = await browser.newContext();
+    await context.route("**/*", route => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/humans") {
+        return route.fulfill({ contentType: "text/html", body: storageHtml });
+      }
+      return route.fulfill({ contentType: "application/json", body: JSON.stringify({
+        room: "lobby", rooms: [], messages: [], generation: 0, first_seq: 0, last_seq: 0,
+      }) });
+    });
+    return context;
+  }
+  for (const mode of ["normal", "save-denied", "save-denied-existing", "remove-denied"]) {
+    const context = await storageContext();
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(String(error)));
+    if (mode === "save-denied") {
+      await page.addInitScript(() => {
+        Storage.prototype.setItem = function () {
+          throw new DOMException("storage probe", "QuotaExceededError");
+        };
+      });
+    }
+    await page.goto(`${BASE}/humans`);
+    await page.waitForSelector("#identity:not([hidden])");
+    if (mode === "save-denied-existing") {
+      await page.evaluate(() => {
+        localStorage.setItem("technocore.seed", "0".repeat(64));
+        Storage.prototype.setItem = function () {
+          throw new DOMException("storage probe", "QuotaExceededError");
+        };
+      });
+    }
+    await page.click("#keymore summary");
+    const fixture = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const expected = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+    await page.fill("#seed", fixture);
+    await page.click("#keyuse");
+    await page.waitForFunction(did => document.getElementById("me").title === did, expected);
+    check(`${mode}: imported fixture can sign`, (await page.textContent("#send")) === "Send signed");
+    const saveWarning = (await page.textContent("#keyhint")).includes("Temporary sign-in");
+    check(`${mode}: save warning matches storage result`, saveWarning === mode.startsWith("save-denied"));
+    if (mode.startsWith("save-denied")) {
+      check(`${mode}: status explains failed persistence`,
+        (await page.textContent("#status")).includes("could not save this key"));
+    }
+    await page.reload();
+    await page.waitForSelector("#identity:not([hidden])");
+    if (mode === "save-denied") {
+      check("save-denied: no saved key returns on reload",
+        await page.evaluate(() => localStorage.getItem("technocore.seed") === null
+          && document.getElementById("keyout").hidden));
+    } else if (mode === "save-denied-existing") {
+      await page.waitForFunction(() => !document.getElementById("keyout").hidden);
+      check("save-denied-existing: reload restores the earlier key",
+        (await page.getAttribute("#me", "title")) !== expected
+        && await page.evaluate(() => localStorage.getItem("technocore.seed") === "0".repeat(64)));
+    } else {
+      await page.waitForFunction(did => document.getElementById("me").title === did, expected);
+      check(`${mode}: the saved fixture returns on reload`, true);
+      if (mode === "remove-denied") {
+        await page.evaluate(() => {
+          Storage.prototype.removeItem = function () {
+            throw new DOMException("storage probe", "SecurityError");
+          };
+        });
+      }
+      await page.click("#keyout");
+      check(`${mode}: sign-out clears the active identity`, await page.locator("#keyout").isHidden());
+      const clearWarning = (await page.textContent("#keyhint")).includes("could not be cleared");
+      check(`${mode}: removal warning matches storage result`, clearWarning === (mode === "remove-denied"));
+      if (mode === "remove-denied") {
+        check("remove-denied: status explains reload recovery",
+          (await page.textContent("#status")).includes("reload may sign it in again"));
+        await page.reload();
+        await page.waitForFunction(did => document.getElementById("me").title === did, expected);
+        check("remove-denied: warning predicted the restored fixture", true);
+        check("remove-denied: successful restore clears the earlier warning",
+          !(await page.textContent("#keyhint")).includes("could not be cleared"));
+      } else {
+        await page.reload();
+        await page.waitForSelector("#identity:not([hidden])");
+        check("normal: sign-out removes the saved key",
+          await page.evaluate(() => localStorage.getItem("technocore.seed") === null
+            && document.getElementById("keyout").hidden));
+      }
+    }
+    check(`${mode}: no page errors`, errors.length === 0, errors.join("; "));
+    await context.close();
+  }
+
+  // A passkey must also report a failed clear of an earlier seed. Mock only its
+  // PRF output with the same public fixture; physical authenticator support is covered below.
+  {
+    const context = await storageContext();
+    const page = await context.newPage();
+    await page.goto(`${BASE}/humans`);
+    await page.waitForSelector("#identity:not([hidden])");
+    await page.evaluate(() => {
+      localStorage.setItem("technocore.seed",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+      Storage.prototype.removeItem = function () {
+        throw new DOMException("storage probe", "SecurityError");
+      };
+      navigator.credentials.get = async () => ({
+        getClientExtensionResults: () => ({
+          prf: { results: { first: Uint8Array.from({ length: 32 }, (_, i) => i).buffer } },
+        }),
+      });
+    });
+    await page.click("#keypass");
+    await page.waitForFunction(() => !document.getElementById("keyout").hidden);
+    check("passkey clear-denied: fixture signs in",
+      (await page.getAttribute("#me", "title")) === "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd");
+    check("passkey clear-denied: persistent hint names the remaining seed",
+      (await page.textContent("#keyhint")).includes("previously saved seed"));
+    check("passkey clear-denied: status reports the failed clear",
+      (await page.textContent("#status")).includes("could not be cleared"));
+    check("passkey clear-denied: the original fixture remains stored",
+      await page.evaluate(() => localStorage.getItem("technocore.seed")
+        === "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"));
+    await context.close();
+  }
+
+}
+
 // ---------------------------------------------------------------------------- signing
 // The did:key lane, which is the one part of this page a Python test can only half-check.
 // tests/unit/test_humans_identity.py pins the constants the page restates; it cannot tell
