@@ -1264,7 +1264,12 @@ def _signer(did: str, sig: str, nonce: str, canonical: str) -> str | Response:
     could re-verify. `room`, `ns`, `key` and `nonce` cannot contain the separator, and the
     free-form field is last, so the canonical string parses one way only.
     """
-    if not NONCE_RE.fullmatch(nonce):
+    # The DID is checked first, through the same anchored shape `public_key` enforces: a
+    # `did` of `" "` is truthy, so it reaches here from both POST lanes, and answering it
+    # with `bad nonce` names a parameter the caller never sent (§3.5: a refusal names the
+    # field that failed). With a malformed `did` this falls through to `verify`, whose
+    # DidError names it; a good DID with a bad nonce still reads as `bad nonce` (#740).
+    if not NONCE_RE.fullmatch(nonce) and didkey.is_did(did):
         return text(f"400 nonce must be 1-19 digits, got {nonce!r}", 400)
     try:
         didkey.verify(did, sig, canonical)
@@ -1472,11 +1477,15 @@ async def room_post(request: Request) -> Response:
     room = request.path_params["room"]
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
-    # were `str()`-coerced here for the same reason `from`/`text` were (#427).
-    did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    # were `str()`-coerced here for the same reason `from`/`text` were (#427). Nothing is
+    # trimmed: `did`, `sig` and `nonce` are semantic fields (docs/design.md §3.5), so a
+    # padded spelling is refused by the same anchored checks the signed GET lanes use —
+    # the shape the schema publishes is the shape that is accepted, not a trimmed copy
+    # of it (#740). The GET lanes never trimmed; this is the POST lanes matching them.
+    did, sent = _field(payload, "did"), _field(payload, "text")
     signer = None
     if did:
-        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
+        sig, nonce = _field(payload, "sig"), _field(payload, "nonce")
         body = store.clean_text(sent)
         signer = _signer(did, sig, nonce, f"{room}|{nonce}|{body}")
         if isinstance(signer, Response):
@@ -1770,10 +1779,12 @@ async def note_post(request: Request) -> Response:
     p = request.path_params
     ns, key = p["ns"], p["key"]
     value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
-    did = _field(payload, "did").strip()
+    # Not trimmed, for the reason spelled out in room_post: the credentials are semantic
+    # fields, so the published shape is enforced as written rather than normalized (#740).
+    did = _field(payload, "did")
     signer = None
     if did:
-        sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
+        sig, nonce = _field(payload, "sig"), _field(payload, "nonce")
         signer = _signer(did, sig, nonce, f"{ns}|{key}|{nonce}|{value}")
         if isinstance(signer, Response):
             return signer
