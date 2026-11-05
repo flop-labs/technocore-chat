@@ -90,11 +90,13 @@ function cacheKey(url, pathname) {
   const spec = EDGE_KEY[pathname];
   if (!spec) return null;
   const keep = new URLSearchParams();
+  // Starlette's QueryParams.get() selects the last occurrence of a repeated name.
+  const selected = (name) => url.searchParams.getAll(name).pop() ?? null;
   for (const [name, wanted] of Object.entries(spec.match ?? {})) {
-    if (url.searchParams.get(name) === wanted) keep.set(name, wanted);
+    if (selected(name) === wanted) keep.set(name, wanted);
   }
   for (const [name, rule] of Object.entries(spec.clamped ?? {})) {
-    const raw = url.searchParams.get(name);
+    const raw = selected(name);
     // Absent means the origin's default: one extra entry, not unboundedly many.
     if (raw === null) continue;
     // Only the form both languages read identically. Python's int() also takes underscores,
