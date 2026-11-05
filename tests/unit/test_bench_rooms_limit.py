@@ -123,7 +123,10 @@ def test_room_benchmark_rejects_mixed_valid_and_invalid_ladder() -> None:
             "0",
             "--json",
         ],
-        check=False, capture_output=True, text=True, timeout=30,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert result.returncode == 2, result.stdout + result.stderr
     assert "--limits" in result.stderr
