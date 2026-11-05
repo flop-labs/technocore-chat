@@ -117,6 +117,10 @@ EDGE_REVALIDATE = {"/rooms": 5}
 # dependency chain. Drift is caught instead — the edge-key test asserts it against
 # store.MAX_LIMIT, which is where the number actually lives.
 
+# The liveness reply does not vary by query at all. Give it an explicit empty key spec so the
+# Worker can collapse `/healthz`, `/healthz?n=1` and every other query variant to one shared
+# cache entry and one canonical origin request.
+#
 # Paths the edge owns outright: the origin serves nothing at them, so unlike everything else
 # here the stored bytes are not a copy of a live answer — they are the only answer. That is
 # why they are neither snapshotted (there is nothing to fetch) nor origin-first (there is
@@ -138,8 +142,14 @@ def rooms_key() -> dict:
         "/rooms": {
             "match": dict(ROOMS_KEY_MATCH),
             "clamped": {"limit": {"min": 1, "max": 200}},
+            "vary": ["Origin"],
         }
     }
+
+
+def edge_key() -> dict:
+    """Cache-key specs for every edge-cached or edge-revalidated path."""
+    return {"/healthz": {}, **rooms_key()}
 
 
 def asset_name(path: str) -> str:
@@ -207,8 +217,8 @@ def main() -> int:
             print(f"  {line}", file=sys.stderr)
         return 1
 
-    edge_key = rooms_key()
-    unspecified = sorted(set(EDGE_REVALIDATE) - set(edge_key))
+    key_spec = edge_key()
+    unspecified = sorted((set(EDGE_CACHED) | set(EDGE_REVALIDATE)) - set(key_spec))
     if unspecified:
         # Fail closed. Without a key spec the Worker would have to key on the raw URL, which
         # is the multiplication bug above — a deploy that silently did that is worse than one
@@ -223,7 +233,7 @@ def main() -> int:
                 "static_first": sorted(STATIC_FIRST),
                 "edge_cached": EDGE_CACHED,
                 "edge_revalidate": EDGE_REVALIDATE,
-                "edge_key": edge_key,
+                "edge_key": key_spec,
                 "edge_only": sorted(EDGE_ONLY),
             },
             indent=2,
