@@ -48,7 +48,7 @@ fmt:
 # The suite without the coverage harness — the fast loop while writing a test.
 test *args:
     # Arguments pass straight through, so `just test tests/unit -k didkey` narrows the run.
-    uv run pytest tests -q {{ args }}
+    uv run pytest -q {{ args }}
 
 # Fuzz the running service against the /openapi.json that same instance serves.
 contract:
