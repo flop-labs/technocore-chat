@@ -138,6 +138,19 @@ class StoreLifecycle(RuleBasedStateMachine):
             setattr(store, name, value)
         shutil.rmtree(self.root, ignore_errors=True)
 
+    @rule(room=st.sampled_from(ROOMS), malformed=st.sampled_from([None, 7, "torn"]))
+    def migrate_malformed_legacy(self, room: str, malformed: object) -> None:
+        """A mixed-version migration must preserve the durable lifecycle through any sequence."""
+        shard = store._read_seq_state(store._seq_state_path(self.root, room))
+        if not isinstance(shard.get(room), dict):
+            return
+        floor = store._seq_field(self.root, room, "floor")
+        generation = store.room_generation(self.root, room)
+        (self.root / ".seqstate").write_text(json.dumps({room: malformed}))
+        store._split_seq_state(self.root)
+        assert store._seq_field(self.root, room, "floor") == floor
+        assert store.room_generation(self.root, room) == generation
+
     # ------------------------------------------------------------------ the reaper, modelled
     #
     # "gone", "kept", or None — None when an age sits close enough to a threshold that the
