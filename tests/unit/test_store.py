@@ -510,12 +510,18 @@ def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     store.append(tmp_path, "live", "bot", "hi")
     path = store.room_path(tmp_path, "live")
     _age(path, store.IDLE_SECONDS + 60)
+    refreshed = []
 
     def refresh(target):
-        os.utime(target, None)  # a writer got in between the stat and the unlink
+        # Only the room write races the unlink; touching the scheduling marker here
+        # would suppress the whole pass instead of exercising its under-lock recheck.
+        if target == path:
+            os.utime(target, None)
+            refreshed.append(target)
 
     _race_under_lock(monkeypatch, store, refresh)
     _reap_now(tmp_path)
+    assert refreshed == [path], "the pass never reached the competing room write"
     assert path.exists()
 
 

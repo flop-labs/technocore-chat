@@ -1864,6 +1864,19 @@ def _drop_emptied_namespaces(
         pass  # no notes yet, or nothing readable: no count to heal and no namespace to drop
 
 
+def _recent(marker: Path, interval: int, now: float) -> bool:
+    """Share the maintenance throttle's unlocked fast check and locked recheck.
+
+    Missing or future markers permit a pass: after a wall-clock rollback the job must
+    restamp its marker rather than wait for that old clock to catch up. Other errors remain
+    the caller's decision: snapshots are best effort, while unreadable reaper state is not due.
+    """
+    try:
+        return 0 <= now - marker.stat().st_mtime < interval
+    except FileNotFoundError:
+        return False
+
+
 def _reap(root: Path) -> None:
     """Delete rooms and notes untouched for IDLE_SECONDS — or, for a room still on its
     first message, for STILLBORN_SECONDS — at most once per REAP_EVERY.
@@ -1885,21 +1898,22 @@ def _reap(root: Path) -> None:
     refused it a moment later anyway. Nothing else ever takes this lock, so it orders against
     nothing and cannot deadlock.
 
-    The throttle itself stays outside that lock, and the touch with it, exactly where they
-    were: the lock is a mutex on the pass, not on the marker, and arming the throttle before
-    the walk starts is what keeps a 30 s pass from being re-run by the very next writer.
+    Keep the first throttle check unlocked so ordinary writes need no maintenance lock,
+    but recheck and arm it under that lock. A worker can observe an old marker, pause until
+    another pass finishes, then acquire a free lock: exclusion alone would let it repeat
+    the entire walk. A caller that loses the lock must not move the marker either, since
+    it has done no work to postpone the next eligible pass.
     """
     marker = root / ".reaped"
     now = time.time()
-    try:
-        if now - marker.stat().st_mtime < REAP_EVERY:
-            return
-    except FileNotFoundError:
-        pass
-    root.mkdir(parents=True, exist_ok=True)
-    marker.touch()
+    if _recent(marker, REAP_EVERY, now):
+        return
     try:
         with _locked(marker, nb=True):
+            now = time.time()
+            if _recent(marker, REAP_EVERY, now):
+                return
+            marker.touch()
             _reap_pass(root, now)
     except BlockingIOError:
         return  # a pass is already running in another worker; nothing here waits for it
@@ -2055,21 +2069,16 @@ def _snapshot(root: Path) -> None:
     marker = root / SNAPSHOTS_FILE
     now = time.time()
     try:
-        if now - marker.stat().st_mtime < SNAPSHOT_EVERY:
+        if _recent(marker, SNAPSHOT_EVERY, now):
             return
-    except FileNotFoundError:
-        pass
     except OSError:
         return
     try:
         with _locked(marker, nb=True):
             # Re-check under the lock: two writers racing the stat above would otherwise
             # both take a sample, and the file is the throttle as well as the data.
-            try:
-                if time.time() - marker.stat().st_mtime < SNAPSHOT_EVERY:
-                    return
-            except FileNotFoundError:
-                pass
+            if _recent(marker, SNAPSHOT_EVERY, time.time()):
+                return
             # Flush this worker's batched counter deltas first: `_bump` lets a plain message
             # ride in memory, and a sample taken over the unflushed bucket is exactly the
             # reading this ring exists to get right — one window short, the next one long.
