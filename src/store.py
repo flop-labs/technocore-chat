@@ -541,14 +541,12 @@ def _migrate(legacy: Path, sharded: Path) -> None:
     under the lock, so a file migrated out from under it fails that stat and is skipped rather
     than deleted.
     """
-    try:
+    with suppress(OSError):  # lost the race, or cannot write: `_resolve` decides what is on disk
         sharded.parent.mkdir(parents=True, exist_ok=True)
         os.replace(legacy, sharded)
-    except OSError:
-        return  # lost the race, or cannot write: `_resolve` falls back to what is on disk
 
 
-def _resolve(d: Path, name: str, suffix: str) -> Path:
+def _resolve(d: Path, name: str, suffix: str, write: bool = False) -> Path:
     """Where `name` lives right now, moving a pre-sharding file into its bucket on the way.
 
     The property that matters is that every caller gets the SAME answer, not that the answer
@@ -562,8 +560,17 @@ def _resolve(d: Path, name: str, suffix: str) -> Path:
     was never fixed, would otherwise turn every unmigrated room into an empty one and every
     note into a missing one — silently, because an absent file is how this store spells "no
     such room". Serving the data that is plainly there is strictly better than hiding it, and
-    it is not the fork above: readers and writers still agree, since the fallback is only
-    taken while the legacy file is the only copy in existence.
+    it is not the fork above: readers agree, since the fallback is only taken while the legacy
+    file is the only copy in existence.
+
+    Writers are the exception, and `write=True` is how they say so: they are refused instead
+    of handed the legacy path. A writer holds the lock beside the path it was given and
+    appends to the file there, and the move takes neither, so any worker whose move succeeds
+    afterwards (permissions repaired, a volume remounted, a nested lookup in the writer's own
+    body) renames the file away mid-write. The writer then creates a NEW legacy file that
+    readers never see, because they check the bucket first: an acknowledged write that is
+    gone. A refusal costs one failed request until the store is fixed; the fallback write
+    costs a message that was acknowledged and cannot be read.
 
     Two resolvers racing the same unmigrated name both reach `_migrate`; the first
     `os.replace` wins, the second fails ENOENT on a source already gone, and both then see the
@@ -580,13 +587,15 @@ def _resolve(d: Path, name: str, suffix: str) -> Path:
     if (legacy := d / filename).exists():
         _migrate(legacy, sharded)
         if legacy.exists():  # the move could not run; the data is still readable there
+            if write:  # ...but a write there is lost the moment any worker's move succeeds
+                raise OSError(f"{legacy} could not be moved into its bucket; fix the permissions")
             return legacy
     return sharded
 
 
-def room_path(root: Path, room: str) -> Path:
+def room_path(root: Path, room: str, write: bool = False) -> Path:
     """Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`."""
-    return _resolve(root / "rooms", valid_name(room), ".jsonl")
+    return _resolve(root / "rooms", valid_name(room), ".jsonl", write)
 
 
 def _note_ns_dir(root: Path, ns: str) -> Path:
@@ -595,9 +604,9 @@ def _note_ns_dir(root: Path, ns: str) -> Path:
     return root / "notes" / valid_name(ns)
 
 
-def note_path(root: Path, ns: str, key: str) -> Path:
+def note_path(root: Path, ns: str, key: str, write: bool = False) -> Path:
     """Where a note lives — `notes/<ns>/<shard>/<key>.txt`."""
-    return _resolve(_note_ns_dir(root, ns), valid_name(key), ".txt")
+    return _resolve(_note_ns_dir(root, ns), valid_name(key), ".txt", write)
 
 
 def _prune(d: Path | str) -> bool:
@@ -2617,7 +2626,7 @@ def _write_record(
 ) -> tuple[dict, bool]:
     """Write one record. Returns (record, created) — `created` is True when this call is
     what brought the room into existence, which is the signal `append` announces on."""
-    path = room_path(root, room)
+    path = room_path(root, room, write=True)
     # Validated here rather than trusted from the caller: `from` is the one field readers
     # treat as provenance, and the allowlist that protects it does not apply to a DID (it
     # rejects ':'). One place decides the shape, for both write lanes.
@@ -2764,7 +2773,7 @@ def note_set(
     nothing revokes the first caller's belief. CAS orders writes; it does not order the
     side effects those writes describe.
     """
-    path = note_path(root, ns, key)
+    path = note_path(root, ns, key, write=True)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
     _reap(root)
