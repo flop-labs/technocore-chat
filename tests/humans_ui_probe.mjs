@@ -1804,6 +1804,60 @@ for (const [label, initial, target] of [
   await context.close();
 }
 
+// ------------------------------------------------------- exact message text on the clipboard
+// textContent can be exact while native selection collapses spaces. A copied JSON
+// condition must still match the note it names, including spaces inside its string.
+{
+  console.log("message spaces");
+  const context = await browser.newContext({
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  const room = "probe-message-spaces";
+  const samples = [
+    '{"value":"ready","if":"alpha beta"}',
+    '{"value":"ready","if":"alpha  beta"}',
+    "left" + " ".repeat(100) + "right " + "x".repeat(3800),
+  ];
+  for (const text of samples) {
+    const r = await context.request.post(`${BASE}/r/${room}`, { data: { from: "probe", text } });
+    if (!r.ok()) throw new Error(`message fixture failed: ${await r.text()}`);
+  }
+  for (const width of [320, 900]) {
+    const page = await context.newPage();
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${BASE}/humans#r/${room}`, { waitUntil: "domcontentloaded" });
+    await page.locator("#log .body").nth(2).waitFor();
+    for (const [i, text] of samples.entries()) {
+      const body = page.locator("#log .body").nth(i);
+      await body.evaluate(element => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+      await page.keyboard.press("ControlOrMeta+c");
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      check(`${width}px: message ${i} copies its exact stored text`, copied === text);
+      if (i < 2) {
+        const note = `${BASE}/kv/probe-message-spaces/status`;
+        const reset = await context.request.post(note, { data: { value: JSON.parse(text).if } });
+        if (!reset.ok()) throw new Error(`note fixture failed: ${await reset.text()}`);
+        const write = await context.request.post(note, { data: JSON.parse(copied) });
+        check(`${width}px: copied condition ${i} still matches`, write.status() === 200,
+              `HTTP ${write.status()}`);
+      }
+    }
+    const geometry = await page.locator("#log").evaluate(element => ({
+      client: element.clientWidth, scroll: element.scrollWidth,
+    }));
+    check(`${width}px: preserved spaces and long words still wrap`,
+          geometry.scroll <= geometry.client, `${geometry.scroll} vs ${geometry.client}`);
+    await page.close();
+  }
+  await context.close();
+}
+
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");
 process.exit(failures ? 1 : 0);
