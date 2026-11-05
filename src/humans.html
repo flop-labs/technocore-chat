@@ -1358,7 +1358,16 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // U+0085, JavaScript takes U+FEFF — and it does not matter, because the sweep has turned
   // every one of those into a space before either one runs.
   var INVISIBLE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/gu;
-  function swept(s) { return s.replace(INVISIBLE, ' ').trim(); }
+  // store.py SWEEP_ALSO, same ranges in the same order: the assigned default-ignorable
+  // codepoints that render as nothing yet sit in Mn or Lo, so no category above reaches
+  // them. Mostly the 256 variation selectors. A codepoint set cannot be written as a
+  // category, so the parity test over INVISIBLE passes whether or not this line is here;
+  // tests/unit/test_humans_identity.py pins this set against the server's instead.
+  // It is not optional. This page signs its own swept text and sends that, so a selector
+  // left in place is signed, sent, and then swept by the server, which leaves the
+  // signature covering bytes the server does not store and the write refused with 403.
+  var SWEEP_ALSO = /[\u{34f}\u{115f}-\u{1160}\u{17b4}-\u{17b5}\u{180b}-\u{180d}\u{180f}\u{3164}\u{fe00}-\u{fe0f}\u{ffa0}\u{e0100}-\u{e01ef}]/gu;
+  function swept(s) { return s.replace(INVISIBLE, ' ').replace(SWEEP_ALSO, ' ').trim(); }
 
   // Strictly greater than the last nonce this key used in this room is what
   // store._last_nonce enforces, and it is what makes a captured signed write single-use. A

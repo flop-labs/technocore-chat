@@ -40,6 +40,14 @@ def test_the_sweep_matches_the_services_own_for_hostile_input():
         "emoji family 👨‍👩‍👧 flattens",
         "line separator paragraph",
         "unicode текст 中文 🎉 survives",
+        # The assigned default-ignorables the category list misses (store.py SWEEP_ALSO).
+        # Without them mirrored here the wrapper signs a selector the service sweeps to a
+        # space, so the signature covers bytes that are never stored and the write is
+        # refused. Every probe above is in a swept *category*, so none of them can catch it:
+        # one variation selector from each block, and the combining grapheme joiner.
+        "selector a️b flattens",
+        "supplement a󠄀b flattens",
+        "joiner a͏b flattens",
     ):
         assert signing.sweep(text) == store.clean_text(text), repr(text)
 
