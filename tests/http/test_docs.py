@@ -427,6 +427,82 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     )
 
 
+def test_patterns_build_a_verifiable_result_bundle_outside_room_retention(client, tmp_path):
+    """#976: exercise the documented construction order, including its tamper boundary.
+
+    The manifest can hash immutable payloads, then a later signed announcement can name the
+    manifest without making signed-records.jsonl depend on its own hash. The exact exported
+    record remains independently verifiable after the room disappears.
+    """
+    import hashlib
+
+    import didkey
+
+    page = client.get("/patterns.md").text
+    pattern = " ".join(page.split("## 8. Publish a durable result bundle", 1)[1].split())
+    for name in ("manifest.json", "signed-records.jsonl", "result files"):
+        assert name in pattern
+    assert "outside the manifest's hashed payload set" in pattern
+    assert "final exported `seq`" in pattern and "last_seq" in pattern
+    assert "<room>|<nonce>|<text>" in pattern and "manifest.sig" in pattern
+
+    room = "durable-result"
+    did, sign = _keypair()
+    assert (
+        _say_signed(client, room, did, sign, "referee approved result", nonce=1).status_code == 200
+    )
+
+    # A clean final line does not prove a timed-out download reached the room's tail. This
+    # comparison is the documented completeness gate before the manifest is announced.
+    before = client.get(f"/r/{room}/export").content
+    tail = client.get(f"/r/{room}?format=json&limit=1").json()["last_seq"]
+    assert json.loads(before.splitlines()[-1])["seq"] == tail
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    payload = bundle / "standings.json"
+    payload.write_bytes(b'{"winner":"agent-a"}\n')
+    manifest = {
+        "files": [
+            {
+                "path": payload.name,
+                "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+            }
+        ]
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    (bundle / "manifest.json").write_bytes(manifest_bytes)
+    manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+
+    announcement = f"result manifest sha256:{manifest_digest}"
+    assert _say_signed(client, room, did, sign, announcement, nonce=2).status_code == 200
+    (bundle / "signed-records.jsonl").write_bytes(client.get(f"/r/{room}/export").content)
+
+    # signed-records.jsonl is deliberately outside this set: the announcement it contains
+    # was created only after the manifest digest existed.
+    assert {entry["path"] for entry in manifest["files"]} == {payload.name}
+
+    def verifies() -> bool:
+        stored_manifest = (bundle / "manifest.json").read_bytes()
+        digest = hashlib.sha256(stored_manifest).hexdigest()
+        records = [
+            json.loads(line) for line in (bundle / "signed-records.jsonl").read_bytes().splitlines()
+        ]
+        record = next(
+            rec for rec in records if rec.get("text") == f"result manifest sha256:{digest}"
+        )
+        didkey.verify(record["from"], record["sig"], f"{room}|{record['nonce']}|{record['text']}")
+        files = json.loads(stored_manifest)["files"]
+        return all(
+            hashlib.sha256((bundle / entry["path"]).read_bytes()).hexdigest() == entry["sha256"]
+            for entry in files
+        )
+
+    assert verifies()
+    payload.write_bytes(b'{"winner":"agent-b"}\n')
+    assert not verifies()
+
+
 def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
     """The bridging guide, served like the patterns it composes.
 
