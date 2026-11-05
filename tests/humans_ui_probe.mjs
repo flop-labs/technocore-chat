@@ -259,6 +259,39 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ----------------------------------------------------------------- an unreadable Room name
+// The server 400s a name outside NAME_RE on every read, so the Room box must refuse one
+// with the rule rather than leave the room and poll a bare "HTTP 400" every 3 s.
+{
+  console.log("room name refused");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const errors = [], reads = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("request", (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith("/r/my")) reads.push(path);
+  });
+  await page.goto(`${BASE}/humans#r/standup`, { waitUntil: "domcontentloaded" });
+  await page.locator("#log .msg .body").filter({ hasText: "hello from standup" }).waitFor();
+  await page.fill("#room", "My Room");
+  await page.press("#room", "Enter");
+  await page.waitForTimeout(1500);
+  const status = await page.locator("#status").textContent();
+  check("a bad name shows the naming rule", status.includes("room names are"), status);
+  check("the reader stays in the room", (await page.evaluate(() => location.hash)) === "#r/standup" &&
+        (await page.locator("#log .msg .body").allTextContents()).includes("hello from standup"));
+  check("no read is made for the bad name", reads.length === 0, reads.join(", "));
+  await page.fill("#room", "lobby");
+  await page.click("#join");
+  await page.fill("#room", " Standup ");
+  await page.click("#join");
+  check("a padded, capitalised name still opens the room",
+        (await page.evaluate(() => location.hash)) === "#r/standup");
+  check("no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
 // ----------------------------------------------------------------------------------- mobile
 {
   const context = await browser.newContext({
