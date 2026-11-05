@@ -18,6 +18,8 @@ import threading
 import unicodedata
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import limit  # noqa: E402
@@ -60,6 +62,146 @@ def test_normalisation_folds_case_whitespace_and_unicode_compatibility() -> None
     assert limit.normalize_text("con\u200dsensus\u2028node") == limit.normalize_text(
         "con sensus node"
     )
+
+
+def test_bare_token_shaped_text_retains_distinct_key_while_pasted_ref_is_cut() -> None:
+    """The documented pasted follow-up syntax (&ref=422-...) is cut out of message text
+    so it cannot buy a fresh duplicate slot. But legitimate bare tokens (such as incident
+    or ticket ids) remain distinct duplicate keys, and ordinary words ending in ref= or
+    malformed token shapes are not over-stripped."""
+    # Bare token stays distinct from text without it
+    phrase = "incident alpha report confirmed"
+    phrase_bare = "incident 422-deadbeef-abcd alpha report confirmed"
+    assert limit.normalize_text(phrase_bare) != limit.normalize_text(phrase)
+    assert limit.normalize_text(phrase_bare) == "incident 422-deadbeef-abcd alpha report confirmed"
+
+    # Documented pasted &ref= syntax is cut out (at middle, start, end, glued)
+    assert limit.normalize_text("hello &ref=422-deadbeef-abcd world") == "hello world"
+    assert limit.normalize_text("&ref=422-deadbeef-abcd") == ""
+    assert limit.normalize_text("&ref=422-deadbeef-abcd hello") == "hello"
+    assert limit.normalize_text("hello &ref=422-deadbeef-abcd") == "hello"
+    assert limit.normalize_text("hello&ref=422-deadbeef-abcd world") == "hello world"
+    assert limit.normalize_text("prefix&ref=422-deadbeef-abcd") == "prefix"
+    assert limit.normalize_text("incident &ref=422-deadbeef-abcd. next") == "incident . next"
+    assert limit.normalize_text("incident &ref=422-deadbeef-abcd&other=1") == "incident &other=1"
+
+    # Uppercase handling (casefold runs first)
+    assert limit.normalize_text("&REF=422-DEADBEEF-ABCD") == ""
+    assert (
+        limit.normalize_text("INCIDENT 422-DEADBEEF-ABCD ALPHA")
+        == "incident 422-deadbeef-abcd alpha"
+    )
+
+    # Malformed tokens or words ending in ref= are not stripped
+    assert (
+        limit.normalize_text("incident brief=422-deadbeef-abcd alpha")
+        == "incident brief=422-deadbeef-abcd alpha"
+    )
+    assert (
+        limit.normalize_text("incident pref=422-deadbeef-abcd alpha")
+        == "incident pref=422-deadbeef-abcd alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-xyz1 alpha")
+        == "incident &ref=422-deadbeef-xyz1 alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef00000000-abcd alpha")
+        == "incident &ref=422-deadbeef00000000-abcd alpha"
+    )
+    # Extended token shapes (e.g. 5th hex digit) or non-token boundaries are not stripped
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-abcde alpha")
+        == "incident &ref=422-deadbeef-abcde alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-abcd9 alpha")
+        == "incident &ref=422-deadbeef-abcd9 alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-abcdz alpha")
+        == "incident &ref=422-deadbeef-abcdz alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-abcd_extra alpha")
+        == "incident &ref=422-deadbeef-abcd_extra alpha"
+    )
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-abcd-extra alpha")
+        == "incident &ref=422-deadbeef-abcd-extra alpha"
+    )
+    # Unicode digits or word continuations that _REF rejects are not stripped
+    assert (
+        limit.normalize_text("incident &ref=422-deadbeef-٠١٢٣ alpha")
+        == "incident &ref=422-deadbeef-٠١٢٣ alpha"
+    )
+
+    # In dupe_refused: filling the threshold with phrase does not reject
+    # the distinct legitimate message phrase_bare
+    limit._dupes.clear()
+    assert refused(phrase, now=0.0, max_copies=1) is False
+    assert refused(phrase, now=1.0, max_copies=1) is True
+    assert refused(phrase_bare, now=2.0, max_copies=1) is False
+    # Extended token values remain distinct and are not falsely refused:
+    assert refused(phrase + " &ref=422-deadbeef-abcde", now=3.0, max_copies=1) is False
+    assert refused(phrase + " &ref=422-deadbeef-abcd9", now=4.0, max_copies=1) is False
+    assert refused(phrase + " &ref=422-deadbeef-abcd-extra", now=5.0, max_copies=1) is False
+    # But pasting documented &ref= into the duplicate message is rejected
+    assert refused(phrase + " &ref=422-deadbeef-abcd", now=6.0, max_copies=1) is True
+    limit._dupes.clear()
+
+
+@pytest.mark.parametrize("width", range(10))
+def test_pasted_ref_timestamp_width_preserves_malformed_identifiers(width: int) -> None:
+    """Only the issued 1–8 digit timestamp shape may disappear from a duplicate key."""
+    text = "incident &ref=422-" + "a" * width + "-abcd confirmed"
+    expected = "incident confirmed" if 1 <= width <= 8 else text
+    assert limit.normalize_text(text) == expected
+
+
+@pytest.mark.parametrize("width", range(6))
+def test_pasted_ref_suffix_requires_exactly_four_digits(width: int) -> None:
+    """A short suffix is caller text too, even when all its characters are valid hex."""
+    text = "incident &ref=422-deadbeef-" + "a" * width + " confirmed"
+    expected = "incident confirmed" if width == 4 else text
+    assert limit.normalize_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        ("", "incident confirmed"),
+        (".", "incident . confirmed"),
+        ("&next=1", "incident &next=1 confirmed"),
+        ("_x", "incident &ref=422-deadbeef-abcd_x confirmed"),
+        ("-x", "incident &ref=422-deadbeef-abcd-x confirmed"),
+        ("e", "incident &ref=422-deadbeef-abcde confirmed"),
+        ("9", "incident &ref=422-deadbeef-abcd9 confirmed"),
+        ("z", "incident &ref=422-deadbeef-abcdz confirmed"),
+        ("é", "incident &ref=422-deadbeef-abcdé confirmed"),
+        ("中", "incident &ref=422-deadbeef-abcd中 confirmed"),
+        ("٠", "incident &ref=422-deadbeef-abcd٠ confirmed"),
+    ],
+)
+def test_pasted_ref_boundaries_preserve_caller_text_and_duplicate_slots(
+    ending: str, expected: str
+) -> None:
+    """A boundary decision must agree with the actual cross-sender duplicate ring."""
+    text = "incident &ref=422-deadbeef-abcd" + ending + " confirmed"
+    assert limit.normalize_text(text) == expected
+    limit._dupes.clear()
+    try:
+        assert not refused("incident confirmed", now=0.0, max_copies=1)
+        assert refused(text, now=1.0, max_copies=1) is (expected == "incident confirmed")
+        assert refused(text, now=2.0, max_copies=1)
+    finally:
+        limit._dupes.clear()
+
+
+def test_multiple_pasted_refs_preserve_the_surrounding_message() -> None:
+    """Removing more than one genuine ref must keep the neighbouring words and ids."""
+    text = "alpha&REF=422-A-ABCD&ref=422-deadbeef-abcd beta 422-deadbeef-abcd"
+    assert limit.normalize_text(text) == "alpha beta 422-deadbeef-abcd"
 
 
 def test_the_length_floor_is_on_the_normalised_text() -> None:
