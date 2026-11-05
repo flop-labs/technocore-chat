@@ -172,6 +172,12 @@ def main() -> int:
                 if r.status != 200:
                     failed.append(f"{path} -> HTTP {r.status}")
                     continue
+                # A 200 can be the deployed Worker's previous outage snapshot, not
+                # the origin. Re-capturing it would let deploy.sh publish stale limits
+                # as a new capture. Static-first bytes are replaced from this tree below.
+                if path not in STATIC_FIRST and r.headers.get("X-Origin-Fallback") is not None:
+                    failed.append(f"{path} -> X-Origin-Fallback: origin snapshot unavailable")
+                    continue
                 body = r.read()
                 ctype = r.headers.get("content-type", "application/octet-stream")
         except Exception as exc:  # noqa: BLE001 - any failure is a failed snapshot
