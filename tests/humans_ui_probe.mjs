@@ -950,7 +950,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
     const expires = String(Math.floor(Date.now() / 1000) + 86400);
     const nonce = String(Date.now());
     const signature = sign(null, Buffer.from(`delegate|${did}|${agent}|${scope}|${expires}|${nonce}`), key);
-    const value = `delegate: ${agent} ${scope} ${expires} ${nonce} ${signature.toString("base64url")}`;
+    const value = `${did} delegate: ${agent} ${scope} ${expires} ${nonce} ${signature.toString("base64url")}`;
     const response = await fetch(`${BASE}${path}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value }),
@@ -1242,7 +1242,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   await fetch(`${HOST}${notePath}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value: "mailbox: mb-probe" }),
+    body: JSON.stringify({ value: `${did} mailbox: mb-probe` }),
   });
 
   const AGENT = "did:key:z6MkqGC3nWZhYieEVTVDKW5v588CiGfsDSmRVG9ZwwWTvLSK";

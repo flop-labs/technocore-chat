@@ -1597,7 +1597,7 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
                 f"/kv/{ns}/{key}/set/<value>.",
                 400,
             )
-        return None
+        return text(reason, 400) if (reason := manifest.did_slot_refusal(ns, key, value)) else None
     if ns == store.OWNERS_NS:
         if not store.ownable(key):
             return text(

@@ -1960,7 +1960,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             // is the only revocation, so re-issuing is routine, and appending would grow the
             // note by a record a week per agent against a cap of about forty.
             var kept = previous ? withoutAgent(previous, agent) : '';
-            var next = kept ? kept + ' ' + record : record;
+            // Identity slots hold their owner as the first did:key token. New notes need
+            // that key before a delegation's agent DID, and an older delegation-only note
+            // is repaired on its next successful compare-and-swap without dropping any of
+            // its other material. Once present at the front, re-issues do not duplicate it.
+            var identified = kept === root || kept.indexOf(root + ' ') === 0;
+            var next = (identified ? kept : root + (kept ? ' ' + kept : '')) + ' ' + record;
             // Compare-and-swap on the previous body, never a blind overwrite. This note is
             // world-writable and may hold a `mailbox:` line or another delegation that
             // arrived between the read and the write; a 409 here means re-read, not retry.
