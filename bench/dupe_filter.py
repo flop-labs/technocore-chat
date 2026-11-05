@@ -110,6 +110,9 @@ CANDIDATES = (CHOSEN,) + tuple(
 # What the borderline class costs, in rows rather than in groups: the group count follows
 # from it and the copy threshold, so the class stays this size whatever N is.
 BORDERLINE_ROWS = 180
+# Derived once, here, because two places need it: build_corpus, and the line that tells the
+# reader what build_corpus built. A literal in either of them is only right at one N.
+BORDERLINE_GROUPS = max(1, BORDERLINE_ROWS // (CHOSEN[1] + 1))
 FARM = ("farm_head", "farm_short", "farm_mid")
 LEGIT = ("legit_short", "legit_echo", "legit_unique")
 
@@ -197,9 +200,10 @@ def build_corpus(rng: random.Random) -> list[tuple[str, str]]:
     # someone sets the knob for. A row budget keeps the class the same size it has always
     # been at the shipped default (30 groups x 6 = 180) and shrinks the group count instead
     # as N rises, so the class still exists at every threshold.
-    groups = max(1, BORDERLINE_ROWS // (CHOSEN[1] + 1))
     rows += [
-        (_echo_base(5000 + i), "borderline") for i in range(groups) for _ in range(CHOSEN[1] + 1)
+        (_echo_base(5000 + i), "borderline")
+        for i in range(BORDERLINE_GROUPS)
+        for _ in range(CHOSEN[1] + 1)
     ]
     # One borderline group alone can still outgrow the corpus at an absurd threshold. Say so
     # in a sentence naming the knob rather than dying on the assert below, which reports a
@@ -385,7 +389,7 @@ def main() -> None:
         print(
             "  farm: 6 head x135, 2 short x30, 12 mid x12; evasion: 60 templates x12 "
             "(textually distinct, uncatchable by design); legit: 8 shorts x40, "
-            f"500 echoes x2-3, 30 borderline x{CHOSEN[1] + 1}, rest unique"
+            f"500 echoes x2-3, {BORDERLINE_GROUPS} borderline x{CHOSEN[1] + 1}, rest unique"
         )
         print(f"median of {PASSES} passes, replayed through limit.dupe_refused")
         print()
