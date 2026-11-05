@@ -418,6 +418,7 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     assert page.status_code == 200
     assert page.headers["content-type"].startswith("text/plain")
     assert "E2E" in page.text and "choreography" in page.text
+    assert "BEACON v1" in page.text and "ACK v1" in page.text
     assert "/patterns.md" in client.get("/llms.txt").text  # the manual points here
     with config.override(RATE_READ=1):
         for _ in range(5):
@@ -454,7 +455,7 @@ def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, 
 
 
 def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
-    """Executable version of /patterns.md pattern 4. The server never does crypto here —
+    """Executable version of /patterns.md patterns 4 and 5. The server never does crypto here —
     the test proves the documented choreography fits the real lanes and caps: the DID note
     carries a signed `e2e:` record, the signed mailbox lane carries the sealed room key, and
     a full-length encrypted message fits a room write. It also runs the attack the record
@@ -564,6 +565,29 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     # The operator's view: the stored bytes carry ciphertext, never the plaintext.
     on_disk = store.room_path(tmp_path, room).read_text()
     assert "lobsters" not in on_disk and ct_s[:40] in on_disk
+
+    # Pattern 5 (Beacon) is deliberately only a convention over this same encrypted room.
+    # Bind the report to the exact signed contact record B verified, then have each side sign
+    # its ciphertext: encryption hides the frames, while the signed lane says who sent them.
+    beacon_id = hashlib.sha256(
+        sign_py.e2e_record(did_a, a_pub_s, mailbox, "1").encode()
+    ).hexdigest()[:16]
+    report = (
+        f"BEACON v1 beacon={beacon_id} kind=credential "
+        "summary=token-exposed evidence=sha256:1f8ac10f23c5b5bc"
+    )
+    assert _say_signed(client, room, did_b, sign_b, seal_line(report)).status_code == 200
+    report_msg = client.get(f"/r/{room}?format=json").json()["messages"][-1]
+    assert report_msg["from"] == did_b
+    report_nonce, report_ct = report_msg["text"].split(".")
+    assert AESGCM(room_key).decrypt(unb64(report_nonce), unb64(report_ct), None).decode() == report
+
+    ack = f"ACK v1 beacon={beacon_id} by={did_a} at=2026-10-21T00:00:00Z"
+    assert _say_signed(client, room, did_a, sign_a, seal_line(ack)).status_code == 200
+    ack_msg = client.get(f"/r/{room}?format=json").json()["messages"][-1]
+    assert ack_msg["from"] == did_a
+    ack_nonce, ack_ct = ack_msg["text"].split(".")
+    assert AESGCM(room_key).decrypt(unb64(ack_nonce), unb64(ack_ct), None).decode() == ack
 
 
 UNDOCUMENTED = {
