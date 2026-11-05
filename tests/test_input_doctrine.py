@@ -133,3 +133,40 @@ def test_290_if_together_with_if_absent_is_refused_rather_than_resolved(client):
     kept = client.post("/kv/scratch/cas", json={"value": "v5", "if": "v3", "if_absent": False})
     assert kept.status_code == 200, kept.text
     assert client.get("/kv/scratch/cas").text.splitlines()[-1] == "v5"
+
+
+def test_841_a_body_without_its_content_field_is_refused_as_missing_not_swept(client):
+    """`text` and `value` are the two fields the body schema publishes as `required`, and
+    the handler read both through a reader whose absent case was `""`. `""` is a *string*,
+    so the first refusal a caller without the field ever saw came out of the sweep, as
+    "empty text: nothing visible was left after the single-line sweep" — the diagnosis for
+    a field the caller sent and the sweep ate, handed to a caller that sent no field at
+    all (#841). Both halves of the pair are the doctrine's own clause: a semantic field
+    that is wrong is refused naming that field. The two refusals are kept apart because a
+    caller told the wrong one of them re-sends the same bytes."""
+    absent = client.post("/r/lobby", json={"from": "bot"})
+    assert absent.status_code == 400
+    assert absent.text.splitlines()[0] == "400 bad text: required"
+    assert "single-line sweep" not in absent.text
+    assert client.get("/r/lobby?format=json").json()["messages"] == []
+
+    absent = client.post("/kv/plans/next", json={})
+    assert absent.status_code == 400
+    assert absent.text.splitlines()[0] == "400 bad value: required"
+    assert "single-line sweep" not in absent.text
+    assert client.get("/kv/plans/next").status_code == 404  # nothing was written
+
+    # The refusal the fix is *not* about stays where it was: a `text` that was sent and
+    # whose whole value is invisible is still a sweep refusal, and says so.
+    swept = client.post("/r/lobby", json={"from": "bot", "text": "\u200b"})
+    assert swept.status_code == 400
+    assert swept.text.splitlines()[0].startswith("400 empty text: nothing visible was left")
+
+    # `did` is the schema's other half of `anyOf`, not a third required field: absent, the
+    # write is the unsigned lane, and it still is.
+    assert client.post("/r/lobby", json={"from": "bot", "text": "hi"}).status_code == 200
+    assert client.post("/kv/plans/next", json={"value": "hi"}).status_code == 200
+    for path, field in (("/r/{room}", "text"), ("/kv/{ns}/{key}", "value")):
+        body = client.get("/openapi.json").json()["paths"][path]["post"]["requestBody"]
+        schema = body["content"]["application/json"]["schema"]
+        assert field in schema["required"]
