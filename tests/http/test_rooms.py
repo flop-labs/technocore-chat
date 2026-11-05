@@ -1076,6 +1076,109 @@ def test_invalid_signed_note_conditions_do_not_burn_a_nonce(client):
     assert client.get(f"/kv/room-nonce/{post_room}").text.strip().endswith("2")
 
 
+def _signed_note_url(ns, key, did, sign, value, nonce):
+    """`_set_signed`'s URL without the request, so a test can put a condition on it."""
+    return f"/kv/{ns}/{key}/set-signed/{did}/{sign(f'{ns}|{key}|{nonce}|{value}')}/{nonce}/{value}"
+
+
+# The 19-digit maximum NONCE_RE admits: a counter spent at this value can never be counted past.
+TOP_NONCE = "9" * 19
+
+
+def test_a_signed_write_its_condition_refuses_spends_no_nonce(client):
+    """The nonce used to be burnt before the write's own `?if=` or `?if_absent` was read, so
+    a write that condition refused had spent it anyway. On an empty, unowned `d-` room the
+    gate admits any key signing a claim of itself, so `?if=nope` at the maximum locked the
+    room against every claim for a week without claiming it — and could be sent again once
+    the counter idled out. A nonce is spent by the write it signs, and only if it lands."""
+    squatter, squatter_sign = _keypair(seed=4)
+    room = "d-unclaimed"
+    squat = _signed_note_url("room-owners", room, squatter, squatter_sign, squatter, TOP_NONCE)
+    assert client.get(f"{squat}?if=nope").status_code == 409
+    assert client.get(f"/kv/room-owners/{room}").status_code == 404  # nothing claimed
+    assert client.get(f"/kv/room-nonce/{room}").status_code == 404  # and nothing spent
+
+    owner, owner_sign = _keypair()
+    assert _claim(client, room, owner, owner_sign).status_code == 200  # still claimable
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+
+    # `?if_absent=1` against the owner's own room: the gate admits them, the condition does not
+    reclaim = _signed_note_url("room-owners", room, owner, owner_sign, owner, 2)
+    assert client.get(f"{reclaim}?if_absent=1").status_code == 409
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+
+    # `?if=` against an allow-list that holds something else: refused under the lock
+    assert _set_signed(client, "room-allow", room, owner, owner_sign, owner, 2).status_code == 200
+    friend, _ = _keypair(seed=2)
+    add = _signed_note_url("room-allow", room, owner, owner_sign, friend, 3)
+    assert client.get(f"{add}?if={friend}").status_code == 409
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+    # …while the write that lands still spends its nonce, and single-use holds after it
+    assert client.get(f"{add}?if={owner}").status_code == 200
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("3")
+    replay = client.get(add)
+    assert replay.status_code == 403 and "single-use" in replay.text
+    assert client.get(f"/kv/room-allow/{room}").text.strip().endswith(friend)
+
+
+def test_a_signed_post_its_condition_refuses_spends_no_nonce(client):
+    """The same promise on the JSON lane, which spends through the same burn."""
+    squatter, squatter_sign = _keypair(seed=4)
+    room = "d-unclaimed-post"
+    squat = _signed_note_payload(
+        "room-owners", room, squatter, squatter_sign, squatter, nonce=TOP_NONCE, **{"if": "nope"}
+    )
+    assert client.post(f"/kv/room-owners/{room}", json=squat).status_code == 409
+    assert client.get(f"/kv/room-nonce/{room}").status_code == 404
+
+    owner, owner_sign = _keypair()
+    claim = _signed_note_payload("room-owners", room, owner, owner_sign, owner, if_absent=True)
+    assert client.post(f"/kv/room-owners/{room}", json=claim).status_code == 200
+    reclaim = {**claim, "nonce": "2", "sig": owner_sign(f"room-owners|{room}|2|{owner}")}
+    assert client.post(f"/kv/room-owners/{room}", json=reclaim).status_code == 409
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+
+    listed = _signed_note_payload("room-allow", room, owner, owner_sign, owner, nonce=2)
+    stale = {**listed, "if": "stale"}  # there is no list yet, so no value can match
+    assert client.post(f"/kv/room-allow/{room}", json=stale).status_code == 409
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("1")
+    assert client.post(f"/kv/room-allow/{room}", json=listed).status_code == 200
+    assert client.get(f"/kv/room-nonce/{room}").text.strip().endswith("2")
+
+
+def test_a_claim_that_loses_the_room_under_its_lock_spends_nothing(client, tmp_path, monkeypatch):
+    """The gate reads "no owner" before any lock is held, so a claim can pass it and find the
+    room taken by the time it writes; its `?if_absent=1` refuses it there. That refusal must
+    not spend its nonce either: the loser of an ordinary race would otherwise hand the winner
+    a counter at whatever it signed — at the maximum, an owner who can never again write
+    their allow-list or hand the room over. Only a burn inside the write's own critical
+    section closes this; checking the condition first and burning after would not."""
+    import store
+
+    winner, winner_sign = _keypair()
+    loser, loser_sign = _keypair(seed=4)
+    room = "d-contested"
+
+    def claimed():  # the winner's claim lands between the loser's gate and its write
+        for ns, value in ((store.NONCE_NS, "1"), (store.OWNERS_NS, winner)):
+            path = store.note_path(tmp_path, ns, room)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value, encoding="utf-8")
+
+    owner = store.note_path(tmp_path, store.OWNERS_NS, room)
+    raced = _race_before_lock(monkeypatch, store, owner, claimed)
+    grab = _signed_note_url(store.OWNERS_NS, room, loser, loser_sign, loser, TOP_NONCE)
+    lost = client.get(f"{grab}?if_absent=1")
+
+    assert raced, "the race never happened — this test proved nothing"
+    assert lost.status_code == 409
+    assert store.note_get(tmp_path, store.OWNERS_NS, room) == winner
+    assert store.note_get(tmp_path, store.NONCE_NS, room) == "1"
+    listed = _set_signed(client, store.ALLOW_NS, room, winner, winner_sign, winner, nonce=2)
+    assert listed.status_code == 200, "the winner is still the one counting"
+
+
 def test_a_replayed_ownership_url_cannot_roll_an_allow_list_back(client):
     owner, owner_sign = _keypair()
     friend, _ = _keypair(seed=2)
