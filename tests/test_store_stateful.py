@@ -25,10 +25,12 @@ import os
 import shutil
 import sys
 import tempfile
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
@@ -455,6 +457,49 @@ class StoreLifecycle(RuleBasedStateMachine):
         os.replace(sharded, flat)
         if (lock := Path(f"{sharded}.lock")).exists():
             os.replace(lock, Path(f"{flat}.lock"))
+
+    @rule(room=st.sampled_from(ROOMS))
+    def an_unreadable_seq_shard_is_not_replaced(self, room: str) -> None:
+        """A transient read failure between lifecycle steps must cost only that update,
+        not the floors and generations that earlier reaps and recreates established."""
+        shard = store._seq_state_path(self.root, room)
+        if not shard.exists():
+            return
+        before = shard.read_bytes()
+        read_bytes = Path.read_bytes
+
+        def failing(path):
+            if path == shard:
+                raise OSError("temporary sequence-state read failure")
+            return read_bytes(path)
+
+        with patch.object(Path, "read_bytes", failing), suppress(OSError):
+            store._set_seq_entry(self.root, room, self.seq[room], create=True)
+        assert shard.read_bytes() == before
+
+    @rule(room=st.sampled_from(ROOMS))
+    def a_failed_create_does_not_consume_a_generation(self, room: str) -> None:
+        """A durable reservation survives refusal, then activates once on a real write."""
+        path = store.room_path(self.root, room)
+        if path.exists():
+            return
+        self._reap_model()
+        generation = store.room_generation(self.root, room)
+        real_open = Path.open
+
+        def failing(target, mode="r", *args, **kwargs):
+            if target == path and mode == "ab":
+                raise OSError("temporary first-record failure")
+            return real_open(target, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", failing), pytest.raises(OSError):
+            store.append(self.root, room, NICKS[0], "refused")
+        assert store.room_generation(self.root, room) == generation
+        self._resync()
+        self.say(room, NICKS[0], ["recovered"])
+        assert store.room_generation(self.root, room) == generation + 1
+        self.say(room, NICKS[0], ["same conversation"])
+        assert store.room_generation(self.root, room) == generation + 1
 
     @invariant()
     def notes_hold_what_was_written(self) -> None:
