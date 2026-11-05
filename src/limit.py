@@ -326,16 +326,17 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
 
 
 def refund(request, kind, per_min, burst=None, *, ip_header="") -> None:
-    """Hand one token back to the caller's bucket, capped at its burst.
+    """Hand one token back to an existing caller bucket, capped at its burst.
 
     `last` is deliberately left alone: it is the refill clock, and moving it would either
-    grant free time or discard earned time. Only the balance changes.
+    grant free time or discard earned time. Only the balance changes. If bounded eviction
+    already removed the bucket, its accounting state is gone and a late refund is a no-op.
     """
     ip = client_ip(request, ip_header)
     cap = float(per_min if burst is None else burst)
     with _buckets_lock:
-        tokens, last = _buckets.get((ip, kind), (cap, time.monotonic()))
-        _buckets[(ip, kind)] = (min(cap, tokens + 1.0), last)
+        if (bucket := _buckets.get((ip, kind))) is not None:
+            _buckets[(ip, kind)] = (min(cap, bucket[0] + 1.0), bucket[1])
     config._dbg(1, "refund", ip=ip, kind=kind)
 
 
