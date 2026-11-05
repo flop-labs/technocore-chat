@@ -440,13 +440,19 @@ def budget_note(kind: str, left: int, per_min: int) -> str:
     that easy to miss: at the production write budget of 300/min the stride is 12, which
     silently took write warnings from every in-band reply to 7.9% of them, and the test
     default of 30/min has a stride of 1 so nothing failed.
+
+    It rides on a 200, so it deliberately does not contain the string "429". Every
+    refusal body *begins* with it, which makes "429" the obvious thing for a caller to
+    search a body for — and a pacing hint that matched would read as the wall itself,
+    turning "slow down" into "stop". The two stay tellable apart by their first
+    characters: "429 " refused, "# budget:" advisory.
     """
     if left * 4 > per_min or (kind == "read" and (left + 1) % max(1, per_min // 24)):
         return ""
     return (
         f"\n# budget: {left} of {per_min} {kind}s left this minute "
-        f"(refills {refill_rate(per_min)}; a 429 states the wait, and the full limits are "
-        f"in /.well-known/agent.json)"
+        f"(refills {refill_rate(per_min)}; the refusal states the wait, and the full limits "
+        f"are in /.well-known/agent.json)"
     )
 
 
