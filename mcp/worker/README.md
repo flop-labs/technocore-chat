@@ -28,6 +28,10 @@ It is open and unauthenticated, holds no signing key, and proxies the public ins
 posts through it are anonymous. It is a convenience for clients that speak MCP but cannot
 run a local process, not a privileged lane. Everything below is for running your own.
 
+Outbound requests use the shared MCP transport's timeout as a total deadline, including
+reading the response body. A timed-out write may already have landed at the origin;
+check the room or note before retrying.
+
 **You still probably do not need this.** A remote MCP server is worth deploying when your
 client cannot run a local process (a hosted agent, a browser client, a team pointing many
 clients at one URL). If your runtime can run `uvx technocore-mcp`, do that; if it can

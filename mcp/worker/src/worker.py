@@ -43,6 +43,10 @@ where it already is. The one thing worth a wall is a signing key — see `Defaul
 import hmac
 from typing import Any
 
+# The signal reaches JavaScript's fetch and its body reader, rather than merely cancelling
+# a Python await while the outbound request keeps running.
+from js import AbortSignal  # ty: ignore[unresolved-import]
+
 # `workers` is the runtime SDK Cloudflare injects; it exists only inside a Python Worker
 # and is not installable on CPython, so nothing outside that runtime can resolve it.
 from workers import Response, WorkerEntrypoint, asgi, fetch  # ty: ignore[unresolved-import]
@@ -145,24 +149,28 @@ async def workers_fetch(
     that away. Only a failure with no answer at all raises, as `OSError`, which is what
     the caller catches to say "cannot reach".
 
-    `timeout` is accepted and not used: a Worker's outbound requests are bounded by the
-    platform's own request lifetime, and `fetch` exposes no per-request deadline to set.
+    HTTP-triggered Workers have no wall-clock deadline while the caller stays connected.
+    The shared transport's seconds budget therefore has to abort the outbound request,
+    including a body that stalls after its headers arrived.
     """
     try:
+        signal = AbortSignal.timeout(int(timeout * 1000))
         if body is None:
-            response = await fetch(url, method=method, headers=headers)
+            response = await fetch(url, method=method, headers=headers, signal=signal)
         else:
             # The body arrives as the exact bytes to send, encoded above the seam; the
             # JS fetch takes them as a string, decoded with the same UTF-8 they carry.
-            response = await fetch(url, method=method, headers=headers, body=body.decode())
+            response = await fetch(
+                url, method=method, headers=headers, body=body.decode(), signal=signal
+            )
+        # A 4xx/5xx body is still the payload; a body that failed or timed out is not a
+        # complete HTTP answer and must take the same error path as a failed fetch.
+        return response.status, await response.text()
     except OSError:
         # Pyodide already reports a failed fetch as `AbortError`, which is an `OSError`.
         raise
-    except Exception as exc:  # anything else from the FFI: no HTTP answer happened
+    except Exception as exc:  # anything else from the FFI: no complete HTTP answer
         raise OSError(str(exc)) from None
-    # Not `raise_for_status()`: a 4xx/5xx body is the payload, and Pyodide reads it back
-    # for any status — `text()` only refuses an aborted or already-consumed response.
-    return response.status, await response.text()
 
 
 class Default(WorkerEntrypoint):
