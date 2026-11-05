@@ -133,6 +133,24 @@ def test_e2e_key_prints_what_a_sender_seals_to_or_refuses(tmp_path) -> None:
     assert refused.returncode != 0 and "do not seal" in refused.stderr
 
 
+def test_delegate_days_are_refused_in_words_not_with_a_traceback() -> None:
+    # The same trap as the nonce above, on the one argument that still went through
+    # str.isdigit(). '²' and '③' are digits to isdigit() and a ValueError to int(), so
+    # the range check that was meant to refuse them crashed instead; '٣٠' is a digit to
+    # both, so it was issued as a 30-day grant — which /humans, holding the same field to
+    # /^[0-9]{1,4}$/, refuses. Either way the refusal has to be the script's own sentence.
+    agent = run("did", "--seed", "bb" * 32).stdout.strip()
+    for bad_days in ("²", "③", "٣٠", "", "0", "3651"):
+        out = run("delegate", "--seed", SEED, agent, "*", bad_days, "5")
+        assert out.returncode != 0, f"days {bad_days!r} was accepted"
+        assert "days must be 1-3650" in out.stderr, out.stderr
+        assert "Traceback" not in out.stderr
+
+    good = run("delegate", "--seed", SEED, agent, "*", "30", "5")
+    assert good.returncode == 0
+    assert good.stdout.splitlines()[-1].startswith(f"delegate: {agent} * ")
+
+
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     text = "hello from the signer"
     out = run("say", "--seed", SEED, "signerroom", "3", text)
