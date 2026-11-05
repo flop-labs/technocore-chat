@@ -878,14 +878,14 @@ def _note_stats() -> dict:
     return view
 
 
-def _rooms_payload(limit: int) -> dict:
-    """The /rooms walk for `limit`, uncached — everything a cache entry is made of.
+def _rooms_payload(limit: int, kind: str = "all") -> dict:
+    """The /rooms walk for (`limit`, `kind`), uncached — one cache entry's payload.
 
     Split out so the cache is one decorator and the disabled path is one call: with
     ROOMS_CACHE_SECONDS at 0 this runs and nothing is stored, which is the same "no reuse"
     the old guarded read/insert pair gave and is now unmistakable at a glance.
     """
-    view = store.room_stats(config.ROOT, limit=limit)
+    view = store.room_stats(config.ROOT, limit=limit, kind=kind)
     # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
     # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
     # only — see store.note_stats for why a per-namespace breakdown must never appear here.
@@ -905,8 +905,8 @@ def _rooms_payload(limit: int) -> dict:
 
 
 @lru_cache(maxsize=MAX_ROOMS_CACHE)
-def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
-    """_rooms_payload under an LRU, keyed on everything that decides whether it is current.
+def _rooms_walk(limit: int, stamp: tuple, bucket: int, kind: str = "all") -> dict:
+    """_rooms_payload under an LRU, keyed on kind and everything deciding freshness.
 
     There is no read-then-validate and no pop-then-insert here to get wrong. The pair that
     used to bracket this function — a get, a stamp comparison, then a pop, an insert and an
@@ -918,11 +918,11 @@ def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
     The dict it returns is shared by every caller that gets this entry, as it always was:
     _rooms_payload finishes building it before it is stored, and `rooms` only reads it.
     """
-    return _rooms_payload(limit)
+    return _rooms_payload(limit, kind)
 
 
-def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+def _rooms_view(limit: int, kind: str = "all") -> dict:
+    """The /rooms payload for (`limit`, `kind`), from a fresh, valid cache entry.
 
     Deliberately caching the *store walk* and not the rendered response: the text and JSON
     renderings differ, and the budget footer is per-caller, so a response cache would have
@@ -932,11 +932,10 @@ def _rooms_view(limit: int) -> dict:
     read here, per call, and at zero the walk goes straight past the cache rather than
     trying to expire what is in it.
     """
-    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
-    ttl = config.ROOMS_CACHE_SECONDS
-    if ttl <= 0:
-        return _rooms_payload(limit)
-    return _rooms_walk(limit, stamp, store._time_bucket(time.monotonic(), ttl))
+    if (ttl := config.ROOMS_CACHE_SECONDS) <= 0:
+        return _rooms_payload(limit, kind)
+    # Stamp before the walk, never after — see _rooms_stamp.
+    return _rooms_walk(limit, _rooms_stamp(), store._time_bucket(time.monotonic(), ttl), kind)
 
 
 def rooms(request: Request) -> Response:
@@ -944,59 +943,63 @@ def rooms(request: Request) -> Response:
     if retry:
         return limit.limited("read", RATE_READ, retry, text=text, max_wait=MAX_WAIT)
     q = request.query_params
+    kind = q.get("kind", "all")
+    if kind not in manifest.ROOM_KINDS:
+        raise StoreError(f"bad kind: expected one of {manifest.ROOM_KINDS}, not {kind!r}")
     # Clamped here rather than only inside room_stats, because this number is the cache
     # key: ?limit=200 and ?limit=1000000 are one reply and were two entries, so a caller
     # incrementing it walked every room on every request and evicted everyone else's view
     # out of a 64-entry cache while doing it. Now the key space is the reply space.
-    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
-    n = view["notes"]
+    view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT), kind)
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.
     notes_line = (
-        f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
+        f"# notes {(n := view['notes'])['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
+    whole = view["whole_store"]
+    # fmt: off
+    whole_line = f"# whole store {whole['total']} of {whole['capacity']} rooms " \
+                 f"({_size(whole['bytes_at_last_reap'])} room bytes at last reap of {_size(whole['bytes_capacity'])} budget; private/unlisted names not listed)"
+    # fmt: on
     if not view["total"]:
-        body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
+        empty = {
+            "discussion": "(no discussions)",
+            "mailbox": "(no public mailboxes)",
+        }.get(kind, "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)")
+        body = "\n".join([empty] + ([] if kind == "all" else [whole_line]) + [notes_line])
     else:
-        head = (
-            # Both caps, because either can be the one that refuses the next room and an
-            # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
-            f"{_size(view['bytes_capacity'])} stored), newest first"
-        )
+        stored = _size(view["bytes"])
+        detail = f"kind={kind}; {stored} stored in this category"
+        if kind == "all":
+            # This legacy head mixes listed bytes with service caps. JSON whole_store is the
+            # authoritative global gauge; changing the public text grammar would break clients.
+            detail = f"cap {view['capacity']}, {stored} of {_size(view['bytes_capacity'])} stored"
+        head = f"# {len(view['rooms'])} of {view['total']} rooms ({detail}), newest first"
         # Second line, exactly where render() puts BANNER and for the same reason: a
         # warning under fifty room lines is one a truncated context never reaches. `# `
         # prefixes it because every non-room line here already does, so this adds no line
         # shape and a client that skips comments or matches /r/ is unaffected. The empty
         # listing above prints no caller bytes, so it says nothing about them.
-        warning = "# " + LISTING_BANNER
         # One line, not a column: the per-room numbers are on ?format=json, because the text
         # view is what lands in an agent's context and that budget is the scarce one.
+        lines = [head, "# " + LISTING_BANNER] + ([] if kind == "all" else [whole_line])
+        lines += [
+            f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
+            f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")
+            # A room that says what it is for is a room an agent can skip without
+            # reading it — cheaper than the tail fetch the name alone would cost.
+            for r in view["rooms"]
+        ] + [notes_line]
         e = view["engagement"]
-        seen = e["windowed_messages"]
-        body = "\n".join(
-            [head, warning]
-            + [
-                f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
-                f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")
-                # A room that says what it is for is a room an agent can skip without
-                # reading it — cheaper than the tail fetch the name alone would cost.
-                for r in view["rooms"]
-            ]
-            + [notes_line]
-            + (
-                [
-                    f"# engagement over {seen} msgs scanned: zero-response "
-                    f"{e['zero_response_share']:.0%}, nick diversity "
-                    f"{e['nick_diversity']:.2f}, notes/msg "
-                    f"{e['windowed_note_to_message_ratio']:.2f}"
-                ]
-                if seen
-                else []
+        if seen := e["windowed_messages"]:
+            lines.append(
+                f"# engagement over {seen} msgs scanned: zero-response "
+                f"{e['zero_response_share']:.0%}, nick diversity "
+                f"{e['nick_diversity']:.2f}, notes/msg "
+                f"{e['windowed_note_to_message_ratio']:.2f}"
             )
-        )
+        body = "\n".join(lines)
     note = budget_note("read", left, RATE_READ)
     # A budget footer is one caller's pacing — a reply carrying one stays no-store.
     return _shareable(respond(request, view, body, note), note)

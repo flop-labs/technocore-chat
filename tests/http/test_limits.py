@@ -605,7 +605,7 @@ def test_oversize_and_empty_input_fail_closed(client):
     assert client.get("/r/lobby/say/bot/%20%20").status_code == 400  # whitespace-only
     assert client.post("/r/lobby", json={"from": "bot", "text": "x" * 4097}).status_code == 400
     assert client.get("/kv/ns/k/set/" + "y" * 8193).status_code == 400
-    assert client.get("/rooms").text.strip().startswith("(no rooms")  # nothing was created
+    assert client.get("/rooms").text.strip().startswith("(no rooms yet")  # nothing was created
 
 
 def test_a_full_length_message_is_accepted(client):
