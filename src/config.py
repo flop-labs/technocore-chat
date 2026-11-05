@@ -272,11 +272,30 @@ WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 # The two knobs beside it shape how conservative the filter is — DUPE_MIN_LENGTH exempts
 # the short conversational replies ("ok", "gm", "+1") that are legitimate repeats by
 # nature, and DUPE_MAX_COPIES lets the first N copies through so a genuine echo wave is
-# never refused. State is per worker, bounded (see limit.MAX_DUPE_KEYS), and costs no
-# I/O. It does take one mutex — both write lanes reach the ring from a threadpool — but
-# a leaf one, held for a hash and a handful of dict operations and never across the
-# flock it exists to spare, so there is nothing it can deadlock against. Costs
-# ~microseconds per write when on, one comparison and no lock at all when off.
+# never refused. State is per worker, bounded (limit.MAX_DUPE_KEYS for the window's map,
+# limit.MAX_RING_ROOMS for the share ring below), and costs no I/O. It does take one
+# mutex — both write lanes reach the state from a threadpool — but a leaf one, held for a
+# hash, two tuple rebuilds and a bounded scan of one room's ring, never across the flock
+# it exists to spare, so there is nothing it can deadlock against. A few microseconds per
+# write when on, one comparison and no lock at all when off.
+#
+# These three knobs are not the whole filter. Everything below sizes the WINDOW, and a
+# window is a rate: a repeater that spaces its copies just outside it is never refused by
+# any value set here, which is issue #697. limit.py carries the second rule that catches
+# that shape — a per-room ring of the last limit.DUPE_RING filterable messages and a
+# refusal once one text would hold more than limit.DUPE_SHARE of the ring's SLOTS, with
+# no time in it anywhere. It is a build bound rather than a knob (nothing here sets it,
+# /config does not publish it) and the block above _rings in limit.py carries its
+# rationale and cites this comment's sizing argument back. The one interaction to know
+# while reading the numbers below: DUPE_FILTER_SECONDS = 0 turns BOTH rules off, because
+# the window short-circuits before the key the ring is keyed on is ever built.
+#
+# The ring shards per worker exactly as the window's map does, and the paragraph below
+# about the knee moving right with workers applies to it too, in this shape: under
+# --workers N a room's writes are spread over N rings, each holding its own stream to
+# DUPE_SHARE, so the share one text can take of what readers actually see is up to N x 32
+# of the last N x 64. The ratio survives an even split; only an uneven one moves it. The
+# fix is the same as for the rate limit — one worker, or shared state in front of it.
 #
 # Sizing the window, from bench/dupe_filter.py's sweep on a sustained corpus at the
 # measured rates: catch rises steeply to ~60s and then flattens, while the ring reaches

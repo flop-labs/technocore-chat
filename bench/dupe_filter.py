@@ -233,7 +233,9 @@ def replay(rows, assignment, min_length, max_copies, window):
 
     Sharding is simulated by routing each message to one of W rings (the room name
     tagged per worker), which is what per-worker state means: no cross-worker
-    visibility, no shared lock. limit._dupes is reset by the caller between runs.
+    visibility, no shared lock. limit._dupes and limit._rings are both reset by the caller
+    between runs — the share ring outlives every window, so a corpus replayed into a ring
+    the last pass left half full measures the last pass.
     """
     refused = Counter()
     total = Counter()
@@ -334,6 +336,7 @@ def analyse_room_file(path: str, min_length: int, max_copies: int, window: float
         return 1000.0 + i * (SPAN / len(records))
 
     limit._dupes.clear()
+    limit._rings.clear()
     refused = 0
     for i, rec in enumerate(records):
         if limit.dupe_refused("room", rec["text"], _when(i, rec), window, min_length, max_copies):
@@ -401,6 +404,7 @@ def main() -> None:
                     rows_i = build_corpus(rng)
                     assignment = [rng.randrange(workers) for _ in rows_i]
                     limit._dupes.clear()
+                    limit._rings.clear()
                     refused, total = replay(rows_i, assignment, min_length, max_copies, window)
                     farm = sum(refused[k] for k in FARM)
                     farm_all = sum(total[k] for k in FARM)
@@ -472,6 +476,7 @@ def sweep(min_length: int, max_copies: int) -> None:
                 rows = sustained_corpus(rng, duration)
                 assignment = [rng.randrange(workers) for _ in rows]
                 limit._dupes.clear()
+                limit._rings.clear()
                 refused, total = replay_timed(rows, assignment, min_length, max_copies, window)
                 farm = sum(refused[k] for k in FARM)
                 farm_all = sum(total[k] for k in FARM)

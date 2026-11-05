@@ -41,6 +41,9 @@ def client(tmp_path, monkeypatch):
     # filter, so a phrase posted in one test cannot make the next test's identical
     # phrase arrive as the fourth copy of something.
     limit._dupes.clear()
+    # Same for the per-room share ring beside it: it outlives a window on purpose, so a
+    # phrase repeated across tests would otherwise arrive already holding half a room.
+    limit._rings.clear()
     # The cross-sender filter is pinned OFF here so a test that is not about the filter
     # never rides on its shipped default: a suite whose rooms all behave pre-filter is
     # hermetic against any future retune of DUPE_* (they moved once already, 0/3 -> 60/5,
