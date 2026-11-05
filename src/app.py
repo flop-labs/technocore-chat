@@ -879,28 +879,19 @@ def _note_stats() -> dict:
 
 
 def _rooms_payload(limit: int) -> dict:
-    """The /rooms walk for `limit`, uncached — everything a cache entry is made of.
+    """The room walk for `limit`, uncached — everything a room-cache entry is made of.
 
     Split out so the cache is one decorator and the disabled path is one call: with
     ROOMS_CACHE_SECONDS at 0 this runs and nothing is stored, which is the same "no reuse"
-    the old guarded read/insert pair gave and is now unmistakable at a glance.
+    the old guarded read/insert pair gave and is now unmistakable at a glance. The note
+    gauge is added by `rooms`, after this cache, so its own stamp and timer still apply.
     """
     view = store.room_stats(config.ROOT, limit=limit)
-    # Notes had no capacity surface at all: /kv/<ns> lists one namespace and namespaces are
-    # unenumerable by design, so nothing showed how full the global note cap was. Aggregate
-    # only — see store.note_stats for why a per-namespace breakdown must never appear here.
-    view["notes"] = _note_stats()
     # Unconditional, including when `rooms` is empty: it describes the schema, not the
     # payload. A field that shows up only once a hostile room exists is one clients parse
     # without, and the listing that needed it is the one that breaks. `fields` is the
     # machine-readable half — mark exactly those two, leave the aggregates alone.
     view["untrusted"] = {"fields": list(UNTRUSTED_LISTING_FIELDS), "note": LISTING_BANNER}
-    # Note count is exact; message count is only what the per-room windows scanned, so the
-    # field name says `windowed_` rather than implying a service-lifetime ratio (§II.2.2).
-    seen = view["engagement"]["windowed_messages"]
-    view["engagement"]["windowed_note_to_message_ratio"] = (
-        round(view["notes"]["total"] / seen, 4) if seen else None
-    )
     return view
 
 
@@ -916,13 +907,14 @@ def _rooms_walk(limit: int, stamp: tuple, bucket: int) -> dict:
     two /rooms requests, and no part of the argument for that rests on GIL scheduling.
 
     The dict it returns is shared by every caller that gets this entry, as it always was:
-    _rooms_payload finishes building it before it is stored, and `rooms` only reads it.
+    _rooms_payload finishes building it before it is stored. `rooms` copies it and its
+    engagement dict before adding the independently refreshed note gauge and ratio.
     """
     return _rooms_payload(limit)
 
 
 def _rooms_view(limit: int) -> dict:
-    """The /rooms payload for `limit`, from cache when one is both fresh and still valid.
+    """The room data for `limit`, from cache when one is both fresh and still valid.
 
     Deliberately caching the *store walk* and not the rendered response: the text and JSON
     renderings differ, and the budget footer is per-caller, so a response cache would have
@@ -949,7 +941,16 @@ def rooms(request: Request) -> Response:
     # incrementing it walked every room on every request and evicted everyone else's view
     # out of a 64-entry cache while doing it. Now the key space is the reply space.
     view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT))
-    n = view["notes"]
+    # A note write must refresh its gauge even while room recency is cached. Adding
+    # notes_written to the room stamp would undo the expensive-walk savings of #249.
+    # Copy both changed dicts: concurrent callers may still hold this cached room view.
+    n = _note_stats()
+    view: dict = {**view, "notes": n, "engagement": dict(view["engagement"])}
+    # Note count is exact; message count is only what the cached room windows scanned.
+    seen = view["engagement"]["windowed_messages"]
+    view["engagement"]["windowed_note_to_message_ratio"] = (
+        round(n["total"] / seen, 4) if seen else None
+    )
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.
     notes_line = (
