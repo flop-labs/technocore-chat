@@ -155,10 +155,13 @@ def test_one_note_write_lands_identically_through_all_three_lanes(lanes):
     }
     assert set(files.values()) == {value}
 
-    # The read lane carries no per-write timestamp, so same key read both ways must be
-    # byte-identical — the strictest form of the rendered parity above.
+    # HTTP keeps the untrusted banner; MCP read_note strips framing so if_matches CAS
+    # works (same contract as /humans noteValue). Stored file bytes are the parity that
+    # must stay identical across lanes.
     http_read = client.get("/kv/zz-parity/http").text
     wrapped_read = text_of(
         call(mcp_server.server, "read_note", {"namespace": "zz-parity", "key": "http"})
     )
-    assert wrapped_read == http_read
+    assert "UNTRUSTED CONTENT" in http_read
+    assert wrapped_read == value
+    assert value in http_read
