@@ -2351,7 +2351,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         additionalProperties: false
       },
       run: function (input, signal) {
-        var payload = { value: String(input.value == null ? '' : input.value) };
+        // Let the server refuse non-strings; coercion can overwrite a note with "[object Object]".
+        var payload = { value: input.value };
         // Two conditions that cannot both hold: `if_absent` is "create", `if` is "replace".
         // Send one; the server refuses a body carrying both. `if_absent` goes as a JSON
         // boolean, never a number: the note lane refuses `1` with a 400 rather than guess.
