@@ -276,9 +276,54 @@ def test_the_manual_states_the_floor_it_enforces_under_a_raised_room_cap(client)
     finally:
         monkeypatch.undo()
 
-    assert "512 KiB per room" in raised
+    assert "256 KiB per room" in raised  # half the raised RESERVED_ROOM_BYTES (#990)
     assert "0 MiB per room" not in raised
     assert app_module._render_manual() == app_module.MANUAL  # and it renders back the same
+
+
+def test_the_manual_never_states_more_floor_than_a_compaction_keeps(client, tmp_path):
+    """The published floor against what the append path leaves behind (#990).
+
+    Under pressure a room's ring is RESERVED_ROOM_BYTES, and the append that crosses it
+    compacts to `limit // 2` like any other, so the room drops to half the figure the
+    manual used to call guaranteed. A trim keeps whole records, so the low point sits
+    within one record under the published floor and never further. Read the floor off
+    the rendered manual rather than recomputing it, so the test pins the number a reader
+    actually sees.
+    """
+    import app as app_module
+    import store
+
+    units = {"B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(store, "MAX_ROOM_BYTES", 8192)
+        monkeypatch.setattr(store, "COMPACT_KEEP_BYTES", 4096)
+        monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 12_000)
+        monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 2048)
+        found = re.search(r"(\d+(?:\.\d)?) (B|KiB|MiB|GiB) per room", app_module._render_manual())
+        assert found, "the manual no longer states a per-room floor"
+        floor = float(found[1]) * units[found[2]]
+
+        store.append(tmp_path, "room", "bot", "seed")
+        (tmp_path / store.USAGE_FILE).write_text(f"1 {store.MAX_TOTAL_ROOM_BYTES + 1}")
+        path, sizes, record = store.room_path(tmp_path, "room"), [], 0
+        for _ in range(40):
+            before = path.stat().st_size
+            store.append(tmp_path, "room", "bot", "x" * 300)
+            after = path.stat().st_size
+            if after < before:
+                sizes.append(after)  # just compacted: the low point of the ring
+            else:
+                record = max(record, after - before)
+    finally:
+        monkeypatch.undo()
+
+    assert sizes, "the room never compacted, so this proves nothing"
+    low = min(sizes)
+    assert low > floor - record, (
+        f"compacted to {low} B, over a {record} B record under a {floor:g} B floor"
+    )
 
 
 def test_fmt_bytes_renders_a_floor_without_ever_overstating_it(client):
