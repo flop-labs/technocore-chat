@@ -284,9 +284,9 @@ def client_ip(request: Request, ip_header: str = "") -> str:
 
 
 def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BUCKETS):
-    """Token bucket per (client IP, kind). Returns (tokens left, seconds until the
-    next one). Process-local: a real deployment puts the authoritative limit in the
-    reverse proxy.
+    """Token bucket per (client IP, kind). Returns (tokens left, whole seconds to wait).
+    A grant returns zero; a refusal rounds up to the next second. Process-local:
+    a real deployment puts the authoritative limit in the reverse proxy.
 
     `burst` is the bucket's capacity, and defaults to one minute's worth because that is
     what a per-minute budget means. A budget measured over a *day* needs the two apart:
@@ -311,7 +311,9 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
             tokens -= 1.0
             wait = 0.0
         else:
-            wait = (1.0 - tokens) * 60.0 / per_min
+            # Both 429 renderers use integer seconds. Round up here so read/write AND
+            # room-creation callers never retry before the next token has refilled.
+            wait = int(-(-((1.0 - tokens) * 60.0 / per_min) // 1))
         _buckets[(ip, kind)] = (tokens, now)
         _buckets.move_to_end((ip, kind))
         while len(_buckets) > max_buckets:
