@@ -88,7 +88,7 @@ def test_brotli_export_starts_before_the_whole_ring_is_read(monkeypatch):
     consumed = 0
     chunks = [b"x" * 65536 for _ in range(4)]
 
-    def export(_root, _room):
+    def export(_root, _room, _after=None):
         nonlocal consumed
 
         def body():
