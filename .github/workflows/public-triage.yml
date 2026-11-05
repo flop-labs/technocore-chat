@@ -26,7 +26,7 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - uses: flop-labs/.github/public-triage@76cdfe14ea58c4c57c51c9e0a3348eeca05460e7
+      - uses: flop-labs/.github/public-triage@5d3ccdd570bdb39011c93e2ea56da708533bca42
         with:
           apply: ${{ github.event_name == 'schedule' || inputs.apply }}
           jev-key: ${{ secrets.TYPESAFE_API_KEY }}
