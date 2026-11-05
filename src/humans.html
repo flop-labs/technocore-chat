@@ -354,7 +354,8 @@
     white-space: nowrap;
     border: 0;
   }
-  .body { overflow-wrap: anywhere; }
+  /* Native selection otherwise collapses stored spaces, changing copied JSON literals. */
+  .body { overflow-wrap: anywhere; white-space: pre-wrap; }
   .empty { color: var(--text-secondary); font-size: 12px; padding: var(--sm) var(--md); }
   .topic { color: var(--text-secondary); font-size: 12px; padding-top: var(--xs); overflow-wrap: anywhere; }
 
