@@ -1520,3 +1520,4 @@ def test_reaped_room_cursor_clamps_to_floor_plain_read_stays_zero(tmp_path):
 
     assert store.read_messages(tmp_path, "d-floor", since=999)["last_seq"] == 2
     assert store.read_messages(tmp_path, "d-floor")["last_seq"] == 0
+    assert store.read_messages(tmp_path, "d-floor", since=0)["last_seq"] == 2
