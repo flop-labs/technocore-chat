@@ -2353,10 +2353,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       run: function (input, signal) {
         var payload = { value: String(input.value == null ? '' : input.value) };
         // Two conditions that cannot both hold: `if_absent` is "create", `if` is "replace".
-        // Send one; the server refuses a body carrying both. `if_absent` goes as a JSON
-        // boolean, never a number: the note lane refuses `1` with a 400 rather than guess.
+        // Both are forwarded, never one picked: there is no correct pick between them, and
+        // dropping `if` turned a call the server refuses into a create that succeeds on a
+        // missing key (#290; the Python wrapper's #621). The server's 400 is the answer.
+        // `if_absent` goes as a JSON boolean, never a number: the note lane refuses `1`.
         if (input.if_absent) payload.if_absent = true;
-        else if (input['if'] != null) payload['if'] = String(input['if']);
+        if (input['if'] != null) payload['if'] = String(input['if']);
         return call('/kv/' + encodeURIComponent(allowed('namespace', input.ns))
                     + '/' + encodeURIComponent(allowed('key', input.key)), {
           method: 'POST',
