@@ -1158,13 +1158,20 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // lane has, and it is the one worth not paying.
     if (document.hidden) return;
     var mine = room, started = Date.now();
-    pollCtl = new AbortController();
+    var ctl = new AbortController(), timedOut = false;
+    pollCtl = ctl;
+    // The server bounds its park, not transport stalls. Keep the deadline through JSON
+    // parsing too, or a partial body leaves an old log marked live without another read.
+    var deadline = setTimeout(function () {
+      timedOut = true; ctl.abort();
+    }, (POLL_WAIT + 15) * 1000);
     // The first read of a room wants the tail *now*, not the next message after it, so it
     // is the one that does not park.
     fetch('/r/' + encodeURIComponent(room) + '?format=json&since=' + since
-          + (primed ? '&wait=' + POLL_WAIT : ''), { signal: pollCtl.signal })
+          + (primed ? '&wait=' + POLL_WAIT : ''), { signal: ctl.signal })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (view) {
+        clearTimeout(deadline);
         // The reader moved rooms while this was parked. Its messages belong to a log that
         // is no longer on screen.
         if (mine !== room) return;
@@ -1207,11 +1214,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
         later(view.messages.length ? 0 : (quick ? 2000 : 0));
       })
       .catch(function (e) {
-        // An abort is this page changing its own mind, not a failure to report.
-        if (e && e.name === 'AbortError') return;
-        if (mine !== room) return;
+        clearTimeout(deadline);
+        // Navigation aborts are silent; deadline aborts must report and restart the read.
+        if (e && e.name === 'AbortError' && !timedOut) return;
+        if (mine !== room || pollCtl !== ctl) return;
         live(false);
-        fail(String(e.message || e));
+        fail(timedOut ? 'room read timed out; retrying' : String(e.message || e));
         later(3000);
       });
   }

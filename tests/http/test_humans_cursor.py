@@ -24,6 +24,7 @@ let turn = 0;
 const context = vm.createContext({
   room: 'cursor', since: input.since, targetSeq: input.target, primed: false,
   pollCtl: null, POLL_WAIT: 10, AbortController, Date, encodeURIComponent,
+  setTimeout, clearTimeout,
   document: {hidden: false, createElement: () => ({})},
   log: {appendChild: () => {}, querySelector: () =>
     rendered.some(m => m.seq === context.targetSeq) ? {} : null},
