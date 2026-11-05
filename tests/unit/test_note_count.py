@@ -429,12 +429,12 @@ def test_a_reap_frees_a_namespace_that_had_filled(tmp_path, monkeypatch) -> None
         store.note_set(tmp_path, "did", "c", "v")
     assert (tmp_path / "notes" / "did" / store.NOTES_FILE).exists(), "the count is cached"
 
-    # Age both notes past the idle rule and let the next write run a pass.
+    # Age both notes past the idle rule and run a pass.
     old = time.time() - store.IDLE_SECONDS - 60
     for note in (tmp_path / "notes" / "did").rglob("*.txt"):
         os.utime(note, (old, old))
     monkeypatch.setattr(store, "REAP_EVERY", 0)
-    store.note_set(tmp_path, "elsewhere", "k", "v")  # any write; the reap rides the path
+    store._reap(tmp_path)
 
     assert not (tmp_path / "notes" / "did" / store.NOTES_FILE).exists(), "reaped, so dropped"
     store.note_set(tmp_path, "did", "c", "v")  # the slots the reaper freed are usable again

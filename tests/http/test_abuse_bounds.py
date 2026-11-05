@@ -74,6 +74,19 @@ def test_missing_note_cas_refusals_create_no_artifacts(client, tmp_path, lane):
     assert client.post("/kv/probe/key", json={"value": "new", "if": "old"}).status_code == 200
 
 
+def test_no_request_runs_the_reap_pass(client, tmp_path, monkeypatch):
+    """#896's acceptance test, at the HTTP edge: with the throttle due, neither a message nor
+    a note write — on either lane — runs the pass inside its own request."""
+    ran = []
+    monkeypatch.setattr(store, "_reap_pass", lambda root, now: ran.append(now))
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    assert client.get("/r/lobby/say/bot/hi").status_code == 200
+    assert client.post("/r/lobby", json={"from": "bot", "text": "hi again"}).status_code == 200
+    assert client.get("/kv/probe/key/set/v1").status_code == 200
+    assert client.post("/kv/probe/key", json={"value": "v2"}).status_code == 200
+    assert ran == [], "a request ran the reap pass"
+
+
 @pytest.mark.parametrize("lane", ["get", "post"])
 def test_reaped_note_cas_refusal_recreates_no_artifacts(client, tmp_path, lane):
     endpoint = "/kv/probe/key"
@@ -82,9 +95,11 @@ def test_reaped_note_cas_refusal_recreates_no_artifacts(client, tmp_path, lane):
     lock = path.with_suffix(path.suffix + ".lock")
     _client._age(path, store.IDLE_SECONDS + 60)
     _client._age(lock, store.IDLE_SECONDS + 60)
-    _client._age(tmp_path / ".reaped", store.REAP_EVERY + 60)
-    # This note exists at request entry but the request's due sweep removes it.
-    assert path.exists()
+    # The background pass reaps it between the caller's read and its CAS (#896: the
+    # request itself no longer sweeps on the way in).
+    (tmp_path / ".reaped").unlink(missing_ok=True)
+    store._reap(tmp_path)
+    assert not path.exists()
     if lane == "get":
         response = client.get(endpoint + "/set/new", params={"if": "old"})
     else:
