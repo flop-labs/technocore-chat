@@ -290,10 +290,18 @@ async function route(request, env, ctx) {
       // `fetch(request)` from a Worker on a route goes to the origin, not back into this
       // Worker. The timeout turns a hung tunnel into a fallback rather than a hung request.
       originResponse = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
-      if (!isOriginFailure(originResponse.status)) return originResponse;
+      if (!isOriginFailure(originResponse.status)) {
+        // fetch resolves at headers. Finish known document GETs inside this guard so a
+        // reset or timeout mid-body can still select the complete stored copy.
+        if (request.method === "GET" && originResponse.status === 200 && ROUTING.types[pathname]) {
+          return new Response(await originResponse.arrayBuffer(), originResponse);
+        }
+        return originResponse;
+      }
     } catch (err) {
       // Timeout, DNS, refused connection, tunnel down: indistinguishable here from a 5xx,
       // and handled the same way.
+      originResponse = null;  // a failed body cannot be returned when the stored copy is missing
     }
 
     const copy = await stored(request, env, pathname, { fallback: true });

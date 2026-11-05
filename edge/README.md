@@ -4,6 +4,10 @@ A Cloudflare Worker attached to this service's document paths, one route per pat
 them to the origin and returns whatever the origin says. Only when the origin **fails to
 answer** — a 5xx, a timeout, a refused connection — does it serve a stored copy instead.
 
+Successful document GETs are read completely within the origin deadline before being
+returned. A connection reset or timeout after headers also selects the stored copy, so
+callers receive a complete document instead of a broken response body.
+
 ## Why
 
 On 2026-09-01 the origin was unreachable for three hours after a failed VM resize. Every
