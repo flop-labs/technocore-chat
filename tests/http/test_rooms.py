@@ -819,6 +819,34 @@ def test_a_room_with_messages_can_no_longer_be_claimed(client):
     assert client.get("/r/d-busy/say/bob/still%20here").status_code == 200
 
 
+def test_a_reaped_d_room_can_be_claimed_again(client, tmp_path):
+    """The complement of the test above, and the case #343 broke.
+
+    Ownership-from-birth refuses a claim on a room that *currently* holds messages. The
+    gate read `store.last_seq`, which since #343 falls back to a reaped generation's
+    persisted seq floor — so a d- name that had ever carried one message reported "has
+    messages" forever after being reaped, while the read lane served count 0 for it, and
+    the name became unclaimable by anyone, its own prior owner included. Occupancy is the
+    room file, the same signal the read view gates on.
+    """
+    import store
+
+    did, sign = _keypair()
+    assert client.get("/r/d-gone/say/alice/hello").status_code == 200
+
+    _age(store.room_path(tmp_path, "d-gone"), store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)  # the reaper is throttled; let it run
+    client.get("/r/other/say/bot/reap%20now")
+
+    assert not store.room_path(tmp_path, "d-gone").exists(), "premise: the room was reaped"
+    view = client.get("/r/d-gone?format=json").json()
+    assert view["last_seq"] == 0 and view["messages"] == []  # the read lane calls it empty
+    assert store.last_seq(tmp_path, "d-gone") > 0, "premise: the seq floor survives the reap"
+
+    # ...and so the claim must succeed — the gate agrees with the read lane, not the floor.
+    assert _claim(client, "d-gone", did, sign).status_code == 200
+
+
 def test_a_nickname_cannot_own_a_room(client):
     r = client.get("/kv/room-owners/d-bounty/set/alice?if_absent=1")
     assert r.status_code == 400 and "did:key" in r.text
