@@ -1109,7 +1109,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       row.appendChild(seq); row.appendChild(who); row.appendChild(body); row.appendChild(when);
       log.appendChild(row);
     });
-    while (log.children.length > MAX_ROWS) log.removeChild(log.firstChild);
+    if (log.children.length > MAX_ROWS) {
+      // Arrival animations can suppress native scroll anchoring. Removing old rows must
+      // not move retained history out from under a reader who is away from the bottom.
+      var top = log.scrollTop, height = log.scrollHeight;
+      while (log.children.length > MAX_ROWS) log.removeChild(log.firstChild);
+      if (!stick) log.scrollTop = Math.max(0, top - (height - log.scrollHeight));
+    }
     var hit = log.querySelector('.msg.target');
     // Honor the permalink once, then let the reader scroll or follow new arrivals. The
     // highlight stays, but its presence must not keep dragging them back to that row.
