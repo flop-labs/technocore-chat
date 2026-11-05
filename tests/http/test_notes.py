@@ -7,6 +7,7 @@ from _client import (
     _keypair,
     _post_signed,
     _say_signed,
+    _set_signed,
 )
 
 client = _client.client  # the shared TestClient fixture
@@ -384,6 +385,40 @@ def test_the_signed_lane_also_works_over_post(client):
         "/r/lobby", json={"did": did, "sig": sign("lobby|4|x"), "nonce": "4", "text": "y"}
     )
     assert bad.status_code == 403
+
+
+def test_signed_allow_list_update_rejects_a_stale_value(client, monkeypatch):
+    """An allow-list CAS must cover the gate-to-write interval, not just ownership."""
+    import store
+
+    owner, sign = _keypair(31)
+    other, _ = _keypair(32)
+    room = "d-allow-cas"
+    assert _claim(client, room, owner, sign).status_code == 200
+    assert _set_signed(client, "room-allow", room, owner, sign, owner, nonce=2).status_code == 200
+
+    real_set, races = store.note_set, []
+
+    def racing_set(root, ns, key, value, *args, **kwargs):
+        if ns == store.ALLOW_NS and key == room and len(races) < 2:
+            races.append(True)
+            real_set(root, ns, key, other if len(races) == 1 else owner)
+        return real_set(root, ns, key, value, *args, **kwargs)
+
+    monkeypatch.setattr(store, "note_set", racing_set)
+    stale = _set_signed(client, "room-allow", room, owner, sign, owner, nonce=3)
+    assert stale.status_code == 409
+
+    stale_post = client.post(
+        f"/kv/room-allow/{room}",
+        json={
+            "did": owner,
+            "sig": sign(f"room-allow|{room}|4|{owner}"),
+            "nonce": "4",
+            "value": owner,
+        },
+    )
+    assert len(races) == 2 and stale_post.status_code == 409
 
 
 def test_signed_post_rejects_padding_and_replays_without_appending(client):
