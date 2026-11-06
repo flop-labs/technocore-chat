@@ -3,21 +3,19 @@
 Every other measurement in this repo is serial: `tests/capacity_bench.py` drives the
 store and the HTTP layer one request at a time, so it can never see a lost update. But the
 limiter's whole job is to bound *concurrent* callers, and `limit.take()` runs in Starlette's
-threadpool for every sync write handler — so two requests from one IP can read the same
-bucket balance before either writes it back, and both spend the same token. This measures
-how many tokens that costs, as a function of how many callers contend.
+threadpool for every sync write handler — so two requests from one IP that read the same
+bucket balance before either writes it back would both spend the same token.
 
-It is the number the open lock proposals argue from without one: #163 and #420 both show the
-race exists with a forced interleaving and close it with a lock. This says how far a *natural*
-burst overshoots the cap, and how the overshoot scales with contention — the thing that decides
-whether a lock is worth its core lines. `uv run sz.py --caps` prices that side; src/limit.py
-has no headroom under its cap, so the ceiling has to move for any lock to land.
+`_buckets_lock` (#163) is what stops that, and its regression tests prove it by forcing one
+interleaving. This is the other half: a natural burst, how far it overshoots the cap, as a
+function of contention and of the scheduling quantum. The answer it should give is zero at
+every row, and a nonzero row means the lock has stopped covering the window.
 
     # primitive only — calls limit.take() from threads, no server, no store:
     python bench/concurrency.py
     python bench/concurrency.py --cap 100 --threads 1,2,8,64,256,1000 --rounds 40
 
-    # why the default run finds nothing (see below) — walk the GIL switch interval:
+    # below the width of the critical section, where only the lock can be holding it:
     python bench/concurrency.py --sweep-switch-interval
 
     # with a server, to also measure it through the real ASGI threadpool:
@@ -29,75 +27,52 @@ has no headroom under its cap, so the ceiling has to move for any lock to land.
 What "overshoot" means here: from a bucket holding `cap` tokens, firing T concurrent grants
 should grant exactly min(T, cap) — no more — under a correct read-modify-write. Anything above
 that is a token handed out twice. The figure is reported as grants, the min(T, cap) ceiling,
-and the excess; the excess is the lost-update count, and zero is the answer a locked take()
-should give at every T.
+and the excess; the excess is the lost-update count.
 
-WHAT IT MEASURED, and why the answer is not the expected one
-------------------------------------------------------------
-On CPython 3.12 (the version CI pins) the answer is **zero excess at every contention level**,
-1 through 1000 threads, 30 rounds each — 240 bursts, not one lost token. Taken alone that
-reads as "take() is thread-safe", and it is the wrong conclusion.
+WHAT IT MEASURED
+----------------
+The same bench against the commit before the lock and a commit with it. Clock frozen, cap 100,
+1000 threads, 20 rounds, `--sweep-switch-interval` on CPython 3.12.14:
 
-The race is real; the default run cannot reach it. The read-modify-write in take() —
-`_buckets.get(...)`, arithmetic, `_buckets[...] = ...` — contains no blocking call, so a
-thread that acquires the GIL runs it to completion inside its scheduling quantum. Lower the
-quantum below the width of that window and the same code, unchanged, loses updates in every
-round (`--sweep-switch-interval --rounds 20`, cap 100, 1000 threads):
+                        6571499, before #163     73a7324, with it
+    switchinterval      excess max   leaking     excess max   leaking
+    0.005 (default)              0      0/20              0      0/20
+    0.0001                       0      0/20              0      0/20
+    1e-06                       78     20/20              0      0/20
+    1e-09                       85     20/20              0      0/20
 
-    switchinterval=0.005    excess max=   0   leaking  0/20     <- the default
-    switchinterval=0.0001   excess max=   0   leaking  0/20
-    switchinterval=1e-06    excess max=  58   leaking 20/20
-    switchinterval=1e-09    excess max=  60   leaking 20/20
+The top two rows are why a zero at the default quantum proves nothing: the unlocked code reads
+zero there too. Its read-modify-write contains no blocking call, so a thread that acquires the
+GIL ran it to completion inside its quantum, and the crossover puts that section near a
+microsecond. The lock is what makes the bottom two rows zero.
 
-The crossover between 1e-4 and 1e-6 puts the critical section near a microsecond, three orders
-of magnitude under the 5 ms default. So the limiter's correctness here is a property of the
-scheduler's timing, not of the code: nothing in take() establishes it, and nothing preserves
-it. Widen the window — an added dict lookup, a log line, a debug hook — and it comes back.
+Free-threaded CPython 3.13.15 (`gil=DISABLED`), same bench, cap 100, 20 rounds:
 
-Remove the coincidence entirely and the bug is not marginal. Free-threaded CPython 3.13.15
-(`gil=DISABLED`), same burst, cap 100 — the bench runs there as-is:
+    threads   6571499: grants min  max  excess max     73a7324: grants min  max  excess max
+         32                    32   32           0                      32   32           0
+        128                   128  128          28                     100  100           0
+        256                   256  256         156                     100  100           0
+        512                   512  512         412                     100  100           0
+       1000                  1000 1000         900                     100  100           0
 
-    uv run --no-project --python 3.13t --with starlette \
+Above the cap, before the lock, min and max both equal the thread count in every round: the
+bucket was not being raced so much as ignored. PEP 779 made free-threading officially supported
+in 3.14. Those two runs had orjson and nacl stubbed on PYTHONPATH, because limit.py imports
+store and store imports both, and take() reaches neither:
+
+    PYTHONPATH=<stubs> uv run --no-project --python 3.13t --with starlette \
         python bench/concurrency.py --cap 100 --threads 32,128,256,512,1000 --rounds 20
-
-    threads  ceiling  grants: min   max  excess max  rounds leaking
-         32       32           32    32           0    0/20  (   0%)
-        128      100          128   128          28   20/20  ( 100%)
-        256      100          256   256         156   20/20  ( 100%)
-        512      100          512   512         412   20/20  ( 100%)
-       1000      100         1000  1000         900   20/20  ( 100%)
-
-Read the min and max columns before the excess: above the cap they equal the thread count, in
-every round, at every level. Not "sometimes loses a token" — every caller was granted, with no
-variance, so the bucket is not being raced so much as ignored. The overshoot tracks demand,
-which means the limiter fails hardest under exactly the flood it exists to stop. Below the cap
-the excess is 0 because every caller is entitled to a token there; the race only surfaces as
-overshoot once demand exceeds the cap, which is the only regime that matters. PEP 779 made
-free-threading officially supported in 3.14, so this is the next interpreter, not a
-hypothetical one.
-
-That is the case for the lock, and it is a different case than "the race exists": the fix buys
-nothing measurable on today's CI interpreter, and it is unconditional the moment anyone runs
-this free-threaded. Whoever weighs its core lines should weigh them against that, not against
-the zeros in the default run.
-
-One failure mode the excess column does not cover, because it is not an overcount: #378 reports
-a KeyError in the same four lines — `__setitem__` leaves an existing key where it is, so another
-thread's `popitem(last=False)` can evict it before `move_to_end` runs, which needs the table
-already over `max_buckets`. The pop-then-insert fix proposed there closes that without a lock,
-and closes none of this: the read-modify-write on the *balance* stays unserialised either way,
-and the balance is what the excess column counts. Two failures in one critical section, and the
-cheap fix addresses one of them.
 
 Method notes, so a single run is not read as a law:
   - Best-of is wrong for a race. A lock either holds or it does not, so the interesting
     number is the WORST round (the most tokens lost) and how often a round loses any at all,
     not the minimum. Both are reported.
-  - The bucket refills while the burst runs, which adds real tokens, not raced ones. At
-    per_min == cap that is cap/60 tokens per second; a 1000-thread burst that finishes in
-    tens of ms adds well under one, so an integer excess of 1+ is the race, not the clock.
-    Raising --cap without shortening the burst reintroduces this — the docstring figure is
-    fabricated if the two are not reported together.
+  - The bucket refills while a burst runs, and those are real tokens, not raced ones. At a
+    switch interval of 1e-06 a burst takes about two seconds, which at per_min == 100 earns
+    three of them. So the primitive bench freezes the clock take() reads, and through HTTP,
+    where it cannot, what the burst earned joins the ceiling.
+  - The HTTP run refuses to start unless `/config` reports `--cap` as the server's rate_write.
+    An excess computed against a ceiling the server is not using is a labelling error.
   - A zero row is evidence about this interpreter and this switch interval, and about nothing
     else. Both are printed in the header for that reason: a figure quoted without them says
     less than it appears to.
@@ -113,17 +88,26 @@ with today's constants is a fabricated measurement.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import limit  # noqa: E402
+
+# take() earns tokens from `limit.time.monotonic()`, the only thing limit.py reads off that
+# module. A burst that takes two seconds at per_min == cap earns real tokens, and those would
+# read as a race. With this in place they cannot: every token granted past the bucket's
+# contents is a lost update.
+_FROZEN_CLOCK = types.SimpleNamespace(monotonic=lambda: 1000.0)
 
 
 def _request(ip: str):
@@ -154,7 +138,7 @@ def _one_burst(cap: int, threads: int) -> int:
             with lock:
                 granted += 1
 
-    with ThreadPoolExecutor(max_workers=threads) as pool:
+    with mock.patch.object(limit, "time", _FROZEN_CLOCK), ThreadPoolExecutor(threads) as pool:
         for _ in range(threads):
             pool.submit(worker)
     return granted
@@ -180,8 +164,8 @@ def primitive_bench(cap: int, thread_counts: list[int], rounds: int) -> None:
         )
     print(
         "  excess is tokens granted beyond the bucket's contents — a lost update, an integer,\n"
-        "  and 0 at every row is what a locked take() gives. The clock adds < 1 token over a\n"
-        "  sub-second burst at per_min == cap, so an excess of 1+ is the race, not refill."
+        "  and 0 at every row is what a locked take() gives. The refill clock is frozen, so a\n"
+        "  slow burst earns nothing and an excess of 1+ is the race, not refill."
     )
 
 
@@ -193,6 +177,28 @@ def _hit(url: str) -> int:
         return e.code
     except Exception:  # noqa: BLE001 — a dropped connection under flood is data, not a crash
         return 0
+
+
+def _require_served_cap(port: int, cap: int) -> None:
+    """Refuse the HTTP run unless the server itself says its write bucket holds `cap`.
+
+    `--cap` is only what this process believes, and excess is computed against it. A server at
+    100 told `--cap 50` grants 80 writes and prints an excess of 30 with nothing raced, and the
+    opposite mismatch hides a real overshoot. `/config` publishes the effective limit, so the
+    belief can be checked rather than trusted, and it is checked before any bench runs.
+    """
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/config", timeout=15) as r:
+            served = json.load(r)["settings"]["rate_write"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit(
+            f"refusing: could not read rate_write from /config on {port}: {e!r}"
+        ) from e
+    if served != cap:
+        raise SystemExit(
+            f"refusing: --cap {cap} is not this server's write cap, /config says rate_write="
+            f"{served}. An excess computed against the wrong ceiling is a labelling error."
+        )
 
 
 def http_bench(port: int, cap: int, threads: int) -> None:
@@ -229,7 +235,9 @@ def http_bench(port: int, cap: int, threads: int) -> None:
     ok = sum(1 for c in codes if c in (200, 201))
     limited = sum(1 for c in codes if c == 429)
     other = threads - ok - limited
-    ceiling = min(threads, cap)
+    # The server's clock cannot be frozen from here, so what the burst earned joins the ceiling.
+    earned = int(dur / 1000 * cap / 60)
+    ceiling = min(threads, cap + earned)
     print(f"  burst finished in {dur:.0f} ms")
     print(f"  {'2xx (granted)':<16} {ok}")
     print(f"  {'429 (limited)':<16} {limited}")
@@ -238,14 +246,9 @@ def http_bench(port: int, cap: int, threads: int) -> None:
             f"  {'other/failed':<16} {other}  (codes: "
             f"{sorted({c for c in codes if c not in (200, 201, 429)})})"
         )
-    print(f"  {'ceiling min(N,cap)':<16} {ceiling}")
-    print(f"  {'excess':<16} {ok - ceiling}   <- tokens the limiter granted beyond the cap")
-    if dur > 2000:
-        print(
-            "  NOTE: burst took over 2s; at per_min == cap the bucket refilled meaningfully "
-            "during it,\n        so some of the excess is the clock. Shorten it or lower --cap "
-            "and re-read."
-        )
+    print(f"  {'earned in burst':<16} {earned}")
+    print(f"  {'ceiling':<16} {ceiling}   <- min(N, cap + earned)")
+    print(f"  {'excess':<16} {ok - ceiling}   <- tokens the limiter granted beyond that")
 
 
 def _thread_list(s: str) -> list[int]:
@@ -269,15 +272,11 @@ def _interpreter() -> str:
 def sweep_switch_interval(cap: int, threads: int, rounds: int) -> None:
     """Walk the GIL's scheduling quantum past the width of take()'s critical section.
 
-    This is here because the default run reports zero overshoot at every contention level, and
-    that number is worth less than it looks: take()'s read-modify-write holds no lock and makes
-    no blocking call, so a thread that gets the GIL finishes it inside its quantum. Nothing in
-    the code establishes that — it is the scheduler's timing doing it. Shrinking the quantum
-    below the window is the cheapest way to show the same lines losing updates, on the same
-    interpreter, with nothing patched.
-
-    Read the crossover, not the individual rows: where the zeros stop is roughly how wide the
-    unprotected window is, and how much headroom the 5 ms default is currently providing.
+    This is here because a zero at the default quantum proves little: take()'s read-modify-write
+    makes no blocking call, so a thread that gets the GIL finishes it inside its quantum with or
+    without a lock. Shrinking the quantum below the window removes that accident, on the same
+    interpreter, with nothing patched. Zeros at every row are the lock doing it, and a leak at
+    any row means the lock has stopped covering the window.
     """
     original = sys.getswitchinterval()
     print(
@@ -298,9 +297,8 @@ def sweep_switch_interval(cap: int, threads: int, rounds: int) -> None:
     finally:
         sys.setswitchinterval(original)  # a bench that leaves this lowered poisons later rows
     print(
-        "  Zeros at the top and leaks at the bottom mean the limiter is correct here by\n"
-        "  scheduling accident, not by construction. A free-threaded build removes the accident\n"
-        "  outright — see the module docstring for those numbers."
+        "  The clock is frozen, so a leak at any row is a lost update. Zeros all the way down\n"
+        "  are what the lock gives; the module docstring has this same sweep from before it."
     )
 
 
@@ -345,8 +343,8 @@ def main() -> None:
         "--cap",
         type=int,
         default=100,
-        help="bucket capacity and per_min for the primitive bench, and the "
-        "CHAT_RATE_WRITE the server under --port is expected to enforce",
+        help="bucket capacity and per_min for the primitive bench, and the rate_write the "
+        "server under --port has to report on /config, or the run is refused",
     )
     parser.add_argument(
         "--threads",
@@ -360,13 +358,13 @@ def main() -> None:
         "--switch-interval",
         type=float,
         help="set sys.setswitchinterval() before measuring. The default 5ms is ~1000x wider "
-        "than take()'s unprotected window, which is why the default run finds nothing",
+        "than take()'s critical section, so it finds nothing even without a lock",
     )
     parser.add_argument(
         "--sweep-switch-interval",
         action="store_true",
-        help="walk the scheduling quantum instead of the thread count, to locate the width of "
-        "the unprotected window (see the module docstring). Needs a --threads level above "
+        help="walk the scheduling quantum instead of the thread count, to check the lock "
+        "below the width of its window (see the module docstring). Needs a --threads level above "
         "--cap, since below the cap there is no overshoot to find",
     )
     args = parser.parse_args()
@@ -374,6 +372,8 @@ def main() -> None:
 
     if args.switch_interval is not None:
         sys.setswitchinterval(args.switch_interval)
+    if args.port:
+        _require_served_cap(args.port, args.cap)
     print(f"{_interpreter()}\nlimit.MAX_BUCKETS={limit.MAX_BUCKETS}  cap(under test)={args.cap}")
     if args.sweep_switch_interval:
         sweep_switch_interval(args.cap, max(t for t in args.threads if t > args.cap), args.rounds)
