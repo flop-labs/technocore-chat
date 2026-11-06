@@ -2719,27 +2719,27 @@ def _compact(path: Path, cutoff: float | None = None, keep: int = COMPACT_KEEP_B
     History loss is visible to clients: the tail response reports `first_seq`, so a
     reader that asked for `since=N` and gets `first_seq > N+1` knows it missed lines.
     """
-    kept: list[bytes] = []
-    total = 0
+    kept, total = [], 0
     with path.open("rb") as f:
         for line in reverse_lines(f, max_bytes=MAX_ROOM_BYTES):
+            if cutoff is not None:
+                # The newest record is always retained, expired or not, because `seq` is
+                # read back from it. Compacting an `e-` room to nothing would restart the
+                # sequence at 1 and silently strand every cursor pointing past it. An
+                # unreadable line is skipped; append order makes everything further back
+                # older still.
+                rec = _parse(line)
+                if rec is None:
+                    continue
+                if kept and _expired(rec, cutoff):
+                    break
             total += len(line) + 1  # the newline this line costs on the way back out
             if kept and (total > keep or len(kept) >= COMPACT_MAX_LINES):
                 break
-            if cutoff is not None and kept:
-                # `and kept`: the newest record is always retained, expired or not, because
-                # `seq` is read back from it. Compacting an `e-` room to nothing would
-                # restart the sequence at 1 and silently strand every cursor pointing past
-                # it. Unreadable on the way out, one line on disk — the cheap side of that
-                # trade. Append-ordered, so everything further back is older still.
-                rec = _parse(line)
-                if rec is None or _expired(rec, cutoff):
-                    break
             kept.append(line)
-    kept.reverse()
     # Not b"\n".join(...): an `e-` room whose every record expired compacts to nothing, and
     # join would leave a stray newline behind instead of an empty file.
-    _replace(path, b"".join(line + b"\n" for line in kept), fsync=True)
+    _replace(path, b"".join(line + b"\n" for line in reversed(kept)), fsync=True)
     config._dbg(2, "compact", room=path.name, kept=len(kept), bytes=total)
 
 

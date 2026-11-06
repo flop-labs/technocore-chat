@@ -503,6 +503,29 @@ def test_an_ephemeral_room_keeps_the_history_that_has_not_expired(tmp_path, monk
     assert seqs == list(range(seqs[0], seqs[-1] + 1))
 
 
+def test_ephemeral_compaction_skips_a_torn_line_without_losing_older_history(tmp_path):
+    """A torn line is not an expiry boundary during newest-first compaction."""
+    import store
+
+    for text in ("first", "second"):
+        store.append(tmp_path, "e-torn", "bot", text)
+    path = store.room_path(tmp_path, "e-torn")
+    with path.open("ab") as f:
+        f.write(b'{"seq":999,"ts":"torn')
+    store.append(tmp_path, "e-torn", "bot", "third")  # heals the torn tail
+
+    valid = path.read_bytes().splitlines()
+    keep = sum(len(line) + 1 for line in valid if b"torn" not in line)
+    store._compact(path, cutoff=time.time() - 1, keep=keep)
+
+    view = store.read_messages(tmp_path, "e-torn", limit=10)
+    assert [message["text"] for message in view["messages"]] == [
+        "first",
+        "second",
+        "third",
+    ]
+
+
 def test_reap_keeps_a_file_refreshed_after_the_stat(tmp_path, monkeypatch):
     """The reaper must recheck mtime under the lock, or it deletes live messages."""
     import store
