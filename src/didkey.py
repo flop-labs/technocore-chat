@@ -60,8 +60,21 @@ DID_PATTERN = rf"{PREFIX}z6Mk[1-9A-HJ-NP-Za-km-z]{{{MULTIBASE_CHARS - 4}}}"
 # the same reason: these strings are published, compared, and re-encoded by other stacks.
 SIG_PATTERN = rf"[A-Za-z0-9_-]{{{SIG_CHARS - 1}}}[AQgw]"
 # A nonce is a plain counter (a millisecond clock works): it must count up per key per
-# room, which is what makes a captured URL single-use. 19 digits is the int64 ceiling.
-NONCE_PATTERN = r"[0-9]{1,19}"
+# room, which is what makes a captured URL single-use. 19 digits is the widest decimal
+# width that stays wholly inside the 64-bit range the JSON encoder serves. It is not the
+# int64 ceiling: the largest value this pattern allows, 10**19 - 1, is above int64 max
+# (9223372036854775807) and below uint64 max, so orjson encodes it and refuses anything
+# past uint64 (tests/unit/test_json_backend.py). Python's int is unbounded, so the width
+# is the only bound the door applies.
+# One spelling per value, for the reason SIG_PATTERN above gives: a signed record stores
+# the nonce as int(nonce) and serves that int back through `?format=json` and
+# `/r/<room>/export`, so the strings that survive the round-trip are exactly those where
+# str(int(nonce)) == nonce. "007" would pass the door and read back as 7, leaving a
+# re-verifier to rebuild `<room>|7|<text>`, which is not the string that was signed, then
+# to search up to 18 paddings for the one the caller sent. "0" stays valid (a counter
+# never leads with a zero). The non-capturing group keeps the `^...$` anchoring in
+# manifest.py correct; a bare `0|...` would bind the anchors to one arm and match "xx7".
+NONCE_PATTERN = r"(?:0|[1-9][0-9]{0,18})"
 
 SIG_RE = re.compile(SIG_PATTERN)
 NONCE_RE = re.compile(NONCE_PATTERN)
