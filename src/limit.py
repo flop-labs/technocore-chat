@@ -357,16 +357,18 @@ def _settle_room_budget(request, record, rooms_per_day, *, ip_header="") -> None
     single room.
 
     `created` is the store's own answer to "did this call bring the room into existence",
-    surfaced by store.append and popped here — always, since it is the left operand, so the
-    flag never rides out into the response. It used to be inferred from `seq == 1`, on the
+    surfaced by store.append and popped here — always, before the charge is looked at, so
+    the flag never rides out into the response. It used to be inferred from `seq == 1`, on the
     reasoning that the creating write is the first line in the file — but a reaped room
     leaves its high-water mark behind as a floor, so a recreated room's first message is
     seq floor+1, not 1 (store.last_seq, #139). That made every genuine recreation look like
     the losing side of a race and refunded its token, letting a caller re-acquire reaped
     room slots for free. An empty record (the duplicate-refusal path, which creates nothing)
-    carries no flag and reads as not-created, so its charge is still handed back.
+    carries no flag and reads as not-created, so its charge is still handed back; so does
+    None, the record of a write refused before it reached the store.
     """
-    if not record.pop("created", False) and request.scope.pop(CHARGED_CREATION, False):
+    created = record is not None and record.pop("created", False)
+    if not created and request.scope.pop(CHARGED_CREATION, False):
         refund(request, "create", rooms_per_day / 1440.0, burst=rooms_per_day, ip_header=ip_header)
 
 
