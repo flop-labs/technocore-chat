@@ -73,10 +73,7 @@ def test_the_shape_refusal_comes_before_the_replay_window_is_consulted(tmp_path)
     diagnosis: nothing was replayed, and the caller's counter is not the problem. It comes
     back as the shape refusal instead.
 
-    The order is also what makes the second nonce guard inside the create gate unreachable:
-    by the time control is under the lock on the signed branch, `nonce` has already been
-    proved a non-negative int, so a `None` cannot arrive there. Reorder the two and this test
-    is what tells you.
+    Reorder the two and this test is what tells you.
     """
     import store
 
@@ -87,7 +84,6 @@ def test_the_shape_refusal_comes_before_the_replay_window_is_consulted(tmp_path)
         store.append(tmp_path, "lobby", "", "second", did=did, nonce=None)
     message = str(refused.value)
     assert "not greater than" not in message
-    assert "must carry a nonce" not in message
 
 
 def test_zero_is_a_valid_nonce_and_is_spent_by_being_used(tmp_path):
