@@ -184,6 +184,16 @@ if (mode === 'edited' || mode === 'refused' || mode === 'network') {
   await finish(1);
   assert.equal(env.textEl.value, '', 'the latest successful send clears its own draft');
   edit('third, still unsent'); expected = env.textEl.value; expectedPolls = 2;
+} else if (mode === 'same-text-other-room') {
+  // An identical message in a different room must not share a pending-send guard.
+  env.room = 'elsewhere'; edit('  original draft  ');
+  await click();
+  assert.equal(posts.length, 2, 'same pending text in another room gets its own POST');
+  assert.equal(posts[1].url, '/r/elsewhere');
+  assert.equal(posts[1].payload.text, 'original draft');
+  await finish(1);
+  edit('another room still has an unsent draft');
+  expected = env.textEl.value; expectedFocuses = 1; expectedPolls = 1;
 } else if (mode === 'duplicate-completion') {
   await click();
   assert.equal(posts.length, 1, 'two immediate Sends of one draft queue only one write');
@@ -217,7 +227,7 @@ assert.equal(focuses, expectedFocuses, 'a stale completion must not steal focus'
 assert.equal(polls, expectedPolls, 'a successful send refreshes only its displayed room');
 assert.deepEqual(errors, mode === 'network' ? ['offline']
                         : ['refused', 'failed-retry'].includes(mode) ? ['request refused'] : []);
-assert.equal(posts.length, ['out-of-order', 'duplicate-completion', 'failed-retry'].includes(mode) ? 2 : 1,
+assert.equal(posts.length, ['out-of-order', 'duplicate-completion', 'failed-retry', 'same-text-other-room'].includes(mode) ? 2 : 1,
              'completion must never re-send a draft');
 """
 
@@ -234,6 +244,7 @@ assert.equal(posts.length, ['out-of-order', 'duplicate-completion', 'failed-retr
         "returned-room",
         "out-of-order",
         "duplicate-completion",
+        "same-text-other-room",
         "failed-retry",
         "refused",
         "network",
