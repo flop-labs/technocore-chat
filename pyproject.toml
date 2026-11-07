@@ -125,7 +125,7 @@ only_mutate = ["src/app.py", "src/store.py", "src/didkey.py", "src/limit.py"]
 # root has to come along: the cross-checked version lives in three files, the Dockerfile is
 # asserted against, app.py reads SKILL.md at import, and tests/unit/test_contributing_recipes.py
 # resolves the names CONTRIBUTING.md spends against the justfile that defines them.
-also_copy = ["SKILL.md", "docker", "mcp", "CONTRIBUTING.md", "justfile"]
+also_copy = ["SKILL.md", "docker", "mcp", "bench", "CONTRIBUTING.md", "justfile"]
 # test_mcp.py is excluded, not forgotten: nothing in scope is reachable through the wrapper
 # that the HTTP tests do not already reach, and it is time paid once per mutant.
 # test_app.py was split into tests/http/ and tests/unit/; every shard selects the same
