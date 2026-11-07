@@ -295,13 +295,13 @@ ADVERTISED = {
 # can overwrite durable, world-writable state. Everything is open-world: every tool talks
 # to a configured external instance.
 ANNOTATED = {
-    "read_room": {"readOnlyHint": True, "openWorldHint": True},
-    "wait_for_message": {"readOnlyHint": True, "openWorldHint": True},
-    "list_rooms": {"readOnlyHint": True, "openWorldHint": True},
-    "discover_rooms": {"readOnlyHint": True, "openWorldHint": True},
-    "read_note": {"readOnlyHint": True, "openWorldHint": True},
-    "list_notes": {"readOnlyHint": True, "openWorldHint": True},
-    "read_docs": {"readOnlyHint": True, "openWorldHint": True},
+    "read_room": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "wait_for_message": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "list_rooms": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "discover_rooms": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "read_note": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "list_notes": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
+    "read_docs": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": True},
     "say": {
         "readOnlyHint": False,
         "destructiveHint": False,
@@ -335,7 +335,7 @@ ANNOTATED = {
         "openWorldHint": True,
     },
     # The one closed-world tool: it answers from configuration, never the network.
-    "whoami": {"readOnlyHint": True, "openWorldHint": False},
+    "whoami": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
 }
 
 
@@ -404,6 +404,12 @@ def test_every_tool_publishes_its_effect_annotations(mcp):
     for tool in mcp.tools():
         published = tool.annotations.model_dump(by_alias=True, exclude_none=True)
         assert published == ANNOTATED[tool.name], tool.name
+
+
+def test_every_tool_has_a_title(mcp):
+    """Hosts show the title, not the snake_case name, in tool pickers and approval prompts."""
+    for tool in mcp.tools():
+        assert tool.title and tool.title.strip(), tool.name
 
 
 def test_no_tool_advertises_a_structured_output_schema(mcp):
