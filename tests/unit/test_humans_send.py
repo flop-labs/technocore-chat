@@ -45,11 +45,13 @@ const gate = new Promise(resolve => { release = resolve; });
 const signing = new Promise(resolve => { started = resolve; });
 const done = new Promise(resolve => { settled = resolve; });
 const posts = [], errors = [];
+let nonceCalls = 0;
 const env = {
   TextEncoder, Promise, String, encodeURIComponent,
   me: original, room: 'identityprobe', draftRevision: 0,
+  pendingSends: new Set(),
   textEl: { value: 'hello', focus() {} }, nickEl: { value: 'guest' },
-  swept: value => value, nextNonce: () => 123,
+  swept: value => value, nextNonce: () => { nonceCalls++; return 123; },
   bytesB64u: value => Buffer.from(value).toString('base64url'),
   crypto: { subtle: { sign(...args) {
     started();
@@ -68,8 +70,9 @@ const env = {
   SEED_KEY: 'seed', drop() {}, renderIdentity() {}, say() {},
 };
 vm.createContext(env);
-vm.runInContext(send + '\nsend();', env);
+vm.runInContext(send + '\nsend(); send();', env);
 await signing;
+assert.equal(nonceCalls, 1, 'a second Send while signing must not mint another nonce');
 if (mode !== 'unchanged')
   vm.runInContext(attemptVar + 'var ceremony = null; function hold() {}\n' + beginIdentity + '\n' + logout, env);
 if (mode === 'switch') env.me = replacement;
@@ -131,7 +134,7 @@ assert.ok(send && initial, 'execute the actual composer state and send handler')
 const handlers = {}, posts = [], errors = [];
 let focuses = 0, polls = 0;
 const env = {
-  Promise, String, encodeURIComponent, me: null,
+  Promise, String, encodeURIComponent, me: null, pendingSends: new Set(),
   textEl: {
     value: '  original draft  ',
     focus() { focuses++; },
@@ -181,14 +184,39 @@ if (mode === 'edited' || mode === 'refused' || mode === 'network') {
   await finish(1);
   assert.equal(env.textEl.value, '', 'the latest successful send clears its own draft');
   edit('third, still unsent'); expected = env.textEl.value; expectedPolls = 2;
+} else if (mode === 'same-text-other-room') {
+  // An identical message in a different room must not share a pending-send guard.
+  env.room = 'elsewhere'; edit('  original draft  ');
+  await click();
+  assert.equal(posts.length, 2, 'same pending text in another room gets its own POST');
+  assert.equal(posts[1].url, '/r/elsewhere');
+  assert.equal(posts[1].payload.text, 'original draft');
+  await finish(1);
+  edit('another room still has an unsent draft');
+  expected = env.textEl.value; expectedFocuses = 1; expectedPolls = 1;
 } else if (mode === 'duplicate-completion') {
   await click();
-  await finish(1);
+  assert.equal(posts.length, 1, 'two immediate Sends of one draft queue only one write');
+  await finish(0);
   assert.equal(env.textEl.value, '');
-  edit('  original draft  '); expected = env.textEl.value; expectedPolls = 2;
+  edit('  original draft  ');
+  await click();
+  assert.equal(posts.length, 2, 'the same text can be sent again after completion');
+  await finish(1);
+  expected = ''; expectedFocuses = 2; expectedPolls = 2;
+} else if (mode === 'failed-retry') {
+  await click();
+  assert.equal(posts.length, 1, 'duplicate Send is suppressed while pending');
+  await finish(0, false);
+  await click();
+  assert.equal(posts.length, 2, 'a failed send releases the guard for retry');
+  await finish(1);
+  expected = ''; expectedPolls = 1;
 }
 
-if (mode === 'network') {
+if (mode === 'duplicate-completion' || mode === 'failed-retry') {
+  // Both writes have already settled in these ordered-send regression cases.
+} else if (mode === 'network') {
   posts[0].reject(new Error('offline')); await tick(); expectedPolls = 0;
 } else {
   await finish(0, mode !== 'refused');
@@ -198,8 +226,8 @@ assert.equal(env.textEl.value, expected, 'completion must not erase a newer unse
 assert.equal(focuses, expectedFocuses, 'a stale completion must not steal focus');
 assert.equal(polls, expectedPolls, 'a successful send refreshes only its displayed room');
 assert.deepEqual(errors, mode === 'network' ? ['offline']
-                        : mode === 'refused' ? ['request refused'] : []);
-assert.equal(posts.length, ['out-of-order', 'duplicate-completion'].includes(mode) ? 2 : 1,
+                        : ['refused', 'failed-retry'].includes(mode) ? ['request refused'] : []);
+assert.equal(posts.length, ['out-of-order', 'duplicate-completion', 'failed-retry', 'same-text-other-room'].includes(mode) ? 2 : 1,
              'completion must never re-send a draft');
 """
 
@@ -216,6 +244,8 @@ assert.equal(posts.length, ['out-of-order', 'duplicate-completion'].includes(mod
         "returned-room",
         "out-of-order",
         "duplicate-completion",
+        "same-text-other-room",
+        "failed-retry",
         "refused",
         "network",
     ],

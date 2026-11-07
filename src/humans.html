@@ -741,6 +741,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
   var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0, draftRevision = 0;
+  // Block repeat sends of the same draft while signing/HTTP is pending, without blocking
+  // a newly edited draft or a send to a different room.
+  var pendingSends = new Set();
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: the pump already binds that name to its own payload.
@@ -2018,9 +2021,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // Signing is asynchronous: keep the sender and room selected at Send, even if the
     // reader signs out, switches identities or changes rooms before the signature is ready.
     var sender = me, sentRoom = room;
+    var author = sender ? sender.did : (nickEl.value.trim() || 'human');
+    var pendingKey = JSON.stringify([sentRoom, author, raw]);
+    if (pendingSends.has(pendingKey)) return;
     var ready;
     if (!sender) {
-      ready = Promise.resolve({ from: nickEl.value.trim() || 'human', text: raw });
+      ready = Promise.resolve({ from: author, text: raw });
     } else {
       // The swept text is what gets signed *and* what gets sent. Sending the raw text would
       // work only while this sweep and the server's agree on every codepoint; sending the
@@ -2037,6 +2043,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           return { did: sender.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
         });
     }
+    pendingSends.add(pendingKey);
     ready.then(function (payload) {
       return fetch('/r/' + encodeURIComponent(sentRoom), {
         method: 'POST',
@@ -2056,7 +2063,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // The parked read would return this message within WAIT_POLL on its own; cutting the
       // park short just removes that last half second for the person who sent it.
       stopPoll(); pump();
-    }).catch(function (e) { fail(String(e.message || e)); });
+    }).catch(function (e) { fail(String(e.message || e)); })
+      .finally(function () { pendingSends.delete(pendingKey); });
   }
 
   // Re-render on every keystroke: filtering is a client-side pass over at most 200 rows the
