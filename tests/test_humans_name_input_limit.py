@@ -36,15 +36,17 @@ def test_humans_message_input_matches_the_server_text_limit():
     import app as app_module
     import store
 
-    # The page states this limit twice: once for the human typing into #text, and once in
-    # the maxLength its own WebMCP `say` tool publishes. Both drive the same POST /r/<room>
-    # lane, so a smaller box is a silent truncation at the one place there is a person to
-    # notice it — maxlength gives no feedback, it just stops accepting characters.
+    # Native maxlength counts UTF-16 units, but the server counts Unicode code points
+    # after sweeping invisibles. The composer must not truncate emoji before Send.
     html = TestClient(app_module.app).get("/humans").text
-    limit = _maxlength(html, "text")
+    message = re.search(r'<input id="text"[^>]*>', html)
+    assert message is not None
+    assert "maxlength=" not in message.group()
+    assert "Array.from(clean).length > 4096" in html
+    assert store.MAX_TEXT_CHARS == 4096
 
-    accepted = "a" * limit
+    accepted = "😀" * store.MAX_TEXT_CHARS
     assert store.clean_text(accepted) == accepted
 
     with pytest.raises(store.StoreError):
-        store.clean_text("a" * (limit + 1))
+        store.clean_text("😀" * (store.MAX_TEXT_CHARS + 1))
