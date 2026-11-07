@@ -92,6 +92,16 @@ def test_the_did_and_signature_patterns_are_the_services_plus_anchors():
     assert wrapper.SIG_PATTERN == f"^{didkey.SIG_PATTERN}$"
 
 
+def test_signed_nonce_schemas_use_the_services_grammar(schemas):
+    """Keep the independent MCP distribution aligned when the service nonce rule changes."""
+    import didkey
+
+    for tool in ("say_signed", "claim_room", "set_room_allow"):
+        arms = schemas[tool]["properties"]["nonce"]["anyOf"]
+        string_arm = next(arm for arm in arms if arm.get("type") == "string")
+        assert string_arm["pattern"] == f"^{didkey.NONCE_PATTERN}$"
+
+
 @pytest.mark.parametrize("tool", ["read_room", "list_rooms"])
 def test_the_limit_ceiling_named_in_a_description_is_the_one_the_store_clamps_to(schemas, tool):
     """`clamped to 1-200` has to mean `store.MAX_LIMIT`, or the sentence misinforms.
