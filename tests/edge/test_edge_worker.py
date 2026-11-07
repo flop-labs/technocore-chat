@@ -514,3 +514,24 @@ def test_the_icon_is_built_from_the_tracked_brand_mark():
     assert 'SOURCE = HERE.parent / "docs" / "brand" / "technocore_Icon_Accent.svg"' in script
     assert ".." not in script.split("SOURCE =")[1].split("\n")[0]
     assert "icon-source.png" not in script, "the raster intermediate is gone; do not bring it back"
+
+
+def test_a_reader_joining_a_cold_fill_is_not_handed_another_callers_reply():
+    """The cold path shares one fill among every reader in the burst, and used to hand all of
+    them whatever the origin told the starter: a 429 naming the starter's spent read budget,
+    or a 200 carrying its budget footer. Only a reply that became the stored copy is every
+    reader's; a joiner given anything else caller-specific asks the origin for itself.
+    """
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    origin = _between(worker, "async function fromOrigin(", "function fill(")
+    stored = origin[origin.index("caches.default.put") :]
+    assert "stored: true" in stored, "only the reply that was stored may be marked shareable"
+    assert origin.count("stored: true") == 1, "an early return must not claim to be the copy"
+    lane = _between(worker, "async function revalidating(", "export default")
+    line = lane[lane.index("if (!hit)") :].split("\n")[0]
+    assert line.index("inFlight.has(") < line.index("fill("), (
+        "whether this reader joined must be read before fill() registers the job"
+    )
+    joiner = _between(worker, "async function cold(", "async function revalidating(")
+    assert "429" in joiner and "r.stored" in joiner, "a joiner must re-ask on a caller's reply"
+    assert "fetch(request" in joiner, "the joiner asks with its own request, not the starter's"
