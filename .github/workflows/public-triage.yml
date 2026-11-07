@@ -1,0 +1,32 @@
+name: Public issue and PR triage
+
+on:
+  schedule:
+    - cron: '29 3 * * *'
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply labels and issue closures
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: public-triage
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    if: github.repository_owner == 'flop-labs' && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: flop-labs/.github/public-triage@4b73c0f63829b34fe4bf6bad6ea4cb90e41443b0
+        with:
+          apply: ${{ github.event_name == 'schedule' || inputs.apply }}
+          jev-key: ${{ secrets.TYPESAFE_API_KEY }}
