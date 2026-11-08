@@ -55,3 +55,23 @@ def test_timed_replay_preserves_worker_cap_and_reports_largest_ring() -> None:
     assert refused["target"] == 1
     assert largest_ring == 2501
     assert largest_ring < limit.MAX_DUPE_KEYS
+
+
+def test_timed_replay_reports_peak_even_after_expiry() -> None:
+    """An earlier full ring must not be hidden by later expired entries."""
+    rows = [
+        (float(i) / 1000, f"unique peak occupancy phrase {i}", "other")
+        for i in range(limit.MAX_DUPE_KEYS + 1)
+    ]
+    rows.extend(
+        [
+            (100.0 + i, f"late fresh occupancy phrase {i}", "other")
+            for i in range(3)
+        ]
+    )
+    refused, total, largest_ring = bench.replay_timed(
+        rows, [0] * len(rows), min_length=0, max_copies=1, window=5
+    )
+    assert total["other"] == len(rows)
+    assert refused["other"] == 0
+    assert largest_ring == limit.MAX_DUPE_KEYS
