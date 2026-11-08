@@ -279,8 +279,8 @@ def sustained_corpus(rng: random.Random, duration: float) -> list[tuple[float, s
 def replay_timed(rows, assignment, min_length, max_copies, window):
     """Replay timed traffic with a separate bounded ring for each worker.
 
-    Return the largest end-of-pass worker ring too: a combined count would not
-    indicate whether any single process hit MAX_DUPE_KEYS.
+    Return the peak live key count across workers and replay steps, so reaching
+    MAX_DUPE_KEYS is recorded even when later expirations shrink a ring.
     """
     refused = Counter()
     total = Counter()
@@ -293,7 +293,7 @@ def replay_timed(rows, assignment, min_length, max_copies, window):
             total[label] += 1
             if limit.dupe_refused("lobby", text, when, window, min_length, max_copies):
                 refused[label] += 1
-        largest_ring = max(largest_ring, len(limit._dupes))
+            largest_ring = max(largest_ring, len(limit._dupes))
     return refused, total, largest_ring
 
 
