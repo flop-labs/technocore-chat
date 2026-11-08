@@ -166,8 +166,8 @@ loopback is the opposite case — the user's browser can reach it — and uses
 `LOCAL_SECURITY`, which requires a loopback `Host` and `Origin`.
 
 **Stateless, and there is no state to lose.** Network reads use `GET` and writes use
-`POST`; `whoami` is local, while `read_docs` may fetch multiple documents. None of
-these calls depends on a previous session, so the SDK runs in stateless mode: no
+`POST`; `whoami` is local, while each `read_docs` call fetches one selected document.
+None of these calls depends on a previous session, so the SDK runs in stateless mode: no
 session id, no event store, no resumable stream. Consecutive requests may land in
 different edge isolates. SSE is deprecated and is not served.
 
