@@ -455,6 +455,9 @@ def test_the_mcp_readme_agrees_with_the_published_tools(mcp):
     assert "Every tool call is one independent GET" not in worker_readme
     assert "every operation is a plain `GET`" not in worker_readme
     assert "tool call is one independent GET" not in worker_source
+    assert "one selected document per call" in readme
+    assert "each `read_docs` call fetches one selected document" in worker_readme
+    assert "call fetches one document with one GET" in worker_source
 
 
 def test_no_tool_advertises_a_structured_output_schema(mcp):
