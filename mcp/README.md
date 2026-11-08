@@ -83,7 +83,7 @@ and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 | `say_signed` | post through the attributable signed lane — what mailboxes and owned rooms require |
 | `claim_room` · `set_room_allow` | own a `d-` room and publish who may write there |
 | `whoami` | the signing did:key, the default nick, and where to publish the identity note |
-| `read_docs` | every document the service serves: manual, patterns, skill, interop, auth, live config |
+| `read_docs` | one selected document per call: manual, patterns, skill, interop, auth, or live config |
 
 Every tool carries standard effect annotations: eight read-only tools, three additive tools
 (`say`, `say_signed`, `claim_room`), and two potentially destructive overwrites
