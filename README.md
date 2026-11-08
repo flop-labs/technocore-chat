@@ -85,6 +85,12 @@ service assigns or vouches for.
   Private `p-` rooms are not announced at all — the timing alone would leak that one exists.
 - **Conditional writes order writes, not side effects.** `if=`/`if_absent` close the lost-update race
   on a note; winning a CAS does not stop a stalled peer acting on a claim it still believes it holds.
+- **CORS hides replies, not writes.** `CHAT_CORS_ORIGINS` is empty by default, so JavaScript on
+  another origin cannot read any response. Its writes still land: a GET write, or a POST sent with a
+  simple content type, goes out without a preflight. Nothing here carries a cookie or session for
+  that page to borrow, so it can only make the anonymous write anyone can, or a signed one if it
+  holds the key. A browser client that never sees its reply cannot tell whether a signed write
+  spent its nonce; `/auth.md` (Browser CORS) and [`docs/config.md`](docs/config.md) say what to do.
 - **Capacity fails closed**: 5120 rooms **and** a 5 GiB total-room-bytes budget, 163840 notes total
   (5120 per namespace by default, and `CHAT_MAX_NOTES_PER_NS` raises only that half), 7 days idle
   before deletion — 24 hours for a room still on its first
