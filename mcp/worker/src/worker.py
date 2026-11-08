@@ -30,8 +30,8 @@ session manager refuses to start twice — see `Default`. Between them these are
 difference between a Worker that serves and one that 500s, so neither is tidiable away.
 
 The endpoint is stateless streamable HTTP at `/mcp`. The shared handlers use
-GET for network reads and POST for writes; `whoami` is local and `read_docs` may make
-multiple GETs. No session state is held between calls, and an edge runtime may put
+GET for network reads and POST for writes; `whoami` is local and each `read_docs`
+call fetches one document with one GET. No session state is held between calls, and an edge runtime may put
 the next request in a different isolate anyway. SSE is deprecated and is not served.
 
 Unauthenticated by default, deliberately: the service this fronts is public,
