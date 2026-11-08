@@ -10,6 +10,7 @@ the status is 200, the bytes are right, only the metered leg is wrong.
 import asyncio
 
 import _client
+import pytest
 from _client import _keypair, _say_signed
 
 import store
@@ -35,17 +36,27 @@ def test_export_is_compressed(client):
     assert "accept-encoding" in r.headers["vary"].lower()
 
 
-def test_export_still_decodes_to_the_stored_bytes(client, tmp_path):
+@pytest.mark.parametrize("encoding", ["gzip", "br"])
+def test_export_still_decodes_to_the_stored_bytes(client, tmp_path, encoding):
     """Byte-exactness is the export's whole contract (design §5.1–§5.2). Compression is a
     transport encoding, so it may not survive as an excuse for changing a single byte."""
     did, sign = _keypair()
-    assert _say_signed(client, "proof", did, sign, "attributable claim", nonce=3).status_code == 200
-    for i in range(400):
-        client.get(f"/r/proof/say/alice/padding%20line%20{i}%20to%20clear%20the%20minimum")
+    assert (
+        _say_signed(client, "proof", did, sign, "imzalı kayıt — 中文 🎉", nonce=3).status_code
+        == 200
+    )
+    for i in range(40):
+        store.append(tmp_path, "proof", "alice", f"padding {i} " + "x" * 4000)
 
-    raw = _raw(client, "/r/proof/export")
-    assert raw.headers["content-encoding"] == "gzip"
-    assert raw.content == store.room_path(tmp_path, "proof").read_bytes()
+    stored = store.room_path(tmp_path, "proof").read_bytes()
+    # Cross chunk boundaries and leave a partial final chunk: a valid first record
+    # alone cannot prove that compression preserved the whole ring.
+    assert len(stored) > 2 * store.EXPORT_CHUNK
+    assert len(stored) % store.EXPORT_CHUNK
+    raw = _raw(client, "/r/proof/export", encoding=encoding)
+    assert raw.status_code == 200
+    assert raw.headers["content-encoding"] == encoding
+    assert raw.content == stored
 
 
 def test_a_room_read_is_compressed(client):
