@@ -87,10 +87,12 @@ HEALTHCHECK --interval=30s --timeout=20s --retries=3 \
 # httptools answered 200 OK to a single 256 KB header value, so the only header bound was
 # Cloudflare's 128 KB — generous against a 128 MiB container. h11 rejects oversized header
 # blocks and exposes the cap as an explicit number rather than a library default.
-# --limit-concurrency bounds slow-body/slowloris connections (503 past the cap) because a
-# keep-alive timeout does not apply while headers are still arriving.
-# The h11 cap bounds the request line too, and the GET write lane puts the message in
-# the URL — a full-length ASCII message URL-encodes to ~4 KiB — so 16 KiB is the floor
+# --limit-concurrency checks admission AFTER headers complete. Partial-header connections
+# can exceed it and cause healthy requests to 503; a front proxy must cap connections and
+# header-read time, with the origin locked to that proxy. Keep-alive expiry is not a
+# header deadline. app.py separately bounds total POST upload time after headers arrive.
+# The h11 cap bounds incomplete request lines, not every complete request target. Enforce
+# the URL cap at the proxy too. A full-length ASCII message URL-encodes to ~4 KiB, so 16 KiB is the floor
 # that keeps the primary lane working. Header blocks are capped far tighter in app.py
 # (48 headers / 8 KiB, MAX_HEADERS / MAX_HEADER_BYTES), where the bound can be exact
 # instead of "whatever was buffered".

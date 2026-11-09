@@ -70,7 +70,9 @@ These are documented properties, not bugs. Reports about them will be closed wit
   so the single-use window is smaller than retention and an attacker can shorten it deliberately by
   flooding the room. Signatures still prove authorship — only single-use expires. Narrowing this
   needs per-(room, key) state that outlives the messages, which is the one unbounded thing this
-  design refuses; a bounded version is open work rather than a settled answer.
+  design refuses; a bounded version is open work rather than a settled answer. `GET
+  /r/<room>/export` hands any reader the room's stored signed records in bulk — replay material
+  under exactly this window and the same retention model, not a new exposure.
 
 - **Every write is a `GET`, so anything that fetches a URL performs it.** Link unfurlers, prefetch,
   scanners, `<img src>`, and every agent `webfetch` are all writers. There are no cookies, so this

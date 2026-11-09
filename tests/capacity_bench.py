@@ -23,11 +23,19 @@ create figure below is an upper bound rather than the shape. MAX_NOTES_TOTAL is 
 and 480 ms at 163840 when re-measured on tmpfs, and is ~0.1 ms now, so the line below is
 the cost that change removed rather than a cost anyone still pays:
 
-  store, per NEW room/note (the create path, serialised behind the create gate):
+  store, per NEW room/note (the create path):
     _check_room_capacity                 ~16 ms   count + byte budget, one scandir pass.
-                                                  Still O(rooms), deliberately: the byte
-                                                  total has to be exact, and the scan that
-                                                  gets it returns the count anyway
+                                                  O(rooms) when this was measured; #578 moved
+                                                  both figures onto .usage, which the reaper
+                                                  rewrites from a walk it already makes, so
+                                                  this is ~0 ms now and reads no directories
+                                                  at all (tests/unit/test_room_count.py pins
+                                                  the zero). The line below is the cost that
+                                                  change removed. #578 also retired the
+                                                  service-wide create gate this whole section
+                                                  used to be serialised behind: what a create
+                                                  now holds against other creates is a
+                                                  counter read-modify-write, not a room write
     _check_note_capacity                  ~0 ms   was ~25 ms. The global cap reads
                                                   .notes-count instead of walking every
                                                   namespace; only the per-namespace cap
@@ -319,7 +327,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     is counted at the call, not inferred from a latency, so the figure is exact.
 
     It drives `app._rooms_view` rather than the route, so it measures the stamp alone. The
-    `_rooms_cache.clear()` that used to run on every write in `take` cost the same thing
+    `_rooms_walk` clear that used to run on every write in `take` cost the same thing
     per worker, and is gone for the same reason; a server-level run (`--port`) is what shows
     the two together.
     """
@@ -335,7 +343,7 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
     def run(label: str, keys: tuple) -> None:
         walks, latencies, sent, served, noted = 0, [], 0, 0, 0
         last: dict | None = None
-        app._rooms_cache.clear()
+        app._rooms_walk.cache_clear()
         app.ROOMS_STAMP_KEYS = keys
         start = time.monotonic()
         while (now := time.monotonic() - start) < seconds:
