@@ -220,6 +220,28 @@ def test_a_migration_that_cannot_write_still_serves_the_data(tmp_path, monkeypat
     assert store.list_rooms(tmp_path) == ["stuck"], "…and it still lists"
 
 
+def test_a_writer_refuses_a_legacy_path_migrated_while_it_waited(tmp_path, monkeypatch):
+    """A resolver can return the flat path just before another reader moves it. Refusing that
+    stale target is safer than acknowledging bytes no future resolver can see.
+
+    The write gate owns the final check under the legacy sidecar lock. Migration uses the same
+    lock, so once the gate sees the bucket it cannot appear after the check and before a write.
+    """
+    import store
+
+    legacy = _legacy_room(tmp_path, "raced", _record(1, "seed"))
+    monkeypatch.setattr(store.os, "replace", lambda *args: (_ for _ in ()).throw(OSError()))
+    stale = store.room_path(tmp_path, "raced")
+    monkeypatch.undo()
+    assert stale == legacy
+
+    assert store.room_path(tmp_path, "raced") != legacy
+    with pytest.raises(store.StoreError, match="migrated"):
+        with store._create_gate(tmp_path / "rooms-count", stale, lambda: None, lambda _: None):
+            pass
+    assert store.read_messages(tmp_path, "raced")["messages"][0]["text"] == "seed"
+
+
 def test_a_flat_note_moves_and_keeps_its_value(tmp_path):
     import store
 
