@@ -518,7 +518,7 @@ def _shard(name: str, key: bytes | None = None) -> str:
     return hashlib.blake2b(name.encode("utf-8"), digest_size=1, key=key or b"").hexdigest()
 
 
-def _migrate(legacy: Path, sharded: Path) -> None:
+def _migrate(legacy: Path, sharded: Path) -> bool:
     """Move a pre-sharding file into its bucket. The data only — deliberately NOT the lock.
 
     Moving the sidecar too looked tidier and was a lock-domain bug. Between testing that the
@@ -542,10 +542,12 @@ def _migrate(legacy: Path, sharded: Path) -> None:
     than deleted.
     """
     try:
-        sharded.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(legacy, sharded)
+        with _locked(legacy, nb=True):
+            sharded.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(legacy, sharded)
+            return True
     except OSError:
-        return  # lost the race, or cannot write: `_resolve` falls back to what is on disk
+        return False  # lost the race, or cannot write: `_resolve` falls back to what is on disk
 
 
 def _resolve(d: Path, name: str, suffix: str) -> Path:
@@ -575,13 +577,10 @@ def _resolve(d: Path, name: str, suffix: str) -> Path:
     """
     filename = f"{name}{suffix}"
     sharded = d / _shard(name) / filename
-    if sharded.exists():
+    if sharded.exists() or not (legacy := d / filename).exists():
         return sharded
-    if (legacy := d / filename).exists():
-        _migrate(legacy, sharded)
-        if legacy.exists():  # the move could not run; the data is still readable there
-            return legacy
-    return sharded
+    # The short-circuit keeps the readable fallback only when the move left data behind.
+    return sharded if _migrate(legacy, sharded) else legacy if legacy.exists() else sharded
 
 
 def room_path(root: Path, room: str) -> Path:
@@ -2502,6 +2501,8 @@ def _create_gate(gate: Path, path: Path, check, counted):
     with _locked(gate.with_suffix(".create"), shared=True), _locked(path):
         reserved = False
         if not path.exists():
+            if (path.parent / _shard(path.stem) / path.name).exists():
+                raise StoreError("write target migrated while it was queued; retry")
             with _locked(gate):
                 check()  # authoritative: the reservation below consumes what it just counted
                 # Before the write, not after: a crash in between leaves the count one too
@@ -2571,7 +2572,7 @@ def _log_event(root: Path, line: str) -> None:
         pass
 
 
-def _last_nonce(root: Path, room: str, did: str) -> int | None:
+def _last_nonce(root: Path, room: str, did: str, path: Path | None = None) -> int | None:
     """The newest nonce this DID used in this room, within the tail READ_BUDGET covers.
 
     Bounded on purpose. A signed URL is a bearer token for one message: replaying it must
@@ -2581,7 +2582,7 @@ def _last_nonce(root: Path, room: str, did: str) -> int | None:
     a gap: this store forgets, and an anti-replay set that outlived the messages it guards
     would be the one piece of unbounded state on a service whose whole design is bounded.
     """
-    path = room_path(root, room)
+    path = path or room_path(root, room)
     if not path.exists():
         return None
     # Reject on bytes before parsing. This is a predicate scan, not a tail read: when the DID
@@ -2662,7 +2663,7 @@ def _write_record(
         if did is not None:
             # Validated before _reap and the create gate above; narrow the optional type.
             assert nonce is not None
-            previous = _last_nonce(root, room, did)
+            previous = _last_nonce(root, room, did, path)
             if previous is not None and nonce <= previous:
                 raise StoreError(
                     f"nonce {nonce} is not greater than {previous}, the last one this key "
@@ -2697,7 +2698,7 @@ def _write_record(
         # discontinuity and resync instead of silently watching a different conversation
         # (#139 dir #3). Also clears the floor the reaper left behind — the recreated room
         # has taken up the sequence where the old one left off, so it must not be reused.
-        _set_seq_entry(root, room, None)
+        created and _set_seq_entry(root, room, None)
     return rec, created
 
 
