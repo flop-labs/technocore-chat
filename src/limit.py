@@ -294,12 +294,12 @@ def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BU
     back. Folded together, a 20-rooms-per-day budget would be a bucket holding 0.0139
     tokens, which never reaches the 1.0 a grant costs — the limit would refuse everything.
     """
-    # Once per request: every request makes exactly one take that is not the room-creation
-    # gate. Walked at 019b57a: 13 `take(request` sites in app.py, twelve non-create and one
-    # per handler, the thirteenth the create gate (@zkasuran, #359). A future handler that
-    # takes twice outside the gate would resurrect the over-count this fixes.
-    # gate, and `ip_header` empty is the same "not configured to read one" case client_ip
-    # used to note. /stats publishes this as a count of requests (app.py, README).
+    # Once per request, on one assumption: every request makes exactly one take that is not
+    # the room-creation gate. Walked at 019b57a and again at cd41f86: 12 call sites in app.py,
+    # eleven non-create and one per handler, the twelfth the create gate (@zkasuran, #359). A
+    # future handler that takes twice outside the gate would resurrect the over-count this
+    # fixes. `ip_header` empty is the same "not configured to read one" case client_ip used
+    # to note. /stats publishes this as a count of requests (app.py, README).
     if kind != "create" and not ip_header and any(h in request.headers for h in PROXY_IP_HEADERS):
         _proxy_evidence["proxied_requests"] += 1
     ip = client_ip(request, ip_header)
