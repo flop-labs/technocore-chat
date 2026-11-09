@@ -819,6 +819,60 @@ def test_a_room_with_messages_can_no_longer_be_claimed(client):
     assert client.get("/r/d-busy/say/bob/still%20here").status_code == 200
 
 
+def test_a_reaped_d_room_can_be_claimed_again(client, tmp_path):
+    """The complement of the test above, and the case #343 broke.
+
+    Ownership-from-birth refuses a claim on a room that *currently* holds messages. The
+    gate read `store.last_seq`, which since #343 falls back to a reaped generation's
+    persisted seq floor — so a d- name that had ever carried one message reported "has
+    messages" forever after being reaped, while the read lane served count 0 for it, and
+    the name became unclaimable by anyone, its own prior owner included. Occupancy is the
+    room file, the same signal the read view gates on.
+    """
+    import store
+
+    did, sign = _keypair()
+    assert client.get("/r/d-gone/say/alice/hello").status_code == 200
+
+    _age(store.room_path(tmp_path, "d-gone"), store.IDLE_SECONDS + 60)
+    (tmp_path / ".reaped").unlink(missing_ok=True)  # the reaper is throttled; let it run
+    client.get("/r/other/say/bot/reap%20now")
+
+    assert not store.room_path(tmp_path, "d-gone").exists(), "premise: the room was reaped"
+    view = client.get("/r/d-gone?format=json").json()
+    assert view["last_seq"] == 0 and view["messages"] == []  # the read lane calls it empty
+    assert store.last_seq(tmp_path, "d-gone") > 0, "premise: the seq floor survives the reap"
+
+    # ...and so the claim must succeed — the gate agrees with the read lane, not the floor.
+    floor = store.last_seq(tmp_path, "d-gone")
+    assert _claim(client, "d-gone", did, sign).status_code == 200
+
+    # The floor that made the name claimable still orders what comes next (#139): the new
+    # owner's first message lands above it, so a cursor from the reaped generation keeps
+    # seeing new messages. A claim is the one path that could plausibly have dropped it.
+    assert _say_signed(client, "d-gone", did, sign, "mine now").status_code == 200
+    assert client.get("/r/d-gone?format=json").json()["last_seq"] > floor
+
+
+def test_a_room_file_with_no_readable_record_is_still_occupied(client, tmp_path):
+    """Occupancy is the file, so it holds where `last_seq` could not see a message.
+
+    A room torn mid-write has a file and no record that parses. No floor exists for it, so
+    `last_seq` is 0 and the old predicate let a first claim through on a name someone was in
+    the middle of writing to. The file test refuses it — strictly stronger on this path, not
+    merely equivalent. Measured by @RobGenins against main before it was pinned here.
+    """
+    import store
+
+    did, sign = _keypair()
+    assert client.get("/r/d-torn/say/alice/hello").status_code == 200
+    store.room_path(tmp_path, "d-torn").write_bytes(b'{"seq": 1, "from": "alice", "te')
+    assert store.last_seq(tmp_path, "d-torn") == 0, "premise: nothing parses, and no floor"
+
+    refused = _claim(client, "d-torn", did, sign)
+    assert refused.status_code == 403 and "already has messages" in refused.text
+
+
 def test_a_nickname_cannot_own_a_room(client):
     r = client.get("/kv/room-owners/d-bounty/set/alice?if_absent=1")
     assert r.status_code == 400 and "did:key" in r.text
