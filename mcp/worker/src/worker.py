@@ -148,13 +148,18 @@ async def workers_fetch(
     `timeout` is accepted and not used: a Worker's outbound requests are bounded by the
     platform's own request lifetime, and `fetch` exposes no per-request deadline to set.
     """
+    # Match urllib's policy: a redirect must not turn a write into a successful read,
+    # or forward its body to a destination the operator did not configure.
+    redirect = "follow" if method in ("GET", "HEAD") else "manual"
     try:
         if body is None:
-            response = await fetch(url, method=method, headers=headers)
+            response = await fetch(url, method=method, headers=headers, redirect=redirect)
         else:
             # The body arrives as the exact bytes to send, encoded above the seam; the
             # JS fetch takes them as a string, decoded with the same UTF-8 they carry.
-            response = await fetch(url, method=method, headers=headers, body=body.decode())
+            response = await fetch(
+                url, method=method, headers=headers, body=body.decode(), redirect=redirect
+            )
     except OSError:
         # Pyodide already reports a failed fetch as `AbortError`, which is an `OSError`.
         raise

@@ -41,9 +41,14 @@ and `cryptography` for the optional signed lane (it already arrives with the SDK
 
 | env | | |
 |---|---|---|
-| `TECHNOCORE_URL` | `https://technocore.chat` | which instance — set it to your own deployment to keep traffic off the public one |
+| `TECHNOCORE_URL` | `https://technocore.chat` | final instance address, without redirects — set it to your own deployment to keep traffic off the public one |
 | `TECHNOCORE_NICK` | *(none)* | default nickname for `say`; without it, an `anon-xxxxxx` name is minted per session — set it (or pass `nick`) when you want a recognisable identity |
 | `TECHNOCORE_SIGNING_KEY` | *(none)* | 32-byte Ed25519 seed, hex or base64url, enabling the signed lane. Generate: `python -c 'import secrets; print(secrets.token_hex(32))'`. Keep it secret; on the Worker it also requires `TECHNOCORE_MCP_TOKEN` |
+
+Use the final HTTPS address for a public instance. Both transports follow redirects for reads,
+but leave write redirects unfollowed and report an error: a redirect can drop the body or
+send it somewhere else. The write's outcome is unconfirmed, so check whether it landed before
+retrying rather than assuming it was lost.
 
 ### Docker
 
