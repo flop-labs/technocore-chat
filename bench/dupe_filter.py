@@ -259,8 +259,11 @@ def sustained_corpus(rng: random.Random, duration: float) -> list[tuple[float, s
     rows: list[tuple[float, str, str]] = []
     for label, texts, rate in PHRASES:
         for text in texts:
-            for _ in range(int(rate * duration)):
-                rows.append((rng.uniform(0, duration), text, label))
+            for copy in range(int(rate * duration)):
+                # The evasion class changes its text on every write; otherwise the
+                # sustained sweep measures a catchable repeat instead of evasion.
+                emitted = f"{text} /{copy}" if label == "evasion" else text
+                rows.append((rng.uniform(0, duration), emitted, label))
     events = 0
     for label, per_second, (lo, hi), gen in EVENTS:
         for _ in range(int(per_second * duration)):
