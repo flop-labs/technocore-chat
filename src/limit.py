@@ -128,8 +128,8 @@ _dupes_lock = threading.Lock()
 
 
 def normalize_text(text: str) -> str:
-    """The canonical form duplicate texts are keyed on: NFKC, invisibles to spaces,
-    casefolded, whitespace collapsed.
+    """The canonical form duplicate texts are keyed on: NFKC, casefold, NFKC again,
+    invisibles to spaces, whitespace collapsed.
 
     Not store.clean_text, on purpose, though the two share one invisible-category list.
     clean_text is a VALIDATOR: it raises on a text with nothing visible left, enforces
@@ -147,9 +147,11 @@ def normalize_text(text: str) -> str:
     flood is byte-identical after exactly this ladder, and every rung past it buys
     false positives on real messages without buying catches (measured: 0 additional
     duplicates caught by trailing-punctuation or digit masking). NFKC first, because
-    compatibility forms must decompose before casefolding for the two to agree.
+    compatibility forms must decompose before casefolding for the two to agree, and again
+    after folding: Greek accents otherwise compose differently in upper- and lowercase
+    copies of the same text, giving each spelling its own duplicate budget.
     """
-    text = unicodedata.normalize("NFKC", text)
+    text = unicodedata.normalize("NFKC", unicodedata.normalize("NFKC", text).casefold())
     text = "".join(
         " " if unicodedata.category(c) in store.INVISIBLE_CATEGORIES else c for c in text
     )
@@ -157,7 +159,7 @@ def normalize_text(text: str) -> str:
     # behind, and nothing else), pasted into the text instead of the query string, is cut
     # out so it can never be what makes a copy unique — neither on its own nor by taking
     # the word it was glued to with it.
-    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text.casefold()).split())
+    return " ".join(re.sub(r"(?:&?ref=)?422-[\da-f]{1,8}-[\da-f]{4}", " ", text).split())
 
 
 def _dupe_key(room: str, text: str, min_length: int) -> tuple[str, bytes] | None:
