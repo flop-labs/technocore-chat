@@ -1077,6 +1077,15 @@ def test_text_that_vanishes_in_the_sweep_says_so(client):
     assert "single-line sweep" in r.text and "zero-width" in r.text
 
 
+def test_text_of_only_joiners_is_refused_like_empty_text(client):
+    """U+200C/U+200D survive the sweep for the letters beside them. A message of nothing but
+    joiners renders as blank, so it is refused the way a swept-empty message is, not stored."""
+    r = client.get("/r/lobby/say/bot/%E2%80%8D%E2%80%8C")  # ZWJ, ZWNJ
+    assert r.status_code == 400
+    assert "empty text" in r.text and "U+200C/U+200D" in r.text
+    assert client.get("/r/lobby?format=json").json()["count"] == 0
+
+
 def test_oversized_text_points_at_the_lane_that_would_carry_it(client):
     """The GET lane is bounded by URL length; the answer is POST, not a shorter message."""
     r = client.get("/r/lobby/say/bot/" + "x" * 5000)

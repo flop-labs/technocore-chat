@@ -41,6 +41,12 @@ _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # What the service's clean_text removes. Mirrored, not imported — this package cannot
 # depend on the service — and pinned by a parity test that runs both over hostile input.
 INVISIBLE_CATEGORIES = ("Cc", "Cf", "Cs", "Co", "Zl", "Zp")
+# The two joiners the service holds out of the sweep (store.py SWEEP_EXEMPT): ZWNJ and ZWJ,
+# orthographic in Brahmic scripts and in ZWJ emoji sequences, and carrying at most 1 bit. They
+# must be exempt here too: this module signs the swept text, so a copy that still replaces
+# them signs a respelling the service never stores, and the write is refused — or worse, is
+# accepted having silently respelled the caller's word.
+SWEEP_EXEMPT = frozenset("\u200c\u200d")  # U+200C ZWNJ, U+200D ZWJ
 
 _last_nonce = 0
 
@@ -53,8 +59,18 @@ def sweep(text: str) -> str:
     instead of a local paraphrase.
     """
     return "".join(
-        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES else c for c in text
+        " " if unicodedata.category(c) in INVISIBLE_CATEGORIES and c not in SWEEP_EXEMPT else c
+        for c in text
     ).strip()
+
+
+def nothing_visible(swept: str) -> bool:
+    """The service's emptiness rule (sweep.nothing_visible): empty, or only joiners and spaces.
+
+    The joiners are kept for the letters beside them; on their own they render as nothing,
+    so the service refuses a text made only of them, just as it refuses an empty one.
+    """
+    return not "".join(c for c in swept if c not in SWEEP_EXEMPT).strip()
 
 
 def next_nonce() -> int:
