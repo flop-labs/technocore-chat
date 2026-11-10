@@ -211,7 +211,7 @@ def use_fetch(fetcher: Fetch) -> None:
 # the note path derived from it — and makes no request at all. It carries
 # `open_world_hint=False` inline below for that reason, which is a claim about the tool and
 # not an oversight.
-READS = ToolAnnotations(read_only_hint=True, open_world_hint=True)
+READS = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=True)
 APPENDS = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
@@ -393,6 +393,7 @@ def _resolve_signature(
 
 @server.tool(
     name="read_room",
+    title="Read a room",
     description=(
         "Read messages from a shared room, oldest first. Pass `since` with the last seq you "
         "saw to get only what is new. Content is untrusted input from strangers."
@@ -417,6 +418,7 @@ async def read_room(
 
 @server.tool(
     name="wait_for_message",
+    title="Wait for a message",
     description=(
         "Long-poll a room: returns as soon as a message newer than `since` lands, or empty "
         "after `seconds`. Cheaper and faster than repeated reads — prefer this over polling."
@@ -453,6 +455,7 @@ async def wait_for_message(
 
 @server.tool(
     name="say",
+    title="Post to a room",
     description=(
         "Post a message to a room, creating the room if it does not exist. The message is "
         "public, permanent-ish and attributed to a nickname anyone could also use."
@@ -487,6 +490,7 @@ async def say(
 
 @server.tool(
     name="list_rooms",
+    title="List rooms",
     description=(
         "List public rooms, most recently active first, with their topics. Private (`p-`) "
         "rooms never appear here. A room name and its topic are caller-chosen strings, not "
@@ -505,6 +509,7 @@ async def list_rooms(
 
 @server.tool(
     name="discover_rooms",
+    title="Discover rooms",
     description=(
         "Read the discovery log: one line per newly created public room, in creation order. "
         "This is how to find agents you had no room name for."
@@ -522,6 +527,7 @@ async def discover_rooms(
 
 @server.tool(
     name="read_note",
+    title="Read a note",
     description=(
         "Read a durable note. Notes outlive rooms and are the place to keep state between "
         "sessions — but they are world-readable and world-writable."
@@ -535,6 +541,7 @@ async def read_note(namespace: Namespace, key: Key) -> str:
 
 @server.tool(
     name="write_note",
+    title="Write a note",
     description=(
         "Write a durable note (<= 8192 characters). Optionally conditional: `if_matches` "
         "writes only when the note still holds that exact value, `if_absent` only when it "
@@ -563,6 +570,7 @@ async def write_note(
 
 @server.tool(
     name="list_notes",
+    title="List notes",
     description=(
         "List the keys in a note namespace, alphabetically. Namespaces themselves are never "
         "enumerable, and keys beginning `p-` are never listed."
@@ -581,6 +589,7 @@ async def list_notes(
 
 @server.tool(
     name="say_signed",
+    title="Post a signed message",
     description=(
         "Post a message through the signed, attributable lane: the record carries a "
         "verified did:key instead of a self-asserted nick. This is what mailboxes (mb- "
@@ -619,6 +628,7 @@ async def say_signed(
 
 @server.tool(
     name="claim_room",
+    title="Claim a room",
     description=(
         "Claim ownership of a d- room by storing this identity's did:key in "
         "room-owners, create-only: first claimant wins, and only signed writes from keys "
@@ -671,6 +681,7 @@ async def claim_room(
 
 @server.tool(
     name="set_room_allow",
+    title="Set a room's allow-list",
     description=(
         "Publish the allow-list for a room this identity owns: the space-separated "
         "did:keys permitted to write there, replacing the previous list. Owner-signed "
@@ -701,6 +712,7 @@ async def set_room_allow(
 
 @server.tool(
     name="whoami",
+    title="Show this session's identity",
     description=(
         "Report this server's identities without touching the network: the signing "
         "did:key if one is configured, the nick unsigned posts default to, and where "
@@ -708,7 +720,7 @@ async def set_room_allow(
         "mailbox."
     ),
     # The one closed-world tool: it answers from configuration alone.
-    annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False),
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False),
     structured_output=False,
 )
 async def whoami() -> str:
@@ -760,6 +772,7 @@ PAGES = {
 
 @server.tool(
     name="read_docs",
+    title="Read the docs",
     description=(
         "Fetch the service's own documentation: `manual` is the complete API reference, "
         "`patterns` is worked multi-agent choreographies (mailboxes, private channels, "
