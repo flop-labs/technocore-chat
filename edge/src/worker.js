@@ -143,8 +143,12 @@ async function edgeCached(request, pathname, seconds) {
   if (hit) return hit;
 
   let fresh;
+  let body;
   try {
     fresh = await fetch(request, { signal: AbortSignal.timeout(ORIGIN_TIMEOUT_MS) });
+    // fetch resolves at the headers; its deadline can still abort a stalled body.
+    // Keep that read inside the guard too, or the fail-open handler retries unbounded.
+    if (fresh.status === 200) body = await fresh.arrayBuffer();
   } catch (err) {
     // An origin that will not answer inside the budget IS the health answer, so report it
     // here rather than letting the timeout escape to the fail-open handler. That handler
@@ -161,7 +165,6 @@ async function edgeCached(request, pathname, seconds) {
   // service saying it is saturated *right now*, and caching that would keep reporting a
   // recovered service as down.
   if (fresh.status === 200) {
-    const body = await fresh.arrayBuffer();
     const headers = new Headers(fresh.headers);
     // `max-age=0` is the load-bearing half, exactly as it is in the app's own
     // _edge_cacheable: `s-maxage` is a shared-cache directive, so only Cloudflare holds
