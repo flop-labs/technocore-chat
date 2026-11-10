@@ -285,6 +285,33 @@ def test_case_and_whitespace_variants_count_as_one_text(client) -> None:
         assert _say(client, "lobby", "x", shouty).status_code == 422
 
 
+@pytest.mark.parametrize("lane", ["get", "post", "get-signed", "post-signed"])
+def test_greek_case_variants_share_the_copy_budget(client, lane) -> None:
+    """Uppercasing ordinary Greek can change how accents compose after casefolding.
+
+    The word Μαΐου (May) becomes ΜΑΪ́ΟΥ in uppercase. Both spellings must spend
+    the same copy budget, including when a bridge changes case before signing.
+    """
+    phrase = "Η συνάντηση είναι στις 15 Μαΐου."
+    did, sign = _keypair(31)
+
+    def send(body: str, nonce: int):
+        if lane == "get":
+            return _say(client, "lobby", "n" + str(nonce), body)
+        if lane == "post":
+            return client.post("/r/lobby", json={"from": "n" + str(nonce), "text": body})
+        if lane == "get-signed":
+            return _say_signed(client, "lobby", did, sign, body, nonce=nonce)
+        return _post_signed(client, "lobby", did, sign, body, nonce=nonce)
+
+    with _filter_on():
+        for nonce in range(1, COPIES + 1):
+            assert send(phrase, nonce).status_code == 200
+        assert send(phrase, COPIES + 1).status_code == 422
+        assert send(phrase.upper(), COPIES + 2).status_code == 422
+    assert _view(client) == [phrase] * COPIES
+
+
 def test_a_refused_room_still_accepts_other_messages(client) -> None:
     """A refusal is about one text, not the room or the sender: the next different
     message lands normally, from the identity that was just refused."""
