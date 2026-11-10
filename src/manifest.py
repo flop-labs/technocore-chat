@@ -1690,13 +1690,30 @@ def config_document(version: str) -> dict:
             "static_cache_seconds": "s-maxage on the documents; 0 means no-store",
         },
         "withheld": _WITHHELD,
+        # The staleness is named as the knob rather than as a period, because that is the
+        # one form that cannot go stale itself: this document is served through
+        # app._static_cacheable, so what a shared cache may hold is `static_cache_seconds`
+        # above plus its stale-while-revalidate, and nothing from the ORIGIN at 0 — the edge
+        # is a separate answer, and the note now says so: /config is Worker-routed
+        # (edge/wrangler.jsonc) and in edge/snapshot.py's PATHS, so every deploy writes its
+        # body into the assets dir. On an origin 5xx the Worker serves those deploy-time
+        # bytes with `s-maxage=30, stale-while-revalidate=30` (edge/src/worker.js), which a
+        # shared cache may hold for ~60s at the very setting whose point is that none does.
+        # The origin's Cache-Control never reaches that path. Caught by @WIZARDspace. It said "up to an
+        # hour" — the private `max-age=3600` these documents carried until 0.11.0 moved
+        # them onto the knob — for as long as that had stopped being true, in the one
+        # document whose whole claim is that it reports what this process enforces.
         "note": (
             "Every key in `settings` is the environment variable of the same name, "
             "uppercased and prefixed with `env_prefix` — `rate_read` is CHAT_RATE_READ. "
             "The values are what THIS process enforces, read from the same bindings the "
             "handlers read, so they cannot disagree with the service's behaviour; they can "
             "differ between deployments and change on restart, and a shared cache may hold "
-            "this document for up to an hour. `withheld` names every remaining knob and why "
+            "this document for the `static_cache_seconds` window above plus its "
+            "stale-while-revalidate, never for a fixed period — at 0 the origin shares "
+            "nothing, though while the origin is failing the edge still answers from its "
+            "deploy-time snapshot, marked `X-Origin-Fallback: 1`. "
+            "`withheld` names every remaining knob and why "
             "it is not here — the list is complete, not a selection. The rate limits also "
             "appear in /.well-known/agent.json, which is the document registries read; this "
             "one is for a client tuning itself and for an operator reading back what they "
