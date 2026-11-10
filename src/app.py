@@ -957,19 +957,13 @@ def rooms(request: Request) -> Response:
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     if not view["total"]:
-        if view["occupied"]:
-            # Rooms exist but are all unlisted: `total` counts only listable rooms, so it
-            # reads as empty, but telling the caller to create one is a closed loop — the
-            # create is refused at the cap and the refusal points back here. Say what is
-            # true instead. Deliberately stays in this branch: the normal listing branch
-            # emits the UNTRUSTED-NAMES banner and caller bytes, and the empty listing is
-            # meant to stay silent about those (#312).
-            body = (
-                f"(this service has {view['occupied']} room(s), but all are unlisted — "
-                f"nothing to list here)\n" + notes_line
-            )
-        else:
-            body = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n" + notes_line
+        # All rooms unlisted reads as empty, but "create one" is a closed loop: the create
+        # is refused at the cap and the refusal points back here (#312). No count — how
+        # many unlisted rooms exist is not a public figure (#277).
+        hint = "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)\n"
+        if view["has_unlisted"]:
+            hint = "(this service has rooms, but all are unlisted — nothing to list here)\n"
+        body = hint + notes_line
     else:
         head = (
             # Both caps, because either can be the one that refuses the next room and an

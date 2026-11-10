@@ -1395,11 +1395,11 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     """
     now = time.time()
     entries = []
-    total_rooms = 0
+    hidden = False
     for e in _walk(root / "rooms", ".jsonl"):
-        total_rooms += 1
         name = e.name[: -len(".jsonl")]
         if not _listable(name):
+            hidden = True
             continue
         try:
             st = e.stat()
@@ -1428,7 +1428,9 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     return {
         "rooms": shown,
         "total": len(entries),
-        "occupied": total_rooms,
+        # A bit, never a count: a public figure would move whenever a `p-` room opened and
+        # announce it (#277). The bit is what breaks the #312 loop; /stats has the split.
+        "has_unlisted": hidden,
         "capacity": MAX_ROOMS,
         "bytes": sum(e[1] for e in entries),
         # Both bounds, because either can be the one that bites: a service can be far from

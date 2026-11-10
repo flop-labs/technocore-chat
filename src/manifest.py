@@ -860,14 +860,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                                     "rooms": {"type": "array", "items": {"type": "object"}},
                                     "total": {"type": "integer"},
                                     "capacity": {"type": "integer"},
-                                    "occupied": {
-                                        "type": "integer",
+                                    "has_unlisted": {
+                                        "type": "boolean",
                                         "description": (
-                                            "Total rooms that exist — listed and unlisted "
-                                            "combined. Differs from `total` (listed rooms "
-                                            "only) whenever unlisted (`p-`) rooms exist; "
-                                            "this is the population the room cap actually "
-                                            "refuses on."
+                                            "True when rooms exist that this listing may "
+                                            "not name (e.g. unlisted `p-` rooms). A boolean, "
+                                            "not a count: a public total would move the "
+                                            "moment such a room opened (#277). The exact "
+                                            "split is on the token-gated `/stats`."
                                         ),
                                     },
                                     "bytes": {"type": "integer"},
