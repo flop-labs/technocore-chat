@@ -56,8 +56,72 @@ def test_compaction_bounds_file_and_keeps_seq(tmp_path, monkeypatch):
         store.append(tmp_path, "big", "bot", "x" * 100)
     path = store.room_path(tmp_path, "big")
     assert path.stat().st_size <= 4096
-    view = store.read_messages(tmp_path, "big", limit=50)
+    view = store.read_messages(tmp_path, "big", limit=1)
     assert view["last_seq"] == 200 and view["first_seq"] > 1  # gap is observable
+    assert view["first_retained_seq"] < view["first_seq"]
+    assert view["first_retained_ts"]
+
+
+def test_retained_floor_is_independent_of_limit_and_cursor(tmp_path):
+    import store
+
+    for text in ("one", "two", "three"):
+        store.append(tmp_path, "floor", "bot", text)
+
+    view = store.read_messages(tmp_path, "floor", limit=1, since=1)
+    assert view["first_seq"] == 3
+    assert view["first_retained_seq"] == 1
+    assert view["first_retained_ts"] == store.read_messages(tmp_path, "floor")["messages"][0]["ts"]
+
+    empty = store.read_messages(tmp_path, "missing")
+    assert empty["first_retained_seq"] is None and empty["first_retained_ts"] is None
+
+
+def test_last_seq_does_not_rewind_when_every_visible_record_expires(tmp_path, monkeypatch):
+    """An e- room whose visible messages have all aged past the TTL must still report the
+    true high-water seq. Falling back to `since or 0` rewinds the cursor and contradicts
+    the invariant documented above read_messages: seq keeps advancing past records nobody
+    can read any more.
+    """
+    import time
+
+    import store
+
+    for i in range(5):
+        store.append(tmp_path, "e-gone", "bot", f"m{i}")
+
+    # Force every record expired while leaving head_seq discoverable on disk.
+    monkeypatch.setattr(store, "_cutoff", lambda room: time.time() + 10)
+
+    view = store.read_messages(tmp_path, "e-gone")
+    assert view["count"] == 0
+    assert view["last_seq"] == 5
+    assert store.last_seq(tmp_path, "e-gone") == 5
+    assert view["first_retained_seq"] is None and view["first_retained_ts"] is None
+
+    # A since past nothing visible must still advance to the head, not stick at since.
+    stuck = store.read_messages(tmp_path, "e-gone", since=2)
+    assert stuck["count"] == 0
+    assert stuck["last_seq"] == 5
+
+    # #585/#565: a cursor past the head still clamps to head (not echo since, not 0).
+    past = store.read_messages(tmp_path, "e-gone", since=999)
+    assert past["count"] == 0
+    assert past["last_seq"] == 5
+
+
+def test_reaped_room_cursor_clamps_to_floor_plain_read_stays_zero(tmp_path):
+    """#585: past-head cursor on a reaped room uses the floor; plain read stays 0."""
+    import store
+
+    store.append(tmp_path, "d-floor", "bot", "one")
+    store.append(tmp_path, "d-floor", "bot", "two")
+    store.room_path(tmp_path, "d-floor").unlink()
+    store._set_seq_entry(tmp_path, "d-floor", floor=2)
+
+    assert store.read_messages(tmp_path, "d-floor", since=999)["last_seq"] == 2
+    assert store.read_messages(tmp_path, "d-floor")["last_seq"] == 0
+    assert store.read_messages(tmp_path, "d-floor")["first_retained_seq"] is None
 
 
 def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
@@ -714,6 +778,25 @@ def test_a_second_precision_timestamp_still_expires(tmp_path):
     assert [m["text"] for m in view["messages"]] == ["new"]
     # seq keeps advancing past what nobody can read any more, or a cursor would be reused.
     assert store.last_seq(tmp_path, "e-legacy") == 2
+
+
+def test_timestamp_less_retained_floor_does_not_break_a_tail_read(tmp_path):
+    """A legacy retained record without `ts` keeps the sequence floor usable while the
+    timestamp field remains nullable for readers that need to re-verify the response shape."""
+    import store
+
+    path = store.room_path(tmp_path, "d-legacy-floor")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b'{"seq":1,"from":"a","text":"legacy"}\n'
+        b'{"seq":2,"ts":"2026-01-01T00:00:01.000000Z","from":"b","text":"current"}\n'
+    )
+
+    view = store.read_messages(tmp_path, "d-legacy-floor", limit=1, since=1)
+
+    assert [message["seq"] for message in view["messages"]] == [2]
+    assert view["first_retained_seq"] == 1
+    assert view["first_retained_ts"] is None
 
 
 def test_reap_spares_a_stillborn_room_answered_after_the_count(tmp_path, monkeypatch):
