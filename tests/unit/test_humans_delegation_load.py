@@ -23,7 +23,8 @@ const mode = process.argv[1];
 const html = readFileSync('src/humans.html', 'utf8');
 const names = ['hexBytes', 'bytesHex', 'b64uBytes', 'bytesB64u', 'base58', 'didOf',
   'unbase58', 'didPublicKey', 'notePath', 'delegationString', 'verifyDelegation',
-  'stripNote', 'readNote', 'parseDelegations', 'newest', 'loadDelegations'];
+  'stripNote', 'readNoteAt', 'readNote', 'writeNote', 'parseDelegations', 'newest',
+  'loadDelegations'];
 const functions = names.map(name => {
   const match = html.match(new RegExp('  function ' + name + '\\([^]*?\\n  \\}'));
   assert.ok(match, name + ' exists');
@@ -44,13 +45,13 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
-const observed = [deferred(), deferred()], requests = [], renders = [], errors = [];
+const observed = [deferred(), deferred(), deferred()], requests = [], renders = [], errors = [];
 const env = {
   crypto: webcrypto, TextEncoder, Uint8Array, atob, btoa, Date, me: null,
   renderDelegations(rows) { renders.push(JSON.parse(JSON.stringify(rows))); },
   fail(message) { errors.push(message); },
-  fetch(url) {
-    const request = { url, ...deferred() };
+  fetch(url, options) {
+    const request = { url, options, ...deferred() };
     requests.push(request);
     observed[requests.length - 1].resolve(request);
     return request.promise;
@@ -80,6 +81,51 @@ function expectScope(scope) {
   assert.equal(latest[0].d.scope, scope);
 }
 
+if (mode === 'legacy-write') {
+  const path = await env.notePath(original.did);
+  const reading = env.readNote(path);
+  const sharded = await observed[0].promise;
+  assert.equal(sharded.url, '/kv/' + path.ns + '/' + path.key);
+  sharded.resolve(new Response('missing', { status: 404 }));
+  const legacy = await observed[1].promise;
+  assert.equal(legacy.url, '/kv/' + path.legacy.ns + '/' + path.legacy.key);
+  legacy.resolve(new Response('BANNER\n\nmailbox: mb-p-old'));
+  const previous = await reading;
+  assert.equal(JSON.stringify(previous),
+               JSON.stringify({ value: 'mailbox: mb-p-old', targetExists: false }));
+
+  const next = previous.value + ' delegate: new-record';
+  const writing = env.writeNote(path, previous, next);
+  const posted = await observed[2].promise;
+  assert.equal(posted.url, '/kv/' + path.ns + '/' + path.key);
+  assert.equal(posted.options.method, 'POST');
+  assert.deepEqual(JSON.parse(posted.options.body), { value: next, if_absent: true });
+  posted.resolve(new Response('ok'));
+  assert.equal((await writing).status, 200);
+  clearTimeout(watchdog);
+  process.exit(0);
+}
+
+if (mode === 'current-write') {
+  const path = await env.notePath(original.did);
+  const reading = env.readNote(path);
+  const sharded = await observed[0].promise;
+  sharded.resolve(new Response('BANNER\n\nmailbox: mb-p-current'));
+  const previous = await reading;
+  assert.equal(JSON.stringify(previous),
+               JSON.stringify({ value: 'mailbox: mb-p-current', targetExists: true }));
+
+  const next = previous.value + ' delegate: new-record';
+  const writing = env.writeNote(path, previous, next);
+  const posted = await observed[1].promise;
+  assert.equal(posted.url, '/kv/' + path.ns + '/' + path.key);
+  assert.deepEqual(JSON.parse(posted.options.body), { value: next, if: previous.value });
+  posted.resolve(new Response('ok'));
+  assert.equal((await writing).status, 200);
+  clearTimeout(watchdog);
+  process.exit(0);
+}
+
 env.me = original;
 const old = env.loadDelegations();
 const first = await observed[0].promise;
@@ -92,15 +138,23 @@ if (mode.startsWith('current-')) {
     await old;
     expectScope('r:current');
     assert.deepEqual(errors, []);
+  } else if (mode === 'current-legacy' || mode === 'current-missing') {
+    first.resolve(new Response('missing', { status: 404 }));
+    const legacy = await observed[1].promise;
+    assert.equal(legacy.url, '/kv/' + path.legacy.ns + '/' + path.legacy.key);
+    legacy.resolve(mode === 'current-legacy'
+      ? new Response(await note(original, 'r:legacy', '1'))
+      : new Response('missing', { status: 404 }));
+    await old;
+    if (mode === 'current-legacy') expectScope('r:legacy');
+    else assert.deepEqual(renders, [[]]);
+    assert.deepEqual(errors, []);
   } else {
-    const status = mode === 'current-error' ? 503 : 404;
-    first.resolve(new Response('unavailable', { status }));
+    first.resolve(new Response('unavailable', { status: 503 }));
     await old;
     assert.deepEqual(renders, [[]]);
-    if (status === 503) {
-      assert.equal(errors.length, 1);
-      assert.match(errors[0], /could not read delegations.*HTTP 503/);
-    } else assert.deepEqual(errors, []);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /could not read delegations.*HTTP 503/);
   }
 } else {
   const [change, result] = mode.split('-');
@@ -133,8 +187,11 @@ clearTimeout(watchdog);
     "mode",
     [
         "current-success",
+        "current-write",
         "current-error",
+        "current-legacy",
         "current-missing",
+        "legacy-write",
         "switch-success",
         "switch-error",
         "refresh-success",
