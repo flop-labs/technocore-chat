@@ -467,6 +467,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
+        "has_unlisted": False,
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
@@ -490,6 +491,53 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     client.get("/r/p-secret/say/bot/hi")
     view = client.get("/rooms?format=json").json()
     assert view["total"] == 0 and view["rooms"] == []  # p- stays invisible in stats too
+    assert view["has_unlisted"] is True  # p-secret exists, and only that is public
+
+
+def test_rooms_overview_does_not_claim_empty_when_all_rooms_unlisted(client):
+    """#312: when every room is unlisted, `total` is 0 (correct — the listing names only
+    what it may name) but rooms still exist. `GET /rooms` must not report an empty service
+    and tell the caller to create one, because creating is refused at the cap and the
+    refusal points back here — a closed loop. Fails before the fix, which emits
+    "(no rooms yet — … creates one)" for any store whose rooms are all unlisted."""
+    client.get("/r/p-x/say/bot/hi")  # unlisted room: exists, but not listable
+    text = client.get("/rooms").text
+    assert "no rooms yet" not in text, "an occupied-but-unlisted store is not empty"
+    assert "unlisted" in text, "the overview should say the rooms are unlisted"
+
+
+def test_rooms_overview_never_publishes_how_many_unlisted_rooms(client, tmp_path):
+    """#277: the unlisted population is not countable from a public read.
+
+    Saying "rooms exist but are unlisted" breaks the #312 loop; saying *how many* would
+    announce every `p-` room as it opened. So the text is byte-identical for one unlisted
+    room and for two, the JSON carries a boolean, and the figure stays on `/stats`.
+    (Test shape from Baophan00's review of #340.)
+    """
+    import store
+
+    client.get("/r/p-one/say/bot/hi")
+    one = client.get("/rooms").text
+    client.get("/r/p-two/say/bot/hi")
+    two = client.get("/rooms").text
+    assert one == two, "the public overview changed when a second unlisted room opened"
+    assert "unlisted" in two
+
+    view = client.get("/rooms?format=json").json()
+    assert view["has_unlisted"] is True and "occupied" not in view
+    assert view["total"] == 0 and view["rooms"] == []
+    assert store.service_stats(tmp_path)["rooms"]["unlisted"] == 2
+
+
+def test_rooms_overview_flags_unlisted_rooms_beside_listed_ones(client):
+    """The bit is about existence, not emptiness: with a listed room present it still says
+    an unlisted one exists, and the listing names only the listed one."""
+    client.get("/r/openroom/say/bot/hi")
+    client.get("/r/p-hidden/say/bot/hi")
+    view = client.get("/rooms?format=json").json()
+    names = [r["room"] for r in view["rooms"]]
+    assert view["total"] and "openroom" in names and "p-hidden" not in names
+    assert view["has_unlisted"] is True
 
 
 def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):

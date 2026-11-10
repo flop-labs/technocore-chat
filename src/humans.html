@@ -1037,7 +1037,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // Three different situations, three different next steps. The truncated case is the
       // one worth spelling out: the room may well exist and simply not be on this page, and
       // the Room box below opens any room by name whether or not it was ever listed.
-      td.textContent = !roomsView.total ? 'No rooms yet.'
+      // Every room unlisted is not an empty service (#312): say so, or a reader goes to
+      // create one the cap will refuse. The Room box opens an unlisted room by name.
+      td.textContent = !roomsView.total
+        ? (roomsView.has_unlisted
+          ? 'This service has rooms, but all are unlisted. Open one by name in the Room box below.'
+          : 'No rooms yet.')
         : roomsView.rooms.length < roomsView.total
           ? 'No match among the ' + roomsView.rooms.length + ' most recently active rooms '
             + 'loaded here. Older rooms are not loaded — open one by name in the Room box '
