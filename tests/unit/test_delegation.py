@@ -377,6 +377,55 @@ def _signer_source() -> str:
     return (ROOT / "scripts" / "sign.py").read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node executes the page's note editor")
+@pytest.mark.parametrize("position", ["absent", "first", "middle", "last", "single-space"])
+def test_publishing_a_delegation_preserves_unrelated_profile_text(page, sign, position):
+    """Adding/replacing a grant must not rewrite literal strings elsewhere in the note."""
+    import store
+
+    root = _key(ROOT_SEED)
+    agent = sign.did_of(_key(AGENT_SEED))
+    other_agent = sign.did_of(_key("44" * 32))
+    old = _line(sign, root, agent, scope="*", nonce="1")
+    other = _line(sign, root, other_agent, scope="kv:plans", nonce="2")
+    # Repeated ASCII spaces and NBSP survive the server's single-line sweep. Neither
+    # is a delegation delimiter when it occurs inside a profile's JSON string.
+    profile = 'profile: {"label":"Build  Agent","unit":"10\u00a0kg"}'
+    if position == "single-space":
+        profile = 'profile: {"label":"Build Agent","unit":"10 kg"}'
+    parts = [profile, "mailbox: mb-profile", other]
+    if position in ("first", "middle", "last"):
+        parts.insert({"first": 0, "middle": 1, "last": 3}[position], old)
+    previous = " ".join(parts)
+    assert store.clean_text(previous, store.MAX_VALUE_CHARS) == previous
+
+    editor = re.search(r"  function withoutAgent\(note, agent\) \{[\s\S]*?\n  \}", page)
+    assert editor is not None
+    script = (
+        f"var DELEGATE_TOKEN = {json.dumps(sign.DELEGATE_TOKEN)};\n"
+        f"var DELEGATE_FIELDS = {sign.DELEGATE_FIELDS};\n"
+        + editor.group(0)
+        + "\nprocess.stdout.write(withoutAgent(process.argv[1], process.argv[2]));"
+    )
+    result = subprocess.run(
+        ["node", "-e", script, previous, agent],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    replacement = _line(sign, root, agent, scope="r:lobby", nonce="3")
+    published = store.clean_text(result.stdout + " " + replacement, store.MAX_VALUE_CHARS)
+    assert profile in published, (
+        "delegation publishing changed the stored profile's literal strings"
+    )
+    assert "mailbox: mb-profile" in published and other in published
+    assert old not in published
+    records = sign.delegations(published)
+    assert [(d[0], d[1]) for d in records] == [(other_agent, "kv:plans"), (agent, "r:lobby")]
+    assert sign.check_note(sign.did_of(root), published) == 2
+
+
 # Spellings Number() accepts and /[0-9]/ does not, plus one Python's str.isdigit() accepts
 # and JavaScript never will. Each is a way for two verifiers of one record to disagree about
 # whether a grant is live — which, since expiry is this format's only revocation, is the

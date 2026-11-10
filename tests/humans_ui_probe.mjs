@@ -1239,10 +1239,11 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   // server's sweep turns every newline into a space — so this is what makes the delegations
   // below land in a note that is not empty, which is the case that a line-oriented parser
   // silently loses (PR #719 review).
+  const profile = 'mailbox: mb-probe profile: {"label":"Build  Agent","unit":"10\u00a0kg"}';
   await fetch(`${HOST}${notePath}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ value: "mailbox: mb-probe" }),
+    body: JSON.stringify({ value: profile }),
   });
 
   const AGENT = "did:key:z6MkqGC3nWZhYieEVTVDKW5v588CiGfsDSmRVG9ZwwWTvLSK";
@@ -1298,6 +1299,8 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
         `${(note.match(/delegate:/g) || []).length} records`);
   check("delegation: the note's existing content survived the append",
         note.includes("mailbox: mb-probe"), note.slice(0, 120));
+  check("delegation: adding and re-issuing grants preserves literal profile strings",
+        note.includes(profile), JSON.stringify(note.split("\n")[2]));
   check("delegation: and the note really is a single line",
         note.trimEnd().split("\n").filter((l) => l.includes("delegate:")).length === 1);
 
