@@ -242,6 +242,21 @@ def test_a_truncated_trailing_record_is_dropped_rather_than_half_read(sign):
     assert sign.delegations(sign.DELEGATE_TOKEN) == []
 
 
+def test_expired_higher_nonce_does_not_revive_older_delegation(sign, capsys):
+    """An authentic expired newer grant must still supersede the older grant."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    agent_did = sign.did_of(agent)
+    old = _line(sign, root, agent_did, scope="*", expires=int(time.time()) + 86400, nonce="1")
+    newer_expired = _line(
+        sign, root, agent_did, scope="r:lobby", expires=int(time.time()) - 60, nonce="2"
+    )
+
+    assert sign.check_note(sign.did_of(root), old + " " + newer_expired) == 0
+    out = capsys.readouterr().out
+    assert "EXPIRED" in out
+    assert "OK " not in out
+
+
 def test_the_page_scans_for_the_token_the_same_way(page, sign):
     """The page and the signer each walk the note's whitespace-separated fields looking for
     the token. Written twice, so pinned twice: the page must not go back to splitting lines,
@@ -289,6 +304,23 @@ def test_putting_a_superseded_grant_back_does_not_restore_it(sign, capsys):
     out = capsys.readouterr().out
     assert "OK         " + agent_did + " r:lobby" in out
     assert "SUPERSEDED " + agent_did + " *" in out
+
+
+def test_forged_higher_nonce_does_not_supersede_valid_delegation(sign, capsys):
+    """A forged record must not supersede a valid delegation for the same agent."""
+    root, agent = _key(ROOT_SEED), _key(AGENT_SEED)
+    agent_did = sign.did_of(agent)
+    valid = _line(sign, root, agent_did, scope="r:lobby", nonce="1")
+
+    forged_fields = _line(sign, root, agent_did, scope="r:lobby", nonce="999").split()
+    forged_fields[-1] = "Zm9yZ2Vk"
+    note = valid + " " + " ".join(forged_fields)
+
+    assert sign.check_note(sign.did_of(root), note) == 1
+    out = capsys.readouterr().out
+    assert "FORGED" in out
+    assert "OK         " + agent_did + " r:lobby" in out
+    assert "SUPERSEDED" not in out
 
 
 def test_superseding_is_per_agent_and_never_across_them(sign, capsys):
