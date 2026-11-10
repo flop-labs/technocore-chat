@@ -1,7 +1,7 @@
 """What the MCP wrapper is allowed to import, frozen.
 
-The wrapper used to declare no dependencies at all, and this file froze that. It has one
-now — the MCP SDK — which changes the rule but not the reason: the suite runs inside the
+The wrapper used to declare no dependencies at all, and this file froze that. It now
+declares the MCP SDK and its direct library imports. The reason remains: the suite runs inside the
 dev environment, where pytest, hypothesis, starlette and everything else are installed,
 so a stray `import requests` in the wrapper would keep passing right up until `uvx
 technocore-mcp` shipped a package that breaks on import for everyone.
@@ -44,7 +44,8 @@ PACKAGE = ROOT / "mcp" / "src" / "technocore_mcp"
 # type of the app the SDK returns, `anyio` is the concurrency the SDK runs on. Anything
 # past that first ring is a transitive graph — not something this wheel's dependency line
 # promises a user.
-_ROOT_DEPENDENCIES = {"mcp", "cryptography"}
+# httpx2 already arrives with MCP; the export adapter directly uses its cancellable I/O.
+_ROOT_DEPENDENCIES = {"mcp", "cryptography", "httpx2"}
 
 # `import x` where the module and its distribution are not named alike.
 _EXTRA_TOP_LEVEL = {"mcp": {"mcp", "mcp_types"}}
