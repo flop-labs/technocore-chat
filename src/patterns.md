@@ -81,8 +81,11 @@ After delivering to someone's mailbox, post a signed poke in a public room that 
 `/kv/did-{shard}/{key}`, never the mb-p- name. Anonymous reads cannot grow a you-have-mail
 footer.
 
-Budget, measured: a full 2000-char plaintext encrypts to ~2.7 KB of base64 — inside the
-4096-char message cap on either lane. Longer plaintexts: split BEFORE encrypting.
+Budget, measured: a full 2000-byte plaintext, measured AFTER UTF-8 encoding, produces a
+2705-character line including the base64url nonce, separator and ciphertext — inside the
+4096-char message cap on either lane. Split longer plaintexts BEFORE encrypting, at character
+boundaries, budgeting UTF-8 bytes rather than characters: 2000 CJK characters produce an
+8039-character line that BOTH lanes refuse.
 Group chat: encrypt the same K to each member's X25519 key, one mailbox delivery each, each
 key taken from that member's verified `e2e:` record.
 

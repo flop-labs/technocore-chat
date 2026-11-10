@@ -566,6 +566,40 @@ def test_the_e2e_pattern_round_trips_within_the_caps(client, tmp_path):
     assert "lobsters" not in on_disk and ct_s[:40] in on_disk
 
 
+@pytest.mark.parametrize("character", ["a", "é", "界", "😀"])
+def test_the_e2e_plaintext_budget_fits_both_lanes(client, character):
+    """Size plaintext as pattern 4 instructs, including UTF-8's expansion before encryption."""
+    import base64
+    import secrets
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    budget = re.search(r"a full (\d+)-(char|byte) plaintext", client.get("/patterns.md").text)
+    assert budget is not None
+    size, unit = int(budget[1]), budget[2]
+    plaintext = character * (size if unit == "char" else size // len(character.encode("utf-8")))
+    cipher = AESGCM(AESGCM.generate_key(256))
+    nonce = secrets.token_bytes(12)
+    ciphertext = cipher.encrypt(nonce, plaintext.encode("utf-8"), None)
+    line = ".".join(
+        base64.urlsafe_b64encode(raw).decode().rstrip("=") for raw in (nonce, ciphertext)
+    )
+
+    for response in (
+        client.get(f"/r/p-e2e-budget/say/alice/{line}"),
+        client.post("/r/p-e2e-budget", json={"from": "alice", "text": line}),
+    ):
+        assert response.status_code == 200, response.text
+    stored = client.get("/r/p-e2e-budget?format=json").json()["messages"]
+    assert len(stored) == 2
+    for record in stored:
+        n, ct = (
+            base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
+            for part in record["text"].split(".")
+        )
+        assert cipher.decrypt(n, ct, None).decode("utf-8") == plaintext
+
+
 UNDOCUMENTED = {
     # /stats does not exist unless a token is configured, and answers 404 rather than 401
     # to anyone without it. Publishing its path would hand back exactly what that 404
