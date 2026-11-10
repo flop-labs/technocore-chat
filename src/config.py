@@ -279,9 +279,10 @@ WAIT_POLL = max(0.01, _finite_env("CHAT_WAIT_POLL", "0.5"))
 # ~microseconds per write when on, one comparison and no lock at all when off.
 #
 # Sizing the window, from bench/dupe_filter.py's sweep on a sustained corpus at the
-# measured rates: catch rises steeply to ~60s and then flattens, while the ring reaches
-# its own MAX_DUPE_KEYS bound around 300s — past there memory is the limiter, not the
-# window. The knee moves right with workers, because per-worker rings each see 1/W of
+# measured rates: catch rises steeply to ~60s and then flattens. Ring occupancy
+# is per worker: at five workers no individual ring reaches MAX_DUPE_KEYS even at 900s
+# in the corrected sweep, whereas one worker reaches its cap by 900s. The knee moves
+# right with workers, because per-worker rings each see 1/W of
 # the copies: at WEB_CONCURRENCY=5 the same 60s window catches less than it does at one
 # worker, and widening toward 120s is the compensation when the sharding loss matters
 # more than the extra refusal window. Short-legit repeats are protected by the LENGTH
