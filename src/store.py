@@ -29,6 +29,7 @@ import orjson
 
 import config
 import didkey
+import roomsindex
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 
@@ -174,6 +175,7 @@ USAGE_FILE = ".usage"
 # leaving the count stale until the next reap (<= REAP_EVERY). Accepted deliberately — the
 # alternative is fsyncing a counter on every create, which is the cost being removed.
 NOTES_FILE = ".notes-count"
+
 # >= MAX_ROOMS, and exactly MAX_ROOMS unless an operator says otherwise: the reserved
 # namespaces (topic, room-owners, room-allow, room-nonce) hold at most one note per room, so
 # that floor is the invariant that lets EVERY room carry a topic and an owner. Raising
@@ -1388,29 +1390,24 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
 def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     """Recency-sorted room summaries for the overview.
 
-    `size` and `idle` come free from the directory stat; `last_seq` and the engagement
-    aggregates cost one small tail read, computed only for the rooms actually shown and
-    memoized against that same stat — so a walk re-reads only rooms that changed since
-    the last one. See WINDOW_BYTES for the per-room worst-case bound.
+    Uses the incremental rooms index when available, falling back to
+    walking all room files if the index is missing or empty.
+
+    `size` and `idle` come from the index; `last_seq` and the engagement
+    aggregates cost one small tail read, computed only for the rooms actually shown.
     """
     now = time.time()
-    entries = []
-    for e in _walk(root / "rooms", ".jsonl"):
-        name = e.name[: -len(".jsonl")]
-        if not _listable(name):
-            continue
-        try:
-            st = e.stat()
-        except OSError:
-            continue  # reaped between the readdir and the stat
-        entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
-    entries.sort(reverse=True)
+    # The index when it can answer, the walk when it cannot — and the whole decision
+    # between them, plus the totals, in one call. Nothing here stats every room: that is
+    # what the index is for (see roomsindex.listing).
+    entries, total, total_bytes = roomsindex.listing(root, limit)
+
     shown = []
     windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
     mono = time.monotonic()
-    for mtime, size, name, mtime_ns in entries[: max(1, min(int(limit), MAX_LIMIT))]:
+    for mtime, size, name, mtime_ns in entries:
         top, nicks = _cached_window(root_key, name, (mtime_ns, size))
         windows.append(nicks)
         shown.append(
@@ -1425,12 +1422,9 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         )
     return {
         "rooms": shown,
-        "total": len(entries),
+        "total": total,
         "capacity": MAX_ROOMS,
-        "bytes": sum(e[1] for e in entries),
-        # Both bounds, because either can be the one that bites: a service can be far from
-        # the room count and out of disk, or the reverse. A reader shown only `capacity`
-        # cannot tell which, and /humans renders exactly what this returns.
+        "bytes": total_bytes,
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
         "engagement": _rollup(windows),
     }
@@ -1930,6 +1924,10 @@ def _reap_pass(root: Path, now: float) -> None:
     # And the directories it emptied, which is the only place a bucket or a namespace can
     # need removing: nothing else in the store deletes.
     touched: dict[str, set[str]] = {"rooms": set(), "notes": set()}
+    # The rooms index this pass publishes, started here and folded together with the very
+    # `st` the count below accumulates from — so one walk produces both figures and the
+    # index, and they agree by construction. See roomsindex.reap_*.
+    roomsindex.reap_begin(root)
     for sub, suffix, stillborn_rule in (("rooms", ".jsonl", True), ("notes", ".txt", False)):
         base = f"{root / sub}{os.sep}"
         held, emptied = kept[sub], touched[sub]
@@ -1941,6 +1939,7 @@ def _reap_pass(root: Path, now: float) -> None:
                 st = entry.stat()
                 held[0] += 1
                 held[1] += st.st_size
+                roomsindex.reap_see(root, entry, st)
                 if by_ns:
                     per_ns[_emptied(base, entry.path, True)] += 1
                 if _guards_a_live_room(root, base, entry, now):
@@ -1974,6 +1973,7 @@ def _reap_pass(root: Path, now: float) -> None:
                         p.unlink(missing_ok=True)
                         held[0] -= 1
                         held[1] -= st.st_size
+                        roomsindex.reap_unsee(root, entry)  # never carried into the snapshot
                         emptied.add(d := _emptied(base, entry.path, by_ns))
                         if by_ns:
                             per_ns[d] -= 1
@@ -1982,6 +1982,12 @@ def _reap_pass(root: Path, now: float) -> None:
                             reaped[f"reaped_{reason}"] += 1
             except OSError:
                 continue  # racing writer or vanished file: next pass picks it up
+    # The rooms this pass took are already out of the snapshot — dropped at unlink, by the
+    # same walk that counted them — so nothing is removed from the index file here. Deleting
+    # lines in place would race the appends this loop deliberately shares no lock with; the
+    # publish at the tail replaces the whole file atomically instead. Until it runs, the old
+    # lines are still on disk and listing() re-stats each one and backfills, so a dead entry
+    # never reaches a listing in that window.
     if any(reaped.values()):  # one lock for the whole pass, not one per deleted room
         _bump(root, **reaped)
     _sweep_orphan_locks(root, now, touched)
@@ -2005,6 +2011,12 @@ def _reap_pass(root: Path, now: float) -> None:
                 os.rmdir(d)  # empty buckets only: rmdir refuses a directory with entries
         except OSError:
             continue  # best effort, like the rest of the tail: the next pass tries again
+    # Publish the index from THIS pass's own walk — no second pass over the tree, and
+    # outside the spans above, because `_settle_count` holds that span for O(1) reads and
+    # this is O(rooms). The lock it serializes on is the one appenders already share, so a
+    # room created after the walk passed it is carried onto the staging file rather than
+    # lost, and no create span is needed to protect it.
+    roomsindex.reap_end(root)
 
 
 def snapshots(root: Path) -> list[dict]:
@@ -2555,8 +2567,13 @@ def append(
     # instant, which is correlatable with whoever was active. So: nothing at all.
     if created and room != EVENTS_ROOM and not unlisted(room):
         _log_event(root, f"created {room}")
+        # The events room is written by _log_event via _write_record, which bypasses
+        # append() — so index it here, or /rooms would wait for the next reap pass.
+        roomsindex.observe_file(root, EVENTS_ROOM)
     # Last, so the sample includes this write and any announcement it produced. Throttled
     # internally — the common call is one stat of a marker file.
+    # The room itself, under its own lock: see observe_file.
+    roomsindex.observe_file(root, room)
     _snapshot(root)
     return rec
 
