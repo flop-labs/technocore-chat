@@ -27,10 +27,11 @@ for (const field of ['text', 'room', 'filter']) {
       addEventListener(type, callback) { listeners[name + ':' + type] = callback; },
     });
     const elements = Object.fromEntries(
-      ['text', 'room', 'filter', 'send', 'join'].map((name) => [name, element(name)])
+      ['text', 'room', 'filter', 'kind', 'send', 'join'].map((name) => [name, element(name)])
     );
     vm.runInNewContext(input.script, {
       textEl: elements.text, roomEl: elements.room, filterEl: elements.filter,
+      kindEl: elements.kind, roomsView: null, statsEl: {}, loadRooms() {},
       document: { getElementById: (name) => elements[name] },
       roomsBody: { querySelector: () => ({ click: () => actions.push('filter') }) },
       renderRooms() {},

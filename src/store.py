@@ -1385,8 +1385,13 @@ def _cached_topic(root: str, room: str, stamp: tuple, now: float) -> str | None:
     return _topics_memo(root, room, stamp, _time_bucket(now, ttl))
 
 
-def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
+def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dict:
     """Recency-sorted room summaries for the overview.
+
+    `kind` partitions the already-listable population before `limit`: discussion includes
+    every public non-mailbox room (including `events`), mailbox includes every public room
+    carrying the `mb` class, and all preserves the original population. An unlisted
+    composed class is excluded before that choice and therefore cannot leak through it.
 
     `size` and `idle` come free from the directory stat; `last_seq` and the engagement
     aggregates cost one small tail read, computed only for the rooms actually shown and
@@ -1397,7 +1402,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
     entries = []
     for e in _walk(root / "rooms", ".jsonl"):
         name = e.name[: -len(".jsonl")]
-        if not _listable(name):
+        if not _listable(name) or ((kind == "mailbox") != is_mailbox(name) and kind != "all"):
             continue
         try:
             st = e.stat()
@@ -1405,8 +1410,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
             continue  # reaped between the readdir and the stat
         entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     entries.sort(reverse=True)
-    shown = []
-    windows = []
+    shown, windows = [], []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
     mono = time.monotonic()
@@ -1423,6 +1427,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
                 **_engagement(nicks),
             }
         )
+    whole_total, whole_bytes_at_last_reap = _note_totals(root, _count_rooms, name=USAGE_FILE)
     return {
         "rooms": shown,
         "total": len(entries),
@@ -1432,6 +1437,14 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT) -> dict:
         # the room count and out of disk, or the reverse. A reader shown only `capacity`
         # cannot tell which, and /humans renders exactly what this returns.
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        # The room count is current between reaps; bytes are the explicitly named cached
+        # measurement used by the create/compaction gates. Names deliberately stay absent.
+        "whole_store": {
+            "total": whole_total,
+            "capacity": MAX_ROOMS,
+            "bytes_at_last_reap": whole_bytes_at_last_reap,
+            "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        },
         "engagement": _rollup(windows),
     }
 
@@ -2178,15 +2191,12 @@ def _count_notes(root: Path) -> tuple[int, int]:
     """
     total = 0
     size = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                    total += count
-                    size += ns_bytes
-    except FileNotFoundError:
-        pass
+    with suppress(FileNotFoundError), os.scandir(root / "notes") as namespaces:
+        for ns in namespaces:
+            if ns.is_dir():
+                count, ns_bytes = _scan(ns.path, ".txt", sized=True)
+                total += count
+                size += ns_bytes
     return total, size
 
 
@@ -2221,12 +2231,10 @@ def _read_counts(d: Path, name: str = NOTES_FILE) -> tuple[int, int] | None:
     answer to that — `_note_totals` walks, `room_bytes_used` reads it as no pressure, and the
     reaper writes what its own walk saw — and each one says why.
     """
-    try:
+    with suppress(OSError, ValueError):
         count, size = (d / name).read_text(encoding="utf-8").split()
         if int(count) >= 0 and int(size) >= 0:
             return int(count), int(size)
-    except (OSError, ValueError):
-        pass
     return None
 
 
@@ -2260,10 +2268,8 @@ def _note_totals(d: Path, rebuild=_count_notes, persist=False, name=NOTES_FILE) 
         return cached
     totals = rebuild(d)
     if persist and totals[0]:
-        try:
+        with suppress(OSError):
             _write_note_count(d, *totals, name=name)
-        except OSError:
-            pass
     return totals
 
 
