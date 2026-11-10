@@ -1182,6 +1182,40 @@ def test_the_signed_lane_publishes_the_shape_it_actually_enforces(client):
     assert client.post("/r/lobby", json={"from": "b", "text": "hi", "sig": "x"}).status_code == 200
 
 
+@pytest.mark.parametrize("nickname", [None, 0, "Bad Name"])
+def test_signed_post_schema_accepts_the_from_field_the_handler_ignores(client, nickname):
+    """A shared POST envelope can carry an unused nickname beside signed credentials.
+
+    Schema validation must allow that envelope on the signed lane while still rejecting
+    the same nickname when it would be used as the unsigned author.
+    """
+    from jsonschema import Draft202012Validator
+
+    did, sign = _keypair()
+    payload = {
+        "did": did,
+        "sig": sign("schema-signed-from|1|hello"),
+        "nonce": "1",
+        "text": "hello",
+        "from": nickname,
+    }
+    response = client.post("/r/schema-signed-from?format=json", json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["posted"]["from"] == did
+
+    unsigned = {"from": nickname, "text": "hello"}
+    refused = client.post("/r/schema-signed-from", json=unsigned)
+    assert refused.status_code == 400
+    assert refused.text.startswith("400 bad from:")
+
+    doc = client.get("/openapi.json").json()
+    for path in ("/r/{room}", "/r/events"):
+        schema = doc["paths"][path]["post"]["requestBody"]["content"]["application/json"]["schema"]
+        validator = Draft202012Validator(schema)
+        validator.validate(payload)
+        assert not validator.is_valid(unsigned)
+
+
 def test_a_free_form_field_publishes_that_it_cannot_be_empty(client):
     """`required: ["text"]` is satisfied by `""`, which is a 400 — the sweep leaves nothing
     visible. A generator reading only `required` emits a client whose empty-message call

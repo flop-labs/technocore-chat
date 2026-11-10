@@ -287,12 +287,12 @@ _ROOM_POST_BODY = {
                 "type": "object",
                 "properties": {
                     "from": {
-                        **_NAME_SCHEMA,
                         "description": (
-                            f"Self-asserted nickname; {_NAME_RULE}. Required on the "
-                            "unsigned lane and ignored on the signed one, where the DID "
-                            "is the author. A non-string is a 400 naming `from`, never "
-                            "`str()`-coerced into a nickname."
+                            f"Self-asserted nickname; {_NAME_RULE} on the unsigned lane, "
+                            "where it is required and a non-string is a 400 naming "
+                            "`from`, never `str()`-coerced into a nickname. Ignored on "
+                            "the signed lane regardless of type or value: the DID is "
+                            "the author."
                         ),
                     },
                     "text": {
@@ -317,7 +317,12 @@ _ROOM_POST_BODY = {
                 # name validator, so the 400 blamed a parameter the caller had got right
                 # (#373). One of the two is always required, which is exactly what `anyOf`
                 # says and what the handler now enforces.
-                "anyOf": [{"required": ["from"]}, {"required": ["did"]}],
+                # `from` is read only on the unsigned lane, just as `sig`/`nonce` below
+                # are read only on the signed one. Its constraints belong to that branch.
+                "anyOf": [
+                    {"required": ["from"], "properties": {"from": _NAME_SCHEMA}},
+                    {"required": ["did"]},
+                ],
                 # `did` without the other two is refused, never downgraded to the unsigned
                 # lane. Not stated the other way round: a stray `sig` with no `did` is an
                 # ordinary unsigned post and is accepted — which is also why the exact
