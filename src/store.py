@@ -542,12 +542,15 @@ def _migrate(legacy: Path, sharded: Path) -> bool:
     than deleted.
     """
     try:
-        with _locked(legacy, nb=True):
+        # Wait for an in-flight writer instead of returning the legacy path while another
+        # resolver is moving it.  A resolver that returns before the move completes can hand
+        # one caller the flat file and another the bucket, forking the room.
+        with _locked(legacy):
             sharded.parent.mkdir(parents=True, exist_ok=True)
             os.replace(legacy, sharded)
             return True
     except OSError:
-        return False  # lost the race, or cannot write: `_resolve` falls back to what is on disk
+        return False  # cannot write: `_resolve` falls back to what is on disk
 
 
 def _resolve(d: Path, name: str, suffix: str) -> Path:
