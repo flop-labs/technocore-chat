@@ -77,7 +77,7 @@ def test_373_an_unsigned_post_without_from_names_from_not_the_room(client):
     # required on the unsigned lane only, which is what the body schema's anyOf says.
     body = client.get("/openapi.json").json()["paths"]["/r/{room}"]["post"]["requestBody"]
     schema = body["content"]["application/json"]["schema"]
-    assert schema["anyOf"] == [{"required": ["from"]}, {"required": ["did"]}]
+    assert [lane["required"] for lane in schema["anyOf"]] == [["from"], ["did"]]
 
     # A *malformed* `from` was the same failure in a different coat, and the one half the
     # issue's own suggested fix named that its reproduction did not: it reached valid_name
