@@ -201,7 +201,8 @@ async function fromOrigin(request, key) {
   // to refresh, so a header that expires sooner would just hand the decision back.
   headers.set("Cache-Control", `public, max-age=0, s-maxage=${EDGE_HOLD_SECONDS}`);
   await caches.default.put(key, new Response(body, { status: 200, headers }));
-  return { status: 200, body, headers };
+  // `stored` is what makes this reply every reader's rather than the caller's: see cold().
+  return { status: 200, body, headers, stored: true };
 }
 
 /** One origin walk per key, however many readers are waiting on it. */
@@ -215,14 +216,28 @@ function fill(request, key) {
 
 const asResponse = (r) => new Response(r.body, { status: r.status, headers: r.headers });
 
+/** A cold reader's answer. The reader that started the fill gets whatever the origin told it.
+ * A reader that joined someone else's fill gets that reply only if it is the shared copy: a
+ * 429 is the starter's read budget being spent ("the read budget for your IP"), and a 200
+ * that was not stored carries the starter's budget footer (no-store) — handing either on
+ * makes every reader in the burst back off on, or pace by, one caller's allowance. Those
+ * readers ask the origin for themselves. A 5xx is the origin failing for everyone, so it is
+ * shared as before: re-asking a saturated origin once per reader is what fill() prevents. */
+async function cold(request, joined, r) {
+  const callers = r.status === 429 || (r.status === 200 && !r.stored);
+  if (!joined || !callers) return asResponse(r);
+  return fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
+}
+
 async function revalidating(request, ctx, pathname, seconds) {
   const key = cacheKey(new URL(request.url), pathname);
   // No canonical key: serve from the origin without touching the shared copy.
   if (!key) return fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
 
   const hit = await caches.default.match(key);
-  // Cold: someone has to be first, but only one of them — the rest join that fill.
-  if (!hit) return asResponse(await fill(request, key));
+  // Cold: someone has to be first, but only one of them — the rest join that fill. Whether
+  // this reader joined is read before fill() registers a job, so the starter never counts.
+  if (!hit) return cold(request, inFlight.has(key.url), await fill(request, key));
 
   const stamp = Number(hit.headers.get(STAMP) || 0);
   if (Date.now() - stamp > seconds * 1000) {
