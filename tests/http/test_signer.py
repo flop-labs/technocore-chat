@@ -150,6 +150,14 @@ def test_delegate_days_are_refused_in_words_not_with_a_traceback() -> None:
     assert good.returncode == 0
     assert good.stdout.splitlines()[-1].startswith(f"delegate: {agent} * ")
 
+    # DIGITS_RE also bounds <days> at 19 characters, like every other number this script
+    # reads: 18 leading zeros and a 1 is still a one-day grant; 19 and a 1 is refused.
+    edge = run("delegate", "--seed", SEED, agent, "*", "0" * 18 + "1", "5")
+    assert edge.returncode == 0, edge.stderr
+    too_long = run("delegate", "--seed", SEED, agent, "*", "0" * 19 + "1", "5")
+    assert too_long.returncode != 0
+    assert "days must be 1-3650" in too_long.stderr and "Traceback" not in too_long.stderr
+
 
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
     text = "hello from the signer"
