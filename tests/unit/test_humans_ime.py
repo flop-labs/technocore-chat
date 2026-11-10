@@ -35,6 +35,8 @@ for (const field of ['text', 'room', 'filter']) {
       roomsBody: { querySelector: () => ({ click: () => actions.push('filter') }) },
       renderRooms() {},
       send: () => actions.push('text'),
+      // The composer's Enter lane now calls the in-flight guard, which calls send().
+      submit: () => actions.push('text'),
       open: () => actions.push('room'),
     });
     listeners[field + ':keydown'](event);

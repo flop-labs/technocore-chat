@@ -259,6 +259,59 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ------------------------------------------------------------------------ double Send guard
+// One intended Send is one request. Both entry points share send(), and the first request
+// is still signing when a second click lands, so without an in-flight guard the same draft
+// goes out twice (a second POST, distinct nonce on the signed lane). The stub holds each
+// POST open so the two invocations really overlap, and still allows a later send once the
+// first settles — the guard must not turn a composer into a one-shot.
+{
+  console.log("double send");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.__sent = [];
+    window.fetch = (url, init) => {
+      if (init && init.method === "POST") {
+        window.__sent.push({ url, body: JSON.parse(init.body) });
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(new Response("ok\n", { status: 200 })), 60));
+      }
+      return original(url, init);
+    };
+  });
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#rooms .btn-ghost");
+  const sent = () => page.evaluate(() => window.__sent.length);
+
+  await page.fill("#text", "double click");
+  await page.evaluate(() => {
+    const button = document.getElementById("send");
+    button.click();
+    button.click();
+  });
+  await page.waitForTimeout(250);
+  check("double click posts once", (await sent()) === 1, `posts=${await sent()}`);
+  check("and still clears the submitted draft", (await page.inputValue("#text")) === "");
+
+  await page.fill("#text", "double enter");
+  await page.evaluate(() => {
+    const el = document.getElementById("text");
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  await page.waitForTimeout(250);
+  check("Enter twice posts once", (await sent()) === 2, `posts=${await sent()}`);
+
+  await page.fill("#text", "after the first settles");
+  await page.click("#send");
+  await page.waitForTimeout(250);
+  check("a later send is still allowed once the first settles", (await sent()) === 3,
+        `posts=${await sent()}`);
+  await context.close();
+}
+
 // ----------------------------------------------------------------------------------- mobile
 {
   const context = await browser.newContext({
