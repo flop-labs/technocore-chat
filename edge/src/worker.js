@@ -78,7 +78,7 @@ const STAMP = "x-edge-stamp";
 // origin: keying on the raw URL instead is the bug the spec exists to prevent. Fail closed.
 const EDGE_KEY = ROUTING.edge_key ?? {};
 
-// One fill per cache key per isolate, cold path included. Isolates are per-PoP, so this is
+// One shared fill per cache key per isolate, cold path included. Isolates are per-PoP, so this is
 // not a global lock and does not need to be: what it stops is a burst arriving on one PoP
 // with no copy or an expired one, each reader starting its own walk at the origin.
 const inFlight = new Map();
@@ -201,13 +201,19 @@ async function fromOrigin(request, key) {
   // to refresh, so a header that expires sooner would just hand the decision back.
   headers.set("Cache-Control", `public, max-age=0, s-maxage=${EDGE_HOLD_SECONDS}`);
   await caches.default.put(key, new Response(body, { status: 200, headers }));
-  return { status: 200, body, headers };
+  return { status: 200, body, headers, shareable: true };
 }
 
-/** One origin walk per key, however many readers are waiting on it. */
-function fill(request, key) {
+/** Share public fills. A cold follower needs its own reply when the fill is caller-specific. */
+function fill(request, key, { needsOwnReply = false } = {}) {
   const pending = inFlight.get(key.url);
-  if (pending) return pending;
+  if (pending) {
+    // Background refresh callers already have a cached reply: they only join the refresh.
+    // Cold callers must not inherit another caller's 429 or private budget footer merely
+    // because it arrived through a shared promise rather than through caches.default.
+    if (!needsOwnReply) return pending;
+    return pending.then((reply) => reply.shareable ? reply : fromOrigin(request, key));
+  }
   const job = fromOrigin(request, key).finally(() => inFlight.delete(key.url));
   inFlight.set(key.url, job);
   return job;
@@ -221,8 +227,8 @@ async function revalidating(request, ctx, pathname, seconds) {
   if (!key) return fetch(request, { signal: AbortSignal.timeout(ORIGIN_REVALIDATE_MS) });
 
   const hit = await caches.default.match(key);
-  // Cold: someone has to be first, but only one of them — the rest join that fill.
-  if (!hit) return asResponse(await fill(request, key));
+  // Cold: join the first fill if it is public; a private result belongs only to its caller.
+  if (!hit) return asResponse(await fill(request, key, { needsOwnReply: true }));
 
   const stamp = Number(hit.headers.get(STAMP) || 0);
   if (Date.now() - stamp > seconds * 1000) {
