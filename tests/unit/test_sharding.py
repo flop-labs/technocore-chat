@@ -447,3 +447,135 @@ def test_pruning_keeps_the_bucket_of_a_room_that_survived(tmp_path, monkeypatch)
     assert not doomed_bucket.exists(), "the emptied bucket was not pruned"
     assert store.room_path(tmp_path, "keeper").exists(), "…and the live room went with it"
     assert store.read_messages(tmp_path, "keeper", limit=5)["messages"][0]["text"] == "hi"
+
+
+def test_the_reaper_unlinks_the_flat_room_it_found_rather_than_migrating_it(tmp_path, monkeypatch):
+    """The reap branch must act on the path its walk locked, never on one it re-resolved.
+
+    Resolving a name MIGRATES a pre-sharding file, so reading the high-water mark by name
+    inside the branch moved the very file the branch had just decided to unlink into its
+    bucket. `p.unlink(missing_ok=True)` then found nothing: the room outlived the retention
+    it had already exceeded, and the pass still reported it reaped and subtracted it from
+    the room count. And the only flat files left on a live store are the ones nobody has
+    read or written since the migration — which is exactly the set the reaper is here for.
+
+    The count is asserted against a walk of the disk rather than against a literal: a cached
+    figure BELOW what is on disk admits creates past MAX_ROOMS. `_settle_count` does not
+    defend against this one — its fail-closed term, `max(0, after - before)`, covers creates
+    that landed while the walk ran, and here the corruption is in `kept` itself, which no
+    later correction can recover.
+    """
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"), _record(2, "two"))
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+
+    store._reap(tmp_path)
+
+    left = sorted(str(p) for p in (tmp_path / "rooms").rglob("*.jsonl"))
+    assert left == [], f"an idle room past its retention is still on disk: {left}"
+    assert store._read_counts(tmp_path, store.USAGE_FILE) == store._count_rooms(tmp_path), (
+        "the cached room count no longer describes the disk"
+    )
+    assert store.last_seq(tmp_path, "old") == 2, "the floor outlived the room it came from"
+
+
+def test_a_reaped_flat_room_is_counted_once_and_not_once_per_pass(tmp_path, monkeypatch):
+    """The digest half of the same bug. A room the pass did not actually delete is found
+    again by the next pass and counted again, so `reaped_idle` — a lifetime counter whose
+    whole contract is that it only ever goes up by real events — over-reports every flat
+    room by one."""
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"))
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+
+    store._reap(tmp_path)
+    store._reap(tmp_path)
+
+    assert store.counters(tmp_path)["reaped_idle"] == 1, "one room, one reap"
+
+
+def test_a_flat_room_migrated_after_its_tail_was_read_is_not_booked_as_reaped(
+    tmp_path, monkeypatch
+):
+    """The reap branch may only book a deletion it actually made (#815 review).
+
+    `_tail_seq(p)` failing with FileNotFoundError covers a resolver that moves the flat file
+    before the branch opens it. It does not cover one that moves it after the read and before
+    the unlink: on POSIX the open descriptor stays readable across the `os.replace`, the read
+    succeeds, and `p.unlink(missing_ok=True)` then finds no pathname and does nothing — while
+    the pass still subtracts the room from the count and adds it to `reaped_idle`. The room is
+    alive in its bucket, the cached count sits below the disk, and the next pass reaps it and
+    counts it a second time.
+
+    The move is injected at exactly that point, so the interleaving is deterministic rather
+    than a thread race. `_migrate` takes no lock, which is what makes the point reachable.
+    """
+    import store
+
+    legacy = _legacy_room(tmp_path, "old", _record(1, "one"), _record(2, "two"))
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    sharded = tmp_path / "rooms" / store._shard("old") / "old.jsonl"
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    read_then_moved = store._tail_seq
+
+    def a_resolver_moves_it_after_the_read(path):
+        seq = read_then_moved(path)
+        store._migrate(legacy, sharded)
+        return seq
+
+    monkeypatch.setattr(store, "_tail_seq", a_resolver_moves_it_after_the_read)
+    store._reap(tmp_path)
+
+    assert sharded.exists(), "the room the resolver moved is alive, which is the premise"
+    assert store.counters(tmp_path).get("reaped_idle", 0) == 0, "booked a reap that deleted nothing"
+    # Not equality: `_walk` is a lazy scandir, so the bucket the move created may or may not be
+    # walked in the same pass. Counting the room twice is fail-closed; counting it zero times
+    # admits a create past MAX_ROOMS, and that is the direction this asserts cannot happen.
+    cached, disk = store._read_counts(tmp_path, store.USAGE_FILE), store._count_rooms(tmp_path)
+    assert cached is not None and cached[0] >= disk[0], (
+        f"cached count {cached} is below the disk {disk}"
+    )
+
+    monkeypatch.setattr(store, "_tail_seq", read_then_moved)
+    store._reap(tmp_path)
+
+    assert not sharded.exists(), "the next pass reaps the room in its bucket"
+    assert store.counters(tmp_path)["reaped_idle"] == 1, "one room, one reap"
+    assert store._read_counts(tmp_path, store.USAGE_FILE) == store._count_rooms(tmp_path)
+    assert store.last_seq(tmp_path, "old") == 2, "the floor is the room's own high-water mark"
+
+
+def test_a_flat_note_migrated_under_the_reapers_lock_is_not_booked_as_reaped(tmp_path, monkeypatch):
+    """The same unlink serves notes, where the window is the locked recheck to the unlink."""
+    from pathlib import Path
+
+    import store
+
+    legacy = _legacy_note(tmp_path, "ns", "old", "value")
+    old = time.time() - store.IDLE_SECONDS - 60
+    os.utime(legacy, (old, old))
+    sharded = tmp_path / "notes" / "ns" / store._shard("old") / "old.txt"
+    monkeypatch.setattr(store, "REAP_EVERY", 0)
+    decide = store._reapable
+
+    def a_resolver_moves_it_after_the_recheck(path, *args, **kwargs):
+        reason = decide(path, *args, **kwargs)
+        if reason and isinstance(path, Path) and path == legacy:  # the locked recheck, not the walk
+            store._migrate(legacy, sharded)
+        return reason
+
+    monkeypatch.setattr(store, "_reapable", a_resolver_moves_it_after_the_recheck)
+    store._reap(tmp_path)
+
+    assert sharded.exists(), "the note the resolver moved is alive, which is the premise"
+    cached, disk = store._read_counts(tmp_path, store.NOTES_FILE), store._count_notes(tmp_path)
+    assert cached is not None and cached[0] >= disk[0], (
+        f"cached count {cached} is below the disk {disk}"
+    )

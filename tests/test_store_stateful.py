@@ -94,11 +94,31 @@ def _age_world(root: Path, seconds: int) -> None:
         os.utime(path, (stat.st_atime - seconds, stat.st_mtime - seconds))
 
 
+def _room_files(root: Path, room: str) -> list[Path]:
+    """Every file holding `room`, flat or bucketed, found by looking rather than by asking.
+
+    `store.room_path` resolves the name, and resolving MIGRATES a pre-sharding file into its
+    bucket as a side effect. An observer that goes through it rescues the very state it came
+    to watch: a flat room that `unshard` produced is moved back before the reaper can meet it
+    flat, so a reaper bug that only exists for flat rooms is unreachable from this machine.
+    During a lazy migration a room is at one depth or the other, never both — so more than one
+    path here is itself a fork of the room, and `_on_disk` says so.
+    """
+    rooms = root / "rooms"
+    return sorted([*rooms.glob(f"{room}.jsonl"), *rooms.glob(f"*/{room}.jsonl")])
+
+
+def _rooms_on_disk(root: Path) -> set[str]:
+    """Every room the disk holds right now, at either depth, named rather than resolved."""
+    return {path.stem for path in (root / "rooms").rglob("*.jsonl")}
+
+
 def _on_disk(root: Path, room: str) -> list[dict]:
-    path = store.room_path(root, room)
-    if not path.exists():
+    files = _room_files(root, room)
+    assert len(files) <= 1, f"{room} is on disk twice: {files}"
+    if not files:
         return []
-    return [json.loads(raw) for raw in path.read_bytes().splitlines() if raw.strip()]
+    return [json.loads(raw) for raw in files[0].read_bytes().splitlines() if raw.strip()]
 
 
 class StoreLifecycle(RuleBasedStateMachine):
@@ -220,7 +240,7 @@ class StoreLifecycle(RuleBasedStateMachine):
             kept = set(seqs)
             self.said[room] = {s: v for s, v in self.said[room].items() if s in kept}
             self.record_age[room] = {s: a for s, a in self.record_age[room].items() if s in kept}
-            if not seqs and not store.room_path(self.root, room).exists():
+            if not seqs and not _room_files(self.root, room):
                 # The file is gone. With #139, last_seq() reports the floor — the previous
                 # generation's high-water mark left behind on reap — or 0 when the room was
                 # reaped empty. Adopt that, so a recreated room continues the sequence.
@@ -401,13 +421,39 @@ class StoreLifecycle(RuleBasedStateMachine):
         expected_notes = {key for key in NOTES if self._note_verdict(key) == "gone"}
         kept_notes = {key for key in self.notes if self._note_verdict(key) == "kept"}
 
+        # Every room on disk, not just the three this model drives: `store.append` also
+        # creates the server's own `events` room, and a pass that reaps it books a reap the
+        # model never asked for. The question here is whether the books match the disk.
+        present = _rooms_on_disk(self.root)
+        generation = {room: store.room_generation(self.root, room) for room in present}
+        booked = store.counters(self.root)
+
         (self.root / ".reaped").unlink(missing_ok=True)
         store._reap(self.root)
 
+        # Observed through `_room_files`, never `room_path`: resolving a name that survived
+        # flat would migrate it on the way to the assertion.
         for room in expected_rooms:
-            assert not store.room_path(self.root, room).exists(), f"{room} outlived its idle rule"
+            assert not _room_files(self.root, room), f"{room} outlived its idle rule"
         for room in survivors:
-            assert store.room_path(self.root, room).exists(), f"{room} was reaped while live"
+            assert _room_files(self.root, room), f"{room} was reaped while live"
+        # The pass books exactly the rooms it removed. A reap counted for a file that is still
+        # on disk is how a flat room migrated mid-branch showed up: `reaped_*` over-reports it
+        # now and counts it again on the next pass.
+        removed = present - _rooms_on_disk(self.root)
+        after = store.counters(self.root)
+        reaps = sum(after[k] - booked[k] for k in ("reaped_idle", "reaped_stillborn"))
+        assert reaps == len(removed), f"the pass booked {reaps} reaps and removed {sorted(removed)}"
+        # And the cached count describes the disk. Nothing else runs during this pass, so this
+        # is equality: a figure below the disk admits creates past MAX_ROOMS.
+        assert store._read_counts(self.root, store.USAGE_FILE) == store._count_rooms(self.root), (
+            "the cached room count no longer describes the disk"
+        )
+        # A reap keeps the generation; only a recreate moves it (#139 dir #3).
+        for room in removed:
+            assert store.room_generation(self.root, room) == generation[room], (
+                f"{room}: reaping moved the generation"
+            )
         for key in expected_notes:
             assert store.note_get(self.root, *key) is None, f"note {key} outlived its idle rule"
         for key in kept_notes:
@@ -490,6 +536,28 @@ class StoreLifecycle(RuleBasedStateMachine):
 
 
 StoreLifecycle.TestCase.settings = settings(
+    # 40, the value this file has always had. An earlier revision of this branch raised it to
+    # 150 and claimed that reached the flat-room reap sequence; the claim was wrong twice over
+    # and @WIZARDspace caught it. `derandomize=True` below is checked BEFORE `global_force_seed`
+    # in hypothesis 6.165.10, so `--hypothesis-seed=N` is silently ignored and the "three seeds"
+    # behind that claim were one exploration run three times; the re-measurement that first
+    # appeared to defend it had the example database and the test file changing under it.
+    #
+    # Measured properly against the pre-fix reaper on current main — isolated worktree, a fresh
+    # `.hypothesis` per run, nothing else touching the tree:
+    #
+    #   derandomize=True,  40x60 (what CI runs)  found it: no
+    #   derandomize=True, 150x60                 found it: no
+    #   derandomize=False, 150x60, seeds 1-5     found it: 1 of 5
+    #   derandomize=False, 40x60,  seeds 1-5     found it: 3 of 5
+    #
+    # So the budget buys this bug nothing in CI, and with exploration on it is seed noise
+    # rather than budget: 40 did better than 150 here, and better than 150 did on the
+    # reviewer's Linux run, where the ordering came out the other way round. Two budgets that
+    # disagree by platform are not a guard. The guard for the flat-room reap is the pair of
+    # deterministic regressions in tests/unit/test_sharding.py, which fail on the parent commit
+    # and under mutation; this machine is here for the orderings nobody wrote down, and it
+    # explores as far at 40 as the repository has always paid for.
     max_examples=40,
     stateful_step_count=60,
     deadline=None,
