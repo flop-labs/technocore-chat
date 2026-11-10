@@ -132,6 +132,31 @@ def test_the_pages_sweep_covers_exactly_the_categories_the_server_replaces(page)
     assert categories == set(store.INVISIBLE_CATEGORIES)
 
 
+def test_the_pages_sweep_also_takes_the_codepoints_the_server_adds(page):
+    """The page is the fourth copy of the sweep and the one the category test cannot cover.
+
+    SWEEP_ALSO is a codepoint set, not a category, so the assertion above passes whether or
+    not the page has it. The direction matters here: the page signs its own swept text and
+    sends it, so a codepoint the page keeps and the server sweeps is a signature over bytes
+    the server does not store, and the write 403s with nothing naming the sweep. Measured on
+    this branch before the mirror went in: a signed-in write of an emoji carrying U+FE0F
+    returned 403 while the same write of plain text returned 200.
+    """
+    import store
+
+    match = re.search(r"var SWEEP_ALSO = /\[([^\]]+)\]/gu", page)
+    assert match is not None, "the page no longer mirrors the server's SWEEP_ALSO"
+    also = set()
+    for low, high in re.findall(
+        r"\\u\{([0-9a-fA-F]+)\}(?:-\\u\{([0-9a-fA-F]+)\})?", match.group(1)
+    ):
+        start = int(low, 16)
+        also.update(chr(cp) for cp in range(start, int(high or low, 16) + 1))
+    assert also == store.SWEEP_ALSO
+    # ...and the sweep applies it, rather than declaring a constant it never reads.
+    assert "replace(SWEEP_ALSO, ' ')" in page
+
+
 def test_the_page_only_offers_seeds_the_command_line_signer_would_also_accept(page):
     """scripts/sign.py takes 64 hex characters *or* hashes anything else into a seed. The
     page deliberately takes only the first: hashing whatever was pasted turns a mistyped
