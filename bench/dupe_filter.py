@@ -217,15 +217,18 @@ def build_corpus(rng: random.Random) -> list[tuple[str, str]]:
 
 
 def senders_for(rows: list[tuple[str, str]], rng: random.Random) -> list[str]:
-    """~82% distinct senders: every farm copy from its own identity, legit traffic from
-    a smaller pool with reuse - the measured shape, and the worst case for anything
-    keyed per sender, which is why this filter is not."""
-    return [
-        f"did:key:farm{i:06d}"
-        if label.startswith("farm")
-        else f"did:key:peer{rng.randrange(3200):06d}"
-        for i, (_, label) in enumerate(rows)
-    ]
+    """~82% distinct senders: every farm and evasion copy has its own identity;
+    legitimate traffic comes from a smaller pool with reuse. Distinct prefixes
+    make the synthetic sender classes visible in exported benchmark traces."""
+    senders = []
+    for i, (_, label) in enumerate(rows):
+        if label == "evasion":
+            senders.append(f"did:key:evade{i:06d}")
+        elif label.startswith("farm"):
+            senders.append(f"did:key:farm{i:06d}")
+        else:
+            senders.append(f"did:key:peer{rng.randrange(3200):06d}")
+    return senders
 
 
 def replay(rows, assignment, min_length, max_copies, window):
