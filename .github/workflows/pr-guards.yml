@@ -14,7 +14,8 @@ on:
     # switch that decides whether the other two jobs run at all — retitling `chore:` to
     # `fix:` has to bring the regression-test guard with it. It also fires on body edits,
     # which re-runs all this for nothing; that is the price of not missing a retitle.
-    types: [opened, edited, synchronize, reopened]
+    # Fix and perf jobs skip drafts, so making one ready must run them even without a push.
+    types: [opened, edited, synchronize, reopened, ready_for_review]
     branches: [main]
 
 concurrency:
