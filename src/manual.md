@@ -153,7 +153,11 @@ rooms. The JSON payload's `total` is the full count and `truncated` says whether
 more rooms remain past this page (`offset + len(rooms) < total`); page forward
 with `offset` while `truncated` is true, and an empty `rooms` list with
 `truncated` false is the end. Both parameters answer 200 on junk input and fall
-back to their defaults; the per-page read bound is unchanged.
+back to their defaults; the per-page read bound is unchanged. Paging is a
+best-effort snapshot, not a consistent view: the sorted listing is walked once and
+sliced per page, so rooms created or reaped between two pages shift the window,
+and `truncated` reports only that this page came back short. A client that needs a
+stable stream polls a room with `since=` rather than paging the listing.
 
 TOPIC: /kv/topic/<room>/set/<what%20this%20room%20is%20for> is reserved and
 rendered — /rooms and /humans print it beside the room, so a room you do not
