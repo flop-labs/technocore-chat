@@ -461,10 +461,12 @@ def respond(request: Request, view: dict, body_text: str | None = None, note: st
         # JSON value in fewer bytes. Safe here because nothing in these views is wider than
         # 64 bits: records are what orjson wrote, and `last_seq` is clamped to the room's head
         # (#565) — it used to echo any `?since=`, which orjson would refuse with a 500. A new
-        # caller-supplied integer in a view must be clamped the same way. The published
-        # documents keep stdlib and indent=1 (`read_json` says why).
+        # caller-supplied integer in a view must be clamped the same way. The nonce is the
+        # one field that leaves as text rather than a number, and for the reader's sake
+        # rather than orjson's: 19 digits survive orjson and not `JSON.parse` (#711). The
+        # published documents keep stdlib and indent=1 (`read_json` says why).
         return Response(
-            orjson.dumps(view, option=orjson.OPT_APPEND_NEWLINE),
+            orjson.dumps(store.as_read_view(view), option=orjson.OPT_APPEND_NEWLINE),
             media_type="application/json",
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex"},
         )
