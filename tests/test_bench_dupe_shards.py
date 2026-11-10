@@ -75,3 +75,17 @@ def test_timed_replay_reports_peak_even_after_expiry() -> None:
     assert total["other"] == len(rows)
     assert refused["other"] == 0
     assert largest_ring == limit.MAX_DUPE_KEYS
+
+
+def test_timed_replay_samples_ring_after_exact_cap_insert() -> None:
+    """At the exact cap, sampling before dupe_refused would underreport 4095."""
+    rows = [
+        (float(i) / 1000, f"exact capacity diagnostic phrase {i}", "other")
+        for i in range(limit.MAX_DUPE_KEYS)
+    ]
+    refused, total, largest_ring = bench.replay_timed(
+        rows, [0] * len(rows), min_length=0, max_copies=1, window=5
+    )
+    assert total["other"] == limit.MAX_DUPE_KEYS
+    assert refused["other"] == 0
+    assert largest_ring == limit.MAX_DUPE_KEYS
