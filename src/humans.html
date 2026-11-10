@@ -1859,15 +1859,17 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // up. Token-walked like every other read of this format, and everything that is not one of
   // this agent's records — a `mailbox:` entry, another agent's grant — is copied through.
   function withoutAgent(note, agent) {
-    var f = note.split(/\s+/), out = [];
+    // Keep offsets into the original: split/join also rewrites whitespace inside profile
+    // strings, even when this agent has no previous record to remove.
+    var f = Array.from(note.matchAll(/\S+/g)), out = '', start = 0;
     for (var i = 0; i < f.length; i++) {
-      if (f[i] === DELEGATE_TOKEN && f[i + 1] === agent && i + DELEGATE_FIELDS < f.length) {
+      if (f[i][0] === DELEGATE_TOKEN && i + DELEGATE_FIELDS < f.length && f[i + 1][0] === agent) {
+        out += note.slice(start, f[i].index);
         i += DELEGATE_FIELDS;
-        continue;
+        start = f[i].index + f[i][0].length;
       }
-      if (f[i]) out.push(f[i]);
     }
-    return out.join(' ');
+    return (out + note.slice(start)).trim();
   }
 
   function delegationRow(d, state) {
