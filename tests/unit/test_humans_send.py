@@ -65,7 +65,7 @@ const env = {
   },
   fail: message => { errors.push(message); settled(); },
   stopPoll() {}, pump() { settled(); },
-  SEED_KEY: 'seed', drop() {}, renderIdentity() {}, say() {},
+  SEED_KEY: 'seed', drop() { return true; }, renderIdentity() {}, say() {},
 };
 vm.createContext(env);
 vm.runInContext(send + '\nsend();', env);
