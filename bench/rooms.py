@@ -171,9 +171,20 @@ def main() -> int:
     )
     p.add_argument("--reps", type=int, default=5, help="timed calls per point")
     p.add_argument("--writers", type=int, default=0, help="concurrent appenders, cold arm")
-    p.add_argument("--limits", type=int, nargs="+", default=list(LADDER))
+    p.add_argument(
+        "--limits",
+        type=int,
+        nargs="+",
+        default=list(LADDER),
+        help=f"ladder points to measure (1..{store.MAX_LIMIT})",
+    )
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
+    if any(not 1 <= limit <= store.MAX_LIMIT for limit in args.limits):
+        p.error(
+            f"--limits values must be between 1 and {store.MAX_LIMIT}; "
+            "room_stats clamps outside that range"
+        )
 
     with tempfile.TemporaryDirectory(prefix="bench-rooms-") as tmp:
         root = Path(tmp)
