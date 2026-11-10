@@ -266,12 +266,17 @@ ADVERTISED = {
             "text": "string",
             "did": "string?",
             "sig": "string?",
-            "nonce": "integer?",
+            "nonce": "integer|string?",
         },
         ["room", "text"],
     ),
     "claim_room": (
-        {"room": "string", "did": "string?", "sig": "string?", "nonce": "integer?"},
+        {
+            "room": "string",
+            "did": "string?",
+            "sig": "string?",
+            "nonce": "integer|string?",
+        },
         ["room"],
     ),
     "set_room_allow": (
@@ -280,7 +285,7 @@ ADVERTISED = {
             "dids": "string",
             "did": "string?",
             "sig": "string?",
-            "nonce": "integer?",
+            "nonce": "integer|string?",
         },
         ["room", "dids"],
     ),
@@ -336,12 +341,13 @@ ANNOTATED = {
 
 
 def named(schema: dict) -> str:
-    """The one word a property's schema says about its type, optional arms folded in."""
+    """The effective types in a property's schema, optional arms folded in."""
     if "type" in schema:
         return schema["type"]
     arms = [arm for arm in schema["anyOf"] if arm.get("type") != "null"]
-    assert len(arms) == 1, schema
-    return arms[0]["type"] + "?"
+    nullable = len(arms) != len(schema["anyOf"])
+    types = "|".join(sorted(arm["type"] for arm in arms))
+    return types + ("?" if nullable else "")
 
 
 def test_every_tool_is_listed_with_a_usable_schema(mcp):
@@ -377,6 +383,20 @@ def test_the_descriptions_the_model_reads_survive_the_generation(mcp):
     assert "TECHNOCORE_NICK" in schemas["say"]["properties"]["nick"]["description"]
     write_note = next(tool for tool in tools if tool.name == "write_note")
     assert "Send one condition, not both." in write_note.description
+
+
+def test_signed_nonce_schema_preserves_values_past_javascript_integer_precision(mcp):
+    """A signature covers the nonce's exact digits, so a JavaScript client must not be
+    invited to round a service-valid 19-digit value through its JSON number type."""
+    schemas = {tool.name: tool.input_schema for tool in mcp.tools()}
+    for name in ("say_signed", "claim_room", "set_room_allow"):
+        nonce = schemas[name]["properties"]["nonce"]
+        arms = {arm.get("type"): arm for arm in nonce["anyOf"]}
+        assert set(arms) == {"string", "integer", "null"}
+        assert arms["string"]["pattern"] == mcp.module.NONCE_PATTERN
+        assert arms["integer"]["minimum"] == 0
+        assert arms["integer"]["maximum"] == mcp.module.JSON_SAFE_INTEGER
+        assert "decimal digits" in nonce["description"]
 
 
 def test_every_tool_publishes_its_effect_annotations(mcp):
@@ -1000,6 +1020,48 @@ def test_an_external_signature_passes_through_without_a_server_key(mcp):
     assert swept in text_of(mcp.call("read_room", {"room": "mb-inbox"}))
 
 
+def test_an_external_signature_keeps_a_19_digit_nonce_exact(mcp):
+    """The decimal-string arm carries every service-valid nonce without JSON rounding."""
+    from _client import _keypair
+
+    assert mcp.module._signer is None
+    did, sign = _keypair(seed=5)
+    nonce = "1750000000000000001"
+    canonical = f"mb-inbox|{nonce}|large nonce"
+    reply = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "large nonce",
+            "did": did,
+            "sig": sign(canonical),
+            "nonce": nonce,
+        },
+    )
+    assert reply.is_error is False, text_of(reply)
+
+
+def test_an_unsafe_json_integer_nonce_is_refused_before_the_network(mcp):
+    """A rounded number must fail locally with the schema pointing callers to strings."""
+    from _client import _keypair
+
+    did, sign = _keypair(seed=6)
+    nonce = mcp.module.JSON_SAFE_INTEGER + 1
+    before = len(mcp.sent)
+    reply = mcp.call(
+        "say_signed",
+        {
+            "room": "mb-inbox",
+            "text": "unsafe numeric nonce",
+            "did": did,
+            "sig": sign(f"mb-inbox|{nonce}|unsafe numeric nonce"),
+            "nonce": nonce,
+        },
+    )
+    assert reply.is_error is True
+    assert len(mcp.sent) == before
+
+
 def test_a_partial_external_signature_is_refused_before_the_network(mcp, monkeypatch):
     async def never(method, url, headers, body, timeout):
         raise AssertionError(f"the network was reached: {url}")
@@ -1395,9 +1457,143 @@ def test_the_console_script_speaks_stdio_unless_told_otherwise(monkeypatch):
     assert kwargs["port"] == 9123
     assert kwargs["streamable_http_path"] == "/mcp"
     assert kwargs["stateless_http"] is True
-    # The same relaxation the Worker needs: without it the SDK's localhost-only default
-    # answers 421 to every request that does not arrive with a loopback Host header.
-    assert kwargs["transport_security"].enable_dns_rebinding_protection is False
+    # Loopback is the default bind, and there the check is on: the user's browser is the
+    # one caller that can reach this port, and a rebound page must not be able to use it.
+    assert kwargs["transport_security"] is mcp_server.LOCAL_SECURITY
+    assert kwargs["transport_security"].enable_dns_rebinding_protection is True
+
+
+def test_every_loopback_spelling_gets_rebinding_protection_and_a_remote_bind_does_not(
+    monkeypatch,
+):
+    """Keyed on the bind, not on the SDK's three exact strings: `HOST=LOCALHOST` binds
+    loopback exactly as `HOST=127.0.0.1` does, and left to the SDK it was unguarded. Off
+    loopback there is no boundary (and no key: that bind refuses one), and the Worker's app
+    has to answer whatever hostname it is deployed under."""
+    from technocore_mcp import server as mcp_server
+
+    ran = []
+    monkeypatch.setattr(mcp_server.server, "run", lambda *a, **k: ran.append(k))
+    monkeypatch.setattr(sys, "argv", ["technocore-mcp", "--http"])
+    for host in ("127.0.0.1", "localhost", "LOCALHOST", "::1"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        assert ran.pop()["transport_security"] is mcp_server.LOCAL_SECURITY, host
+    # Loopback by meaning, not spelling: the rest of 127/8 is as reachable from the browser,
+    # so it is protected too, with its own address added to what a client may send.
+    from technocore_mcp import signing
+
+    monkeypatch.setattr(mcp_server, "_signer", signing.load(SEED))  # and may hold a key
+    for host in ("127.0.0.2", "127.255.255.254"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        other = ran.pop()["transport_security"]
+        assert other.enable_dns_rebinding_protection is True, host
+        assert f"{host}:*" in other.allowed_hosts and f"http://{host}:*" in other.allowed_origins
+        assert set(mcp_server.LOCAL_SECURITY.allowed_hosts) < set(other.allowed_hosts)
+    # A literal is no resolver's to move, so its spelling as typed is allowed too — the Host
+    # a client that keeps it (Python's urllib) sends.
+    monkeypatch.setenv("HOST", "0:0:0:0:0:0:0:1")
+    mcp_server.main()
+    served = ran.pop()
+    assert served["host"] == "0:0:0:0:0:0:0:1"
+    assert {"[0:0:0:0:0:0:0:1]:*", "[::1]:*"} <= set(served["transport_security"].allowed_hosts)
+    # Shorthand the socket layer binds as 127.0.0.1 is loopback too — protected, and reached
+    # at 127.0.0.1 (as browsers rewrite it), not at the spelling itself.
+    for host in ("127.1", "0x7f.1"):
+        monkeypatch.setenv("HOST", host)
+        mcp_server.main()
+        served = ran.pop()
+        assert served["transport_security"] is mcp_server.LOCAL_SECURITY, host
+        assert served["host"] == "127.0.0.1", "bound at the address that was validated"
+    # A name is loopback when everything it resolves to is: a system alias for ::1 is local,
+    # one that also resolves somewhere else is not (and so cannot hold the key).
+    real = mcp_server.socket.getaddrinfo
+    aliases = {
+        "loop-alias": ["::1"],
+        "split-alias": ["127.0.0.1", "10.0.0.1"],
+        "ip6-localhost": ["::1"],
+    }
+
+    def resolve(name, *args, **kwargs):
+        if name not in aliases:
+            return real(name, *args, **kwargs)
+        return [(0, 0, 0, "", (address, 0)) for address in aliases[name]]
+
+    monkeypatch.setattr(mcp_server.socket, "getaddrinfo", resolve)
+    monkeypatch.setenv("HOST", "loop-alias")
+    mcp_server.main()
+    served = ran.pop()
+    # Bound at the address that was checked, not handed back to a resolver whose next answer
+    # could be anywhere — with the key allowed on the strength of the first one.
+    assert served["host"] == "::1"
+    alias = served["transport_security"]
+    assert alias.enable_dns_rebinding_protection is True
+    # Its resolved address only: the name's DNS may belong to someone else, and allowing it
+    # as Host would hand them the rebinding this check exists to stop.
+    assert alias is mcp_server.LOCAL_SECURITY and "loop-alias:*" not in alias.allowed_hosts
+    # ip6-localhost is an alias like any other, not a reserved name: resolved, pinned, and
+    # never itself allowed as Host.
+    monkeypatch.setenv("HOST", "ip6-localhost")
+    mcp_server.main()
+    served = ran.pop()
+    assert served["host"] == "::1" and served["transport_security"] is mcp_server.LOCAL_SECURITY
+    assert "ip6-localhost:*" not in mcp_server.LOCAL_SECURITY.allowed_hosts
+    monkeypatch.setenv("HOST", "split-alias")
+    with pytest.raises(SystemExit):
+        mcp_server.main()
+    monkeypatch.setattr(mcp_server, "_signer", None)
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    mcp_server.main()
+    assert ran.pop()["transport_security"] is mcp_server.REMOTE_SECURITY
+    built = []
+    monkeypatch.setattr(mcp_server.server, "streamable_http_app", lambda **k: built.append(k))
+    mcp_server.streamable_http_app()
+    assert built[0]["transport_security"] is mcp_server.REMOTE_SECURITY
+    assert mcp_server.REMOTE_SECURITY.enable_dns_rebinding_protection is False
+
+
+def test_a_loopback_server_refuses_a_rebound_host_and_a_foreign_origin():
+    """What a rebinding attack looks like at the server: the page's own hostname in Host,
+    or its own origin in Origin. Either is refused before any tool runs; a loopback Host,
+    with no Origin or a loopback one on any port, is served."""
+    from technocore_mcp import server as mcp_server
+
+    app = mcp_server.server.streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=True,
+        transport_security=mcp_server.LOCAL_SECURITY,
+    )
+    hello = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"},
+        },
+    }
+    cases = [
+        ({"Host": "rebind.attacker.example:8000"}, 421),
+        ({"Host": "127.0.0.1:8000", "Origin": "http://rebind.attacker.example:8000"}, 403),
+        ({"Host": "127.0.0.1:8000"}, 200),
+        ({"Host": "localhost:8000", "Origin": "http://localhost:6274"}, 200),
+        ({"Host": "[::1]:8000", "Origin": "http://[::1]:8000"}, 200),
+        ({"Host": "localhost"}, 200),
+    ]
+    with anyio.from_thread.start_blocking_portal() as portal, ExitStack() as stack:
+        stack.enter_context(portal.wrap_async_context_manager(app.router.lifespan_context(app)))
+        http = stack.enter_context(
+            portal.wrap_async_context_manager(
+                httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://x")
+            )
+        )
+        for headers, status in cases:
+            got = portal.call(
+                lambda h=headers: http.post("/mcp", json=hello, headers={**WIRE_HEADERS, **h})
+            )
+            assert got.status_code == status, (headers, got.status_code, got.text[:120])
 
 
 def test_an_unrecognised_argument_is_refused_rather_than_ignored(monkeypatch, capsys):

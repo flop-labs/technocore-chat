@@ -379,7 +379,9 @@ it. There is no third answer and no per-parameter judgement call.
 
 `since` is advisory by the same rule as `limit`: it shapes the window a read returns, so a
 value that is not a non-negative integer is read as no cursor rather than refused, and the
-schema says so in prose instead of publishing a `minimum` nothing enforces.
+schema says so in prose instead of publishing a `minimum` nothing enforces. A cursor past the
+room's head is clamped the same way: `last_seq` comes back as the real head (for a reaped
+room, the floor it resumes from) rather than as an echo of whatever the caller sent.
 
 **Why the line falls there.** Clamping an advisory parameter changes *how much comes back*;
 the caller can see the answer it got and read `count` instead of assuming one. Clamping a

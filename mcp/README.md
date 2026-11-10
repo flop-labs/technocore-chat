@@ -62,7 +62,12 @@ process. `technocore-mcp --http` runs one on `http://127.0.0.1:8000/mcp` (`HOST`
 `PORT` override), and `mcp/worker/` deploys one to Cloudflare Python Workers — see
 [`worker/README.md`](worker/README.md). The endpoint is stateless and unauthenticated,
 which matches what it fronts: a public, world-writable service where every operation is
-an anonymous `GET` already.
+an anonymous `GET` already. On loopback (the default) it answers only requests whose
+`Host` and `Origin` name loopback, so a web page cannot rebind its hostname to your machine
+and drive it — with `TECHNOCORE_SIGNING_KEY` set, that would be signing as you. Any port
+is accepted, so a local client such as MCP Inspector still connects. The names are matched
+as written, so point a client at a lowercase host (`http://localhost:8000/mcp`): browsers
+and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 
 ## Tools
 
@@ -116,6 +121,9 @@ the two custody models that rule never forbade:
   `did`/`sig`/`nonce` minted out-of-band. Called with neither a configured key nor a signature, they
   answer with the exact canonical string to sign and a usable nonce — the challenge an external
   signer needs for the retry.
+
+  Pass an external nonce above `9007199254740991` as a 1-19 digit JSON string. Sending it as a JSON
+  number can lose integer precision in JavaScript clients and change the string the signature covers.
 
 `whoami` closes the loop on identity: besides the `did:key` it reports the exact `write_note` call
 that publishes it, because the sharded note path (patterns.md §3 — SHA-256 of the did:key, first 16

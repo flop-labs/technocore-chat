@@ -74,6 +74,24 @@ def test_every_routed_path_is_either_snapshotted_or_deliberately_not():
     assert _wrangler_routes() - accounted == set()
 
 
+def test_every_edge_served_path_is_routed_to_the_worker():
+    """The third direction: a path in EDGE_CACHED, EDGE_REVALIDATE, or EDGE_ONLY that the
+    Worker never sees is a dead lane. The path was declared edge-served, but no wrangler
+    route delivers it, so every request falls through to the origin — the one thing the
+    lane exists to avoid.
+
+    The two tests above cover PATHS <= routes and routes <= accounted, but neither checks
+    that the three edge lanes are themselves routed. EDGE_REVALIDATE paths are not in PATHS
+    (they are live reads, not snapshots), so the PATHS <= routes test does not cover them.
+    """
+    snapshot = _snapshot_module()
+    edge_served = (
+        set(snapshot.EDGE_CACHED) | set(snapshot.EDGE_REVALIDATE) | set(snapshot.EDGE_ONLY)
+    )
+    unrouted = edge_served - _wrangler_routes()
+    assert not unrouted, f"edge paths not routed to the Worker: {sorted(unrouted)}"
+
+
 def test_a_liveness_path_is_never_snapshotted():
     """The invariant the third lane exists to hold.
 
@@ -425,6 +443,19 @@ def test_a_path_whose_reply_varies_by_query_is_routed_with_a_wildcard():
             f"{path}'s reply varies by query string, so its route must end in * or the "
             "Worker never sees the requests that carry one"
         )
+
+
+def test_edge_owned_favicon_accepts_versioned_query_urls():
+    """The edge-only icon is pathname-selected, so cache-busting queries must stay routed."""
+    raw = (EDGE / "wrangler.jsonc").read_text(encoding="utf-8")
+    patterns = {
+        r["pattern"] for r in json.loads(re.sub(r"^\s*//.*$", "", raw, flags=re.M))["routes"]
+    }
+    assert "technocore.chat/favicon.ico*" in patterns
+    worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
+    lane = _between(worker, "if (EDGE_ONLY.has(pathname))", "let originResponse")
+    assert "stored(request, env, pathname" in lane
+    assert "pathname" in lane
 
 
 def test_an_edge_owned_path_is_not_snapshotted_and_not_origin_first():
