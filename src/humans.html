@@ -2037,7 +2037,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           return { did: sender.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
         });
     }
-    ready.then(function (payload) {
+    return ready.then(function (payload) {
       return fetch('/r/' + encodeURIComponent(sentRoom), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2059,6 +2059,26 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     }).catch(function (e) { fail(String(e.message || e)); });
   }
 
+  // One intended Send is one request, not a lock on the composer. The button and Enter
+  // share this handler, and the draft is still signing when a second click lands, so two
+  // presses on the same draft post it twice — under a fresh nonce on the signed lane, where
+  // the server's duplicate-text filter is not a single-send guard. A message typed after
+  // the first is a separate intent though, so the guard is keyed on the draft that left,
+  // and released when that send settles: the same text can be sent again afterwards, and a
+  // pending send never blocks the next one.
+  var inflight = Object.create(null);
+
+  function submit() {
+    var key = room + '\u0000' + textEl.value;
+    if (inflight[key]) return;
+    var pending = send();
+    // An empty draft, or one the sweep left with nothing visible, never left the page.
+    if (!pending) return;
+    inflight[key] = true;
+    var release = function () { delete inflight[key]; };
+    pending.then(release, release);
+  }
+
   // Re-render on every keystroke: filtering is a client-side pass over at most 200 rows the
   // page already has, so there is nothing to debounce and no request to spare.
   filterEl.addEventListener('input', renderRooms);
@@ -2078,9 +2098,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (first) { first.click(); }
   });
   document.getElementById('join').addEventListener('click', function () { open(roomEl.value); });
-  document.getElementById('send').addEventListener('click', send);
+  document.getElementById('send').addEventListener('click', submit);
   textEl.addEventListener('input', function () { draftRevision += 1; });
-  textEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) send(); });
+  textEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) submit(); });
   roomEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) open(roomEl.value); });
 
   // Pasting a #room link into an already-open tab must navigate, not sit there.
