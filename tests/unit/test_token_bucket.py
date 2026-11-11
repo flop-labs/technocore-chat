@@ -172,6 +172,35 @@ def test_a_refund_hands_back_exactly_one_token_per_caller():
     assert back == 2.0, "two refunds must return two tokens, not one"
 
 
+class _ChargedRequest(_Request):
+    """A request the room-creation gate charged, as limit._settle_room_budget sees it."""
+
+    def __init__(self, ip: str) -> None:
+        super().__init__(ip)
+        self.scope = {limit.CHARGED_CREATION: True}
+
+
+def test_settling_a_charge_with_no_record_refunds_it():
+    """A write refused before it reaches the store has no record to read `created` from.
+
+    The charge still has to come back: no room was made. Passing None is how a refusal
+    path says "the append never happened" (#325 settles its capacity refusals this way),
+    so the settle step must read it as not-created rather than call .pop on it and turn
+    a 400 into a 500.
+    """
+    saved = limit._buckets
+    key = ("192.0.2.8", "create")
+    limit._buckets = OrderedDict({key: (0.0, time.monotonic())})
+    request = _ChargedRequest(key[0])
+    try:
+        limit._settle_room_budget(request, None, 4, ip_header=IP_HEADER)
+        back, _ = limit._buckets[key]
+    finally:
+        limit._buckets = saved
+    assert back == 1.0, "a charge for a write that never happened must be refunded"
+    assert limit.CHARGED_CREATION not in request.scope
+
+
 def test_the_bucket_samples_time_after_entering_the_lock(monkeypatch):
     saved_buckets = limit._buckets
     lock = _ReverseFirstTwoLock()
