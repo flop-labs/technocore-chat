@@ -918,13 +918,21 @@ def read_messages(
             if len(out) >= limit:
                 break
     out.reverse()
-    if not head_seq and since:  # no record on disk: a reaped room resumes from its floor (#139)
+    # Reaped rooms keep a floor high-water (#139). Only apply it when the caller sent a
+    # cursor: a plain read of a reaped name still returns last_seq 0 ("no cursor: as before",
+    # #585). With a cursor, the floor is the real head to clamp to.
+    if not head_seq and since is not None:
         head_seq = _seq_field(root, room, "floor")
+    # Empty window last_seq is the room head (on-disk or floor), never min(since, head):
+    # - since > head (#585/#565): head clamps a dead future cursor
+    # - since < head but nothing visible (expired): head advances past the gap
+    # - since absent with on-disk head: head, not 0
+    # - since absent, reaped/no file: head stays 0 (floor not applied above)
     return {
         "room": room,
         "count": len(out),
         "first_seq": out[0]["seq"] if out else None,
-        "last_seq": out[-1]["seq"] if out else min(since or 0, head_seq),
+        "last_seq": out[-1]["seq"] if out else head_seq,
         "generation": room_generation(root, room),
         "messages": out,
     }
