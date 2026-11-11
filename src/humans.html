@@ -1002,9 +1002,18 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     var list = q ? roomsView.rooms.filter(function (r) { return matches(r, q); })
                  : roomsView.rooms;
     renderStats(list.length);
+    // The rebuild below destroys whatever row control has focus, every 5 seconds, which
+    // drops a keyboard reader onto <body> and sends their next Tab back to the first row.
+    // Remember the room and which of its two controls held focus, and hand it back after.
+    var held = document.activeElement, focusRoom = null, focusCopy = false;
+    if (held && roomsBody.contains(held) && held.closest('tr')) {
+      focusRoom = held.closest('tr').dataset.room;
+      focusCopy = held.classList.contains('icon-btn');
+    }
     roomsBody.textContent = '';
     list.forEach(function (r) {
       var tr = document.createElement('tr');
+      tr.dataset.room = r.room;
       var name = document.createElement('td'); name.className = 'name';
       var btn = document.createElement('button');
       btn.className = 'btn-ghost';
@@ -1028,6 +1037,11 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
                  permalink(r.room, 0), 'icon-btn'));
       [name, seq, by, idle, share].forEach(function (c) { tr.appendChild(c); });
       roomsBody.appendChild(tr);
+      // The room, not the position: the list is ordered by activity and rows move. No
+      // scroll, so a refresh never drags the page to wherever that row now sits.
+      if (r.room === focusRoom) {
+        (focusCopy ? share.firstChild : btn).focus({ preventScroll: true });
+      }
     });
     if (!list.length) {
       var tr = document.createElement('tr'), td = document.createElement('td');
