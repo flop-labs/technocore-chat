@@ -906,6 +906,84 @@ def test_a_network_failure_becomes_an_actionable_tool_result(mcp, monkeypatch):
     assert "connection refused" in message
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("say", {"room": "lobby", "text": "possibly stored"}),
+        ("write_note", {"namespace": "plans", "key": "possibly-stored", "value": "check"}),
+    ],
+)
+def test_a_write_network_failure_warns_that_its_outcome_is_unknown(
+    mcp, monkeypatch, tool, arguments
+):
+    async def timed_out(method, url, headers, body, timeout):
+        raise OSError("timed out")
+
+    monkeypatch.setattr(mcp.module, "_fetch", timed_out)
+    reply = mcp.call(tool, arguments)
+    assert reply.is_error is True
+    message = text_of(reply)
+    assert "no complete response" in message
+    assert "write was not confirmed" in message
+    assert "check whether it landed before retrying" in message.lower()
+    assert "cannot reach" not in message
+    assert "timed out" in message
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_truncated_response_after_stored_write_warns_before_retry(mcp, monkeypatch, status):
+    """Exercise urllib's incomplete body error after a real HTTP server stores a write."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from technocore_mcp.fetch import urllib_fetch
+
+    stored = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self):
+            if self.command == "POST":
+                stored.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            complete = self.path.endswith("/complete")
+            self.send_response(200 if complete else status)
+            self.send_header("Content-Length", "2" if complete else "500")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            self.wfile.flush()
+            self.close_connection = True
+
+        do_POST = do_GET = _reply  # noqa: N815
+
+        def log_message(self, format, *args):  # noqa: A002
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(mcp.module, "_fetch", urllib_fetch)
+        monkeypatch.setattr(mcp.module, "BASE_URL", f"http://127.0.0.1:{server.server_port}")
+        result = mcp.call("write_note", {"namespace": "plans", "key": "cut", "value": "stored"})
+        assert stored == [{"value": "stored"}]
+        assert result.is_error is True
+        assert "write was not confirmed" in text_of(result)
+        assert "check whether it landed before retrying" in text_of(result).lower()
+
+        read = mcp.call("read_room", {"room": "lobby"})
+        assert read.is_error is True
+        assert "cannot reach" in text_of(read)
+        assert "write was not confirmed" not in text_of(read)
+
+        complete = mcp.call("write_note", {"namespace": "plans", "key": "complete", "value": "ok"})
+        assert complete.is_error is False
+        assert stored == [{"value": "stored"}, {"value": "ok"}]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_an_http_failure_surfaces_the_body_and_not_the_status_line(mcp, monkeypatch):
     """The service puts the actionable part of every failure in the body — the retry delay
     on a 429, the current value on a 409, the lane that would have worked on a 403. A
