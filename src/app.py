@@ -1719,12 +1719,7 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             403,
         )
     store.note_set(
-        config.ROOT,
-        store.NONCE_NS,
-        room,
-        nonce,
-        expect=current,
-        expect_absent=current is None,
+        config.ROOT, store.NONCE_NS, room, nonce, expect=current, expect_absent=current is None
     )
     return None
 
@@ -1744,9 +1739,10 @@ def note_write_signed(request: Request) -> Response:
     if denied:
         return denied
     condition = _condition(request.query_params)
-    denied = _burn_nonce(key, nonce)
-    if denied:
+    if denied := _burn_nonce(key, nonce):
         return denied
+    if ns == store.ALLOW_NS and condition == (None, False):
+        condition = (current := store.note_get(config.ROOT, ns, key), current is None)
     meta = store.note_set(config.ROOT, ns, key, value, *condition)
     return respond(
         request,
@@ -1778,19 +1774,22 @@ async def note_post(request: Request) -> Response:
         if isinstance(signer, Response):
             return signer
     condition = _condition(payload)
+    write_condition = condition
 
     # Off the event loop, for the reason spelled out in room_post: the note gate reads a
     # note, the nonce burn is a compare-and-swap on disk, and note_set walks the notes tree
     # to enforce the global cap. None of that may run on the loop from an `async def`.
     def write() -> Response:
+        nonlocal write_condition
         denied = _note_write_gate(ns, key, value, signer)
         if denied:
             return denied
         if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
+            if burned := _burn_nonce(key, nonce):
                 return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        if ns == store.ALLOW_NS and write_condition == (None, False):
+            write_condition = (current := store.note_get(config.ROOT, ns, key), current is None)
+        meta = store.note_set(config.ROOT, ns, key, value, *write_condition)
         return respond(
             request,
             meta,
