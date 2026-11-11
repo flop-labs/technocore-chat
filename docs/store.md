@@ -13,7 +13,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `list_notes(root: pathlib.Path, ns: str) -> list[str]` — (undocumented)
 - `list_rooms(root: pathlib.Path) -> list[str]` — (undocumented)
 - `note_get(root: pathlib.Path, ns: str, key: str) -> str | None` — (undocumented)
-- `note_path(root: pathlib.Path, ns: str, key: str) -> pathlib.Path` — Where a note lives — `notes/<ns>/<shard>/<key>.txt`.
+- `note_path(root: pathlib.Path, ns: str, key: str, write: bool = False) -> pathlib.Path` — Where a note lives — `notes/<ns>/<shard>/<key>.txt`.
 - `note_set(root: pathlib.Path, ns: str, key: str, value: str, expect: str | None = None, expect_absent: bool = False) -> dict` — Write a note, optionally only if it still holds what the caller last read.
 - `note_stats(root: pathlib.Path) -> dict` — Aggregate note usage. Deliberately blind: no namespace, no key, ever.
 - `ownable(name: str) -> bool` — (undocumented)
@@ -22,7 +22,7 @@ via stdlib `inspect` — never edited by hand; a test regenerates and diffs this
 - `room_bytes_used(root: pathlib.Path) -> int` — Total room bytes at the last reap pass, or 0 if none has run yet.
 - `room_classes(name: str) -> frozenset[str]` — The leading `<class>-` markers on a name, so classes compose by prefix.
 - `room_generation(root: pathlib.Path, room: str) -> int` — The conversation epoch of a room, bumping each time it is (re)created (#139 dir #3).
-- `room_path(root: pathlib.Path, room: str) -> pathlib.Path` — Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`.
+- `room_path(root: pathlib.Path, room: str, write: bool = False) -> pathlib.Path` — Where a room's JSONL lives — `rooms/<shard>/<room>.jsonl`.
 - `room_stamp(root: pathlib.Path, room: str) -> tuple[int, int, int, int] | None` — The room file's (inode, size, mtime, ctime), or None when there is no room. Anything
 - `room_stats(root: pathlib.Path, limit: int = 50) -> dict` — Recency-sorted room summaries for the overview.
 - `room_window(root: pathlib.Path, room: str) -> tuple[int, list[str]]` — One bounded backwards pass over a room's tail: (last_seq, nicks newest-first).

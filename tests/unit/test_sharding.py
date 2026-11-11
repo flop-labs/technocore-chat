@@ -220,6 +220,96 @@ def test_a_migration_that_cannot_write_still_serves_the_data(tmp_path, monkeypat
     assert store.list_rooms(tmp_path) == ["stuck"], "…and it still lists"
 
 
+def test_a_write_is_refused_while_the_move_cannot_run_and_lands_once_it_can(tmp_path, monkeypatch):
+    """Reads fall back to the flat file; writes must not.
+
+    A writer handed the flat path appends to the file there, and any worker whose move later
+    succeeds renames it away mid-write. The writer then makes a NEW flat file that readers
+    never see. So a write during a failed move is refused, the flat file is left exactly as it
+    was, and the next write after the store is fixed moves the history and appends to it.
+    """
+    import store
+
+    flat = _legacy_room(tmp_path, "stuck", _record(1, "one"), _record(2, "two"))
+    held = _legacy_note(tmp_path, "kv", "held", "value")
+    before = flat.read_bytes()
+    real = store.os.replace
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("bucket is not writable")
+
+    monkeypatch.setattr(store.os, "replace", refuse)
+    with pytest.raises(OSError, match="could not be moved into its bucket"):
+        store.append(tmp_path, "stuck", "bob", "three")
+    with pytest.raises(OSError, match="could not be moved into its bucket"):
+        store.note_set(tmp_path, "kv", "held", "new")
+
+    assert flat.read_bytes() == before and held.read_text() == "value", "refusal writes nothing"
+    bucketed = tmp_path / "rooms" / store._shard("stuck") / "stuck.jsonl"
+    assert not bucketed.exists(), "and forks nothing"
+    assert [m["text"] for m in store.read_messages(tmp_path, "stuck")["messages"]] == ["one", "two"]
+    assert store.note_get(tmp_path, "kv", "held") == "value", "reads still fall back"
+
+    monkeypatch.setattr(store.os, "replace", real)  # permissions repaired
+    store.append(tmp_path, "stuck", "bob", "three")
+    store.note_set(tmp_path, "kv", "held", "new")
+
+    view = store.read_messages(tmp_path, "stuck")["messages"]
+    assert [(m["seq"], m["text"]) for m in view] == [(1, "one"), (2, "two"), (3, "three")]
+    assert store.note_get(tmp_path, "kv", "held") == "new"
+    assert not flat.exists() and not held.exists(), "the flat files moved, none was recreated"
+
+
+@pytest.mark.parametrize("lane", ["room", "note"])
+def test_an_acknowledged_write_is_never_hidden_by_a_move_that_recovers(tmp_path, monkeypatch, lane):
+    """The interleaving behind the lost write: the move fails, the writer takes the lock beside
+    the flat file, permissions are repaired, another worker reads and its move succeeds, and
+    the writer carries on. Whatever the writer was told, a write it acknowledged is readable.
+    """
+    from contextlib import contextmanager
+
+    import store
+
+    if lane == "room":
+        _legacy_room(tmp_path, "stuck", _record(1, "one"))
+    else:
+        _legacy_note(tmp_path, "kv", "held", "seed")
+    real = store.os.replace
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("bucket is not writable")
+
+    monkeypatch.setattr(store.os, "replace", refuse)
+    original = store._create_gate
+
+    @contextmanager
+    def reader_recovers(gate, path, check, counted):
+        with original(gate, path, check, counted):
+            monkeypatch.setattr(store.os, "replace", real)  # permissions repaired
+            # another worker reads, and its move succeeds
+            if lane == "room":
+                store.room_path(tmp_path, "stuck")
+            else:
+                store.note_path(tmp_path, "kv", "held")
+            yield
+
+    monkeypatch.setattr(store, "_create_gate", reader_recovers)
+    try:
+        if lane == "room":
+            store.append(tmp_path, "stuck", "bob", "acknowledged")
+        else:
+            store.note_set(tmp_path, "kv", "held", "acknowledged")
+        acknowledged = True
+    except OSError:
+        acknowledged = False
+
+    if lane == "room":
+        seen = [m["text"] for m in store.read_messages(tmp_path, "stuck")["messages"]]
+    else:
+        seen = [store.note_get(tmp_path, "kv", "held")]
+    assert not acknowledged or "acknowledged" in seen, f"acknowledged, then unreadable: {seen}"
+
+
 def test_a_flat_note_moves_and_keeps_its_value(tmp_path):
     import store
 
