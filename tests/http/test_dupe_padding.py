@@ -15,7 +15,9 @@ newline, so a trailing `%0D` or `%09` reaches the operation on every lane.
 it first — over every code point either transform touches, with the probe character embedded in the
 middle of the phrase. That is the axis a lane chooses. This file is the axis a caller chooses: text
 against text-plus-padding, at the end of the segment, which is the only part of a message a farm
-can vary without also changing what the room sees.
+can vary without also changing what the room sees. The two divide one rung between them:
+removing the `split()`/`join` collapse fails every case here, but narrowing it to `.strip()`
+still trims the end, so only `test_dupe_ring.py` sees that one.
 
 Every assertion here is on what the padded copy achieves, never on which refusal it collects, so
 none of them depends on where the router happens to draw its line.
