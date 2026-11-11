@@ -133,3 +133,20 @@ def test_290_if_together_with_if_absent_is_refused_rather_than_resolved(client):
     kept = client.post("/kv/scratch/cas", json={"value": "v5", "if": "v3", "if_absent": False})
     assert kept.status_code == 200, kept.text
     assert client.get("/kv/scratch/cas").text.splitlines()[-1] == "v5"
+
+
+def test_925_a_repeated_query_condition_is_refused_rather_than_last_one_wins(client):
+    """`?if=A&if=B` reached the compare-and-set as `B` alone, and `?if_absent=1&if_absent=0`
+    as an unconditional overwrite: `QueryParams.get` keeps the last occurrence of a name, so
+    one half of the caller's condition was dropped without a word. A repeated name is the
+    query-string spelling of a list, and is refused the way `{"if": ["A", "B"]}` is —
+    naming the field, before anything is written."""
+    client.get("/kv/scratch/rep/set/B")
+    for query, name in (("if=A&if=B", "if"), ("if_absent=1&if_absent=0", "if_absent")):
+        refused = client.get(f"/kv/scratch/rep/set/new?{query}")
+        assert refused.status_code == 400, (query, refused.text)
+        assert refused.text.splitlines()[0] == f"400 bad {name}: must be a string"
+    assert client.get("/kv/scratch/rep").text.splitlines()[-1] == "B"  # nothing was written
+    # One occurrence of each is still an ordinary condition, and still a real one.
+    assert client.get("/kv/scratch/rep/set/C?if=B").status_code == 200
+    assert client.get("/kv/scratch/rep/set/D?if=B").status_code == 409
