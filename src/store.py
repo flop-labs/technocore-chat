@@ -776,11 +776,14 @@ def _bump(root: Path, **deltas: int) -> None:
 
     That contract is what pays for LOCK_NB here. Every append in the service ran through
     this one lock and *waited* on it, so writes to unrelated rooms serialised behind each
-    other on a counter neither of them reads (#588). Now a writer that finds the lock held
-    leaves its delta in `_PENDING` and returns; the next writer that does get the lock
-    persists the whole accumulated batch in the same single read-modify-replace one bump
-    used to cost. Uncontended — one process, no overlap — that is still a write per bump,
-    exactly as before, so nothing about a quiet store changes.
+    other on a counter neither of them reads (#588). Now a bump that is only `messages`
+    and finds the lock held leaves its delta in `_PENDING` and returns; the next writer
+    that does get the lock persists the whole accumulated batch in the same single
+    read-modify-replace one bump used to cost. A bump carrying any other counter — a
+    note write's `notes_written` among them — still waits for the lock, for the reason
+    the body gives: another worker's freshness stamp reads it. Uncontended — one
+    process, no overlap — that is still a write per bump, exactly as before, so nothing
+    about a quiet store changes.
 
     The batch is taken out of `_PENDING` only *after* the flock is held, so a caller that
     cannot get the lock never removes deltas another thread is counting on, and there is
