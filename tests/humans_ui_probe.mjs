@@ -980,7 +980,10 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
         const response = await realFetch(...args);
         const path = new URL(args[0], location.href).pathname;
         if (!path.startsWith("/kv/did-") || (args[1]?.method || "GET") !== "GET") return response;
-        const read = { path, returned: false };
+        const read = { path, returned: false, status: response.status, body: "" };
+        // A failed read is the one thing that can stall release() below; keep what the
+        // server said so the probe reports it instead of timing out on a count.
+        if (!response.ok) read.body = (await response.clone().text()).slice(0, 200);
         const held = new Promise((resolve) => {
           read.release = (error) => resolve(error ? new Response("temporary failure", { status: 503 }) : response);
         });
@@ -1003,7 +1006,24 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
       const before = await page.evaluate(() => window.delegationProbe.verified);
       await page.evaluate(({ index, error }) => window.delegationProbe.reads[index].release(error), { index, error });
       await page.waitForFunction((i) => window.delegationProbe.reads[i].returned, index);
-      if (!error) await page.waitForFunction((n) => window.delegationProbe.verified === n + 1, before);
+      if (!error) {
+        // A non-OK note read verifies nothing, so waiting for a verification would only run
+        // out the 30s default and name no cause. Fail on the response itself instead.
+        const read = await page.evaluate((i) => {
+          const { path, status, body } = window.delegationProbe.reads[i];
+          return { path, status, body };
+        }, index);
+        if (read.status !== 200)
+          throw new Error(`delegation fixture: note read ${index} answered HTTP ${read.status}: ${JSON.stringify(read)}`);
+        await page.waitForFunction((n) => window.delegationProbe.verified === n + 1, before, { timeout: 10000 })
+          .catch(async (e) => {
+            const state = await page.evaluate(() => ({
+              verified: window.delegationProbe.verified,
+              reads: window.delegationProbe.reads.map((r) => [r.path, r.status, r.returned]),
+            }));
+            throw new Error(`delegation fixture: read ${index} returned but verified stayed at ${before}: ${JSON.stringify(state)} (${e.message})`);
+          });
+      }
       // Verification is real WebCrypto. Its promise reactions, including Promise.all
       // and the final render, drain before this next task; no fixed sleep can race it.
       await page.evaluate(() => new Promise((resolve) => {
