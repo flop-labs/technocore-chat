@@ -86,7 +86,12 @@ jobs:
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
-      - run: uv sync --frozen
+      # --locked, not --frozen: --frozen installs from uv.lock without asking whether it
+      # still matches pyproject.toml, so a version bump that forgets `uv lock` goes green
+      # here and then dirties every fresh tree that runs `uv run` (#506). --locked fails
+      # the job on that disagreement instead. One gate is enough: the other install sites
+      # keep --frozen, and pr-guards' base checkout must not fail on drift main carries.
+      - run: uv sync --locked
 
       # One command, defined once, in the repo-root justfile: ruff, the formatter in
       # --check mode, ty, `sz.py --caps` and the coverage run. Spelling the list out here
