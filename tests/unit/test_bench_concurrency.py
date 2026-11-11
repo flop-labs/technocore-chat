@@ -61,10 +61,12 @@ def test_a_server_that_cannot_be_reached_refuses_the_run(monkeypatch, bench):
 
 
 def test_a_slow_burst_earns_the_bucket_nothing(monkeypatch, bench):
-    """A minute passes between any two reads of this clock, which refills the bucket every time.
+    """A trap for a bench that stops freezing the clock, not a clock the bench reads.
 
-    With the bench reading the real clock, all sixteen callers are granted, and that would read as
-    an excess of twelve. It reads none of it, so the grant count stays at the bucket's contents.
+    The patched clock gains a minute on every read, which refills the bucket each time. The bench
+    swaps `limit.time` for a frozen clock, so it never reads this one and grants exactly four. Take
+    the freeze out and take() reads this clock instead: all sixteen are granted, an excess of twelve
+    the bench would report as a race, and this assertion fails.
     """
     ticks = iter(range(0, 60_000_000, 60))
     monkeypatch.setattr(time, "monotonic", lambda: float(next(ticks)))

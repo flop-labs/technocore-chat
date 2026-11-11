@@ -41,6 +41,10 @@ The same bench against the commit before the lock and a commit with it. Clock fr
     1e-06                       78     20/20              0      0/20
     1e-09                       85     20/20              0      0/20
 
+Those figures are one host on CPython 3.12.14. A second host on 3.13.14 measured the unlocked
+commit at 0 for 1e-06 and 2 for 1e-09 (1/20 leaking), and nothing at 128 threads: how wide the
+window is depends on the interpreter, so baseline yours before comparing to these.
+
 The top two rows are why a zero at the default quantum proves nothing: the unlocked code reads
 zero there too. Its read-modify-write contains no blocking call, so a thread that acquires the
 GIL ran it to completion inside its quantum, and the crossover puts that section near a
