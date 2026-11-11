@@ -60,6 +60,18 @@ def test_compaction_bounds_file_and_keeps_seq(tmp_path, monkeypatch):
     assert view["last_seq"] == 200 and view["first_seq"] > 1  # gap is observable
 
 
+def test_since_filters_the_newest_limit_instead_of_forward_paginating(tmp_path):
+    import store
+
+    for i in range(5):
+        store.append(tmp_path, "busy", "bot", str(i))
+
+    view = store.read_messages(tmp_path, "busy", limit=2, since=1)
+
+    assert [message["seq"] for message in view["messages"]] == [4, 5]
+    assert view["first_seq"] == 4  # the caller must detect the missing 2..3 before advancing
+
+
 def test_room_count_is_capped_so_disk_is_bounded(tmp_path, monkeypatch):
     import store
 

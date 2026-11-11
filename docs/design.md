@@ -182,8 +182,13 @@ backwards reader, write a temp file, `os.replace` (atomic rename). Amortised cos
 `MAX_ROOM_BYTES` of traffic — at 10 MiB with a half-ring keep budget that is one ~5 MiB rewrite per ~10 MiB written.
 
 **Truncation is never silent.** Every response reports `first_seq`; a reader that asked for
-`since=N` and receives `first_seq > N+1` knows it missed lines. (Repo rule "no silent fallbacks"
-applies to money/state/gate paths; this is neither, but the observable-gap contract costs nothing.)
+`since=N` and receives `first_seq > N+1` knows lines are absent from the response. The cause may be
+the newest-`limit` response window or ring compaction; the jump alone does not mean the ring
+dropped anything. The reader must try the retained export before advancing. The export's first
+sequence must be at most `N+1`; keep only records with
+`seq > N`. If it starts after `N+1`, those records are no longer retained because of ring
+compaction or, for an `e-` room, expiry. (Repo rule "no silent fallbacks" applies to money/state/gate
+paths; this is neither, but the observable-gap contract costs nothing.)
 
 ### 2.3 Reading the tail without reading the file
 
