@@ -17,7 +17,7 @@ import re
 import secrets
 import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -1649,7 +1649,17 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
         # kept for good once their room is live. Emptied rather than deleted: `none` names
         # no key, and overwriting keeps the note and its count, so the new owner's own list
         # is an overwrite too — an unlink would leave the count one high and refuse it at a
-        # full namespace until the next reap. The room's nonce is left alone.
+        # full namespace until the next reap.
+        #
+        # The room's nonce is left alone, and deliberately so: a first claim counts past it
+        # like any other signed write rather than resetting it. While a room has no owner,
+        # its counter is what keeps the claim URLs of an earlier ownership dead — reset by a
+        # claim, whoever holds one could re-claim the room for its former owner the moment it
+        # fell vacant. Nor can a counter be run up against a claimant any more: only a write
+        # that lands spends a nonce (`_burn_nonce`), and the only signed write that lands on an
+        # unowned room is a claim, which makes its signer the owner. A counter nobody can
+        # count past was put there by a write some owner of the room signed, and the reaper
+        # takes it with the room's other guard notes.
         #
         # Under the owner note's own lock, re-checked: a claim that raced this one and won
         # writes its owner note under that lock, and can only write a list after it, so a
@@ -1701,15 +1711,29 @@ def note_write(request: Request) -> Response:
     )
 
 
-def _burn_nonce(room: str, nonce: str) -> Response | None:
+def _burn_nonce(room: str, nonce: str) -> Response | Callable[[], object]:
     """Spend a nonce for a room's signed ownership writes, or refuse the replay.
 
     A message replay stops mattering when the message leaves the ring; a note has no ring,
     so a captured signed URL would work forever — including the one that re-adds a key the
     owner has since removed. The counter is claimed with a compare-and-set on the note that
     holds it, so two concurrent writers cannot both spend the same value; the loser gets
-    the ordinary 409. A burnt nonce is not refunded if the write behind it then fails —
-    counters only move forward, and re-signing costs one line of shell.
+    the ordinary 409. A burnt nonce is not refunded if the write behind it then fails on
+    the disk — counters only move forward, and re-signing costs one line of shell.
+
+    The refusal is made here; the burn is returned, for `store.note_set` to run as `then` —
+    under the lock of the note being written, once that note's `?if=` or `?if_absent` holds,
+    before its value lands. So a nonce is spent by the write it signs and by nothing else:
+    never by one its condition or the note cap refuses. Burnt up front, it was spent by those
+    too, and on an empty unowned `d-` room the gate admits any key signing its own claim — so
+    `?if=nope` there raised the counter without claiming anything. Sent at the 19-digit
+    maximum, that left a room nobody could claim until the counter idled out a week later,
+    when the same request could simply be sent again.
+
+    A refused URL stays unspent, as it always has for the refusals ahead of this one (the
+    gate, a malformed condition). The condition is not part of what is signed, so whoever
+    holds one can resend it without; it still carries only the write its signer signed, and
+    the next signed write that lands for the room, at a higher nonce, retires it.
     """
     current = store.note_get(config.ROOT, store.NONCE_NS, room)
     if current is not None and not (current.isdigit() and int(nonce) > int(current)):
@@ -1718,15 +1742,9 @@ def _burn_nonce(room: str, nonce: str) -> Response | None:
             "ownership URL is single-use — count up and sign again.",
             403,
         )
-    store.note_set(
-        config.ROOT,
-        store.NONCE_NS,
-        room,
-        nonce,
-        expect=current,
-        expect_absent=current is None,
+    return lambda: store.note_set(
+        config.ROOT, store.NONCE_NS, room, nonce, expect=current, expect_absent=current is None
     )
-    return None
 
 
 def note_write_signed(request: Request) -> Response:
@@ -1744,10 +1762,10 @@ def note_write_signed(request: Request) -> Response:
     if denied:
         return denied
     condition = _condition(request.query_params)
-    denied = _burn_nonce(key, nonce)
-    if denied:
-        return denied
-    meta = store.note_set(config.ROOT, ns, key, value, *condition)
+    burn = _burn_nonce(key, nonce)
+    if isinstance(burn, Response):
+        return burn
+    meta = store.note_set(config.ROOT, ns, key, value, *condition, then=burn)
     return respond(
         request,
         meta,
@@ -1786,11 +1804,10 @@ async def note_post(request: Request) -> Response:
         denied = _note_write_gate(ns, key, value, signer)
         if denied:
             return denied
-        if signer is not None:
-            burned = _burn_nonce(key, nonce)
-            if burned:
-                return burned
-        meta = store.note_set(config.ROOT, ns, key, value, *condition)
+        burn = None if signer is None else _burn_nonce(key, nonce)
+        if isinstance(burn, Response):
+            return burn
+        meta = store.note_set(config.ROOT, ns, key, value, *condition, then=burn)
         return respond(
             request,
             meta,
