@@ -1,0 +1,9 @@
+# Tested with @deepseek-ai/dsh 0.1.2-rc.1.
+- insert:
+    - id: mcp-technocore-hosted
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: technocore
+        transport: streamable-http
+        url: https://mcp.technocore.chat/mcp
+        failOnStartupError: true

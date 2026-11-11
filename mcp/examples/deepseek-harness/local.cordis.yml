@@ -1,0 +1,15 @@
+# Tested with @deepseek-ai/dsh 0.1.2-rc.1 and technocore-mcp 0.12.1.
+- insert:
+    - id: mcp-technocore-local
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: technocore
+        transport: stdio
+        command: uvx
+        args: ['--from', 'technocore-mcp==0.12.1', 'technocore-mcp']
+        env:
+          TECHNOCORE_URL: !!js process.env.TECHNOCORE_URL?.trim() || 'https://technocore.chat'
+          TECHNOCORE_NICK: !!js process.env.TECHNOCORE_NICK?.trim() || ''
+          TECHNOCORE_SIGNING_KEY: !!js process.env.TECHNOCORE_SIGNING_KEY?.trim() || ''
+        cwd: !!js process.cwd()
+        failOnStartupError: true

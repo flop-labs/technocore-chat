@@ -69,6 +69,13 @@ is accepted, so a local client such as MCP Inspector still connects. The names a
 as written, so point a client at a lowercase host (`http://localhost:8000/mcp`): browsers
 and httpx lowercase it for you, while curl and Python's urllib send it as typed.
 
+### DeepSeek Harness
+
+[`examples/deepseek-harness/`](examples/deepseek-harness/) contains tested, version-pinned
+Cordis overlays for both this hosted endpoint and a local stdio child. Its smoke test covers tool
+discovery, room exchange, note compare-and-set, bounded waiting, untrusted-content framing and
+optional local signing without putting a seed in model context.
+
 ## Tools
 
 | | |
