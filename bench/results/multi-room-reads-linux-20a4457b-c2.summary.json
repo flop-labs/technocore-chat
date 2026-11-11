@@ -1,0 +1,77 @@
+{
+  "metadata": {
+    "connection_reuse": true,
+    "delay_injection": "ASGI wrapper before each GET /r/* request",
+    "delay_ms": 25.0,
+    "environment_note": "WSL2 Alpine 3.21.7; CPython 3.12.13 via uv 0.12.3; official uv.lock; production ASGI app; no compatibility shim",
+    "fixture_description": "16 rooms x 20 messages x 128 text bytes",
+    "kind": "metadata",
+    "limits": [
+      20
+    ],
+    "parallel_concurrency": 2,
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-libc",
+    "python": "3.12.13",
+    "repetitions_per_method": 20,
+    "room_count": 16,
+    "schema": 1,
+    "server_cpu": "NOT_MEASURED",
+    "server_memory": "NOT_MEASURED",
+    "server_workers": 1,
+    "snapshot_semantics": "independent per-room snapshots; not atomic across rooms",
+    "transport_header_bytes": "NOT_MEASURED",
+    "upstream_commit": "20a4457b89ba11254f4aa48217b066884a148d98",
+    "warmups": 2
+  },
+  "results": {
+    "sequential": {
+      "samples": 20,
+      "latency_median_seconds": 0.46320669650003765,
+      "latency_p95_seconds": 0.4670196960000794,
+      "latency_min_seconds": 0.46018119700011084,
+      "latency_max_seconds": 0.46745709800006807,
+      "latency_stdev_seconds": 0.002062236125542176,
+      "client_cpu_median_seconds": 0.031101349999999917,
+      "client_rss_median_bytes_after": "NOT_MEASURED",
+      "requests_per_sample": [
+        16
+      ],
+      "response_body_bytes_per_sample": [
+        71440
+      ],
+      "errors": 0,
+      "possible_gaps": 0
+    },
+    "bounded_parallel": {
+      "samples": 20,
+      "latency_median_seconds": 0.24203149799996027,
+      "latency_p95_seconds": 0.2511073989999204,
+      "latency_min_seconds": 0.23376689900032943,
+      "latency_max_seconds": 0.2511495979997562,
+      "latency_stdev_seconds": 0.005321983881768529,
+      "client_cpu_median_seconds": 0.03731619999999991,
+      "client_rss_median_bytes_after": "NOT_MEASURED",
+      "requests_per_sample": [
+        16
+      ],
+      "response_body_bytes_per_sample": [
+        71440
+      ],
+      "errors": 0,
+      "possible_gaps": 0
+    }
+  },
+  "comparison": {
+    "same_dataset_all_samples": true,
+    "parallel_median_speedup": 1.9138281600856502,
+    "parallel_p95_speedup": 1.8598404422174253,
+    "request_reduction": 0,
+    "batch_endpoint_measured": false
+  },
+  "limits": [
+    "Application-layer delay is not a WAN/TLS/proxy measurement.",
+    "Response body bytes exclude HTTP headers and framing.",
+    "Server CPU, memory and thread occupancy were not measured.",
+    "No batch endpoint was implemented or measured."
+  ]
+}
