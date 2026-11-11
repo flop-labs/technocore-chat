@@ -1,0 +1,74 @@
+# One capacity alert, plus the two collection alerts that have to exist beside it.
+#
+# The pairing is the point: a rule that fires on room pressure is worthless if a broken
+# token silently stops the samples, because "no data" and "no rooms" render identically. So
+# the collection rules watch the exporter and the capacity rule watches the service.
+#
+# Two collection rules rather than one, because collection fails in two ways that need
+# different answers — the page never arrived, or it arrived saying the read failed. Only
+# the second is something the exporter can report about itself; see below.
+groups:
+  - name: technocore
+    rules:
+      # Two collection alerts, not one, because "we never got the page" and "we got the
+      # page and it says the read failed" are different questions with different fixes,
+      # and an `or` across both produces one alert whose description has to hedge about
+      # which happened. They are mutually exclusive by construction: the second can only
+      # fire when samples exist, which means the first did not.
+      #
+      # Both select `job="technocore"`, the job_name in the prometheus-scrape.yml shipped
+      # beside this file. Rename the job there and these must be renamed with it.
+      - alert: TechnocoreExporterDown
+        # `up` is synthesized by Prometheus per scrape and is the authority on whether the
+        # exporter answered at all. Measured against Prometheus 3.5.0: a target answering
+        # in 8s under a 2s scrape_timeout gives up=0 and stores no technocore_* samples
+        # whatever the exporter believed it was publishing, and a target that is gone gives
+        # the same. Only `up` sees either.
+        #
+        # This replaces absent(technocore_exporter_scrape_success), which was true only
+        # when EVERY series was gone — so with an HA pair, or any second instance, one dead
+        # exporter fired nothing at all. `up` is per instance and labels which one.
+        # absent(up{...}) is kept for the case under that: nothing scraping this job, which
+        # no per-instance expression can see.
+        expr: absent(up{job="technocore"}) or up{job="technocore"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "technocore exporter is not answering"
+          description: >-
+            The exporter is down, unreachable, or answering slower than scrape_timeout —
+            in which case Prometheus stores no exporter samples at all. If no instance is
+            listed, nothing is scraping job "technocore" and the scrape_config is the
+            thing to check.
+
+      - alert: TechnocoreStatsUnreadable
+        # The case only the exporter can report: it is up and answering promptly, and the
+        # /stats read behind it is failing. `up` stays 1 throughout, so nothing above sees
+        # this. A wrong CHAT_STATS_TOKEN is the common cause, and /stats answers 404 to it
+        # rather than 401, so nothing about the failure looks like authentication.
+        expr: technocore_exporter_scrape_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "technocore exporter cannot read /stats"
+          description: >-
+            The exporter is answering but its /stats read is failing. Check
+            TECHNOCORE_STATS_TOKEN against the service's CHAT_STATS_TOKEN: a mismatch
+            answers 404, not 401, so it does not look like an auth failure.
+
+      - alert: TechnocoreRoomCapacityPressure
+        # Rooms, not bytes: the room cap is the one that refuses creates outright. Bytes
+        # have their own budget and a reaper working against them, so they warrant a
+        # separate, lower-urgency rule an operator can tune to their disk.
+        expr: technocore_rooms / technocore_rooms_capacity > 0.85
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "technocore room occupancy above 85% of cap"
+          description: >-
+            {{ $value | humanizePercentage }} of the room cap is in use. New rooms are
+            refused at the cap. Note this counts unlisted rooms, which GET /rooms does not
+            show — so the listing will look emptier than this number.

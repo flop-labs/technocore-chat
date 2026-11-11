@@ -1,0 +1,180 @@
+# promtool unit tests for technocore-alerts.yml.
+#
+# A rules file that parses is not a rules file that fires. These pin both directions for
+# each alert — that it fires on the condition, and that it stays quiet otherwise — because
+# a capacity alert nobody has seen fire is indistinguishable from one that cannot.
+#
+#   promtool test rules exporter/config/technocore-alerts.test.yml
+rule_files:
+  - technocore-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: room occupancy crossing the cap threshold
+    input_series:
+      # 4352/5120 = 85%, exactly at the boundary and therefore NOT over it, then 4608 = 90%.
+      - series: technocore_rooms
+        values: "4352+0x20 4608+0x20"
+      - series: technocore_rooms_capacity
+        values: "5120+0x40"
+      - series: technocore_exporter_scrape_success
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: TechnocoreRoomCapacityPressure
+        exp_alerts: []  # exactly 85% is not "> 0.85"
+      - eval_time: 21m
+        alertname: TechnocoreRoomCapacityPressure
+        exp_alerts: []  # over the line, but not yet for 15m
+      - eval_time: 37m
+        alertname: TechnocoreRoomCapacityPressure
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "technocore room occupancy above 85% of cap"
+              description: >-
+                90% of the room cap is in use. New rooms are refused at the cap. Note this
+                counts unlisted rooms, which GET /rooms does not show — so the listing will
+                look emptier than this number.
+
+  - interval: 1m
+    name: the exporter is up and the /stats read is failing
+    input_series:
+      # The service is healthy and far from its cap; only the exporter's read fails. `up`
+      # stays 1 — the page arrives, it just reports 0 — so TechnocoreExporterDown must stay
+      # quiet and TechnocoreStatsUnreadable must fire. Pinned in both directions because
+      # collapsing these two into one `or` is what made the description hedge.
+      - series: technocore_rooms
+        values: "10+0x30"
+      - series: technocore_rooms_capacity
+        values: "5120+0x30"
+      - series: 'up{job="technocore", instance="a:9464"}'
+        values: "1+0x30"
+      - series: 'technocore_exporter_scrape_success{instance="a:9464"}'
+        values: "1 1 1 0+0x27"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TechnocoreStatsUnreadable
+        exp_alerts: []  # failing, but not yet for 5m
+      - eval_time: 10m
+        alertname: TechnocoreStatsUnreadable
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "a:9464"
+            exp_annotations:
+              summary: "technocore exporter cannot read /stats"
+              description: >-
+                The exporter is answering but its /stats read is failing. Check
+                TECHNOCORE_STATS_TOKEN against the service's CHAT_STATS_TOKEN: a mismatch
+                answers 404, not 401, so it does not look like an auth failure.
+      - eval_time: 10m
+        alertname: TechnocoreExporterDown
+        exp_alerts: []  # the page arrived; this is not a collection failure
+      - eval_time: 10m
+        alertname: TechnocoreRoomCapacityPressure
+        exp_alerts: []
+
+  - interval: 1m
+    name: one exporter of two goes down
+    input_series:
+      # The case the previous rule could not see at all. absent() is true only when EVERY
+      # series is gone, so with a second healthy instance a dead exporter fired nothing.
+      # `up` is per instance, so this fires and names the one that is down.
+      - series: 'up{job="technocore", instance="a:9464"}'
+        values: "1+0x30"
+      - series: 'up{job="technocore", instance="b:9464"}'
+        values: "1 1 1 0+0x27"
+      - series: 'technocore_exporter_scrape_success{instance="a:9464"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TechnocoreExporterDown
+        exp_alerts: []  # down, but not yet for 5m
+      - eval_time: 10m
+        alertname: TechnocoreExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: technocore
+              instance: "b:9464"
+            exp_annotations:
+              summary: "technocore exporter is not answering"
+              description: >-
+                The exporter is down, unreachable, or answering slower than scrape_timeout —
+                in which case Prometheus stores no exporter samples at all. If no instance is
+                listed, nothing is scraping job "technocore" and the scrape_config is the
+                thing to check.
+
+  - interval: 1m
+    name: the scrape is slower than scrape_timeout
+    input_series:
+      # Measured against Prometheus 3.5.0: a target answering in 8s under a 2s
+      # scrape_timeout yields up=0 and stores no technocore_* samples whatever the exporter
+      # believed it published. Only `up` expresses this, which is why the rule moved to it.
+      - series: 'up{job="technocore", instance="a:9464"}'
+        values: "1 1 1 0+0x27"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TechnocoreExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: technocore
+              instance: "a:9464"
+            exp_annotations:
+              summary: "technocore exporter is not answering"
+              description: >-
+                The exporter is down, unreachable, or answering slower than scrape_timeout —
+                in which case Prometheus stores no exporter samples at all. If no instance is
+                listed, nothing is scraping job "technocore" and the scrape_config is the
+                thing to check.
+      - eval_time: 10m
+        alertname: TechnocoreStatsUnreadable
+        exp_alerts: []  # no samples arrived, so the gauge cannot say anything
+
+  - interval: 1m
+    name: a healthy pair stays quiet
+    input_series:
+      # The other direction, so neither rule can pass by firing on everything.
+      - series: 'up{job="technocore", instance="a:9464"}'
+        values: "1+0x30"
+      - series: 'up{job="technocore", instance="b:9464"}'
+        values: "1+0x30"
+      - series: 'technocore_exporter_scrape_success{instance="a:9464"}'
+        values: "1+0x30"
+      - series: 'technocore_exporter_scrape_success{instance="b:9464"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: TechnocoreExporterDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: TechnocoreStatsUnreadable
+        exp_alerts: []
+
+  - interval: 1m
+    name: nothing is scraping the job at all
+    input_series:
+      # No `up` for this job anywhere — a dropped scrape_config or a renamed job. No
+      # per-instance expression can see this, which is why absent(up{...}) is kept. The
+      # alert carries no instance label, and the description says so.
+      - series: technocore_rooms
+        values: "10+0x30"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TechnocoreExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: technocore
+            exp_annotations:
+              summary: "technocore exporter is not answering"
+              description: >-
+                The exporter is down, unreachable, or answering slower than scrape_timeout —
+                in which case Prometheus stores no exporter samples at all. If no instance is
+                listed, nothing is scraping job "technocore" and the scrape_config is the
+                thing to check.

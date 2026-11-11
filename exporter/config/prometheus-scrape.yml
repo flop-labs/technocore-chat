@@ -1,0 +1,29 @@
+# Scrape configuration for technocore-exporter.
+#
+# 60s, matching the service's CHAT_STATS_CACHE_SECONDS default. The digest behind /stats is
+# an O(cap) walk, cached for that long precisely so it is not rebuilt per request; scraping
+# faster returns the same cached bytes and buys no freshness at all. If an operator raises
+# CHAT_STATS_CACHE_SECONDS, raise this with it — a scrape interval below the cache is how
+# monitoring starts paying for a walk it cannot use.
+scrape_configs:
+  - job_name: technocore
+    scrape_interval: 60s
+    # Above every origin timeout the exporter will accept: TECHNOCORE_STATS_TIMEOUT
+    # defaults to 5s and is refused at boot unless 0 < t < 10 (SCRAPE_TIMEOUT_CEILING), so
+    # a slow origin always surfaces as technocore_exporter_scrape_success=0 with telemetry
+    # rather than as a scrape timeout with no samples at all — the second tells you nothing
+    # about which side is unwell.
+    #
+    # That holds because the exporter treats the timeout as a budget for the whole scrape —
+    # resolution, connect, headers, body, and any time queued behind another scrape — not as
+    # a per-socket-operation timeout. It did not always, and the gap was not one gap. Two ran
+    # past this figure as measured: a trickling body answered after 20.18s reporting success,
+    # and a scrape queued behind another took 17.82s on a 9s timeout. Three more were
+    # measured on a 3s budget to keep the runs short, so their figures are smaller — a wedged
+    # resolver 20.0s, trickled response headers 22.6s, four address records 12.0s — but
+    # none of the three is bounded by this figure either. The first two last as long as the
+    # other side cares to block; the third is four times the configured timeout, so ~40s at
+    # the accepted ceiling. See the exporter README.
+    scrape_timeout: 15s
+    static_configs:
+      - targets: ["127.0.0.1:9464"]
