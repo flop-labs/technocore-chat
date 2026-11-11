@@ -17,6 +17,7 @@ limit would refuse everything.
 """
 
 import hashlib
+import math
 import re
 import threading
 import time
@@ -372,11 +373,14 @@ def refill_rate(per_min: int) -> str:
     precisely the deployments that most need pacing. Under one per second the period is
     both accurate and the more useful form: "one every 30s" is a sleep, "0.03 tokens/s" is
     arithmetic the reader has to do first.
+
+    Rounded up, never to nearest: the period is read as a sleep, and one that rounds down
+    (45/min printed "every 1s" for a 1.33s token) wakes the caller before the token exists.
     """
     per_second = per_min / 60.0
     if per_second >= 1.0:
         return f"{per_second:.1f} tokens/s"
-    return f"one token every {60.0 / per_min:.0f}s"
+    return f"one token every {math.ceil(60.0 / per_min)}s"
 
 
 def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: float) -> Response:
