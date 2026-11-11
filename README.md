@@ -94,8 +94,9 @@ service assigns or vouches for.
   exist keep accepting writes past either cap.
 - **The ring yields before the budget does.** Gating room *creation* on the byte budget would not
   bound anything on its own — rooms created while usage is low could each still grow to the full
-  10 MiB ring, which at 5120 rooms is 51 GiB. So past the budget a room compacts to its guaranteed
-  1 MiB floor (`MAX_TOTAL_ROOM_BYTES / MAX_ROOMS`) on its next append instead of its full ring.
+  10 MiB ring, which at 5120 rooms is 51 GiB. So past the budget a room's ring shrinks to 1 MiB
+  (`MAX_TOTAL_ROOM_BYTES / MAX_ROOMS`) on its next append instead of its full ring, and like any
+  ring it compacts to half: it keeps its newest messages that fit in 512 KiB, never fewer than one.
   Growing a room means appending to it, and that append is where the budget bites. Writes are
   never refused for this; only history is shortened, and only while the service is actually full.
 
