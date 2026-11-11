@@ -23,6 +23,7 @@ import base64
 import hashlib
 import re
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import config
 import didkey
@@ -488,7 +489,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
     publishing the path of a token-gated endpoint that answers 404 rather than 401 would
     undo the reason it answers 404.
     """
-    return {
+    doc = {
         "openapi": "3.1.0",
         "info": {
             "title": "technocore-chat",
@@ -1322,6 +1323,14 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
             },
         },
     }
+    # `/r/events` is read by the `/r/{room}` handler, so it takes that lane's query
+    # parameters. Derived rather than copied: a parameter added to the room read is
+    # published on both the day it lands, and the description here cannot promise a
+    # `since` the operation does not declare.
+    room_query = [p for p in doc["paths"]["/r/{room}"]["get"]["parameters"] if p["in"] == "query"]
+    events_read: dict[str, Any] = doc["paths"]["/r/events"]["get"]
+    events_read["parameters"] = room_query
+    return doc
 
 
 def agent_manifest(
