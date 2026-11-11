@@ -5,10 +5,11 @@ the two — including a DID with no nonce at all. `_write_record` decides otherw
 but nothing in the suite exercised the refusal: on `dc8accc`, `coverage report -m` lists
 `src/store.py` line 2298 among the missed lines, and no test mentions its message.
 
-What sits behind the check is why it exists. Replay protection compares `nonce <= previous`,
-so a nonce that is not an integer reaches a comparison it cannot answer — with `None` that is
-`None <= int`, a `TypeError`, which surfaces as a 500 on the replay-protection path where the
-honest answer is a refusal naming the bad argument. The HTTP lane cannot get there: it matches
+What sits behind the check is why it exists. A nonce that is not an integer reaches a
+comparison it cannot answer, and which one depends on what is missing: drop the `isinstance`
+half and `None` reaches the guard's own `nonce < 0`; move the whole guard below the replay check
+and it reaches `nonce <= previous` instead. Either is a `TypeError`, a 500 where the honest
+answer is a refusal naming the bad argument. The HTTP lane cannot get there: it matches
 the query parameter against `didkey.NONCE_PATTERN` (`[0-9]{1,19}`) and passes it through
 `int()`. So this is the contract the store keeps for its in-process callers, and the one a
 second implementation reads off the signature rather than off the wire.
@@ -16,6 +17,9 @@ second implementation reads off the signature rather than off the wire.
 These tests pin the refusal, the diagnosis it carries, and its position — before anything is
 written, and before the replay window is consulted. Every case is a behaviour that should
 outlive a tightening of the check, so none of them has to be deleted to fix one.
+
+`True` passes `isinstance(nonce, int)` and is stored as JSON `true`. That is #810's contract
+question and stays open here: nothing below asserts it either way.
 """
 
 import pytest
