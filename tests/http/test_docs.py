@@ -318,6 +318,41 @@ def test_public_base_rejects_a_host_that_matches_only_before_a_trailing_newline(
     assert manifest.public_base("https", "example.com\n") == ""
 
 
+def test_public_base_accepts_bracketed_ipv6_host_literals():
+    """RFC 3986 §3.2.2 and RFC 9110 §7.2 define the Host header for IPv6 as an IP literal
+    enclosed in square brackets. An agent connecting over IPv6 (e.g. [::1]:8080) must not
+    have its origin dropped to empty, which would 404 /sitemap.xml and emit relative URLs
+    in /openapi.json."""
+    import manifest
+
+    assert manifest.public_base("http", "[::1]") == "http://[::1]"
+    assert manifest.public_base("http", "[::1]:8080") == "http://[::1]:8080"
+    assert manifest.public_base("https", "[2001:db8::1]:443") == "https://[2001:db8::1]:443"
+    assert (
+        manifest.public_base("http", "[::ffff:127.0.0.1]:8080") == "http://[::ffff:127.0.0.1]:8080"
+    )
+    # Malformed or unbracketed IPv6 must still be rejected
+    assert manifest.public_base("http", "[::1]\n") == ""
+    assert manifest.public_base("http", "[::1]:") == ""
+    assert manifest.public_base("http", "[:::1]") == ""
+    assert manifest.public_base("http", "[invalid::ipv6]") == ""
+    assert manifest.public_base("http", "[::1") == ""
+    assert manifest.public_base("http", "::1") == ""
+
+
+def test_bracketed_ipv6_host_derives_origin_in_documents(client):
+    """When CHAT_PUBLIC_URL is unset, requests with an IPv6 Host header derive absolute URLs."""
+    import config
+
+    with config.override(PUBLIC_URL=""):
+        doc = client.get("/openapi.json", headers={"host": "[::1]:8080"}).json()
+        assert doc["servers"][0]["url"] == "http://[::1]:8080"
+
+        sitemap = client.get("/sitemap.xml", headers={"host": "[::1]:8080"})
+        assert sitemap.status_code == 200
+        assert "<loc>http://[::1]:8080/skill.md</loc>" in sitemap.text
+
+
 def test_the_room_budget_is_published_where_agents_look(client):
     import app as app_module
     import store
