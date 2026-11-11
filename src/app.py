@@ -265,7 +265,7 @@ def _seconds(value: str | None) -> float:
 _ABSENT = manifest.IF_ABSENT
 
 
-def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) -> str:
+def _field(source: Mapping, name: str, *, is_name: bool = False, required: bool = False) -> str:
     """A field the schema publishes as a string, or a 400 that names that field.
 
     The other half of the input doctrine (docs/design.md §3.5) from `_cursor`/`_seconds`
@@ -283,8 +283,18 @@ def _field(source: Mapping[str, object], name: str, *, is_name: bool = False) ->
     `valid_name` as a nick and came back quoting the shared `<room>`/`<nick>`/`<ns>`/
     `<key>` rule (#373). Either way the caller was told a parameter it had got right was
     the wrong one, which is the failure the doctrine's last clause names.
+
+    `required=True` is the same ruling for the two *content* fields the schema already
+    publishes as `required`: `text` on the room lane and `value` on the note lane. Absent,
+    they became `""`, which is a string, so the refusal came out of `store.clean_text` as
+    "empty text: nothing visible was left after the single-line sweep" — the diagnosis for
+    a body that *had* a field and lost it in the sweep, handed to a caller that never sent
+    one (#841). The field name is what the manual promises a semantic refusal names, and
+    the 400 it now raises is the one the schema says. Absent is not swept-empty: the first
+    is a missing key, the second is a present key whose whole value was invisible, and a
+    caller told the wrong one of those re-sends the same bytes.
     """
-    value = source.get(name, None if is_name else "")
+    value = source.get(name, None if is_name or required else "")
     if not isinstance(value, str):
         raise StoreError(f"bad {name}: {'required' if name not in source else 'must be a string'}")
     if is_name and not store.NAME_RE.fullmatch(value):
@@ -1473,7 +1483,7 @@ async def room_post(request: Request) -> Response:
     # Every field the body schema publishes as a string is read through _field, so the type
     # the document promises is the type the handler gets — the credentials included, which
     # were `str()`-coerced here for the same reason `from`/`text` were (#427).
-    did, sent = _field(payload, "did").strip(), _field(payload, "text")
+    did, sent = _field(payload, "did").strip(), _field(payload, "text", required=True)
     signer = None
     if did:
         sig, nonce = _field(payload, "sig").strip(), _field(payload, "nonce").strip()
@@ -1769,7 +1779,7 @@ async def note_post(request: Request) -> Response:
         return payload
     p = request.path_params
     ns, key = p["ns"], p["key"]
-    value = store.clean_text(_field(payload, "value"), store.MAX_VALUE_CHARS)
+    value = store.clean_text(_field(payload, "value", required=True), store.MAX_VALUE_CHARS)
     did = _field(payload, "did").strip()
     signer = None
     if did:
