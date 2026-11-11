@@ -539,6 +539,39 @@ def test_if_absent_creates_only_once(mcp):
     assert "a" in text_of(mcp.call("read_note", {"namespace": "l", "key": "k"}))
 
 
+@pytest.mark.parametrize("expected", ["null", '{"step":1}', '["pending"]'])
+def test_note_cas_preserves_json_shaped_string_conditions(mcp, expected):
+    """A JSON-looking note is still text when used as an exact compare-and-set guard."""
+    args = {"namespace": "plans", "key": "state"}
+    assert not mcp.call("write_note", {**args, "value": expected}).is_error
+    replaced = mcp.call("write_note", {**args, "value": "changed", "if_matches": expected})
+    assert not replaced.is_error, text_of(replaced)
+
+    stale = mcp.call("write_note", {**args, "value": "lost update", "if_matches": expected})
+    assert stale.is_error, "the stale condition must not become an unconditional overwrite"
+    assert "409" in text_of(stale)
+    assert json.loads(mcp.sent[-1][2])["if"] == expected
+    stored = text_of(mcp.call("read_note", args))
+    assert "changed" in stored and "lost update" not in stored
+
+
+def test_say_preserves_a_literal_null_nick(mcp):
+    reply = mcp.call("say", {"room": "lobby", "text": "hello", "nick": "null"})
+    assert not reply.is_error, text_of(reply)
+    assert "<~null> hello" in text_of(mcp.call("read_room", {"room": "lobby"}))
+
+
+def test_explicit_null_string_options_still_mean_omitted(mcp):
+    reply = mcp.call("say", {"room": "lobby", "text": "hello", "nick": None})
+    assert not reply.is_error, text_of(reply)
+    assert f"<~{mcp.module.SESSION_NICK}> hello" in text_of(reply)
+    args = {"namespace": "plans", "key": "state", "if_matches": None}
+    for value in ("first", "second"):
+        reply = mcp.call("write_note", {**args, "value": value})
+        assert not reply.is_error, text_of(reply)
+        assert "if" not in json.loads(mcp.sent[-1][2])
+
+
 def test_the_two_write_note_conditions_are_sent_together_so_that_service_can_refuse_them(mcp):
     """#290: dropping `if_matches` when `if_absent` is true makes a contradictory request
     look like a successful create. Keep both fields on the recorded wire so the service's
