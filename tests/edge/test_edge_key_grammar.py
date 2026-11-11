@@ -8,8 +8,8 @@ whitespace. cacheKey says why the difference matters, beside the guard that clos
 disagreement there would not be a miss but a wrong answer — one caller's row count served to
 another."
 
-Nothing enumerated it. There is no JS harness in this repo, so the grammar is read out of worker.js
-and measured against the running origin, in three parts: the guard refuses a form rather than
+Nothing enumerated it. The grammar is read out of worker.js, `cacheKey` itself runs in Node where
+one is installed, and both are measured against the running origin, in three parts: the guard refuses a form rather than
 coercing it, the two parsers really do differ — by 670 code points and by every form Python reads
 around a number — and inside the grammar the key names the reply the origin gives.
 """
@@ -17,8 +17,11 @@ around a number — and inside the grammar the key names the reply the origin gi
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import re
+import shutil
+import subprocess
 import unicodedata
 import urllib.parse
 
@@ -47,7 +50,7 @@ def _snapshot_module():
 
 
 def _cache_key_source() -> str:
-    """cacheKey's own source, for the assertions there is no JS harness to make properly."""
+    """cacheKey's own source: read for the structural pins, executed for the behavioural one."""
     worker = (EDGE / "src" / "worker.js").read_text(encoding="utf-8")
     body = worker[worker.index("function cacheKey(") :]
     return body[: body.index("\n}\n")]
@@ -71,7 +74,7 @@ def _digit_grammar() -> re.Pattern[str]:
 
 
 def test_a_limit_outside_the_grammar_gets_no_key_rather_than_a_coerced_one():
-    """A source assertion, deliberately, and narrow — there is no JS harness in this repo.
+    """A source assertion, and narrow: it pins the line, and the Node test below pins what it does.
 
     Everything below rests on this one property: a `limit` the grammar refuses yields no key at
     all, so that caller is answered by the origin alone and no shared copy is read or written. The
@@ -97,6 +100,54 @@ def test_a_limit_outside_the_grammar_gets_no_key_rather_than_a_coerced_one():
         "a matched parameter must survive on exact equality — a looser comparison would let the "
         "edge key one rendering while the origin serves another"
     )
+
+
+def _run_cache_key(queries: list[str]) -> list[str | None]:
+    """cacheKey executed, not read: its own source in Node, with the policy snapshot.py generates.
+
+    The same move `tests/unit/test_delegation.py` makes for the served page's `newest()`. Each
+    query comes back as the search string of the key it was filed under, or None for no key.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is needed to execute cacheKey")
+    script = (
+        f"const EDGE_KEY = {json.dumps(_snapshot_module().rooms_key())};\n"
+        f"{_cache_key_source()}\n}}\n"
+        f"for (const q of {json.dumps(queries)}) {{\n"
+        "  const key = cacheKey(new URL('https://edge.invalid/rooms' + q), '/rooms');\n"
+        "  console.log(JSON.stringify(key === null ? null : new URL(key.url).search));\n"
+        "}\n"
+    )
+    out = subprocess.run(
+        [node, "-e", script], capture_output=True, text=True, timeout=60, check=True
+    )
+    return [json.loads(line) for line in out.stdout.splitlines()]
+
+
+def test_cache_key_itself_refuses_a_limit_outside_the_grammar():
+    """The refusal, executed. The source pin above holds the line; this holds what the line does.
+
+    The edit both exist for is `return null` turned into `continue`. Every Python-side test in
+    this file stays green through it, because none of them runs the Worker. Here it turns each
+    refused limit into a key with no `limit` at all, which names the origin's default page while
+    the origin serves the number it read.
+    """
+    refused = [
+        "?limit=",
+        "?limit=%D9%A5",
+        "?limit=%2B5",
+        "?limit=1_0",
+        "?limit=%205",
+        "?limit=1234567890",
+    ]
+    assert _run_cache_key(refused) == [None] * len(refused), "a refused limit must get no key"
+    assert _run_cache_key(["?limit=5", "?limit=0005", "?limit=999", ""]) == [
+        "?limit=5",
+        "?limit=5",
+        "?limit=200",
+        "",
+    ], "inside the grammar the key is the clamped decimal, and an absent limit adds nothing"
 
 
 def test_a_present_but_empty_limit_gets_no_key_either(client):
