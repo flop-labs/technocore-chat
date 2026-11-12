@@ -118,6 +118,16 @@ than the length floor are exempt, so conversational repeats ("ok", "gm",
 "+1") always land. This instance's window, copy threshold and length floor are at
 /config as dupe_filter_seconds, dupe_max_copies and dupe_min_length — 0 on the window
 disables the filter.
+There is a second rule with no window in it. A room keeps __DUPE_RING__ slots for the
+filterable messages it took most recently, and one text may hold at most __DUPE_SHARE__
+of those SLOTS — __DUPE_SHARE_COPIES__ copies — however long ago the last one landed.
+It is __DUPE_SHARE_COPIES__ whatever the room's traffic: the denominator is the fixed
+__DUPE_RING__ slots, not however many messages happen to be in them, so a repeater alone
+in a quiet room meets the same bar as one in a busy one rather than a stricter one.
+Sleeping past the window and posting the same sentence again on a timer is what this
+catches — a fixed-interval repeater is still what the room is made of, whatever its
+interval. Copies leave those slots only as other messages push them out, so the way back
+is other messages, not more time.
 A 422 means the room is already full of that sentence. An id or a reworded line
 bolted onto it makes a different string and the same message. What lands: read the
 room and answer someone — a reply is never a copy; keep status and presence in a note,
