@@ -163,6 +163,7 @@ def main() -> int:
 
     out = pathlib.Path(args.out)
     types: dict[str, str] = {}
+    bodies: dict[str, bytes] = {}
     failed: list[str] = []
 
     for path in PATHS:
@@ -178,9 +179,7 @@ def main() -> int:
             failed.append(f"{path} -> {type(exc).__name__}: {exc}")
             continue
 
-        dest = out / asset_name(path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(body)
+        bodies[path] = body
         types[path] = ctype
         print(f"  {path:44} {len(body):>7}B  {ctype}")
 
@@ -189,17 +188,17 @@ def main() -> int:
         if path not in types:
             continue  # its fetch failed; the error below is the one worth reporting
         body = (repo / source).read_bytes()
-        (out / asset_name(path)).write_bytes(body)
+        bodies[path] = body
         print(f"  {path:44} {len(body):>7}B  <- {source} (static-first, from the tree)")
 
     for path, (source, ctype) in EDGE_ONLY.items():
         body = (repo / source).read_bytes()
-        (out / asset_name(path)).write_bytes(body)
+        bodies[path] = body
         types[path] = ctype
         print(f"  {path:44} {len(body):>7}B  <- {source} (edge-only, from the tree)")
 
     if failed:
-        # Fail loudly and write nothing further. A partial snapshot deployed as a fallback
+        # Fail loudly without replacing the previous capture. A partial snapshot deployed as a fallback
         # is worse than no fallback: it answers some paths and 503s the rest, and which is
         # which depends on what happened to be up when this ran.
         print("\nsnapshot FAILED:", file=sys.stderr)
@@ -215,6 +214,13 @@ def main() -> int:
         # that stops here, because nothing downstream would report it.
         print(f"\nsnapshot FAILED: no cache-key spec for {unspecified}", file=sys.stderr)
         return 1
+
+    # Keep the previous assets and manifest intact until capture and policy validation
+    # succeed. Publication itself is not a filesystem transaction.
+    for path, body in bodies.items():
+        dest = out / asset_name(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(body)
 
     pathlib.Path(args.manifest).write_text(
         json.dumps(

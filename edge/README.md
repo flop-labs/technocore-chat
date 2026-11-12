@@ -63,12 +63,19 @@ ends in `.md` too.
 `deploy.sh` runs `snapshot.py` first deliberately: publishing without it ships whatever
 copies were last on this disk, which for a versioned surface means last release's numbers.
 
-`edge/public/` and `edge/src/types.json` are generated and gitignored for the same reason —
+Capture completes before any output is written: an HTTP/body-read failure, an unreadable
+checkout asset, or missing cache-key policy leaves the previous assets and routing manifest
+untouched. On a first capture, these failures create neither output. Fix the failure and rerun
+`snapshot.py` before deploying. This is not transactional publication: a disk-write failure
+or interruption while publishing can still leave partial output, so rerun successfully
+before deploying after either.
+
+`edge/public/` and `edge/src/routing.json` are generated and gitignored for the same reason —
 a snapshot committed to the repo is one that goes stale quietly.
 
 ### Content types
 
-`snapshot.py` records the origin's `Content-Type` per path in `src/types.json`, and the
+`snapshot.py` records the origin's `Content-Type` per path in `src/routing.json`, and the
 Worker sets it from there. Six of these paths have no file extension (`/humans`, `/config`,
 `/.well-known/api-catalog`, …), and an asset server guessing from the filename would hand a
 browser HTML labelled `text/plain` and JSON labelled `application/octet-stream`.
