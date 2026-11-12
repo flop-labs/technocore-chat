@@ -2727,9 +2727,8 @@ def _write_record(
         # so a stale nonce never reserves; before the write so a share/window refusal costs no
         # append. `reserve` is None when the filter is off — the hot path pays no seq read. The
         # reserver remembers the generation it was keyed at, so release() below needs no argument.
-        if reserve is not None:
-            if reserve.reserve(_seq_field(root, room, "gen")):
-                raise DuplicateRefused
+        if reserve is not None and reserve.reserve(_seq_field(root, room, "gen")):
+            raise DuplicateRefused
         committed = False  # set once the record is flushed into the file readers see
         try:
             rec["seq"] = last_seq(root, room) + 1
