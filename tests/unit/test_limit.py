@@ -1,9 +1,3 @@
-import sys
-from unittest.mock import MagicMock
-
-if "fcntl" not in sys.modules and sys.platform == "win32":
-    sys.modules["fcntl"] = MagicMock()
-
 from starlette.requests import Request
 
 import limit
@@ -65,3 +59,37 @@ def test_client_ip_ipv4_mapped():
     assert key1 == "192.0.2.1", f"Unexpected mapped key: {key1}"
     assert key2 == "198.51.100.9", f"Unexpected mapped key: {key2}"
     assert key1 != key2, "Mapped IPv4 addresses incorrectly coalesced"
+
+
+def _req(host="203.0.113.7", headers=None):
+    return Request(
+        {
+            "type": "http",
+            "client": (host, 12345),
+            "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        }
+    )
+
+
+def test_client_ip_strips_zone_id():
+    assert limit.client_ip(_req("fe80::1%eth0")) == "fe80::/64"
+    assert limit.client_ip(_req("fe80::1%eth0")) == limit.client_ip(_req("fe80::2%wlan0"))
+
+
+def test_client_ip_header_groups_ipv6_and_takes_first_entry():
+    req = _req(headers={"x-real-ip": "2001:db8::5, 10.0.0.1"})
+    assert limit.client_ip(req, "x-real-ip") == "2001:db8::/64"
+
+
+def test_client_ip_header_junk_falls_back_to_peer():
+    for junk in ("not-an-ip", "", "999.1.1.1"):
+        req = _req("198.51.100.4", {"x-real-ip": junk})
+        assert limit.client_ip(req, "x-real-ip") == "198.51.100.4"
+
+
+def test_client_ip_counts_proxy_evidence_only_without_header_config():
+    before = limit._proxy_evidence["proxied_requests"]
+    limit.client_ip(_req(headers={"x-forwarded-for": "1.2.3.4"}))
+    assert limit._proxy_evidence["proxied_requests"] == before + 1
+    limit.client_ip(_req(headers={"x-forwarded-for": "1.2.3.4"}), "x-forwarded-for")
+    assert limit._proxy_evidence["proxied_requests"] == before + 1

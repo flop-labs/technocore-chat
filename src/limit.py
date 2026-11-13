@@ -272,16 +272,31 @@ def client_ip(request: Request, ip_header: str = "") -> str:
     different notions of "IP" would each be bypassable by whichever header the other
     ignored.
     """
-    raw = request.headers.get(ip_header, "").split(",")[0].strip() if ip_header else ""
+    peer = request.client.host if request.client else "?"
+    claimed = request.headers.get(ip_header, "").split(",")[0].strip() if ip_header else ""
     if not ip_header and any(h in request.headers for h in PROXY_IP_HEADERS):
         _proxy_evidence["proxied_requests"] += 1
+    # A header value that is not an IP is no identity at all: keying on it would hand a
+    # client a fresh bucket per request. Fall back to the socket peer instead.
+    return _ip_key(claimed) or _ip_key(peer) or peer
+
+
+def _ip_key(raw: str) -> str:
+    """Rate-limit identity for one address, or "" if `raw` is not an IP.
+
+    IPv6 clients are grouped by /64 (one subscriber typically owns a whole /64, so cycling
+    addresses inside it must not mint new buckets). IPv4-mapped IPv6 addresses collapse to
+    their IPv4 form. A scope id (`fe80::1%eth0`) is not part of the address and is dropped.
+    """
     try:
-        addr = ipaddress.ip_address(raw := raw or (request.client.host if request.client else "?"))
-        if isinstance(addr, ipaddress.IPv6Address):
-            return str(addr.ipv4_mapped or ipaddress.ip_network(f"{addr}/64", False))
+        addr = ipaddress.ip_address(raw.partition("%")[0])
     except ValueError:
-        pass
-    return raw
+        return ""
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
 def take(request, kind, per_min, burst=None, *, ip_header="", max_buckets=MAX_BUCKETS):
