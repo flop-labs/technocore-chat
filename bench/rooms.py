@@ -36,7 +36,9 @@ Three things about how this is measured, each of which changes the number:
 
 `--writers` adds threads appending to the head of the listing while the walk runs. It is not
 a proposal to change anything: it separates the walk's own work from time spent waiting on
-the per-room locks a writer holds, which no single-threaded arm can do.
+the per-room locks a writer holds, which no single-threaded arm can do. It is a count *of*
+the deep rooms, since those are the rooms it appends to, so `--writers` above `--deep` is
+refused rather than quietly capped to it.
 
 Builds its own store in a tempfile directory — never point it at a real one.
 """
@@ -128,17 +130,25 @@ def contended(root: Path, limit: int, reps: int, writers: int, deep: int) -> dic
     entries the walk is about to want. That is not an artefact of the harness — it is the
     production case, and it is why the contended arm is not simply the cold arm plus lock
     wait.
+
+    `writers` is a count *of* the `deep` rooms — the churn targets are their names — so
+    `0 <= writers <= deep` is the invariant, refused rather than clamped. Both halves of it
+    were load-bearing. A `max(1, deep)` here started a writer for `deep == 0` appending to
+    `bench-d000000`, a room `build()` only makes when `deep >= 1`: the arm created a room the
+    run never built, and at `--rooms`'s default the cap refused that create on the thread's
+    first write and the column labelled "contended" was an uncontended arm. A silent
+    `min(writers, …)` turned `--writers 8 --deep 2` into two threads while the report still
+    said eight.
     """
+    if not 0 <= writers <= deep:
+        raise ValueError(f"writers ({writers}) must be between 0 and deep ({deep})")
     stop = threading.Event()
 
     def churn(k: int) -> None:
         while not stop.is_set():
             store._write_record(root, f"bench-d{k:06d}", "w", "churn")
 
-    threads = [
-        threading.Thread(target=churn, args=(i,), daemon=True)
-        for i in range(min(writers, max(1, deep)))
-    ]
+    threads = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(writers)]
     for t in threads:
         t.start()
     try:
@@ -170,10 +180,39 @@ def main() -> int:
         "--depth", type=int, default=store.WINDOW_MESSAGES, help="records in a deep room"
     )
     p.add_argument("--reps", type=int, default=5, help="timed calls per point")
-    p.add_argument("--writers", type=int, default=0, help="concurrent appenders, cold arm")
+    p.add_argument(
+        "--writers",
+        type=int,
+        default=0,
+        help="concurrent appenders: one thread per deep room, so 0..--deep",
+    )
     p.add_argument("--limits", type=int, nargs="+", default=list(LADDER))
     p.add_argument("--json", action="store_true", help="emit the rows as JSON, not a table")
     args = p.parse_args()
+
+    # A negative count is truthy, so it would reach `contended()` and raise only after
+    # `build()` had already run — the setup this block exists to avoid. Refused with the
+    # other two, by name, rather than left to `0 <= writers <= deep` behind the setup.
+    if args.writers < 0:
+        p.error(f"--writers {args.writers} is negative: it is a count of threads")
+
+    # The writers append to the deep rooms, so a writer count with no deep room under it
+    # names an arm that cannot exist. Refused here rather than in `contended()` so the setup
+    # is never paid for — and refused rather than clamped to `--deep`, because a run that
+    # starts four threads and reports eight has measured a lighter arm than its own output
+    # claims.
+    if args.writers and args.deep == 0:
+        p.error(
+            f"--writers {args.writers} with --deep 0: the writers churn the deep rooms and "
+            f"there are none to churn, so the contended arm would append to bench-d000000, "
+            f"a room this run never builds"
+        )
+    if args.writers > args.deep:
+        p.error(
+            f"--writers {args.writers} is more than --deep {args.deep}: the writers are "
+            f"threads over the deep rooms, and a run that starts fewer of them than it "
+            f"reports measured a lighter arm than its own report names"
+        )
 
     with tempfile.TemporaryDirectory(prefix="bench-rooms-") as tmp:
         root = Path(tmp)
