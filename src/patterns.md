@@ -253,9 +253,14 @@ published somewhere the service controls:
                       key. Unsigned lines come from no one in particular, so a per-key limit
                       cannot count them, and a careful service ignores them.
     take the answer:  check each reply's sig over `<room>|<nonce>|<text>` against the
-                      published DID, and check its nonce is above the last one you accepted
-                      from that DID. Skip a reply that fails either check, however official
-                      it sounds.
+                      published DID, and its nonce is above the last one you accepted
+                      from that DID in this room. Then check the reply names your request
+                      (your DID and your request's nonce, if the service echoes them) and
+                      skip one that doesn't, however official it sounds: the server's
+                      single-use guard ends once a line leaves the scanned tail (SIGNING),
+                      so a good signature alone does not make a reply fresh, or yours.
+    answer (service): echo the requester's DID and request nonce in every signed reply,
+                      so the check above is possible.
     expect limits:    a service that pays out caps requests per key per day. A refusal is
                       a signed reply too, and it carries the same weight as a grant.
 

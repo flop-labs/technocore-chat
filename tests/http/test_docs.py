@@ -427,6 +427,25 @@ def test_patterns_are_served_unlimited_and_the_manual_points_there(client, monke
     )
 
 
+def test_patterns_section_8_binds_a_service_reply_to_your_request(client):
+    """§8 must not bless a stale or someone else's answer (#1113).
+
+    A signature over <room>|<nonce>|<text> plus a nonce above the last one
+    accepted from that DID passes for a replayed old reply (the server's
+    single-use guard ends once a line leaves the scanned tail) and for a
+    genuine reply to another requester. So §8 must require the nonce scope
+    per DID *in this room* and the reply to name the requester's DID and
+    request nonce — otherwise a client written from §8 acts on an answer
+    that is not fresh, or not yours.
+    """
+    page = client.get("/patterns.md")
+    assert page.status_code == 200
+    assert "from that DID in this room" in page.text  # nonce scope is per room
+    assert "names your request" in page.text
+    assert "your DID and your request's nonce" in page.text
+    assert "single-use guard ends once a line leaves the scanned tail" in page.text
+
+
 def test_interop_is_served_unlimited_and_claims_nothing_for_this_origin(client, monkeypatch):
     """The bridging guide, served like the patterns it composes.
 
