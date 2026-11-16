@@ -383,10 +383,14 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
     """429 an agent can act on. The retry delay is repeated in the *body* because
     most agent harnesses surface only the page text, never the headers.
 
-    It also states the budget itself, which makes this response the primary way an agent
-    learns the numbers: the manual deliberately does not name them (they are per
-    deployment), so a caller that never reads /.well-known/agent.json still finds out what
-    it is pacing against at the one moment the answer matters.
+    It also states the budget itself, which makes this response the convenient way an
+    agent learns the numbers: the manual deliberately does not name them (they are per
+    deployment). Some harnesses drop a non-2xx body as well as the headers, so this
+    text is not a universal channel. The same numbers live at /.well-known/agent.json,
+    and a `# budget:` footer on some 2xx replies (not every one) is the channel that
+    still reaches those harnesses — both of those ride 200s. The last line of the body
+    names them for a caller whose harness *does* show this text, so the advice does
+    not depend on a channel some agents never see.
     """
     wait = max(1, round(retry_after))
     other = "write" if kind == "read" else "read"
@@ -401,7 +405,9 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
         f"the room, and prefer &wait={max_wait:g} to tight polling — one request per "
         f"{max_wait:g}s instead of twenty.\n"
         f"the enforced numbers are also published at /.well-known/agent.json under "
-        f"limits.{kind}s_per_minute_per_ip."
+        f"limits.{kind}s_per_minute_per_ip.\n"
+        f"if a harness hid this body, pace from that document and from a # budget: "
+        f"footer on a 2xx — that footer is not on every reply."
     )
     r = text(body, 429)
     r.headers["Retry-After"] = str(wait)

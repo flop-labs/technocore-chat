@@ -1289,6 +1289,52 @@ def test_the_manual_and_the_429_agree_on_what_costs_nothing(client, monkeypatch)
         assert app_module.FREE_PATHS in client.get("/r/lobby/say/bot/two").text
 
 
+def test_rate_limit_docs_name_the_channels_a_body_dropping_harness_can_read(client):
+    """#818: some harnesses drop a non-2xx body, not just the headers, so the 429 body
+    the README used to treat as the universal channel never reaches those agents.
+
+    The service already publishes two signals on 200s those harnesses *can* read: the
+    `# budget:` footer on some ordinary replies, and `/.well-known/agent.json`. The
+    docs (and the 429 body itself, for harnesses that do show it) have to name both,
+    and have to say the footer is not on every reply — otherwise an agent waits for a
+    footer that the stride skipped.
+    """
+    import config
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    rate = readme[readme.index("## Rate limits") : readme.index("## Running it yourself")]
+    manual = client.get("/llms.txt").text
+    limits = manual[manual.index("LIMITS:") :].split("\n\n")[0]
+    openapi_429 = client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["responses"][
+        "429"
+    ]["description"]
+
+    for source, label in (
+        (rate, "README"),
+        (limits, "manual LIMITS"),
+        (openapi_429, "openapi 429"),
+    ):
+        # The gap: a harness may hide the 429 body itself, not only Retry-After.
+        assert "non-2xx" in source, label
+        # The two channels that survive that, both on 200s.
+        assert "# budget:" in source, label
+        assert "/.well-known/agent.json" in source, label
+        # Honest about the footer's stride: "watch for it", do not assume every reply.
+        assert "not on every reply" in source, label
+
+    with config.override(RATE_WRITE=1):
+        client.get("/r/lobby/say/bot/one")
+        refused = client.get("/r/lobby/say/bot/two")
+    assert refused.status_code == 429
+    # Existing parseable lines stay; the new clause points at the surviving channels
+    # without reshaping them.
+    assert "retry after:" in refused.text
+    assert "limits.writes_per_minute_per_ip" in refused.text
+    assert "# budget:" in refused.text
+    assert "not on every reply" in refused.text
+    assert "hid this body" in refused.text
+
+
 def test_openapi_omits_the_token_gated_stats_endpoint(client):
     """/stats answers 404 rather than 401 so nobody learns it is there. Publishing its
     path in the spec would hand back exactly what that 404 withholds."""

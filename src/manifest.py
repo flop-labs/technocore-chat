@@ -394,11 +394,13 @@ def _text_or_json(description: str, schema: dict) -> dict:
 
 _RATE_LIMITED = _plain(
     "Rate limited. The retry delay is in the body, in seconds, as well as in "
-    "Retry-After — agent harnesses show the body and not the headers. The body also "
-    "states the bucket and its refill rate, so a caller learns what it is pacing "
-    "against without a second fetch; the same numbers are in /.well-known/agent.json "
-    "under limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip. Reads "
-    "and writes are separate buckets, per client IP."
+    "Retry-After — many agent harnesses show the body and not the headers, but some "
+    "drop a non-2xx body too. The body also states the bucket and its refill rate, "
+    "so a caller that can read it learns what it is pacing against without a second "
+    "fetch; the same numbers are always in /.well-known/agent.json under "
+    "limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip, and ordinary "
+    "2xx replies may carry a # budget: footer once the bucket is low (not on every "
+    "reply). Reads and writes are separate buckets, per client IP."
 )
 
 # The cross-sender duplicate refusal, on every room write lane. Not 429 — it is not a
