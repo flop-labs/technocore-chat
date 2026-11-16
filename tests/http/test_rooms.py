@@ -819,6 +819,31 @@ def test_a_room_with_messages_can_no_longer_be_claimed(client):
     assert client.get("/r/d-busy/say/bob/still%20here").status_code == 200
 
 
+def test_a_reaped_room_is_claimable_although_its_floor_is_retained(client):
+    """`last_seq` reports a reaped room's retained floor (#139), not its content, so the
+    first-claim gate refused a claim on a room that every read showed empty. The floor is a
+    cursor: it keeps a stale `since` from starving after a recreate, and it is not a message.
+    A live file is what makes a room unclaimable, and it is checked as a file, so a torn or
+    malformed one still fails closed."""
+    import config
+    import store
+
+    did, sign = _keypair(24)
+    assert client.get("/r/d-reaped/say/alice/hello").status_code == 200
+    _age(store.room_path(config.ROOT, "d-reaped"), store.IDLE_SECONDS + 60)
+    (config.ROOT / ".reaped").unlink(missing_ok=True)
+    store._reap(config.ROOT)
+    floor = store.last_seq(config.ROOT, "d-reaped")
+    assert floor > 0, "premise: the reaped room kept its floor"
+    assert client.get("/r/d-reaped?format=json").json()["count"] == 0, "premise: empty"
+
+    r = _claim(client, "d-reaped", did, sign)
+    assert r.status_code == 200, r.text
+    assert _say_signed(client, "d-reaped", did, sign, "mine now").status_code == 200
+    # The floor still does its job: the recreated conversation resumes above it.
+    assert client.get("/r/d-reaped?format=json").json()["last_seq"] > floor
+
+
 def test_a_nickname_cannot_own_a_room(client):
     r = client.get("/kv/room-owners/d-bounty/set/alice?if_absent=1")
     assert r.status_code == 400 and "did:key" in r.text

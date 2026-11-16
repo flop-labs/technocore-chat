@@ -1636,7 +1636,9 @@ def _note_write_gate(ns: str, key: str, value: str, signer: str | None) -> Respo
             )
         # "Claiming a room people are already talking in would lock them out" was documented
         # for the un-ownable rooms and never enforced for d- ones. Ownership is from birth.
-        if current is None and store.last_seq(config.ROOT, key) > 0:
+        # A file, not `last_seq > 0`: that reports a reaped room's retained floor (#139), so
+        # asking it refused claims on rooms every read shows empty.
+        if current is None and _room_exists(key):
             return text(
                 f"403 /r/{key} already has messages, so it can no longer be claimed — "
                 "a room is ownable from birth or not at all, or claiming becomes a way to "
