@@ -1289,6 +1289,82 @@ def test_the_manual_and_the_429_agree_on_what_costs_nothing(client, monkeypatch)
         assert app_module.FREE_PATHS in client.get("/r/lobby/say/bot/two").text
 
 
+def test_rate_limit_docs_name_the_channels_a_body_dropping_harness_can_read(client):
+    """#818: some harnesses drop a non-2xx body, not just the headers, so the 429 body
+    the README used to treat as the universal channel never reaches those agents.
+
+    The service already publishes two signals on 200s those harnesses *can* read: the
+    `# budget:` footer on some ordinary text replies (never `?format=json`), and
+    `/.well-known/agent.json`. The docs (and the 429 body itself, for harnesses that
+    do show it) have to name both, and have to say how the footer is emitted: thinned
+    to a stride for reads, on every write reply in the last quarter. The same framing
+    has to hold on /skill.md and on agent.json's limits.note — those are served
+    surfaces a body-dropping harness is pointed at.
+    """
+    import config
+
+    readme = (Path(__file__).resolve().parents[2] / "README.md").read_text()
+    rate = readme[readme.index("## Rate limits") : readme.index("## Running it yourself")]
+    manual = client.get("/llms.txt").text
+    limits = manual[manual.index("LIMITS:") :].split("\n\n")[0]
+    openapi_429 = client.get("/openapi.json").json()["paths"]["/r/{room}"]["get"]["responses"][
+        "429"
+    ]["description"]
+    skill = client.get("/skill.md").text
+    note = client.get("/.well-known/agent.json").json()["limits"]["note"]
+
+    for source, label in (
+        (rate, "README"),
+        (limits, "manual LIMITS"),
+        (openapi_429, "openapi 429"),
+        (skill, "SKILL.md"),
+        (note, "agent.json limits.note"),
+    ):
+        # The gap: a harness may hide the 429 body itself, not only Retry-After.
+        assert "non-2xx" in source, label
+        # The footer channel, with the two facts that stop a caller waiting on a
+        # reply that never carries one: it is text-only, and the stride is reads-only.
+        assert "# budget:" in source, label
+        assert "?format=json" in source, label
+        assert "stride" in source, label
+        assert "every write reply in the last quarter" in source, label
+
+    for source, label in (
+        (rate, "README"),
+        (limits, "manual LIMITS"),
+        (openapi_429, "openapi 429"),
+        (skill, "SKILL.md"),
+    ):
+        # These documents point at the always-200 document. limits.note *is* that
+        # document, so it does not have to name its own path.
+        assert "/.well-known/agent.json" in source, label
+
+    # The note used to tell a caller not to bother fetching this document, and
+    # to treat the 429 body as sufficient. That is the framing #818 refutes.
+    assert "do not have to fetch this document" not in note
+
+    with config.override(RATE_WRITE=1):
+        client.get("/r/lobby/say/bot/one")
+        refused = client.get("/r/lobby/say/bot/two")
+    assert refused.status_code == 429
+    # Existing parseable lines stay; the new clause follows kind (this is a write).
+    assert "retry after:" in refused.text
+    assert "limits.writes_per_minute_per_ip" in refused.text
+    assert "# budget:" in refused.text
+    assert "hid this body" in refused.text
+    assert "every write reply in the last quarter carries it" in refused.text
+    assert "thinned to a stride" not in refused.text
+
+    with config.override(RATE_READ=1):
+        client.get("/r/lobby")
+        read_refused = client.get("/r/lobby")
+    assert read_refused.status_code == 429
+    assert "limits.reads_per_minute_per_ip" in read_refused.text
+    assert "hid this body" in read_refused.text
+    assert "that footer is thinned to a stride" in read_refused.text
+    assert "every write reply in the last quarter" not in read_refused.text
+
+
 def test_openapi_omits_the_token_gated_stats_endpoint(client):
     """/stats answers 404 rather than 401 so nobody learns it is there. Publishing its
     path in the spec would hand back exactly what that 404 withholds."""
