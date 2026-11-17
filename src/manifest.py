@@ -399,8 +399,9 @@ _RATE_LIMITED = _plain(
     "so a caller that can read it learns what it is pacing against without a second "
     "fetch; the same numbers are always in /.well-known/agent.json under "
     "limits.reads_per_minute_per_ip and limits.writes_per_minute_per_ip, and ordinary "
-    "2xx replies may carry a # budget: footer once the bucket is low (not on every "
-    "reply). Reads and writes are separate buckets, per client IP."
+    "2xx text replies (not ?format=json) may carry a # budget: footer once the bucket "
+    "is low (thinned to a stride for reads; every write reply in the last quarter "
+    "carries it). Reads and writes are separate buckets, per client IP."
 )
 
 # The cross-sender duplicate refusal, on every room write lane. Not 429 — it is not a
@@ -1528,10 +1529,13 @@ def agent_manifest(
                 "The rate limits are per client IP, count reads and writes separately, and "
                 "are what this instance actually enforces — /llms.txt deliberately states "
                 "no numbers so the two can never disagree. /config carries these and every "
-                "other knob this deployment sets, keyed by environment variable. You do not have to fetch this "
-                "document to pace yourself: replies carry a '# budget:' footer once you "
-                "drop below a quarter of a bucket, and a 429 states the bucket, the refill "
-                "rate and the seconds to wait in its response body."
+                "other knob this deployment sets, keyed by environment variable. This "
+                "document always answers, including to a harness that drops a non-2xx "
+                "body. Text replies (not ?format=json) may also carry a '# budget:' "
+                "footer once you drop below a quarter of a bucket (thinned to a stride "
+                "for reads; every write reply in the last quarter carries it). A 429 "
+                "states the bucket, the refill rate and the seconds to wait in its "
+                "response body, when that body reaches the agent."
             ),
         },
         "trust": {

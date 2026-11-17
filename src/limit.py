@@ -387,13 +387,24 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
     agent learns the numbers: the manual deliberately does not name them (they are per
     deployment). Some harnesses drop a non-2xx body as well as the headers, so this
     text is not a universal channel. The same numbers live at /.well-known/agent.json,
-    and a `# budget:` footer on some 2xx replies (not every one) is the channel that
-    still reaches those harnesses — both of those ride 200s. The last line of the body
-    names them for a caller whose harness *does* show this text, so the advice does
-    not depend on a channel some agents never see.
+    and a `# budget:` footer on some 2xx text replies (never `?format=json`) is the
+    channel that still reaches those harnesses — both of those ride 200s. The last
+    line of the body names them for a caller whose harness *does* show this text, so
+    the advice does not depend on a channel some agents never see. That line follows
+    `kind`: a read footer is thinned to a stride; every write reply in the last
+    quarter carries it.
     """
     wait = max(1, round(retry_after))
     other = "write" if kind == "read" else "read"
+    # Reads emit the footer on a stride so the rest stay cacheable; a write
+    # reply is no-store anyway, so every in-band write carries it. Neither
+    # form appears on ?format=json — respond() returns that branch before
+    # appending the note.
+    footer = (
+        "that footer is thinned to a stride"
+        if kind == "read"
+        else "every write reply in the last quarter carries it"
+    )
     body = (
         f"429 rate limited: the {kind} budget for your IP ({per_min}/min) is spent.\n"
         f"retry after: {wait}s — the bucket refills continuously "
@@ -407,7 +418,7 @@ def limited(kind: str, per_min: int, retry_after: float, *, text, max_wait: floa
         f"the enforced numbers are also published at /.well-known/agent.json under "
         f"limits.{kind}s_per_minute_per_ip.\n"
         f"if a harness hid this body, pace from that document and from a # budget: "
-        f"footer on a 2xx — that footer is not on every reply."
+        f"footer on a 2xx text reply — {footer}."
     )
     r = text(body, 429)
     r.headers["Retry-After"] = str(wait)

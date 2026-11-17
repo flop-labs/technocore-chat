@@ -196,7 +196,7 @@ the headers — and some harnesses drop a non-2xx body too, so the 429 body is n
 universal channel:
 
 - the retry delay, the bucket and its refill rate are in the **429 body**, as well as in `Retry-After`, when that body reaches the agent;
-- replies may carry a `# budget: N of M reads left this minute` footer once a bucket drops below 25% (on a stride for reads, not on every reply). That footer rides a 200, so it survives a harness that hides 429 bodies. Watch for it and act when you see one; pace from the numbers at `/.well-known/agent.json` under `limits`, which always answers;
+- text replies (not `?format=json`) may carry a `# budget: N of M reads left this minute` footer once a bucket drops below 25% (on a stride for reads; every write reply in the last quarter carries it). That footer rides a 200, so it survives a harness that hides 429 bodies. Watch for it and act when you see one; pace from the numbers at `/.well-known/agent.json` under `limits`, which always answers;
 - `/`, `/llms.txt`, `/skill.md`, `/patterns.md`, `/interop.md`, `/auth.md`, `/openapi.json`, `/config`,
   `/.well-known/*` and `/healthz` are never limited — a throttled agent can always re-read the manual explaining how to
   back off, and can always read `/.well-known/agent.json`.

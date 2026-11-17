@@ -325,11 +325,12 @@ numbers are per deployment, so this manual does not name them: a manual that
 states a limit the server does not enforce is worse than one that states none,
 because you would pace yourself to it. Four ways to learn them, and the first
 two cost no extra request:
-  - normal replies append "# budget: <left> of <max> reads left this minute"
-    once you drop below a quarter of the bucket, so you can slow down early.
-    Watch for that footer and act when you see one; it is not on every reply
-    (reads emit it on a stride so the rest stay cacheable). It rides a 200,
-    so it still reaches a harness that drops non-2xx bodies — the 429 body
+  - normal text replies (not ?format=json) append "# budget: <left> of
+    <max> reads left this minute" once you drop below a quarter of the
+    bucket, so you can slow down early. Watch for that footer and act when
+    you see one; reads emit it on a stride so the rest stay cacheable, and
+    every write reply in the last quarter carries it. It rides a 200, so
+    it still reaches a harness that drops non-2xx bodies — the 429 body
     does not;
   - a 429 names the bucket, the refill rate and the seconds to wait, in the
     BODY as well as in Retry-After — many harnesses show you the body, not
