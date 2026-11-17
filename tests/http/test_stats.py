@@ -82,6 +82,104 @@ def _expired_stamp():
     return time.monotonic() - 3600.0
 
 
+def _refresh_timeout_diagnostics(app_module, started):
+    """Why a refresh-start wait expired, so the next CI flake in #1064 is a diagnosis.
+
+    The hosted failure only reported `the refresh must start`. The useful evidence is
+    whether `_stats_refresh` was never scheduled, still pending, already done or
+    cancelled, and what the threads and default executor looked like at that moment.
+    """
+    parts = [f"started={started.is_set()}"]
+    run = app_module._stats_refresh
+    if run is None:
+        parts.append("_stats_refresh=None")
+    else:
+        root, task = run
+        if task.cancelled():
+            state = "cancelled"
+        elif task.done():
+            state = "done"
+        else:
+            state = "pending"
+        parts.append(f"_stats_refresh root={root} task={state}")
+        if task.done() and not task.cancelled():
+            exc = task.exception()
+            parts.append(
+                "exception=none" if exc is None else f"exception={type(exc).__name__}: {exc}"
+            )
+        try:
+            loop = task.get_loop()
+            parts.append(f"loop_running={loop.is_running()} loop_closed={loop.is_closed()}")
+            executor = getattr(loop, "_default_executor", None)
+            if executor is not None:
+                threads = getattr(executor, "_threads", None)
+                queue = getattr(executor, "_work_queue", None)
+                detail = type(executor).__name__
+                if threads is not None:
+                    detail += f" threads={len(threads)}"
+                if queue is not None:
+                    detail += f" queue={queue.qsize()}"
+                parts.append(f"default_executor={detail}")
+        except Exception as err:  # a diagnostic failure must not hide the timeout
+            parts.append(f"loop_inspect_error={type(err).__name__}")
+    names = [thread.name for thread in threading.enumerate()]
+    parts.append(f"threads={threading.active_count()} names={names}")
+    return "; ".join(parts)
+
+
+def test_a_refresh_timeout_report_names_task_and_thread_state():
+    """The timeout message has to carry task state, not only that the wait failed."""
+
+    class _Task:
+        def __init__(self, cancelled=False, done=False, exc=None):
+            self._cancelled = cancelled
+            self._done = done
+            self._exc = exc
+
+        def cancelled(self):
+            return self._cancelled
+
+        def done(self):
+            return self._done
+
+        def exception(self):
+            return self._exc
+
+        def get_loop(self):
+            raise RuntimeError("no loop in this fixture")
+
+    started = threading.Event()
+
+    class _NoneRefresh:
+        _stats_refresh = None
+
+    none_msg = _refresh_timeout_diagnostics(_NoneRefresh, started)
+    assert "started=False" in none_msg
+    assert "_stats_refresh=None" in none_msg
+    assert "threads=" in none_msg
+
+    class _Pending:
+        _stats_refresh = (Path("/tmp/stats-root"), _Task(done=False))
+
+    pending_msg = _refresh_timeout_diagnostics(_Pending, started)
+    assert "task=pending" in pending_msg
+    assert "root=" in pending_msg
+    assert "loop_inspect_error=RuntimeError" in pending_msg
+
+    class _Failed:
+        _stats_refresh = (Path("/tmp/stats-root"), _Task(done=True, exc=RuntimeError("boom")))
+
+    failed_msg = _refresh_timeout_diagnostics(_Failed, started)
+    assert "task=done" in failed_msg
+    assert "exception=RuntimeError: boom" in failed_msg
+
+    class _Cancelled:
+        _stats_refresh = (Path("/tmp/stats-root"), _Task(cancelled=True, done=True))
+
+    cancelled_msg = _refresh_timeout_diagnostics(_Cancelled, started)
+    assert "task=cancelled" in cancelled_msg
+
+
 def test_stats_does_not_exist_without_a_token(client):
     """Unconfigured means absent, not open: growth numbers are never public by default."""
     assert client.get("/stats").status_code == 404
@@ -310,7 +408,7 @@ def test_an_expired_entry_is_served_while_its_refresh_runs_behind_it(stats_clien
         app_module._stats_cache = (config.ROOT, _expired_stamp(), first)  # …and now it is expired
         monkeypatch.setattr(app_module, "_stats_view", blocking)
         stale = held.get("/stats", headers=headers)
-        assert started.wait(10), "the refresh must start"
+        assert started.wait(10), _refresh_timeout_diagnostics(app_module, started)
         assert not released.is_set(), "and the answer must not have waited for it"
         assert stale.status_code == 200
         assert stale.json()["counters"] == first["counters"]
