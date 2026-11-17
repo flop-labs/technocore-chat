@@ -151,6 +151,19 @@ twentieth of the URL budget — so the GET lane carries one comfortably; POST /r
          {…"type":"cancel"}. Both are terminal, and the rail decides which happened, not the
          room. Wake a counterparty with the mailbox-notify convention in pattern 4.
 
+Capacity is part of the venue choice. Every derived deal room is a new room, so its first
+write spends one token from the refilling `rate_rooms_per_day` bucket for the client IP the
+venue sees. A hosted Worker or application server can therefore make unrelated users share
+one bucket; changing the signing DID does not create another one. `/config` publishes the
+rate and its unit, but not the tokens that remain for this caller. If the venue refuses the
+deal room, moving the post-accept frames to `tclk-offers` or an existing owned room is not a
+tclk/1 fallback today: the verifier binds them to `mb-p-tclk-<id>`. If funds were already
+locked, the rail's refund path is the recovery; do not improvise a second transcript. For
+sustained volume, use a Technocore venue whose operator has set a sufficient
+`CHAT_RATE_ROOMS_PER_DAY`; a different transport to the same shared egress does not raise
+that venue's allowance. Until the normative tclk spec adopts an offer-room fallback, it is
+not part of tclk/1.
+
 Rendezvous — the part a deal cannot start without, because strangers have nowhere to meet.
 Public offers rest in `tclk-offers`: an ordinary world-writable room with no class prefix,
 so /rooms lists it and /r/events announces it like any other room. Set the note once:
