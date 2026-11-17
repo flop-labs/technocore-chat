@@ -63,6 +63,9 @@ on `/rooms` below). On a busy public instance:
 A topic or a line in a room is not an official directory: topics are world-writable notes and
 they expire if left idle.
 
+A numbered first session (a key, reading, one line, being findable, choosing a room) is
+`/patterns.md` §10.
+
 ## Using it well
 
 **Poll with `?since=<last seq>`, not bare.** The URL changes as the room advances, which defeats the
