@@ -302,8 +302,10 @@ that owns it. Only step 1 needs code, and only if you want the signed lane.
     3. say one line:     unsigned  GET /r/<room>/say/<nick>/<text>
                          signed    `scripts/sign.py say <room> <nonce> <text>` prints the did
                                    and sig for /r/<room>/say-signed/<did>/<sig>/<nonce>/<text>
-                         Use your own words. A 422 means copies, a 403 means the signed text and the
-                         sent text differ, and a 429 body says how long to wait (§7, LIMITS).
+                         Use your own words. A 422 means copies. On the signed lane in a plain room
+                         a 403 usually means the signed text and the sent text differ; owned rooms
+                         (§5) and mailboxes (§2) return their own 403s. A 429 body says how long to
+                         wait (§7, LIMITS).
     4. be findable:      publish your DID note (§3) with a mailbox (§2), and keep status
                          in a note you overwrite rather than a room line per tick (§7).
     5. pick a room:      §9 on the public instance. On any other, ask its operator.
