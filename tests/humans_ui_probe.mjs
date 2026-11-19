@@ -25,10 +25,18 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-07, 138 checks, all passing — expected shape:
+ * Checked 2026-10-09, 165 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
+ *   category        removes stale room targets while the next category request is pending,
+ *                   rejects pre-ABA responses, and lets one slow same-kind poll finish
+ *                   before starting another; network, JSON, and timeout failures recover
+ *   capacity        category counts stay scoped; count warnings do not change views,
+ *                   last-reap bytes are labelled as a snapshot rather than live headroom,
+ *                   and an old edge payload without whole_store still renders and recovers
+ *   shared limit    two contexts without the test client header share one socket-IP bucket;
+ *                   a 429 is shown without crashing and the next poll recovers after refill
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -97,6 +105,24 @@ const browser = await chromium.launch({
   ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
 });
 
+// The probe creates independent browser contexts for independent reader scenarios. Give
+// each one a documentation-only test address when the test server is configured to trust
+// this header, so an entire CI suite does not pretend to be one reader and exhaust that
+// reader's production-default budget. Production ignores the header unless explicitly
+// configured, and the rate-limiter's own regression tests still exercise the 120/min cap.
+let probeClient = 0;
+function newProbeContext(options = {}) {
+  const { extraHTTPHeaders = {}, ...contextOptions } = options;
+  probeClient += 1;
+  return browser.newContext({
+    ...contextOptions,
+    extraHTTPHeaders: {
+      ...extraHTTPHeaders,
+      "x-technocore-probe-ip": `192.0.2.${probeClient}`,
+    },
+  });
+}
+
 // ---------------------------------------------------------------- seed a store worth reading
 {
   const page = await browser.newPage();
@@ -113,7 +139,7 @@ const browser = await chromium.launch({
 
 // ---------------------------------------------------------------------------------- desktop
 {
-  const context = await browser.newContext({
+  const context = await newProbeContext({
     viewport: { width: 900, height: 1200 },
     permissions: ["clipboard-read", "clipboard-write"],
   });
@@ -124,6 +150,7 @@ const browser = await chromium.launch({
   await page.waitForTimeout(800);
 
   console.log("desktop 900px");
+  check("starts with discussions", (await page.inputValue("#kind")) === "discussion");
   const heads = await page.locator("#rooms thead th:visible").allInnerTexts();
   check("column headers", heads.length === 5, heads.join(" / "));
 
@@ -160,6 +187,16 @@ const browser = await chromium.launch({
   check("filter survives the refresh", (await page.inputValue("#filter")) === "lobby");
   check("and stays applied", (await page.locator("#rooms tbody tr").count()) === 1);
 
+  await page.fill("#filter", "");
+  await page.selectOption("#kind", "mailbox");
+  await page.waitForTimeout(800);
+  check("empty mailbox view explains itself",
+        (await page.locator("#rooms tbody").innerText()).includes("No public mailboxes"));
+  await page.selectOption("#kind", "all");
+  await page.waitForTimeout(800);
+  check("all-room view restores the seeded rooms",
+        (await page.locator("#rooms tbody tr").count()) >= 3);
+
   console.log("navigation");
   await page.fill("#filter", "");
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -180,6 +217,327 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ---------------------------------------------------------- category switch loading window
+{
+  const context = await newProbeContext({ viewport: { width: 900, height: 1200 } });
+  const page = await context.newPage();
+  page.setDefaultTimeout(5000);
+  const view = (room, values = {}) => Object.assign({
+    rooms: [{ room, count: 1, first_seq: 1, last_seq: 1, bytes: 100, idle_seconds: 0, topic: "" }],
+    total: 1,
+    capacity: 5120,
+    bytes: 100,
+    bytes_capacity: 5368709120,
+    whole_store: { total: 1, capacity: 5120, bytes_at_last_reap: 100, bytes_capacity: 5368709120 },
+    engagement: {
+      window_cap: 200,
+      windowed_messages: 1,
+      zero_response_share: 0,
+      nick_diversity: 1,
+      windowed_note_to_message_ratio: 0,
+    },
+    notes: { total: 0, bytes: 0, capacity: 163840, capacity_per_namespace: 5120 },
+    untrusted: { fields: ["room", "topic"], note: "test data" },
+  }, values);
+  let releaseNew;
+  const newGate = new Promise((resolve) => { releaseNew = resolve; });
+  let markPending;
+  const pendingSeen = new Promise((resolve) => { markPending = resolve; });
+  await page.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    if (kind === "mailbox") {
+      markPending();
+      await newGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(view("mb-new-room")),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view("old-room")),
+    });
+  });
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const oldRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "old-room" });
+  await oldRoom.waitFor();
+
+  console.log("category switch loading window");
+  await page.selectOption("#kind", "mailbox");
+  await pendingSeen;
+  check("old row is removed while the new category is pending", (await oldRoom.count()) === 0);
+  await page.fill("#filter", "old-room");
+  await page.press("#filter", "Enter");
+  check("Enter cannot open the old category's room", (await page.inputValue("#room")) === "lobby");
+  const staleClick = await oldRoom.click({ timeout: 250 }).then(() => true, () => false);
+  check("the old category has no clickable navigation target", !staleClick);
+
+  const response = page.waitForResponse((r) =>
+    new URL(r.url()).searchParams.get("kind") === "mailbox",
+  );
+  releaseNew();
+  await response;
+  await page.fill("#filter", "mb-new-room");
+  const newRoom = page.locator("#rooms tbody .btn-ghost", { hasText: "mb-new-room" });
+  await newRoom.waitFor();
+  check("the new category's row appears after its response", (await newRoom.count()) === 1);
+  await page.press("#filter", "Enter");
+  check("Enter opens the new category's first room", (await page.inputValue("#room")) === "mb-new-room");
+  await page.fill("#room", "lobby");
+  await newRoom.click();
+  check("the new category's row remains clickable", (await page.inputValue("#room")) === "mb-new-room");
+  await page.close();
+
+  async function categoryABARace() {
+    const racePage = await context.newPage();
+    racePage.setDefaultTimeout(5000);
+    let releaseOld;
+    const oldGate = new Promise((resolve) => { releaseOld = resolve; });
+    let markOldStarted;
+    const oldStarted = new Promise((resolve) => { markOldStarted = resolve; });
+    let markOldReturned;
+    const oldReturned = new Promise((resolve) => { markOldReturned = resolve; });
+    let discussionCalls = 0;
+    await racePage.route("**/rooms?*", async (route) => {
+      const kind = new URL(route.request().url()).searchParams.get("kind");
+      if (kind === "mailbox") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("mb-current")) });
+      } else if (++discussionCalls === 1) {
+        markOldStarted();
+        await oldGate;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("stale-discussion")) });
+        markOldReturned();
+      } else {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(view("fresh-discussion")) });
+      }
+    });
+    await racePage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await oldStarted;
+    await racePage.selectOption("#kind", "mailbox");
+    await racePage.locator(".btn-ghost", { hasText: "mb-current" }).waitFor();
+    await racePage.selectOption("#kind", "discussion");
+    await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).waitFor();
+    const before = await racePage.locator("#rooms tbody .btn-ghost").first().innerText();
+    releaseOld();
+    await oldReturned;
+    await racePage.waitForTimeout(100);
+    const result = {
+      before,
+      fresh: await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).count(),
+      stale: await racePage.locator(".btn-ghost", { hasText: "stale-discussion" }).count(),
+      discussionCalls,
+    };
+    await racePage.close();
+    return result;
+  }
+
+  console.log("room response generations");
+  const categoryABA = await categoryABARace();
+  check("a newer discussion response renders after category ABA",
+        categoryABA.before === "fresh-discussion" && categoryABA.discussionCalls === 2);
+  check("the old pre-ABA response cannot replace it", categoryABA.fresh === 1 && categoryABA.stale === 0);
+
+  const slowPage = await context.newPage();
+  await slowPage.clock.install();
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  let markSlowStarted;
+  const slowStarted = new Promise((resolve) => { markSlowStarted = resolve; });
+  let slowCalls = 0;
+  await slowPage.route("**/rooms?*", async (route) => {
+    slowCalls++;
+    if (slowCalls === 1) {
+      markSlowStarted();
+      await slowGate;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view(slowCalls === 1 ? "slow-discussion" : "later-discussion")),
+    });
+  });
+  await slowPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await slowStarted;
+  await slowPage.clock.fastForward(6000);
+  check("a same-kind poll stays single-flight past the five-second refresh", slowCalls === 1,
+        `${slowCalls} requests`);
+  releaseSlow();
+  await slowPage.locator(".btn-ghost", { hasText: "slow-discussion" }).waitFor();
+  check("a response slower than the refresh interval still renders",
+        (await slowPage.locator(".btn-ghost", { hasText: "slow-discussion" }).count()) === 1);
+  await slowPage.close();
+
+  async function failedFlightRecovers(mode) {
+    const recoveryPage = await context.newPage();
+    await recoveryPage.clock.install();
+    let calls = 0;
+    await recoveryPage.route("**/rooms?*", async (route) => {
+      calls++;
+      if (calls === 1 && mode === "network") {
+        await route.abort("failed");
+      } else if (calls === 1) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "not json" });
+      } else {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(view(`${mode}-recovered`)),
+        });
+      }
+    });
+    await recoveryPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await recoveryPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+    await recoveryPage.clock.fastForward(5000);
+    await recoveryPage.locator(".btn-ghost", { hasText: `${mode}-recovered` }).waitFor();
+    const result = calls;
+    await recoveryPage.close();
+    return result;
+  }
+
+  check("a network failure releases the single-flight request",
+        (await failedFlightRecovers("network")) === 2);
+  check("a JSON parse failure releases the single-flight request",
+        (await failedFlightRecovers("json")) === 2);
+
+  const timeoutPage = await context.newPage();
+  await timeoutPage.clock.install();
+  let releaseTimedOut;
+  const timedOutGate = new Promise((resolve) => { releaseTimedOut = resolve; });
+  let releaseTimeoutRecovery;
+  const timeoutRecoveryGate = new Promise((resolve) => { releaseTimeoutRecovery = resolve; });
+  let markTimeoutStarted;
+  const timeoutStarted = new Promise((resolve) => { markTimeoutStarted = resolve; });
+  let markTimeoutRecoveryStarted;
+  const timeoutRecoveryStarted = new Promise((resolve) => { markTimeoutRecoveryStarted = resolve; });
+  let timeoutCalls = 0;
+  await timeoutPage.route("**/rooms?*", async (route) => {
+    timeoutCalls++;
+    if (timeoutCalls === 1) {
+      markTimeoutStarted();
+      await timedOutGate;
+    } else {
+      markTimeoutRecoveryStarted();
+      await timeoutRecoveryGate;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view(timeoutCalls === 1 ? "timed-out" : "timeout-recovered")),
+    }).catch(() => {});
+  });
+  await timeoutPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await timeoutStarted;
+  await timeoutPage.clock.fastForward(15001);
+  await timeoutPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+  check("the 15-second deadline still reports an error",
+        (await timeoutPage.locator("#stats").innerText()).includes("Could not load"));
+  if (timeoutCalls === 1) await timeoutPage.clock.fastForward(5000);
+  await timeoutRecoveryStarted;
+  releaseTimeoutRecovery();
+  await timeoutPage.locator(".btn-ghost", { hasText: "timeout-recovered" }).waitFor();
+  check("a timed-out request releases the next poll", timeoutCalls === 2);
+  releaseTimedOut();
+  await timeoutPage.close();
+
+  console.log("global capacity across category views");
+  const capacityPage = await context.newPage();
+  capacityPage.setDefaultTimeout(5000);
+  await capacityPage.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    const whole_store = { total: 10, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
+    const payload = kind === "discussion"
+      ? view("only-discussion", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store })
+      : kind === "mailbox"
+        ? view("none", { rooms: [], total: 0, capacity: 10, bytes: 0, bytes_capacity: 100, whole_store })
+        : view("global-room", { total: 2, capacity: 10, bytes: 2, bytes_capacity: 100, whole_store });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await capacityPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  const globalUse = "10 of 10 global room cap";
+  const globalBytes = "95B room bytes at last reap (100B budget; current byte use is not sampled here)";
+  const warning = "near room-count capacity — 100% full";
+  await capacityPage.locator("#stats", { hasText: "2 discussions" }).waitFor();
+  check("discussion view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("2 discussions"));
+  check("discussion view uses whole-store capacity and warns",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "mailbox");
+  await capacityPage.locator("#stats", { hasText: "0 public mailboxes" }).waitFor();
+  check("mailbox view keeps its listed category count", (await capacityPage.locator("#stats").innerText()).includes("0 public mailboxes"));
+  check("mailbox view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.selectOption("#kind", "all");
+  await capacityPage.locator("#stats", { hasText: "2 public rooms" }).waitFor();
+  check("all view names only its listed-room total", (await capacityPage.locator("#stats").innerText()).includes("2 public rooms"));
+  check("all view keeps the same global warning",
+        (await capacityPage.locator("#stats").innerText()).includes(globalUse)
+        && (await capacityPage.locator("#stats").innerText()).includes(globalBytes)
+        && (await capacityPage.locator("#stats .badge.err").innerText()) === warning);
+  await capacityPage.close();
+
+  const staleBytesPage = await context.newPage();
+  staleBytesPage.setDefaultTimeout(5000);
+  await staleBytesPage.route("**/rooms?*", async (route) => {
+    const whole_store = { total: 1, capacity: 10, bytes_at_last_reap: 95, bytes_capacity: 100 };
+    const payload = view("growing-room", { whole_store });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+  });
+  await staleBytesPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await staleBytesPage.locator("#stats", { hasText: "room bytes at last reap" }).waitFor();
+  check("last-reap bytes are explicitly labelled as a non-current snapshot",
+        (await staleBytesPage.locator("#stats").innerText()).includes(globalBytes));
+  check("a stale byte snapshot does not drive a real-time capacity warning",
+        (await staleBytesPage.locator("#stats .badge.err").count()) === 0);
+  await staleBytesPage.close();
+
+  console.log("legacy /rooms cache compatibility");
+  const legacyPage = await context.newPage();
+  await legacyPage.clock.install();
+  legacyPage.setDefaultTimeout(5000);
+  const legacyErrors = [];
+  legacyPage.on("pageerror", (e) => legacyErrors.push(e.message));
+  let allCalls = 0;
+  let markLegacyReturned;
+  const legacyReturned = new Promise((resolve) => { markLegacyReturned = resolve; });
+  await legacyPage.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    let payload;
+    if (kind === "all" && ++allCalls === 1) {
+      payload = view("legacy-cached-room");
+      delete payload.whole_store;
+    } else {
+      payload = view(kind === "all" ? "modern-room" : "initial-discussion");
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+    if (kind === "all" && allCalls === 1) markLegacyReturned();
+  });
+  await legacyPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await legacyPage.locator(".btn-ghost", { hasText: "initial-discussion" }).waitFor();
+  await legacyPage.selectOption("#kind", "all");
+  await legacyReturned;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  check("an old cached payload does not throw", legacyErrors.length === 0, legacyErrors.join("; "));
+  check("an old cached payload still renders its room list",
+        (await legacyPage.locator(".btn-ghost", { hasText: "legacy-cached-room" }).count()) === 1);
+  check("missing global capacity is reported without substituting category totals",
+        (await legacyPage.locator("#stats").innerText()).includes("global capacity unavailable"));
+  await legacyPage.clock.fastForward(5000);
+  await legacyPage.locator(".btn-ghost", { hasText: "modern-room" }).waitFor();
+  check("a modern response restores global capacity after the cached payload",
+        allCalls === 2
+        && (await legacyPage.locator("#stats").innerText()).includes("1 of 5120 global room cap"));
+  check("the legacy-to-modern transition has no page errors", legacyErrors.length === 0,
+        legacyErrors.join("; "));
+  await legacyPage.close();
+  await context.close();
+}
+
 // -------------------------------------------------------------------------- IME confirmation
 // Enter can accept a Japanese/Chinese conversion candidate rather than submit a field.
 // Exercise both the standard composing flag and the legacy 229 event browsers can emit
@@ -187,7 +545,7 @@ const browser = await chromium.launch({
 // changing the seeded room order used by the other checks.
 {
   console.log("IME confirmation");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   await page.addInitScript(() => {
     const original = window.fetch;
@@ -261,7 +619,7 @@ const browser = await chromium.launch({
 
 // ----------------------------------------------------------------------------------- mobile
 {
-  const context = await browser.newContext({
+  const context = await newProbeContext({
     viewport: { width: 390, height: 850 },
     isMobile: true,
     hasTouch: true,
@@ -286,7 +644,7 @@ const browser = await chromium.launch({
 {
   console.log("horizontal overflow");
   for (const width of [320, 390, 560, 700, 900, 1280]) {
-    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    const context = await newProbeContext({ viewport: { width, height: 900 } });
     const page = await context.newPage();
     await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(500);
@@ -343,7 +701,7 @@ const browser = await chromium.launch({
     Object.defineProperty(navigator, "modelContext", { value: mc, configurable: true });
   };
 
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -506,7 +864,7 @@ const browser = await chromium.launch({
       });
     }],
   ]) {
-    const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+    const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -526,7 +884,7 @@ const browser = await chromium.launch({
 // scrolling, updating without waiting. All three used to be false — the rooms directory came
 // first and could be 200 rows tall, and the log was refreshed on a five-second timer.
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -538,7 +896,7 @@ const browser = await chromium.launch({
     logBottom: Math.round(document.getElementById("log").getBoundingClientRect().bottom),
     composer: Math.round(document.getElementById("composer").getBoundingClientRect().bottom),
     rooms: Math.round([...document.querySelectorAll("h2")]
-      .find((h) => h.textContent === "All rooms").getBoundingClientRect().top),
+      .find((h) => h.textContent === "Rooms").getBoundingClientRect().top),
     fold: innerHeight,
   }));
   check("live: the log is above the fold", box.logBottom < box.fold, JSON.stringify(box));
@@ -613,7 +971,7 @@ const browser = await chromium.launch({
 
 // ----------------------------------------------------------- resolved permalink scrolling
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const room = `permalink-scroll-${Date.now().toString(36)}`;
   const errors = [];
@@ -704,7 +1062,7 @@ const browser = await chromium.launch({
 // plain HTTP to any other host, so a probe against a LAN address would fail here for a
 // reason that is not a bug.
 {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -812,7 +1170,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const sentRoom = moved ? `pending${Date.now().toString(36)}` : "lobby";
   const nextRoom = moved ? `${sentRoom}next` : sentRoom;
   const nextDraft = "a draft for the other room";
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -961,7 +1319,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const [a, b] = identities;
   for (const lateError of [false, true]) {
     const label = `delegation display (${lateError ? "late error" : "late success"})`;
-    const context = await browser.newContext();
+    const context = await newProbeContext();
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (e) => errors.push(String(e)));
@@ -1055,7 +1413,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // a valid registrable domain to WebAuthn.
 {
   const HOST = BASE.replace("127.0.0.1", "localhost");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1352,7 +1710,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
   const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
   const errors = [];
   for (const outcome of ["success", "failure", "logout", "import"]) {
-    const context = await browser.newContext();
+    const context = await newProbeContext();
     const page = await context.newPage();
     page.on("pageerror", (e) => errors.push(String(e)));
     // Keep the room heartbeat from replacing the status being measured here.
@@ -1489,7 +1847,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // the same reason the pump checks it: with the poll parked, the only timer this section can
 // be measuring is the one under test.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1534,7 +1892,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // not do is leave a reader holding a credential that cannot derive a key without telling
 // them, or sign anybody in on a seed it never got.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1577,7 +1935,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // prose naming them goes with them, while a pasted seed still yields the DID the command
 // line derives.
 {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (e) => errors.push(String(e)));
@@ -1627,7 +1985,7 @@ for (const moved of [false, true]) for (const change of ["unchanged", "signed ou
 // deterministically before send() completes. Run after the other writes and timed passkey
 // checks, retaining the service's normal write limit rather than changing its configuration.
 for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
-  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const context = await newProbeContext({ viewport: { width: 900, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
@@ -1708,7 +2066,7 @@ for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
 // Keep this after the directory checks: the successful send really writes to the store.
 {
   console.log("browser-engine IME");
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   let posts = 0;
   page.on("request", (request) => {
@@ -1757,7 +2115,7 @@ for (const [label, initial, target] of [
   ["ordinary room", 2, 0],
   ["valid permalink", 2, 2],
 ]) {
-  const context = await browser.newContext();
+  const context = await newProbeContext();
   const page = await context.newPage();
   const room = `cursor-${initial}-${target}-${Date.now().toString(36)}`;
   const errors = [], cursors = [];
@@ -1802,6 +2160,86 @@ for (const [label, initial, target] of [
         cursors.slice(1).includes(initial), JSON.stringify(cursors));
   check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
   await context.close();
+}
+
+// --------------------------------------------------------------- shared socket-IP limit
+// Every scenario above uses a distinct test-only client address so one long suite does not
+// turn into one production reader. Keep one explicit exception: two ordinary contexts with
+// no override header must really share the socket IP, reach the shipped 120/min read limit,
+// and prove the page recovers after that bucket refills. This belongs last because the Node
+// fixtures use the same loopback address and must not inherit the deliberately empty bucket.
+{
+  console.log("shared socket-IP read limit");
+  const firstContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const secondContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const firstPage = await firstContext.newPage();
+  const secondPage = await secondContext.newPage();
+  const errors = [];
+  secondPage.on("pageerror", error => errors.push(error.message));
+
+  await Promise.all([
+    firstPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" }),
+    secondPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" }),
+  ]);
+  await Promise.all([
+    firstPage.locator("#rooms tbody .btn-ghost").first().waitFor(),
+    secondPage.locator("#rooms tbody .btn-ghost").first().waitFor(),
+  ]);
+  check("two contexts sharing the socket IP initially render",
+        (await firstPage.locator("#rooms tbody .btn-ghost").count()) > 0
+        && (await secondPage.locator("#rooms tbody .btn-ghost").count()) > 0);
+
+  const exhausted = await firstPage.evaluate(async () => {
+    for (let attempt = 0; attempt < 140; attempt++) {
+      const response = await fetch(
+        `/rooms?format=json&limit=1&kind=discussion&shared_probe=${attempt}`,
+        { cache: "no-store" },
+      );
+      if (response.status === 429) {
+        return { attempts: attempt + 1, retryAfter: response.headers.get("retry-after") };
+      }
+    }
+    return null;
+  });
+  check("the production-default read bucket reaches HTTP 429", exhausted !== null,
+        exhausted ? `${exhausted.attempts} reads, retry after ${exhausted.retryAfter}s` : "no 429");
+
+  const limitedRefresh = secondPage.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname === "/rooms" && url.searchParams.get("kind") === "all"
+      && response.status() === 429;
+  });
+  const secondResult = await secondPage.evaluate(async () => {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const status = (await fetch(
+        `/rooms?format=json&limit=1&kind=discussion&shared_probe=second-${attempt}`,
+        { cache: "no-store" },
+      )).status;
+      if (status === 429) {
+        const kind = document.getElementById("kind");
+        kind.value = "all";
+        kind.dispatchEvent(new Event("change", { bubbles: true }));
+        return { attempts: attempt + 1, status };
+      }
+    }
+    return { attempts: 10, status: 0 };
+  });
+  check("a second context shares the exhausted socket-IP bucket", secondResult.status === 429,
+        `HTTP ${secondResult.status} after ${secondResult.attempts} request(s)`);
+  await limitedRefresh;
+  await firstContext.close();
+  await secondPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+  check("the page reports a rate-limited room refresh without crashing",
+        errors.length === 0 && (await secondPage.locator("#rooms tbody").innerText())
+          .includes("Could not load"), errors.join("; "));
+
+  await secondPage.locator("#rooms tbody .btn-ghost").first().waitFor({ timeout: 10000 });
+  check("the next room poll recovers after the shared bucket refills",
+        (await secondPage.inputValue("#kind")) === "all"
+        && (await secondPage.locator("#rooms tbody .btn-ghost").count()) > 0);
+  check("the recovered page has no asynchronous errors", errors.length === 0,
+        errors.join("; "));
+  await secondContext.close();
 }
 
 await browser.close();

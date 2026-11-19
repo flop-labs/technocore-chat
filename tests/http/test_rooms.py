@@ -470,6 +470,12 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
         "capacity": store.MAX_ROOMS,
         "bytes": 0,
         "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        "whole_store": {
+            "total": 0,
+            "capacity": store.MAX_ROOMS,
+            "bytes_at_last_reap": 0,
+            "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+        },
         "notes": {
             "total": 0,
             "bytes": 0,
@@ -504,6 +510,176 @@ def test_rooms_overview_limits_the_tail_reads_it_does(client, tmp_path):
     # junk limits fall back rather than 500 (the _cursor rule, incl. Unicode digits)
     for bad in ("abc", "\u00b2", "-4", ""):
         assert client.get(f"/rooms?limit={bad}&format=json").status_code == 200
+
+
+def test_rooms_kind_filters_before_the_detail_limit(client, tmp_path):
+    import store
+
+    client.get("/r/discussion/say/bot/hello")
+    for room in ("mb-first", "e-mb-second", "mb-e-third"):
+        store._write_record(tmp_path, room, "bot", "hello")
+    for room in ("mb-p-secret", "p-mb-secret", "e-mb-p-secret", "e-p-mb-secret"):
+        store._write_record(tmp_path, room, "bot", "hidden")
+
+    original = client.get("/rooms?limit=2&format=json").json()
+    assert original == client.get("/rooms?kind=all&limit=2&format=json").json()
+
+    discussion = client.get("/rooms?kind=discussion&limit=2&format=json").json()
+    assert [row["room"] for row in discussion["rooms"]] == ["events", "discussion"]
+    assert discussion["total"] == 2
+
+    mailboxes = client.get("/rooms?kind=mailbox&limit=2&format=json").json()
+    assert [row["room"] for row in mailboxes["rooms"]] == ["mb-e-third", "e-mb-second"]
+    assert mailboxes["total"] == 3
+    assert not {"mb-p-secret", "p-mb-secret", "e-mb-p-secret", "e-p-mb-secret"} & {
+        row["room"] for row in mailboxes["rooms"]
+    }
+
+    bad = client.get("/rooms?kind=unknown")
+    assert bad.status_code == 400 and "bad kind" in bad.text and "discussion" in bad.text
+
+    operation = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]
+    kind = next(parameter for parameter in operation["parameters"] if parameter["name"] == "kind")
+    assert kind["schema"] == {
+        "type": "string",
+        "enum": ["discussion", "mailbox", "all"],
+        "default": "all",
+    }
+    assert "before applying `limit`" in kind["description"] and "400" in operation["responses"]
+
+
+def test_rooms_whole_store_capacity_counts_unlisted_without_naming_them(
+    client, tmp_path, monkeypatch
+):
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 10)
+    assert client.get("/r/discussion/say/bot/hello").status_code == 200
+    for i in range(8):
+        assert client.get(f"/r/p-hidden-{i}/say/bot/hello").status_code == 200
+    store._reap_pass(tmp_path, store.time.time())
+    app_module._rooms_walk.cache_clear()
+
+    views = {
+        kind: client.get(f"/rooms?kind={kind}&format=json").json()
+        for kind in ("discussion", "mailbox", "all")
+    }
+    assert {kind: view["total"] for kind, view in views.items()} == {
+        "discussion": 2,  # the public room plus the server's events room
+        "mailbox": 0,
+        "all": 2,
+    }
+    whole = {
+        "total": 10,
+        "capacity": 10,
+        "bytes_at_last_reap": store._count_rooms(tmp_path)[1],
+        "bytes_capacity": store.MAX_TOTAL_ROOM_BYTES,
+    }
+    assert all(view["whole_store"] == whole for view in views.values())
+    assert "p-hidden" not in client.get("/rooms?kind=all&format=json").text
+    refused = client.get("/r/eleventh/say/bot/no-room")
+    assert refused.status_code == 400 and "room limit reached" in refused.text
+
+    schema = client.get("/openapi.json").json()
+    whole = schema["paths"]["/rooms"]["get"]["responses"]["200"]["content"]["application/json"][
+        "schema"
+    ]["properties"]["whole_store"]
+    assert set(whole["properties"]) == {
+        "total",
+        "capacity",
+        "bytes_at_last_reap",
+        "bytes_capacity",
+    }
+
+
+def test_rooms_text_separates_category_stats_from_whole_store_capacity(
+    client, tmp_path, monkeypatch
+):
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 12)
+    assert client.get("/r/discussion/say/bot/hello").status_code == 200
+    store._write_record(tmp_path, "mb-public", "bot", "hello")
+    for i in range(8):
+        store._write_record(tmp_path, f"p-hidden-{i}", "bot", "hidden")
+    store._reap_pass(tmp_path, store.time.time())
+    app_module._rooms_walk.cache_clear()
+
+    views = {
+        kind: client.get(f"/rooms?kind={kind}").text for kind in ("discussion", "mailbox", "all")
+    }
+    assert views["discussion"].splitlines()[0].startswith("# 2 of 2 rooms (kind=discussion;")
+    assert views["mailbox"].splitlines()[0].startswith("# 1 of 1 rooms (kind=mailbox;")
+    assert client.get("/rooms").text == views["all"]
+    all_view = client.get("/rooms?kind=all&format=json").json()
+    lines = views["all"].splitlines()
+    assert lines[0] == (
+        f"# {len(all_view['rooms'])} of {all_view['total']} rooms "
+        f"(cap {all_view['capacity']}, {app_module._size(all_view['bytes'])} of "
+        f"{app_module._size(all_view['bytes_capacity'])} stored), newest first"
+    )
+    assert lines[1] == "# " + app_module.LISTING_BANNER
+    rows = [i for i, line in enumerate(lines) if line.startswith("/r/")]
+    notes = next(i for i, line in enumerate(lines) if line.startswith("# notes"))
+    engagement = next(i for i, line in enumerate(lines) if line.startswith("# engagement"))
+    assert rows and 1 < min(rows) <= max(rows) < notes < engagement
+    assert "# whole store" not in views["all"]  # preserve the legacy text grammar
+    for body in (views["discussion"], views["mailbox"]):
+        assert "# whole store 11 of 12 rooms" in body
+        assert "room bytes at last reap" in body
+        assert "private/unlisted names not listed" in body
+    for body in views.values():
+        assert "p-hidden" not in body
+
+
+def test_rooms_labels_stale_whole_store_bytes_after_an_existing_room_grows(
+    client, tmp_path, monkeypatch
+):
+    """The hot-path byte gauge is a last-reap snapshot, never current occupancy.
+
+    Existing rooms keep accepting writes between reaps, so their files can grow while
+    USAGE_FILE stays unchanged. /rooms must name that weaker guarantee explicitly rather
+    than hand /humans a value it could present as live capacity headroom.
+    """
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 100)
+    monkeypatch.setattr(store, "MAX_TOTAL_ROOM_BYTES", 1_000)
+    monkeypatch.setattr(store, "RESERVED_ROOM_BYTES", 10)
+    assert client.get("/r/p-hidden/say/bot/seed-record").status_code == 200
+    store._reap_pass(tmp_path, store.time.time())
+    cached = store.room_bytes_used(tmp_path)
+
+    assert client.get(f"/r/p-hidden/say/bot/{'x' * 4096}").status_code == 200
+    live = store._count_rooms(tmp_path)[1]
+    app_module._rooms_walk.cache_clear()
+    whole = client.get("/rooms?kind=all&format=json").json()["whole_store"]
+
+    assert cached < 800 <= live
+    assert whole["bytes_at_last_reap"] == cached
+    assert "bytes" not in whole
+
+
+def test_rooms_text_empty_state_names_the_selected_kind(client):
+    expected = {
+        "discussion": "(no discussions)",
+        "mailbox": "(no public mailboxes)",
+        "all": "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)",
+    }
+    for kind, first_line in expected.items():
+        body = client.get(f"/rooms?kind={kind}").text
+        assert body.splitlines()[0] == first_line
+        assert ("# whole store" in body) == (kind != "all")
+    assert client.get("/rooms").text == client.get("/rooms?kind=all").text
+
+    # An empty category is not an empty service: this is the misleading case the wording
+    # must keep distinct after the kind filter is applied.
+    client.get("/r/discussion/say/bot/hello")
+    mailbox = client.get("/rooms?kind=mailbox").text.splitlines()[0]
+    assert mailbox == expected["mailbox"] and "no public rooms" not in mailbox
 
 
 def test_engagement_reports_no_data_rather_than_zero_for_an_empty_window(client, tmp_path):
