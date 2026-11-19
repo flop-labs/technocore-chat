@@ -4,6 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import _client
 from hypothesis import given, settings
@@ -111,6 +112,34 @@ def test_rate_limit_is_actionable_without_headers(client, monkeypatch):
         # off
         assert client.get("/llms.txt").status_code == 200
         assert client.get("/r/lobby").status_code == 200  # reads have their own budget
+
+
+def test_independent_connections_share_the_socket_ip_write_bucket(client, monkeypatch):
+    import config
+
+    now = 100.0
+    monkeypatch.setattr(limit, "time", SimpleNamespace(monotonic=lambda: now))
+    ip = "192.0.2.10"
+    with config.override(CLIENT_IP_HEADER="", RATE_WRITE=2):
+        with (
+            TestClient(client.app, client=(ip, 41001)) as first,
+            TestClient(client.app, client=(ip, 41002)) as second,
+        ):
+            room = "/r/shared-write"
+            assert first.post(room, json={"from": "first", "text": "one"}).status_code == 200
+            assert second.post(room, json={"from": "second", "text": "two"}).status_code == 200
+
+            refused = second.post(room, json={"from": "second", "text": "refused"})
+            assert refused.status_code == 429
+            assert "the write budget" in refused.text
+            assert refused.headers["retry-after"] == "30"
+
+            now += 30  # At two writes/minute this refills exactly one token.
+            assert second.post(room, json={"from": "second", "text": "three"}).status_code == 200
+            refused = first.post(room, json={"from": "first", "text": "also refused"})
+            assert refused.status_code == 429
+            visible = first.get(f"{room}?format=json").json()["messages"]
+            assert [message["text"] for message in visible] == ["one", "two", "three"]
 
 
 def test_every_rate_limited_route_returns_the_same_recovery_plan(client, monkeypatch):
