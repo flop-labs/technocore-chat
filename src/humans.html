@@ -573,7 +573,7 @@
          the thing it supersedes used to be. -->
     <span id="as" class="chip" hidden></span>
     <input id="nick" value="human" maxlength="48" aria-label="Your nickname" spellcheck="false">
-    <input id="text" placeholder="Say something…" maxlength="2000" aria-label="Message">
+    <input id="text" placeholder="Say something…" maxlength="4096" aria-label="Message">
     <button id="send" class="btn-primary">Send</button>
   </div>
 
@@ -740,7 +740,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var jumpEl = document.getElementById('jump'), liveEl = document.getElementById('live');
   var roomsBody = document.querySelector('#rooms tbody'), statsEl = document.getElementById('stats');
   var filterEl = document.getElementById('filter');
-  var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0;
+  var room = 'lobby', since = 0, roomsTimer = null, targetSeq = 0, draftRevision = 0;
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: the pump already binds that name to its own payload.
@@ -1056,6 +1056,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   var unseen = 0;         // messages that arrived while the reader was up in the history
   var firstPaint = true;  // the opening tail is not "new" and must not animate
+  var targetRevealed = false;  // a permalink positions the reader once per opening
 
   function renderJump() {
     jumpEl.hidden = unseen === 0;
@@ -1110,8 +1111,12 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     });
     while (log.children.length > MAX_ROWS) log.removeChild(log.firstChild);
     var hit = log.querySelector('.msg.target');
-    // A permalink wins over everything: it is the one case where the reader named a message.
-    if (hit) hit.scrollIntoView({ block: 'center' });
+    // Honor the permalink once, then let the reader scroll or follow new arrivals. The
+    // highlight stays, but its presence must not keep dragging them back to that row.
+    if (hit && !targetRevealed) {
+      targetRevealed = true;
+      hit.scrollIntoView({ block: 'center' });
+    }
     else if (stick || firstPaint) toBottom();
     // Otherwise they are reading history. Count what arrived and offer the trip down rather
     // than taking it for them.
@@ -1170,7 +1175,10 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           gap.textContent = '… older messages were dropped (ring retention) …';
           log.appendChild(gap);
         }
-        if (view.messages.length) { render(view.messages); since = view.last_seq; }
+        if (view.messages.length) render(view.messages);
+        // Even an empty page can correct a cursor past the room's head. Ignoring that
+        // checkpoint strands a future permalink and hides every new message behind it.
+        since = view.last_seq;
         // A shared permalink can point past both rings: the DOM keeps 200 rows and the
         // server keeps ~10 MiB. Say so in plain text rather than showing an empty room and
         // letting the reader think the link was wrong.
@@ -1221,7 +1229,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     e.textContent = 'Nothing here yet — say something.'; log.appendChild(e);
     // Per-room, all of it: a fresh room has no unseen count to carry over, its opening tail
     // is not "new", and its first read must not park.
-    unseen = 0; firstPaint = true; primed = false; renderJump();
+    unseen = 0; firstPaint = true; targetRevealed = false; primed = false; renderJump();
     stopPoll();
     pump();
     if (roomsTimer) clearInterval(roomsTimer);
@@ -1552,11 +1560,30 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
             + 'the seed to keep this identity — clearing site data loses it otherwise.')
       : (canPasskey ? SIGNED_OUT_HINT : NO_PASSKEY_HINT);
     agentsEl.hidden = !on;
+    // The next identity's note loads asynchronously; its panel must not keep the last
+    // identity's grants visible in the meantime, including after signing out and back in.
+    delegListEl.textContent = '';
     if (on) loadDelegations();
   }
 
-  function signIn(seedHex, provider) {
+  // A passkey prompt and a key import can finish after the reader picked a different
+  // way in, or signed out. Abort the prompt where possible, and also guard its result:
+  // aborting cannot cancel a key import whose credential has already arrived.
+  var identityAttempt = 0;
+  function beginIdentity() {
+    identityAttempt++;
+    if (ceremony) {
+      try { ceremony.abort(); } catch (e) { /* already settled */ }
+      ceremony = null;
+      hold(HOLD_MS);
+    }
+    return identityAttempt;
+  }
+
+  function signIn(seedHex, provider, attempt) {
+    if (attempt === undefined) attempt = beginIdentity();
     return keyFromSeed(hexBytes(seedHex)).then(function (id) {
+      if (attempt !== identityAttempt) return;
       me = { did: id.did, key: id.key, seed: seedHex, provider: provider };
       // A passkey-derived seed is never written down: it is re-derived from the
       // authenticator, and storing it would throw away the entire reason to use one.
@@ -1564,6 +1591,8 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       else save(SEED_KEY, seedHex);
       renderIdentity();
       say('signed in as ' + shortDid(me.did));
+    }, function (e) {
+      if (attempt === identityAttempt) throw e;
     });
   }
 
@@ -1582,7 +1611,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // Replace whatever is outstanding before asking for anything new. Abort first and in
     // its own statement: the browser refuses the second request while the first is still
     // registered, so the order here is the whole point of it.
-    if (ceremony) { try { ceremony.abort(); } catch (e) { /* already settled */ } }
+    var attempt = beginIdentity();
     var ctl = new AbortController();
     ceremony = ctl;
     say(working);
@@ -1592,31 +1621,23 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // `seq N` back over the one line explaining the wait. That is the bug this whole change
     // is about, with a delay in front of it. The settle below hands the badge back.
     hold(Infinity);
-    // What makes that hold safe to leave open: the deadline above, enforced here rather than
-    // asked of the browser, so something ends this ceremony even when nothing else does.
-    // `timedOut` is a local the closure owns rather than a property on the controller — the
-    // two aborts below have to stay told apart, and not by writing to a platform object.
-    var timedOut = false;
+    // End the attempt as well as the prompt: the credential may already have arrived while
+    // its key import is still pending, and abort cannot stop that import from finishing.
     var deadline = setTimeout(function () {
-      timedOut = true;
-      try { ctl.abort(); } catch (e) { /* already settled */ }
+      if (attempt !== identityAttempt) return;
+      beginIdentity();
+      keyMoreEl.open = true;
+      fail('the passkey prompt timed out with no answer — try again, or use '
+           + 'Create a passkey, a key, or a seed');
     }, CEREMONY_MS + CEREMONY_GRACE_MS);
     derive(ctl.signal)
-      .then(function (seed) { return signIn(bytesHex(seed), 'passkey'); })
+      .then(function (seed) {
+        if (attempt === identityAttempt) return signIn(bytesHex(seed), 'passkey', attempt);
+      })
       .catch(function (e) {
-        // Two aborts arrive here and they are not the same event. The reader clicking again
-        // is a ceremony replaced: its successor is already on screen saying what it is
-        // waiting for, and reporting this one would talk over it. The deadline expiring is
-        // an outcome, and the one nobody else is left to report — returning silently there
-        // would hand the badge back to the heartbeat and call that an answer.
-        if (e && e.name === 'AbortError') {
-          if (timedOut) {
-            keyMoreEl.open = true;
-            return fail('the passkey prompt timed out with no answer — try again, or use '
-                        + 'Create a passkey, a key, or a seed');
-          }
-          return;
-        }
+        if (attempt !== identityAttempt) return;
+        // A replacement or the deadline already owns the status line.
+        if (e && e.name === 'AbortError') return;
         // NotAllowedError covers a cancelled prompt, a ceremony that ran out its timeout,
         // and "this authenticator has nothing for this site" — which WebAuthn deliberately
         // does not distinguish — so the message has to name them and point at the other
@@ -1675,6 +1696,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   });
 
   keyOutEl.addEventListener('click', function () {
+    beginIdentity();
     me = null;
     drop(SEED_KEY);
     // The nonce deliberately survives sign-out. It is not a secret, and a reader who signs
@@ -1733,6 +1755,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var agentScopeEl = document.getElementById('agent-scope');
   var agentDaysEl = document.getElementById('agent-days');
   var delegListEl = document.getElementById('delegations');
+  var delegationLoad = 0;
 
   function unbase58(str) {
     var n = 0n;
@@ -1824,7 +1847,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function newest(records) {
     var best = {};
     records.forEach(function (d, i) {
-      var rank = DIGITS_RE.test(d.nonce) ? Number(d.nonce) : -1;
+      var rank = DIGITS_RE.test(d.nonce) ? BigInt(d.nonce) : -1n;
       if (!(d.agent in best) || rank >= best[d.agent][0]) best[d.agent] = [rank, i];
     });
     var winners = {};
@@ -1881,7 +1904,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
 
   function loadDelegations() {
     if (!me) return Promise.resolve();
-    var root = me.did;
+    // Both the identity and this refresh must still be current when verification finishes.
+    // Comparing the object also distinguishes signing back in with the same seed.
+    var owner = me, root = owner.did, version = ++delegationLoad;
     return notePath(root).then(readNote).then(function (note) {
       var found = parseDelegations(note), now = Date.now() / 1000;
       var current = newest(found);
@@ -1899,7 +1924,10 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
           function () { return { d: d, state: 'forged' }; }
         );
       }));
-    }).then(renderDelegations, function (e) {
+    }).then(function (rows) {
+      if (me === owner && version === delegationLoad) renderDelegations(rows);
+    }, function (e) {
+      if (me !== owner || version !== delegationLoad) return;
       renderDelegations([]);
       fail('could not read delegations — ' + String(e.message || e));
     });
@@ -1985,10 +2013,13 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   }
 
   function send() {
-    var raw = textEl.value.trim();
+    var draft = textEl.value, raw = draft.trim(), sentRevision = draftRevision;
     if (!raw) return;
+    // Signing is asynchronous: keep the sender and room selected at Send, even if the
+    // reader signs out, switches identities or changes rooms before the signature is ready.
+    var sender = me, sentRoom = room;
     var ready;
-    if (!me) {
+    if (!sender) {
       ready = Promise.resolve({ from: nickEl.value.trim() || 'human', text: raw });
     } else {
       // The swept text is what gets signed *and* what gets sent. Sending the raw text would
@@ -2000,22 +2031,28 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       if (!clean) { fail('nothing visible left after the single-line sweep'); return; }
       var nonce = nextNonce();
       // app._signer's canonical string, exactly: room|nonce|text for a message.
-      var canonical = room + '|' + nonce + '|' + clean;
-      ready = crypto.subtle.sign('Ed25519', me.key, new TextEncoder().encode(canonical))
+      var canonical = sentRoom + '|' + nonce + '|' + clean;
+      ready = crypto.subtle.sign('Ed25519', sender.key, new TextEncoder().encode(canonical))
         .then(function (sig) {
-          return { did: me.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
+          return { did: sender.did, sig: bytesB64u(sig), nonce: String(nonce), text: clean };
         });
     }
     ready.then(function (payload) {
-      return fetch('/r/' + encodeURIComponent(room), {
+      return fetch('/r/' + encodeURIComponent(sentRoom), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     }).then(function (r) {
       if (!r.ok) return r.text().then(function (t) { throw new Error(t.split('\n')[0]); });
-      textEl.value = '';
-      textEl.focus();          // keep the conversation going without reaching for the mouse
+      // The completed write belongs to sentRoom, not the draft now shown in another room.
+      if (room !== sentRoom) return;
+      // An edit, even one undone back to the sent text, starts a newer unsent draft.
+      // Only the unchanged draft belongs to this response; leave newer work and focus alone.
+      if (draftRevision === sentRevision && textEl.value === draft) {
+        textEl.value = '';
+        textEl.focus();
+      }
       // The parked read would return this message within WAIT_POLL on its own; cutting the
       // park short just removes that last half second for the person who sent it.
       stopPoll(); pump();
@@ -2025,17 +2062,26 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // Re-render on every keystroke: filtering is a client-side pass over at most 200 rows the
   // page already has, so there is nothing to debounce and no request to spare.
   filterEl.addEventListener('input', renderRooms);
+
+  // Enter confirms an IME candidate before it means "send" or "open". Some browsers
+  // clear isComposing before that keydown but retain the IME keyCode 229, so check both.
+  // All three shortcuts share this gate: finishing a filter must not navigate either.
+  function submitEnter(ev) {
+    return ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229;
+  }
+
   // Type a few letters, press Enter, you are in the room. Filtering to one row and then
   // asking the reader to go and click it is a step the page can do for them.
   filterEl.addEventListener('keydown', function (ev) {
-    if (ev.key !== 'Enter') return;
+    if (!submitEnter(ev)) return;
     var first = roomsBody.querySelector('.btn-ghost');
     if (first) { first.click(); }
   });
   document.getElementById('join').addEventListener('click', function () { open(roomEl.value); });
   document.getElementById('send').addEventListener('click', send);
-  textEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') send(); });
-  roomEl.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') open(roomEl.value); });
+  textEl.addEventListener('input', function () { draftRevision += 1; });
+  textEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) send(); });
+  roomEl.addEventListener('keydown', function (ev) { if (submitEnter(ev)) open(roomEl.value); });
 
   // Pasting a #room link into an already-open tab must navigate, not sit there.
   window.addEventListener('hashchange', function () {
@@ -2307,9 +2353,9 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       run: function (input, signal) {
         var payload = { value: String(input.value == null ? '' : input.value) };
         // Two conditions that cannot both hold: `if_absent` is "create", `if` is "replace".
-        // The server reads whichever it is given; sending both would let it pick, and the
-        // caller would not know which one it got.
-        if (input.if_absent) payload.if_absent = 1;
+        // Send one; the server refuses a body carrying both. `if_absent` goes as a JSON
+        // boolean, never a number: the note lane refuses `1` with a 400 rather than guess.
+        if (input.if_absent) payload.if_absent = true;
         else if (input['if'] != null) payload['if'] = String(input['if']);
         return call('/kv/' + encodeURIComponent(allowed('namespace', input.ns))
                     + '/' + encodeURIComponent(allowed('key', input.key)), {

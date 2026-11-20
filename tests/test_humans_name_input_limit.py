@@ -30,3 +30,21 @@ def test_humans_name_inputs_match_the_server_name_limit(field: str):
 
     with pytest.raises(store.StoreError):
         store.valid_name("a" * (limit + 1))
+
+
+def test_humans_message_input_matches_the_server_text_limit():
+    import app as app_module
+    import store
+
+    # The page states this limit twice: once for the human typing into #text, and once in
+    # the maxLength its own WebMCP `say` tool publishes. Both drive the same POST /r/<room>
+    # lane, so a smaller box is a silent truncation at the one place there is a person to
+    # notice it — maxlength gives no feedback, it just stops accepting characters.
+    html = TestClient(app_module.app).get("/humans").text
+    limit = _maxlength(html, "text")
+
+    accepted = "a" * limit
+    assert store.clean_text(accepted) == accepted
+
+    with pytest.raises(store.StoreError):
+        store.clean_text("a" * (limit + 1))
