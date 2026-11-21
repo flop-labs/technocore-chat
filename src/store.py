@@ -2767,6 +2767,7 @@ def note_set(
     path = note_path(root, ns, key)
     ns_dir = _note_ns_dir(root, ns)
     value = clean_text(value, MAX_VALUE_CHARS)
+    encoded = value.encode("utf-8")
     _reap(root)
     # A missing note cannot satisfy CAS. Refuse before the create gate makes a sidecar
     # and namespace: those artifacts survive a failed reservation but consume no quota.
@@ -2785,7 +2786,7 @@ def note_set(
         root / NOTES_FILE,
         path,
         lambda: _check_note_capacity(root, ns_dir, path),
-        lambda d: _count_new_note(root, ns_dir, len(value.encode("utf-8")), d),
+        lambda d: _count_new_note(root, ns_dir, len(encoded), d),
     ):
         if expect_absent or expect is not None:
             current = path.read_text(encoding="utf-8") if path.exists() else None
@@ -2795,7 +2796,7 @@ def note_set(
             if expect is not None and current != expect:
                 config._dbg(2, "cas_conflict", ns=ns, key=key, found="changed")
                 raise StoreConflictError(f"note {ns}/{key} changed since you read it", current)
-        _replace(path, value.encode("utf-8"))
+        _replace(path, encoded)
     # After the write is on disk, like append's bump: the counter invalidates the
     # note-derived caches, and being on disk every worker sees it.
     #
@@ -2805,7 +2806,7 @@ def note_set(
     # meant a `did` or `kv` write aged out the room walk. Measured on technocore.chat
     # 2026-08-26: 1,281 note writes a minute, 3 of them topics.
     _bump(root, notes_written=1, **({"topics_written": 1} if ns == TOPIC_NS else {}))
-    return {"ns": ns, "key": key, "bytes": len(value.encode()), "ts": _now()}
+    return {"ns": ns, "key": key, "bytes": len(encoded), "ts": _now()}
 
 
 def note_get(root: Path, ns: str, key: str) -> str | None:
