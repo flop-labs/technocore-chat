@@ -984,6 +984,19 @@ def test_a_wrong_path_answers_with_the_route_map_rather_than_two_words(client):
     assert "/llms.txt" in r.text and "/openapi.json" in r.text  # where the rest is
 
 
+def test_a_trailing_slash_or_a_missing_segment_gets_the_route_map_not_a_redirect(client):
+    """Starlette's redirect_slashes answered these with an empty 307 to the slash-toggled URL,
+    built from the request's own scheme and Host: `http://` behind TLS termination, and a
+    Host header echoed unvalidated. Following it turned `/say/<nick>` with the text left off
+    into an "empty text" 400, and re-sent a POST body to the new URL."""
+    for path in ("/rooms/", "/r/lobby/", "/kv/plans/next/", "/r/lobby/say/bot", "/kv/a/b/set"):
+        r = client.get(path, headers={"host": "attacker.example"}, follow_redirects=False)
+        assert r.status_code == 404 and "location" not in r.headers, path
+        assert "/r/<room>/say/<nick>/<text>" in r.text, path  # the map, not an empty body
+    posted = client.post("/r/lobby/", json={"from": "bot", "text": "hi"}, follow_redirects=False)
+    assert posted.status_code == 404 and "location" not in posted.headers
+
+
 def test_an_unsupported_verb_is_answered_with_the_get_lane_that_replaces_it(client):
     """A caller sending DELETE has guessed a REST shape. The correction is a URL, not a
     verb — every write here is reachable with a plain GET."""
