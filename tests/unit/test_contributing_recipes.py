@@ -105,7 +105,10 @@ def recipe_names(justfile: Path) -> set[str]:
             check=True,
         )
         return set(listed.stdout.split())
-    header = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)[^:=]*:(?!=)")
+    # `[^:]*`, not `[^:=]*`: a parameter default (`serve port="8080":`) puts an `=` before
+    # the colon, and excluding it classified every such recipe as an assignment. The lookahead
+    # still rejects `name := value`, where the `=` follows the colon.
+    header = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)[^:]*:(?!=)")
     names = set()
     for line in justfile.read_text(encoding="utf-8").splitlines():
         if line[:1].strip() and not line.startswith(("#", "set ", "export ")):
@@ -150,6 +153,27 @@ def test_contributing_names_only_things_that_exist():
         recipe_names(JUSTFILE),
     )
     assert not complaints, "\n" + "\n".join(complaints)
+
+
+def test_the_fallback_parser_keeps_recipes_that_take_default_arguments(tmp_path, monkeypatch):
+    """Without `just` on PATH — a bare pytest outside `uv run` — the fallback text parse ran.
+
+    It classified `serve port="8080":` as an assignment because of the `=` in the default,
+    so CONTRIBUTING's `just serve` and `just mutate` read as stale and the suite failed on a
+    tree where `uv run just serve` works fine. The parse has to agree with `just` itself on
+    parameterized recipes, or the test only passes for people who happen to have `just`
+    resolvable from the OS PATH.
+    """
+    justfile = tmp_path / "justfile"
+    justfile.write_text(
+        "plain:\n    @echo hi\n\n"
+        'serve port="8080":\n    @echo {{ port }}\n\n'
+        "variadic *args:\n    @echo {{ args }}\n\n"
+        'answer := "42"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert recipe_names(justfile) == {"plain", "serve", "variadic"}
 
 
 def test_the_document_still_has_command_blocks():

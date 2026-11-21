@@ -180,6 +180,85 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// -------------------------------------------------------------------------- IME confirmation
+// Enter can accept a Japanese/Chinese conversion candidate rather than submit a field.
+// Exercise both the standard composing flag and the legacy 229 event browsers can emit
+// while confirming a candidate. The fetch stub records the page's outgoing writes without
+// changing the seeded room order used by the other checks.
+{
+  console.log("IME confirmation");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.addInitScript(() => {
+    const original = window.fetch;
+    window.__imePosts = [];
+    window.fetch = (url, init) => {
+      if (init && init.method === "POST") {
+        window.__imePosts.push({ url, body: JSON.parse(init.body) });
+        return Promise.resolve(new Response("ok\n", { status: 200 }));
+      }
+      return original(url, init);
+    };
+  });
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#rooms .btn-ghost");
+  const enter = (selector, properties) => page.evaluate(async ([selector, properties]) => {
+    document.querySelector(selector).dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", bubbles: true, ...properties,
+    }));
+    // Let send()'s promise chain settle too: a synchronous-only check misses the POST.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }, [selector, properties]);
+
+  for (const [label, properties] of [
+    ["isComposing", { isComposing: true, keyCode: 13 }],
+    ["keyCode 229", { isComposing: false, keyCode: 229 }],
+  ]) {
+    await page.fill("#text", "日本語を変換中");
+    const before = await page.evaluate(() => window.__imePosts.length);
+    await enter("#text", properties);
+    check(`${label}: confirming a message sends nothing`,
+          (await page.evaluate(() => window.__imePosts.length)) === before);
+    check(`${label}: the composing draft is preserved`,
+          (await page.inputValue("#text")) === "日本語を変換中");
+
+    await page.fill("#room", "lobby");
+    await page.click("#join");
+    await page.fill("#room", "standup");
+    const roomHash = await page.evaluate(() => location.hash);
+    await enter("#room", properties);
+    check(`${label}: confirming a room name does not navigate`,
+          (await page.evaluate(() => location.hash)) === roomHash);
+
+    await page.fill("#room", "lobby");
+    await page.click("#join");
+    await page.fill("#filter", "standup");
+    const filterHash = await page.evaluate(() => location.hash);
+    await enter("#filter", properties);
+    check(`${label}: confirming a filter does not open its top match`,
+          (await page.evaluate(() => location.hash)) === filterHash);
+  }
+
+  await page.fill("#text", "confirmed message");
+  const before = await page.evaluate(() => window.__imePosts.length);
+  await enter("#text", { keyCode: 13 });
+  check("ordinary Enter still sends once and clears the submitted draft",
+        (await page.evaluate(() => window.__imePosts.length)) === before + 1 &&
+        (await page.inputValue("#text")) === "");
+  await page.fill("#text", "shift enter message");
+  await enter("#text", { keyCode: 13, shiftKey: true });
+  check("Shift+Enter keeps the existing send behavior",
+        (await page.evaluate(() => window.__imePosts.length)) === before + 2);
+  await page.fill("#room", "build-notes");
+  await enter("#room", { keyCode: 13 });
+  check("ordinary Enter still opens a room by name",
+        (await page.evaluate(() => location.hash)) === "#r/build-notes");
+  await enter("#filter", { keyCode: 13 });
+  check("ordinary Enter still opens the top filter match",
+        (await page.evaluate(() => location.hash)) === "#r/standup");
+  await context.close();
+}
+
 // ----------------------------------------------------------------------------------- mobile
 {
   const context = await browser.newContext({
@@ -532,6 +611,87 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// ----------------------------------------------------------- resolved permalink scrolling
+{
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const room = `permalink-scroll-${Date.now().toString(36)}`;
+  const errors = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const write = async text => {
+    const response = await context.request.post(`${BASE}/r/${room}`, {
+      data: { from: "scroll-probe", text },
+    });
+    if (!response.ok()) throw new Error(`scroll fixture failed: ${await response.text()}`);
+  };
+  for (let n = 1; n <= 4; n++) {
+    await write(`initial ${n}: ${"A message tall enough to scroll past. ".repeat(8)}`);
+  }
+  await page.goto(`${BASE}/humans#r/${room}/1`, { waitUntil: "domcontentloaded" });
+  await page.locator("#log .msg.target .seq").filter({ hasText: "#1" }).waitFor();
+  check("permalink: the initial target is highlighted", await page.locator(".msg.target").isVisible());
+  // As in the live-log check above, size from the content rather than a font assumption.
+  await page.evaluate(() => {
+    const log = document.getElementById("log");
+    log.style.minHeight = "0";
+    log.style.maxHeight = Math.max(40, log.scrollHeight / 3) + "px";
+  });
+  const scrollAway = () => page.evaluate(() => {
+    const log = document.getElementById("log");
+    log.scrollTop = Math.floor((log.scrollHeight - log.clientHeight) / 2);
+    return log.scrollTop;
+  });
+  const position = () => page.evaluate(() => {
+    const log = document.getElementById("log");
+    return { top: log.scrollTop, bottom: log.scrollHeight - log.clientHeight };
+  });
+  const arrive = async text => {
+    await write(text);
+    await page.locator("#log .msg .body").filter({ hasText: text }).waitFor({ timeout: 15000 });
+  };
+  const before = await scrollAway();
+  check("permalink: history is scrollable", before > 40);
+  await arrive("message after reading away from the permalink");
+  check("permalink: an arrival preserves the reader's position",
+        Math.abs((await position()).top - before) < 1);
+  const jump = page.locator("#jump");
+  const offered = await jump.isVisible();
+  check("permalink: the arrival is offered in the new-message pill", offered);
+  // Still collect the later checks on an unfixed page whose pill never appears.
+  if (offered) await jump.click();
+  else await page.evaluate(() => {
+    const log = document.getElementById("log"); log.scrollTop = log.scrollHeight;
+  });
+  await arrive("message after jumping to latest");
+  const latest = await position();
+  check("permalink: latest follows later arrivals", Math.abs(latest.top - latest.bottom) < 1);
+  check("permalink: its highlight survives leaving the target",
+        (await page.locator("#log .msg.target .seq").textContent()) === "#1");
+
+  // A new hash in the same room is another explicit navigation and must position once.
+  await page.evaluate(hash => { location.hash = hash; }, `#r/${room}/2`);
+  await page.waitForFunction(() =>
+    document.querySelector("#log .msg.target .seq")?.textContent === "#2");
+  check("permalink: a new same-room target is highlighted",
+        (await page.locator("#log .msg.target .seq").textContent()) === "#2");
+  const nextBefore = await scrollAway();
+  await arrive("message after leaving the second permalink");
+  check("permalink: the new target also releases scroll control",
+        Math.abs((await position()).top - nextBefore) < 1);
+  check("permalink: later arrivals keep the selected hash",
+        (await page.evaluate(() => location.hash)) === `#r/${room}/2`);
+
+  await page.evaluate(hash => { location.hash = hash; }, `#r/${room}`);
+  await page.waitForFunction(() =>
+    document.querySelectorAll("#log .msg").length > 0
+    && !document.querySelector("#log .msg.target"));
+  const ordinary = await position();
+  check("permalink: returning to the room tail follows latest",
+        Math.abs(ordinary.top - ordinary.bottom) < 1);
+  check("permalink: no page errors", errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
 // ---------------------------------------------------------------------------- signing
 // The did:key lane, which is the one part of this page a Python test can only half-check.
 // tests/unit/test_humans_identity.py pins the constants the page restates; it cannot tell
@@ -642,6 +802,247 @@ const browser = await chromium.launch({
   check("signing: no page errors throughout", errors.length === 0, errors.join("; "));
   await context.close();
 }
+
+// ------------------------------------------------------------ identity changes while signing
+// Hold a real WebCrypto result so signing out or replacing the identity happens before
+// send's continuation runs. The already-started message must keep its original signer
+// and room; completing it must preserve a draft now displayed in another room.
+for (const moved of [false, true]) for (const change of ["unchanged", "signed out", "replaced"]) {
+  const label = `identity ${change}${moved ? " after room switch" : ""}`;
+  const sentRoom = moved ? `pending${Date.now().toString(36)}` : "lobby";
+  const nextRoom = moved ? `${sentRoom}next` : sentRoom;
+  const nextDraft = "a draft for the other room";
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
+  await page.click("#keymore summary");
+  await page.fill("#seed", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+  await page.click("#keyuse");
+  const original = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  await page.waitForFunction((did) => document.getElementById("me").title === did, original);
+  await page.fill("#room", sentRoom);
+  await page.click("#join");
+
+  await page.evaluate(() => {
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    crypto.subtle.sign = (...args) => {
+      crypto.subtle.sign = sign; // Gate only this send, never a later identity operation.
+      return sign(...args).then((signature) => new Promise((resolve) => {
+        window.__releaseSignature = () => resolve(signature);
+      }));
+    };
+    const realFetch = window.fetch.bind(window);
+    window.__signedPost = null;
+    window.fetch = (url, init) => {
+      if (init?.method !== "POST") return realFetch(url, init);
+      const post = window.__signedPost = { url: String(url), payload: JSON.parse(init.body), status: null };
+      return realFetch(url, init).then((response) => {
+        post.status = response.status;
+        return response;
+      }, (error) => { post.error = String(error); throw error; });
+    };
+  });
+  const text = `${label} while signing ${Date.now()}`;
+  await page.fill("#text", text);
+  await page.click("#send");
+  await page.waitForFunction(() => typeof window.__releaseSignature === "function");
+  check(`${label}: the signed request is held`,
+        (await page.evaluate(() => window.__signedPost)) === null);
+
+  let current = original;
+  if (change !== "unchanged") {
+    await page.click("#keyout");
+    current = null;
+    if (change === "replaced") {
+      await page.click("#keymore summary");
+      await page.fill("#seed", "11".repeat(32));
+      await page.click("#keyuse");
+      await page.waitForFunction((old) => {
+        const badge = document.getElementById("me");
+        return badge.textContent !== "Not signed in" && badge.title !== old;
+      }, original);
+      current = await page.getAttribute("#me", "title");
+    }
+  }
+  if (moved) {
+    await page.fill("#room", nextRoom);
+    await page.click("#join");
+    await page.fill("#text", nextDraft);
+  }
+  await page.evaluate(() => new Promise((resolve) => {
+    // The next task runs after send's promise reactions, including its catch. This also
+    // finishes promptly on the broken sign-out path, which never reaches fetch at all.
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close(); channel.port2.close(); resolve();
+    };
+    window.__releaseSignature();
+    channel.port2.postMessage(null);
+  }));
+  if (await page.evaluate(() => window.__signedPost !== null))
+    await page.waitForFunction(() => window.__signedPost.status !== null || window.__signedPost.error,
+                               null, { timeout: 5000 });
+  const post = await page.evaluate(() => window.__signedPost);
+  check(`${label}: the POST keeps the original room`, post?.url === `/r/${sentRoom}`, post?.url);
+  check(`${label}: the POST keeps the original DID`, post?.payload.did === original);
+  check(`${label}: the server accepts the original signature`, post?.status === 200,
+        post ? JSON.stringify(post.status) : await page.textContent("#status"));
+  const messages = (await (await fetch(`${BASE}/r/${sentRoom}?format=json`)).json()).messages;
+  check(`${label}: the stored message belongs to the original signer`,
+        messages.filter((m) => m.text === text).length === 1 &&
+        messages.find((m) => m.text === text)?.from === original);
+  check(`${label}: completion preserves the current identity`, current
+        ? (await page.getAttribute("#me", "title")) === current
+        : (await page.textContent("#me")) === "Not signed in");
+
+  check(`${label}: completion stays in the displayed room`,
+        (await page.inputValue("#room")) === nextRoom);
+  check(`${label}: completion preserves another room's draft`,
+        (await page.inputValue("#text")) === (moved ? nextDraft : ""));
+  if (moved) {
+    const elsewhere = await (await fetch(`${BASE}/r/${nextRoom}?format=json`)).json();
+    check(`${label}: the new room has no copy of the pending message`,
+          !elsewhere.messages.some((message) => message.text === text));
+  }
+
+  if (change === "replaced") {
+    const next = `${text} next send`;
+    await page.fill("#text", next);
+    await page.click("#send");
+    await page.waitForFunction((text) => window.__signedPost?.payload.text === text &&
+      (window.__signedPost.status !== null || window.__signedPost.error), next, { timeout: 5000 });
+    const later = await page.evaluate(() => window.__signedPost);
+    check(`${label}: the next send uses the new signer and current room`,
+          later.payload.did === current && later.url === `/r/${nextRoom}` && later.status === 200);
+    const view = await (await fetch(`${BASE}/r/${nextRoom}?format=json`)).json();
+    check(`${label}: the next message is stored under the new DID`,
+          view.messages.find((m) => m.text === next)?.from === current);
+  }
+  check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+
+// ------------------------------------------------------------- delegation reads in flight
+// Hold real note replies before the page receives them. Switching through the visible
+// sign-out/seed controls must discard the previous identity's rows and late completions.
+{
+  const { createPrivateKey, createHash, sign } = await import("node:crypto");
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const agent = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const identities = [];
+  for (const [byte, scope] of [[17, "r:display-a"], [18, "r:display-b"]]) {
+    const seed = Buffer.alloc(32, byte);
+    const key = createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]),
+      format: "der", type: "pkcs8",
+    });
+    const publicBytes = Buffer.from(key.export({ format: "jwk" }).x, "base64url");
+    let n = BigInt("0x" + Buffer.concat([Buffer.from([0xed, 0x01]), publicBytes]).toString("hex"));
+    let encoded = "";
+    while (n) { encoded = alphabet[Number(n % 58n)] + encoded; n /= 58n; }
+    const did = "did:key:z" + encoded;
+    const fp = createHash("sha256").update(did).digest("hex").slice(0, 16);
+    const path = `/kv/did-${fp.slice(0, 2)}/${fp.slice(2)}`;
+    const expires = String(Math.floor(Date.now() / 1000) + 86400);
+    const nonce = String(Date.now());
+    const signature = sign(null, Buffer.from(`delegate|${did}|${agent}|${scope}|${expires}|${nonce}`), key);
+    const value = `delegate: ${agent} ${scope} ${expires} ${nonce} ${signature.toString("base64url")}`;
+    const response = await fetch(`${BASE}${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!response.ok) throw new Error(`delegation fixture: HTTP ${response.status}`);
+    identities.push({ seed: seed.toString("hex"), did, path, scope });
+  }
+  const [a, b] = identities;
+  for (const lateError of [false, true]) {
+    const label = `delegation display (${lateError ? "late error" : "late success"})`;
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    await page.addInitScript(() => {
+      // No room heartbeat may hide the error badge this section is checking.
+      Object.defineProperty(document, "hidden", { get: () => true });
+      const realFetch = window.fetch.bind(window);
+      const realVerify = crypto.subtle.verify.bind(crypto.subtle);
+      window.delegationProbe = { reads: [], verified: 0 };
+      crypto.subtle.verify = async (...args) => {
+        const result = await realVerify(...args);
+        window.delegationProbe.verified++;
+        return result;
+      };
+      window.fetch = async (...args) => {
+        const response = await realFetch(...args);
+        const path = new URL(args[0], location.href).pathname;
+        if (!path.startsWith("/kv/did-") || (args[1]?.method || "GET") !== "GET") return response;
+        const read = { path, returned: false };
+        const held = new Promise((resolve) => {
+          read.release = (error) => resolve(error ? new Response("temporary failure", { status: 503 }) : response);
+        });
+        window.delegationProbe.reads.push(read);
+        const result = await held;
+        read.returned = true;
+        return result;
+      };
+    });
+    await page.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+    const signIn = async (identity, count) => {
+      await page.click("#keymore summary");
+      await page.fill("#seed", identity.seed);
+      await page.click("#keyuse");
+      await page.waitForFunction((did) => document.getElementById("me").title === did, identity.did);
+      await page.waitForFunction((n) => window.delegationProbe.reads.length === n, count);
+    };
+    const release = async (index, error = false) => {
+      const before = await page.evaluate(() => window.delegationProbe.verified);
+      await page.evaluate(({ index, error }) => window.delegationProbe.reads[index].release(error), { index, error });
+      await page.waitForFunction((i) => window.delegationProbe.reads[i].returned, index);
+      if (!error) await page.waitForFunction((n) => window.delegationProbe.verified === n + 1, before);
+      // Verification is real WebCrypto. Its promise reactions, including Promise.all
+      // and the final render, drain before this next task; no fixed sleep can race it.
+      await page.evaluate(() => new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+          channel.port1.close(); channel.port2.close(); resolve();
+        };
+        channel.port2.postMessage(null);
+      }));
+    };
+    await signIn(a, 1);
+    await release(0);
+    check(`${label}: current identity's verified grant renders`,
+          (await page.locator("#delegations .deleg.ok .scope").textContent()).startsWith(a.scope));
+    await page.click("#keyout");
+    check(`${label}: sign-out clears the previous rows`,
+          (await page.locator("#delegations .deleg").count()) === 0);
+    await signIn(a, 2); // leave A's second read pending across the next sign-out
+    await page.click("#keyout");
+    await signIn(b, 3);
+    check(`${label}: replacement identity starts without the previous rows`,
+          (await page.locator("#delegations .deleg").count()) === 0);
+    await release(2);
+    check(`${label}: replacement identity's verified grant renders`,
+          (await page.locator("#delegations .deleg.ok .scope").textContent()).startsWith(b.scope));
+    const current = await page.locator("#delegations").textContent();
+    const status = await page.locator("#status").textContent();
+    await release(1, lateError);
+    check(`${label}: old completion cannot replace the current grants`,
+          (await page.locator("#delegations").textContent()) === current);
+    check(`${label}: old completion cannot replace the current status`,
+          (await page.locator("#status").textContent()) === status);
+    check(`${label}: the selected identity remains unchanged`,
+          (await page.getAttribute("#me", "title")) === b.did);
+    check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+    await context.close();
+  }
+}
+
 
 // -------------------------------------------------------------------- passkey + delegation
 // Two things a Python test cannot reach at all: whether an authenticator's PRF output can
@@ -942,6 +1343,140 @@ const browser = await chromium.launch({
 }
 
 
+// ----------------------------------------------------------- identity operations overtaken
+// Complete a real PRF ceremony, but hold delivery of its credential while the reader
+// chooses a seed, creates a key or signs out. Abort cannot recall a credential already returned by the
+// authenticator. Also hold a real Ed25519 import: both lanes must respect the latest choice.
+{
+  const SEED = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+  const EXPECTED = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  const errors = [];
+  for (const outcome of ["success", "failure", "logout", "import"]) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    page.on("pageerror", (e) => errors.push(String(e)));
+    // Keep the room heartbeat from replacing the status being measured here.
+    await page.addInitScript(() => {
+      Object.defineProperty(document, "hidden", { get: () => true });
+    });
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("WebAuthn.enable", { enableUI: false });
+    await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal",
+        hasResidentKey: true, hasUserVerification: true, hasPrf: true,
+        automaticPresenceSimulation: true, isUserVerified: true,
+      },
+    });
+    await page.goto(`${BASE.replace("127.0.0.1", "localhost")}/humans`,
+                    { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#identity:not([hidden])", { timeout: 8000 });
+    if (outcome !== "import") {
+      await page.click("#keymore summary");
+      await page.click("#keypassnew");
+      await page.waitForFunction(() => document.getElementById("me").title.startsWith("did:"),
+                                 null, { timeout: 15000 });
+      await page.click("#keyout");
+    }
+    await page.evaluate((outcome) => {
+      const probe = window.identityProbe = { ready: false };
+      const pending = new Set();
+      const track = (promise) => {
+        pending.add(promise);
+        promise.then(() => pending.delete(promise), () => pending.delete(promise));
+        return promise;
+      };
+      // A task boundary drains promise callbacks. Await native crypto too, since those
+      // operations can finish after that boundary; checking only microtasks misses them.
+      const turn = () => new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => {
+          channel.port1.close(); channel.port2.close(); resolve();
+        };
+        channel.port2.postMessage(null);
+      });
+      probe.settle = async () => {
+        let timer;
+        try {
+          await Promise.race([
+            (async () => {
+              await turn();
+              while (pending.size) await Promise.allSettled([...pending]);
+              await turn();
+            })(),
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("identity did not settle")), 8000);
+            }),
+          ]);
+        } finally { clearTimeout(timer); }
+      };
+      const pause = (value) => new Promise((resolve, reject) => {
+        probe.ready = true;
+        probe.release = () => outcome === "failure"
+          ? reject(new DOMException("delayed cancellation", "NotAllowedError")) : resolve(value);
+      });
+      let holdImport = outcome === "import";
+      const importKey = crypto.subtle.importKey.bind(crypto.subtle);
+      crypto.subtle.importKey = (...args) => track(importKey(...args).then((key) => {
+        if (!holdImport) return key;
+        holdImport = false;
+        return pause(key);
+      }));
+      const exportKey = crypto.subtle.exportKey.bind(crypto.subtle);
+      crypto.subtle.exportKey = (...args) => track(exportKey(...args));
+      if (outcome !== "import") {
+        const get = navigator.credentials.get.bind(navigator.credentials);
+        navigator.credentials.get = (...args) => get(...args).then(pause);
+      }
+    }, outcome);
+    if (outcome === "import") {
+      await page.click("#keymore summary");
+      await page.fill("#seed", "11".repeat(32));
+      await page.click("#keyuse");
+    } else {
+      await page.click("#keypass");
+    }
+    await page.waitForFunction(() => window.identityProbe.ready, null, { timeout: 15000 });
+    if (outcome !== "import") await page.click("#keymore summary");
+    if (outcome === "logout") {
+      await page.click("#keynew");
+      await page.waitForFunction(() => document.getElementById("me").title.startsWith("did:"),
+                                 null, { timeout: 8000 });
+      check("identity logout: Create key signs in while the old passkey result is held",
+            /^[0-9a-f]{64}$/.test(await page.evaluate(() => localStorage.getItem("technocore.seed"))));
+    } else {
+      await page.fill("#seed", SEED);
+      await page.click("#keyuse");
+      await page.waitForFunction((did) => document.getElementById("me").title === did,
+                                 EXPECTED, { timeout: 8000 });
+      if (outcome !== "import") {
+        check(`identity ${outcome}: the newer seed signs in while the old result is held`,
+              (await page.getAttribute("#me", "title")) === EXPECTED);
+      }
+    }
+    if (outcome === "logout") await page.click("#keyout");
+    const statusBefore = await page.textContent("#status");
+    const result = await page.evaluate(async () => {
+      window.identityProbe.release();
+      await window.identityProbe.settle();
+      return {
+        did: document.getElementById("me").title,
+        seed: localStorage.getItem("technocore.seed"),
+        status: document.getElementById("status").textContent,
+      };
+    });
+    check(`identity ${outcome}: the old result cannot replace the latest identity`,
+          result.did === (outcome === "logout" ? "" : EXPECTED), result.did);
+    check(`identity ${outcome}: the old result cannot alter the saved seed`,
+          result.seed === (outcome === "logout" ? null : SEED));
+    check(`identity ${outcome}: the old result cannot overwrite the current status`,
+          result.status === statusBefore, result.status);
+    await context.close();
+  }
+  check("identity operations: no page errors throughout", errors.length === 0, errors.join("; "));
+}
+
+
 // ------------------------------------------------------------- a deadline the page owns
 // `publicKey.timeout` is a hint: the spec lets a user agent clamp or ignore it, so it cannot
 // be what bounds a ceremony. This is the engine that ignores it — a get() that never settles
@@ -1087,6 +1622,187 @@ const browser = await chromium.launch({
   await context.close();
 }
 
+// --------------------------------------------------------------- newer drafts during a send
+// As in TSynarc's closed PR #657, hold a real write's response so the user's edits happen
+// deterministically before send() completes. Run after the other writes and timed passkey
+// checks, retaining the service's normal write limit rather than changing its configuration.
+for (const mode of ["unchanged", "edited", "restored", "out-of-order"]) {
+  const context = await browser.newContext({ viewport: { width: 900, height: 900 } });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(String(error)));
+  await page.goto(`${BASE}/humans#r/lobby`, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector("#identity:not([hidden])", { timeout: 5000 });
+  await page.click("#keymore summary");
+  await page.fill("#seed", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+  await page.click("#keyuse");
+  const did = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+  await page.waitForFunction((did) => document.getElementById("me").title === did, did);
+  await page.evaluate(() => {
+    const realFetch = window.fetch.bind(window);
+    window.__draftPosts = [];
+    window.fetch = (url, options) => {
+      if (options?.method !== "POST") return realFetch(url, options);
+      const post = { url: String(url), payload: JSON.parse(options.body) };
+      window.__draftPosts.push(post);
+      return realFetch(url, options).then((response) => new Promise((resolve) => {
+        post.status = response.status;
+        post.release = () => resolve(response);
+      }));
+    };
+  });
+  const original = `pending draft ${mode} ${Date.now()}`;
+  await page.fill("#text", original);
+  await page.click("#send");
+  await page.waitForFunction(() => typeof window.__draftPosts[0]?.release === "function");
+  const posted = await page.evaluate(() => {
+    const { status, payload } = window.__draftPosts[0];
+    return { status, payload };
+  });
+  check(`draft ${mode}: the original signed write succeeded`,
+        posted.status === 200 && posted.payload.did === did && posted.payload.text === original,
+        `HTTP ${posted.status}`);
+
+  async function release(index) {
+    await page.evaluate((index) => {
+      window.__draftPosts[index].release();
+      // A task runs after the response's promise chain has cleared or preserved the draft.
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }, index);
+  }
+  let expected = "";
+  if (mode === "edited" || mode === "restored") {
+    await page.fill("#text", `${original} edited`);
+    expected = mode === "restored" ? original : `${original} edited`;
+    if (mode === "restored") await page.fill("#text", original);
+  } else if (mode === "out-of-order") {
+    await page.fill("#text", `${original} second`);
+    await page.click("#send");
+    await page.waitForFunction(() => typeof window.__draftPosts[1]?.release === "function");
+    check("draft out-of-order: the second signed write succeeded",
+          (await page.evaluate(() => window.__draftPosts[1].status)) === 200);
+    await release(1);
+    check("draft out-of-order: the second response clears its own draft",
+          (await page.inputValue("#text")) === "");
+    expected = `${original} third, unsent`;
+    await page.fill("#text", expected);
+  }
+  await page.focus("#room");
+  check(`draft ${mode}: another visible field has focus before completion`,
+        await page.evaluate(() => document.activeElement.id === "room"));
+  await release(0);
+  check(`draft ${mode}: completion preserves only newer unsent work`,
+        (await page.inputValue("#text")) === expected);
+  check(`draft ${mode}: completion focuses only its unchanged composer`,
+        await page.evaluate((mode) => document.activeElement.id ===
+          (mode === "unchanged" ? "text" : "room"), mode));
+  const messages = (await (await fetch(`${BASE}/r/lobby?format=json`)).json()).messages;
+  check(`draft ${mode}: the original message is stored once`,
+        messages.filter((message) => message.text === original && message.from === did).length === 1);
+  check(`draft ${mode}: no page errors`, errors.length === 0, errors.join("; "));
+  await context.close();
+}
+
+// --------------------------------------------------------------- browser-engine composition
+// Unlike the synthetic compatibility events above, CDP starts composition inside Blink.
+// Keep this after the directory checks: the successful send really writes to the store.
+{
+  console.log("browser-engine IME");
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  let posts = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url() === `${BASE}/r/ime-compose`) posts++;
+  });
+  await page.goto(`${BASE}/humans#r/ime-compose`, { waitUntil: "domcontentloaded" });
+  await page.locator("#text").focus();
+  await page.evaluate(() => {
+    window.__imeKeys = [];
+    document.getElementById("text").addEventListener("keydown", (event) => {
+      window.__imeKeys.push({ key: event.key, composing: event.isComposing, trusted: event.isTrusted });
+    });
+  });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Input.imeSetComposition", {
+    text: "日本語", selectionStart: 3, selectionEnd: 3,
+  });
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(100);
+  const keys = await page.evaluate(() => window.__imeKeys);
+  check("IME engine delivers a trusted composing Enter",
+        keys.some((event) => event.key === "Enter" && event.composing && event.trusted));
+  let view = await (await page.request.get(`${BASE}/r/ime-compose?format=json`)).json();
+  check("composing Enter preserves the Japanese draft without posting",
+        posts === 0 && view.count === 0 && (await page.inputValue("#text")) === "日本語");
+  await cdp.send("Input.insertText", { text: "日本語" });
+  await Promise.all([
+    page.waitForResponse((response) =>
+      response.request().method() === "POST" && response.url() === `${BASE}/r/ime-compose`),
+    page.keyboard.press("Enter"),
+  ]);
+  view = await (await page.request.get(`${BASE}/r/ime-compose?format=json`)).json();
+  check("Enter after composition stores exactly one Japanese message",
+        posts === 1 && view.count === 1 && view.messages[0].text === "日本語");
+  await page.waitForFunction(() => document.getElementById("text").value === "");
+  check("the successful send clears the draft", (await page.inputValue("#text")) === "");
+  await context.close();
+}
+// ------------------------------------------------------------- empty cursor checkpoints
+// A future permalink gets an empty page whose last_seq corrects the cursor. The next
+// message must appear without reopening the room; the server's successful correction
+// is useful even though there was nothing to render in the first response.
+for (const [label, initial, target] of [
+  ["future existing room", 2, 9999],
+  ["future absent room", 0, 9999],
+  ["ordinary room", 2, 0],
+  ["valid permalink", 2, 2],
+]) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const room = `cursor-${initial}-${target}-${Date.now().toString(36)}`;
+  const errors = [], cursors = [];
+  page.on("pageerror", e => errors.push(e.message));
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname === `/r/${room}` && request.method() === "GET") {
+      cursors.push(Number(url.searchParams.get("since")));
+    }
+  });
+  for (let n = 1; n <= initial; n++) {
+    const response = await context.request.post(`${BASE}/r/${room}`, {
+      data: { from: "cursor-test", text: `initial message ${n}` },
+    });
+    if (!response.ok()) throw new Error(`cursor fixture failed: ${await response.text()}`);
+  }
+  const firstResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname === `/r/${room}` && response.request().method() === "GET");
+  await page.goto(`${BASE}/humans#r/${room}${target ? `/${target}` : ""}`,
+                  { waitUntil: "domcontentloaded" });
+  const first = await (await firstResponse).json();
+  if (target === 9999) {
+    check(`${label}: initial empty page corrects the cursor`,
+          first.count === 0 && first.last_seq === initial);
+    await page.getByText("message 9999 has not been posted yet", { exact: true })
+      .waitFor({ timeout: 5000 });
+  } else {
+    await page.locator("#log .msg").first().waitFor({ timeout: 5000 });
+    check(`${label}: initial messages are visible`,
+          (await page.locator("#log .msg .body").allTextContents())
+            .includes(`initial message ${initial}`));
+  }
+  const nextText = `message after ${label}`;
+  const written = await context.request.post(`${BASE}/r/${room}`, {
+    data: { from: "cursor-test", text: nextText },
+  });
+  if (!written.ok()) throw new Error(`cursor follow-up failed: ${await written.text()}`);
+  const arrived = await page.locator("#log .msg .body")
+    .filter({ hasText: nextText }).waitFor({ timeout: 8000 }).then(() => true, () => false);
+  check(`${label}: the next message appears without reopening`, arrived);
+  check(`${label}: a follow-up read uses the server checkpoint`,
+        cursors.slice(1).includes(initial), JSON.stringify(cursors));
+  check(`${label}: no page errors`, errors.length === 0, errors.join("; "));
+  await context.close();
+}
 
 await browser.close();
 console.log(failures ? `\n${failures} check(s) FAILED` : "\nall checks passed");

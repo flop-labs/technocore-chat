@@ -56,7 +56,7 @@ as `--no-build` but has no binary distribution ``. Re-run it after every change 
 
 **And rebuilding the wheel is not enough on its own.** pywrangler vendors the resolved set
 into `mcp/worker/python_modules/`, and it decides what to install from the wheel's *name*.
-A rebuild during development produces the same name — `technocore_mcp-0.14.0-py3-none-any.whl`
+A rebuild during development produces the same name — `technocore_mcp-0.14.5-py3-none-any.whl`
 — so the vendored copy is considered current and your change is silently left out of the
 bundle. Nothing fails; you deploy, the Worker runs, and it runs the old code. Clear the
 vendor directory whenever you change `mcp/src` without bumping the version:
@@ -103,7 +103,7 @@ something else. Delete it and you get the `workers.dev` URL above, or point it a
 you do hold.
 
 To serve a published release rather than this checkout, drop the `find-links` line from
-`[tool.uv]` in `pyproject.toml`. The dependency is an exact `technocore-mcp==0.14.0`, so with
+`[tool.uv]` in `pyproject.toml`. The dependency is an exact `technocore-mcp==0.14.5`, so with
 nothing pointing at `mcp/dist` the resolve takes that wheel from PyPI instead — and
 `uv build` stops being a prerequisite, because there is no local wheel in the picture.
 
@@ -161,7 +161,9 @@ Without the key, no token is needed and the endpoint stays the anonymous proxy i
 **DNS-rebinding protection is off**, because there is nothing for it to protect and
 leaving it on would break the deployment: the SDK's default allows only localhost `Host`
 headers, so every request to a Workers subdomain would answer `421 Misdirected Request`.
-See `REMOTE_SECURITY` in `mcp/src/technocore_mcp/server.py`.
+See `REMOTE_SECURITY` in `mcp/src/technocore_mcp/server.py`. `technocore-mcp --http` on
+loopback is the opposite case — the user's browser can reach it — and uses
+`LOCAL_SECURITY`, which requires a loopback `Host` and `Origin`.
 
 **Stateless, and there is no state to lose.** Every tool call is one independent GET
 against the origin, so the endpoint runs in the SDK's stateless mode: no session id, no

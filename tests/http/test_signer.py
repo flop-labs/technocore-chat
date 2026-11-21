@@ -27,6 +27,16 @@ SIGNER = ROOT / "scripts" / "sign.py"
 SEED = "aa" * 32
 
 
+def _x25519(seed: int) -> str:
+    """A real X25519 public key, unpadded base64url — what `sign.py e2e` insists on."""
+    import base64
+
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    raw = X25519PrivateKey.from_private_bytes(bytes([seed]) * 32).public_key().public_bytes_raw()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
 def run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SIGNER), *args], capture_output=True, text=True, cwd=ROOT
@@ -70,6 +80,57 @@ def test_nonces_are_rejected_exactly_where_the_server_would_reject() -> None:
     # The server's own pattern, not a copy of it: a stale copy here would pass a
     # signature the signed lane refuses, which is the gap these tests exist to close.
     assert re.fullmatch(didkey.SIG_PATTERN, sig)
+
+
+def test_the_e2e_record_the_script_prints_is_one_a_sender_accepts() -> None:
+    """patterns.md pattern 4 tells a recipient to publish what `sign.py e2e` prints and a
+    sender to trust only a record `e2e_key` accepts, so the two have to agree — and the
+    record must verify only against the key that signed it, whatever DID a note puts first."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sign", SIGNER)
+    assert spec is not None and spec.loader is not None
+    sign_py = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sign_py)
+
+    did = run("--seed", SEED, "did").stdout.strip()
+    x25519 = _x25519(5)
+    out = run("--seed", SEED, "e2e", x25519, "mb-p-inbox", "5")
+    assert out.returncode == 0, out.stderr
+    line = out.stdout.splitlines()[-1]
+    assert line.startswith("e2e: ")
+    assert sign_py.e2e_key(did, f"{did} {line}") == (x25519, "mb-p-inbox", 5)
+    other = run("--seed", "bb" * 32, "did").stdout.strip()
+    assert sign_py.e2e_key(other, f"{other} {line}") is None  # someone else's record
+
+    for bad in (
+        ["e2e", x25519, "Not A Room", "5"],
+        ["e2e", x25519, "mb-p-inbox", "١"],
+        ["e2e", "x", "mb-p-inbox", "5"],  # signs fine, and no sender could ever decode it
+        ["e2e", "A" * 42 + "B", "mb-p-inbox", "5"],  # 32 bytes, but not the canonical spelling
+        ["e2e", "A" * 43, "mb-p-inbox", "5"],  # 32 zero bytes: a low-order point, no exchange
+    ):
+        refused = run("--seed", SEED, *bad)
+        assert refused.returncode != 0, bad
+
+    # A record signed over a key nobody can decode is skipped, never chosen as newest.
+    typo = f"e2e: x mb-p-inbox 9 {sign_py.signature(sign_py.load_key(SEED)[0], sign_py.e2e_record(did, 'x', 'mb-p-inbox', '9'))}"
+    assert sign_py.e2e_key(did, f"{did} {line} {typo}") == (x25519, "mb-p-inbox", 5)
+
+
+def test_e2e_key_prints_what_a_sender_seals_to_or_refuses(tmp_path) -> None:
+    """The sender's half of pattern 4 as a command, since the pattern says a shell is all
+    either side needs: the verified record's fields, or a nonzero exit meaning "do not seal"."""
+    did = run("--seed", SEED, "did").stdout.strip()
+    key = _x25519(6)
+    line = run("--seed", SEED, "e2e", key, "mb-p-inbox", "5").stdout.splitlines()[-1]
+    note = tmp_path / "note.txt"
+    note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil {line}", encoding="utf-8")
+    picked = run("e2e-key", did, str(note))
+    assert picked.returncode == 0 and picked.stdout.split() == [key, "mb-p-inbox", "5"]
+    note.write_text(f"{did} x25519:{'B' * 43} mailbox:mb-p-evil", encoding="utf-8")
+    refused = run("e2e-key", did, str(note))
+    assert refused.returncode != 0 and "do not seal" in refused.stderr
 
 
 def test_a_script_signature_is_accepted_by_the_real_server(client) -> None:
