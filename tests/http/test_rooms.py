@@ -56,7 +56,9 @@ def test_posting_to_the_events_room_documents_what_it_really_answers(client):
     import app as app_module
 
     documented = client.get("/openapi.json").json()["paths"]["/r/events"]["post"]
-    assert set(documented["responses"]) == {"400", "403", "408", "413", "429"}
+    # 414/431 are the edge refusals HeaderLimits can raise on any operation before routing
+    # (#829); every other code is this handler's own.
+    assert set(documented["responses"]) == {"400", "403", "408", "413", "414", "429", "431"}
     # It parses a body, so it declares one.
     assert (
         "text" in (documented["requestBody"]["content"]["application/json"]["schema"]["properties"])

@@ -239,13 +239,14 @@ Header blocks are capped at **48 headers / 8 KiB** (431 past that) in the app, b
 only bounds *buffered incomplete* data — a real block through Cloudflare is 13 headers / ~400 bytes.
 
 `--http h11`, not the faster `httptools`, which answered 200 OK to a measured 256 KB header value.
-Plus `--h11-max-incomplete-event-size 16384` (bounds incomplete parser events),
+Plus `--h11-max-incomplete-event-size 32768` (bounds incomplete parser events, and set above the
+16 KiB URL budget so a just-over-budget request reaches the app — see **URL budget** below),
 `--limit-concurrency 128`, `--backlog 128`, `--timeout-keep-alive 5`. Re-measure if those
 change:
 
 ```bash
 uvicorn app:app --app-dir src --port 8099 --http h11 \
-    --h11-max-incomplete-event-size 16384 --limit-concurrency 128 --timeout-keep-alive 5
+    --h11-max-incomplete-event-size 32768 --limit-concurrency 128 --timeout-keep-alive 5
 python tests/http_hardening_probe.py 8099
 ```
 
@@ -264,11 +265,18 @@ expire them. The origin must be unreachable except through the proxy.
 Room, note, and orphan-lock age thresholds are unchanged. Expired data and count repairs can
 wait until the next eligible write; the longer interval reduces repeated full-store walks.
 
-**URL budget**: the GET write lane carries text in the path, so its real limit is URL length (16 KB
-at the edge). 4096 ASCII characters fit; a CJK character is 9 bytes URL-encoded and an emoji 12, so
-long non-Latin messages need the POST lane. Enforce that URL cap at the proxy: h11's incomplete
-event cap is not a deterministic bound on a complete request target, and the app currently
-has no separate request-target bound.
+**URL budget**: the GET write lanes carry their payload in the path, so the real limit is URL
+*bytes*, not characters. The app enforces it directly — **16 KiB** (`MAX_URL_BYTES`), returning a
+**414** that names the byte count and points at the POST lane (#180). 4096 ASCII characters fit; a
+CJK character is 9 URL bytes and an emoji 12, so a full-length non-Latin message (~36–49 KiB), or any
+note whose encoded request target exceeds 16 KiB, must use POST — a full-length ASCII note is only
+~8 KiB and stays a valid GET write; only heavily multibyte note values cross the budget. That
+refusal is *deterministic* for a URL in the **(16 KiB, 32 KiB]**
+band: the h11 cap (`--h11-max-incomplete-event-size 32768`) sits above the budget, so such a request
+always reaches the app for the 414 rather than being rejected by the parser at random (h11 refuses an
+over-long request line only when it arrives across TCP segments). A URL past the 32 KiB cap — which
+includes those full-length multibyte writes — is still always refused, but as the parser's 400 or the
+app's 414 depending on segmentation, so keep the proxy's own URL cap in place too.
 
 **HTTP/2 and HTTP/3 are a front-proxy concern** — uvicorn is HTTP/1.1 only.
 
