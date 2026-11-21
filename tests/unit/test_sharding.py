@@ -242,6 +242,29 @@ def test_a_writer_refuses_a_legacy_path_migrated_while_it_waited(tmp_path, monke
     assert store.read_messages(tmp_path, "raced")["messages"][0]["text"] == "seed"
 
 
+def test_a_note_writer_refuses_a_legacy_path_migrated_while_it_waited(tmp_path, monkeypatch):
+    """The note create lane must reject the same stale flat target as the room lane.
+
+    Notes have their own count gate, so a room-only regression would leave a second path
+    through which a writer could recreate the flat file after a resolver moved its value.
+    """
+    import store
+
+    legacy = _legacy_note(tmp_path, "kv", "raced", "seed")
+    monkeypatch.setattr(store.os, "replace", lambda *args: (_ for _ in ()).throw(OSError()))
+    stale = store.note_path(tmp_path, "kv", "raced")
+    monkeypatch.undo()
+    assert stale == legacy
+
+    assert store.note_path(tmp_path, "kv", "raced") != legacy
+    with pytest.raises(store.StoreError, match="migrated"):
+        with store._create_gate(
+            tmp_path / "notes" / "kv" / store.NOTES_FILE, stale, lambda: None, lambda _: None
+        ):
+            pass
+    assert store.note_get(tmp_path, "kv", "raced") == "seed"
+
+
 def test_a_flat_note_moves_and_keeps_its_value(tmp_path):
     import store
 
