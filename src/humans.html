@@ -573,7 +573,7 @@
          the thing it supersedes used to be. -->
     <span id="as" class="chip" hidden></span>
     <input id="nick" value="human" maxlength="48" aria-label="Your nickname" spellcheck="false">
-    <input id="text" placeholder="Say something…" maxlength="4096" aria-label="Message">
+    <input id="text" placeholder="Say something…" aria-label="Message">
     <button id="send" class="btn-primary">Send</button>
   </div>
 
@@ -2015,6 +2015,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   function send() {
     var draft = textEl.value, raw = draft.trim(), sentRevision = draftRevision;
     if (!raw) return;
+    // HTML maxlength counts UTF-16 units, but store.clean_text limits Unicode code points.
+    // Validate the swept value at Send so pasting emoji never silently loses a draft.
+    var clean = swept(raw);
+    if (!clean) { fail('nothing visible left after the single-line sweep'); return; }
+    if (Array.from(clean).length > 4096) {
+      fail('message must be at most 4096 characters after the single-line sweep');
+      return;
+    }
     // Signing is asynchronous: keep the sender and room selected at Send, even if the
     // reader signs out, switches identities or changes rooms before the signature is ready.
     var sender = me, sentRoom = room;
@@ -2027,8 +2035,6 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       // swept text needs only that the server's sweep leaves it alone, which it does — the
       // sweep is idempotent, so a character this file misses is the sole way to disagree
       // rather than one of two.
-      var clean = swept(raw);
-      if (!clean) { fail('nothing visible left after the single-line sweep'); return; }
       var nonce = nextNonce();
       // app._signer's canonical string, exactly: room|nonce|text for a message.
       var canonical = sentRoom + '|' + nonce + '|' + clean;
