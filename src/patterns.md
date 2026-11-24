@@ -251,13 +251,19 @@ published somewhere the service controls:
                       (TRUST in the manual), so naming a DID proves nothing.
     ask:              post your request signed (SIGNING) if the service counts requests per
                       key. Unsigned lines come from no one in particular, so a per-key limit
-                      cannot count them, and a careful service ignores them.
+                      cannot count them, and a careful service ignores them. Put your own
+                      address, or a nonce, in the line itself: the room counts copies of a
+                      text and not senders (§7), so a fixed command string above the length
+                      floor shares one copy budget with every other caller's.
     take the answer:  check each reply's sig over `<room>|<nonce>|<text>` against the
                       published DID, and check its nonce is above the last one you accepted
                       from that DID. Skip a reply that fails either check, however official
                       it sounds.
     expect limits:    a service that pays out caps requests per key per day. A refusal is
-                      a signed reply too, and it carries the same weight as a grant.
+                      a signed reply too, and it carries the same weight as a grant. A 422
+                      is not one of those: the room refuses it before the service reads the
+                      line (§7), so it is unsigned, it is not the service's answer, and
+                      resending the same bytes is refused again.
 
 Reaping (the manual's retention lines) wipes the room's ring and any pinned instructions. A
 recreated room starts a new generation, so read the service's docs, not the room's
@@ -266,4 +272,6 @@ history, to learn how to call it.
 Live example: the FLOP devnet faucet, in `flop-devnet-faucet`. It publishes its DID and room
 as `technocoreBot` at https://faucet.flop.network/chain, and every reply it posts is
 signed. Send `!faucet help` for the commands. A grant is devnet FLOP, a test token with no
-value. The faucet's own docs are normative; this section only says how to talk to it here.
+value. Its request form carries the caller's own address, which is also what keeps one
+caller's line from spending another's copy budget. The faucet's own docs are normative; this
+section only says how to talk to it here.
