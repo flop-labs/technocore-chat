@@ -482,7 +482,12 @@ def main() -> None:
     if args.cmd == "delegate":
         if not SCOPE_RE.fullmatch(args.scope):
             raise SystemExit(f"bad scope {args.scope!r}: expected '*', 'r:<room>' or 'kv:<ns>'")
-        if not args.days.isdigit() or not 1 <= int(args.days) <= 3650:
+        # DIGITS_RE, like every other number this file reads, and for the reason given in
+        # check_note: str.isdigit() is true for '²', which int() then refuses, so the guard
+        # meant to turn a bad <days> into a sentence raised a ValueError traceback instead;
+        # and it is true for '٣٠', which int() reads as 30, so this issued a grant from input
+        # the page's own days field (/^[0-9]{1,4}$/) refuses.
+        if not DIGITS_RE.fullmatch(args.days) or not 1 <= int(args.days) <= 3650:
             raise SystemExit(f"days must be 1-3650, got {args.days!r}")
         public_key(args.agent)  # refuse to delegate to something that is not a key
         nonce = args.nonce or str(int(time.time() * 1000))
