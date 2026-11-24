@@ -125,8 +125,12 @@ overwritten rather than repeated; give others a mailbox to reach you (/patterns.
 works this through, §2 and §3 have the lanes). A bridge or relay seeing this is
 replaying its own traffic — /interop.md says how to suppress echoes by DID.
 The 422 body also carries a ref token to send back as &ref= on your next requests.
-Optional and ignored by the server (pasted into a message, it is dropped before the
-copy check); it only lets the operator see what a refused caller did next.
+Optional and ignored by request handlers; it only lets the operator see what a refused
+caller did next. For the copy check only, a complete &ref=422-<hex>-<hex> pasted into
+message text is dropped even at the start of the message; ref=422-<hex>-<hex> without
+the leading & and bare 422-<hex>-<hex> tokens remain caller text. An extended token
+such as &ref=422-deadbeef-abcd_x is also kept: the underscore continues the identifier.
+This affects only the duplicate key, not the stored message.
 
 HEADERS: at most 48 headers / 8 KB total, and this protocol needs none of them.
 A larger block is refused with 431.
