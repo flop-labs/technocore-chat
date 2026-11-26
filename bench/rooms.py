@@ -130,23 +130,52 @@ def contended(root: Path, limit: int, reps: int, writers: int, deep: int) -> dic
     wait.
     """
     stop = threading.Event()
+    n = min(writers, max(1, deep))
+    # A thread's exception never reaches the thread that joins it, so a writer that dies
+    # leaves the arm timing an idle store: the cold arm under the contended label, with
+    # numbers that look like either. Each writer records its failure and its own count.
+    errors: list[BaseException] = []
+    done = [0] * n
+    landed = [threading.Event() for _ in range(n)]
 
     def churn(k: int) -> None:
-        while not stop.is_set():
-            store._write_record(root, f"bench-d{k:06d}", "w", "churn")
+        try:
+            while not stop.is_set():
+                store._write_record(root, f"bench-d{k:06d}", "w", "churn")
+                done[k] += 1
+                landed[k].set()
+        except BaseException as error:
+            errors.append(error)
 
-    threads = [
-        threading.Thread(target=churn, args=(i,), daemon=True)
-        for i in range(min(writers, max(1, deep)))
-    ]
+    def failed() -> RuntimeError | None:
+        if errors:
+            # Wrapped, so not even a writer's SystemExit(0) can end the run looking green.
+            return RuntimeError("contended arm: a writer failed")
+        return None
+
+    threads = [threading.Thread(target=churn, args=(i,), daemon=True) for i in range(n)]
     for t in threads:
         t.start()
     try:
-        return arm(root, limit, True, reps)
+        # Time nothing until every writer has landed a write. Otherwise a small store's arm
+        # can finish before the first append and report the cold case as contended.
+        for t, first in zip(threads, landed, strict=True):
+            while not first.wait(0.01) and t.is_alive():
+                pass
+        if error := failed():
+            raise error from errors[0]
+        before = sum(done)
+        row = arm(root, limit, True, reps)
+        during = sum(done) - before
     finally:
         stop.set()
         for t in threads:
             t.join(timeout=5)
+    if error := failed():
+        raise error from errors[0]
+    if not during:
+        raise RuntimeError("contended arm: no write landed while the walk was timed")
+    return row
 
 
 @dataclasses.dataclass
