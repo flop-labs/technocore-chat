@@ -113,7 +113,7 @@ function cacheKey(url, pathname) {
  * invent content for a path the service deliberately refused. */
 const isOriginFailure = (status) => status >= 500;
 
-/** The stored copy, with the Content-Type the origin gave it when it was captured.
+/** The stored copy, with the Content-Type recorded by snapshot.py.
  *
  * The type comes from the manifest rather than the asset server's guess because six of
  * these paths carry no file extension (/humans, /config, /.well-known/api-catalog among

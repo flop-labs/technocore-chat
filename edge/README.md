@@ -62,16 +62,20 @@ ends in `.md` too.
 
 `deploy.sh` runs `snapshot.py` first deliberately: publishing without it ships whatever
 copies were last on this disk, which for a versioned surface means last release's numbers.
+The script fetches the origin-first documents and copies `/skill.md` and `/patterns.md`
+directly from the checkout.
 
-`edge/public/` and `edge/src/types.json` are generated and gitignored for the same reason —
+`edge/public/` and `edge/src/routing.json` are generated and gitignored for the same reason —
 a snapshot committed to the repo is one that goes stale quietly.
 
 ### Content types
 
-`snapshot.py` records the origin's `Content-Type` per path in `src/types.json`, and the
-Worker sets it from there. Six of these paths have no file extension (`/humans`, `/config`,
-`/.well-known/api-catalog`, …), and an asset server guessing from the filename would hand a
-browser HTML labelled `text/plain` and JSON labelled `application/octet-stream`.
+`snapshot.py` records each asset's `Content-Type` in `src/routing.json`, and the Worker
+sets it from there. Fetched assets keep the response header, and the checkout Markdown
+files use the service's default `text/plain; charset=utf-8`. Six of these paths have no file
+extension (`/humans`, `/config`, `/.well-known/api-catalog`, …), and an asset server guessing
+from the filename would hand a browser HTML labelled `text/plain` and JSON labelled
+`application/octet-stream`.
 
 ## Verify
 

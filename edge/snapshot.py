@@ -166,6 +166,8 @@ def main() -> int:
     failed: list[str] = []
 
     for path in PATHS:
+        if path in STATIC_FIRST:
+            continue
         url = args.base.rstrip("/") + path
         try:
             with urllib.request.urlopen(url, timeout=60) as r:
@@ -186,10 +188,12 @@ def main() -> int:
 
     repo = pathlib.Path(__file__).resolve().parent.parent
     for path, source in STATIC_FIRST.items():
-        if path not in types:
-            continue  # its fetch failed; the error below is the one worth reporting
         body = (repo / source).read_bytes()
-        (out / asset_name(path)).write_bytes(body)
+        dest = out / asset_name(path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(body)
+        # Match the service's default response for requests that omit Accept.
+        types[path] = "text/plain; charset=utf-8"
         print(f"  {path:44} {len(body):>7}B  <- {source} (static-first, from the tree)")
 
     for path, (source, ctype) in EDGE_ONLY.items():

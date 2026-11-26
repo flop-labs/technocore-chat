@@ -14,7 +14,10 @@ import importlib.util
 import json
 import pathlib
 import re
+import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import _client
 import pytest
@@ -161,6 +164,58 @@ def test_the_generated_routing_manifest_agrees_with_the_snapshot_policy():
     assert set(routing["types"]) == set(snapshot.PATHS) | set(snapshot.EDGE_ONLY)
     assert set(routing["static_first"]) == set(snapshot.STATIC_FIRST)
     assert all(v and "/" in v for v in routing["types"].values()), routing["types"]
+
+
+def test_snapshot_copies_static_first_documents_without_requesting_them(tmp_path):
+    snapshot = _snapshot_module()
+    requested = set()
+
+    class Origin(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+            requested.add(self.path)
+            if self.path in snapshot.STATIC_FIRST:
+                self.send_error(503)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"from": "origin"}')
+
+    out = tmp_path / "public"
+    manifest = tmp_path / "routing.json"
+    with HTTPServer(("127.0.0.1", 0), Origin) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(EDGE / "snapshot.py"),
+                    "--base",
+                    f"http://127.0.0.1:{server.server_port}",
+                    "--out",
+                    str(out),
+                    "--manifest",
+                    str(manifest),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        finally:
+            server.shutdown()
+            thread.join()
+
+    assert result.returncode == 0, result.stderr
+    assert requested == set(snapshot.PATHS) - set(snapshot.STATIC_FIRST)
+    routing = json.loads(manifest.read_text(encoding="utf-8"))
+    assert routing["static_first"] == sorted(snapshot.STATIC_FIRST)
+    for path, source in snapshot.STATIC_FIRST.items():
+        assert (out / path.lstrip("/")).read_bytes() == (EDGE.parent / source).read_bytes()
+        assert routing["types"][path] == "text/plain; charset=utf-8"
+    assert (out / "config").read_bytes() == b'{"from": "origin"}'
+    assert routing["types"]["/config"] == "application/json"
 
 
 # The knobs that reach the document surface, moved far enough that anything quoting one has
