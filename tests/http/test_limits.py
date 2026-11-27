@@ -1060,6 +1060,21 @@ def test_a_lost_conditional_write_says_how_to_rebase(client):
     assert lost.text.startswith("409 note plans/next changed since you read it")
 
 
+def test_openapi_note_conflicts_cover_missing_notes_on_both_write_lanes(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    missing_get = client.get("/kv/plans/missing/set/next", params={"if": "previous"})
+    missing_post = client.post("/kv/plans/missing", json={"value": "next", "if": "previous"})
+    for spec_path, method, response in (
+        ("/kv/{ns}/{key}/set/{value}", "get", missing_get),
+        ("/kv/{ns}/{key}", "post", missing_post),
+    ):
+        assert response.status_code == 409
+        assert "no note there at all" in response.text and "if_absent" in response.text
+        description = paths[spec_path][method]["responses"]["409"]["description"]
+        assert "If the note is missing" in description and "`if_absent`" in description
+        assert "current value" in description and "last line" in description
+
+
 def test_a_rejected_name_names_the_usual_causes(client):
     """The rule alone leaves the caller diffing its string against a regex; uppercase and
     spaces are almost always the actual cause."""

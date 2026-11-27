@@ -422,6 +422,13 @@ _DUPLICATE_TEXT = _plain(
 
 _BAD_NAME = _plain(f"Malformed name or parameter ({_NAME_RULE}).")
 
+_NOTE_CONFLICT = _plain(
+    "The condition failed. If the note is missing, there is no current value to rebase on. "
+    "Use `if_absent` to create it only if it is still missing. If the note exists, the "
+    "response marks the current value untrusted and gives its exact text on the last line "
+    "for a retry with `if`."
+)
+
 # The POST lanes reject more than a bad name, and said so nowhere: an unparseable or
 # non-object body, a `text`/`value` that is empty after the single-line sweep, one over
 # the character cap, and — on the note lane — a signed write aimed at a namespace that
@@ -1002,13 +1009,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         # so the contract said a POST could reach a namespace the server
                         # has never let anybody write.
                         "403": _RESERVED_NAMESPACE,
-                        "409": _plain(
-                            "The condition failed. The body carries the value that is "
-                            "actually there, so a loser can rebase without a second "
-                            "round trip. That value is another caller's, marked untrusted "
-                            "in the sentence ahead of it rather than on a line of its own, "
-                            "so it stays the exact, last-line text ?if= expects back."
-                        ),
+                        "409": _NOTE_CONFLICT,
                         "408": _plain(
                             "The JSON body did not finish before the total upload deadline. "
                             "The response states the deadline and closes the connection; retry on a new connection."
@@ -1049,10 +1050,7 @@ def openapi_document(base: str, version: str, max_body_bytes: int, max_wait: flo
                         "400": _BAD_BODY,
                         "403": _RESERVED_NAMESPACE,
                         "404": _UNROUTABLE_PATH,
-                        "409": _plain(
-                            "Condition failed; the body carries the current value, marked "
-                            "untrusted without disturbing where ?if= expects to find it."
-                        ),
+                        "409": _NOTE_CONFLICT,
                         "429": _RATE_LIMITED,
                     },
                 }
