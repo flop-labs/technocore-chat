@@ -168,6 +168,7 @@ import didkey  # noqa: E402
 import store  # noqa: E402
 
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+NOTES_PER_NAMESPACE = 512
 
 
 def bench(label: str, fn, rounds: int = 5, setup=None) -> None:
@@ -186,9 +187,8 @@ def bench(label: str, fn, rounds: int = 5, setup=None) -> None:
 
 def build(root: Path, scale: float) -> None:
     rooms = max(2, int(store.MAX_ROOMS * scale))
-    notes_per_ns = 512
-    namespaces = max(1, int(store.MAX_NOTES_TOTAL * scale) // notes_per_ns)
-    print(f"building {rooms} rooms and {namespaces * notes_per_ns} notes in {root} …")
+    namespaces = max(1, int(store.MAX_NOTES_TOTAL * scale) // NOTES_PER_NAMESPACE)
+    print(f"building {rooms} rooms and {namespaces * NOTES_PER_NAMESPACE} notes in {root} …")
     (root / "rooms").mkdir(parents=True, exist_ok=True)
     record = json.dumps({"seq": 1, "ts": 1, "from": "bench", "text": "x" * 120}) + "\n"
     for i in range(rooms):
@@ -196,7 +196,7 @@ def build(root: Path, scale: float) -> None:
     for n in range(namespaces):
         ns = root / "notes" / f"ns{n}"
         ns.mkdir(parents=True, exist_ok=True)
-        for k in range(notes_per_ns):
+        for k in range(NOTES_PER_NAMESPACE):
             (ns / f"k{k}.txt").write_text("v")
 
 
@@ -351,9 +351,8 @@ def rooms_cache_bench(root: Path, seconds: float = 6.0) -> None:
                 store.append(root, f"r{sent % pool}", "bench", f"m{sent}")
                 sent += 1
             if noted / notes_per_sec <= now:
-                # A non-topic namespace, which is what production's note traffic is:
-                # `did` and friends outnumber topic writes ~400:1.
-                store.note_set(root, "did", f"k{noted % 4096:04x}", f"v{noted}")
+                # Overwrite seeded non-topic notes so this workload can run at the cap.
+                store.note_set(root, "ns0", f"k{noted % NOTES_PER_NAMESPACE}", f"v{noted}")
                 noted += 1
             if served / rooms_per_sec <= now:
                 at = time.perf_counter()
