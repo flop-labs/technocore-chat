@@ -2419,13 +2419,11 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // untrustedContentHint, which is what that annotation is for. Note values are single-line
   // by construction — clean_text collapses newlines on the way in — so what is left after
   // the framing is exactly what was stored.
-  function noteValue(body) {
-    var lines = body.split('\n');
-    lines.splice(0, 2);                                            // the banner, then a blank
-    if (lines.length && lines[lines.length - 1] === '') lines.pop();          // trailing newline
-    if (lines.length && lines[lines.length - 1].indexOf('# budget:') === 0) lines.pop();
-    return lines.join('\n');
-  }
+  //
+  // stripNote already parses this reply for the delegation reads, so it parses it here too:
+  // one grammar, one parser. A second parser here matched the footer by line prefix and took
+  // a stored value beginning "# budget:" for it, returning nothing.
+  function noteValue(body) { return stripNote(body); }
 
   // Same allowlist the server enforces, checked here so a typo costs a sentence instead of
   // a request. NAME_RE is the one above — the page and the store agree on it by construction.
