@@ -17,25 +17,25 @@ Two things this measures that bound the fix:
   and `os.stat(name, dir_fd=)` land within ~1.2x of each other and Path is 2.5x off all
   three, so there is no cleverer syscall to reach for — the representation is the whole
   cost. That is also why the sweep uses a plain absolute path rather than threading a
-  directory fd out of the walk: on the prod box dir_fd is 4.55 us against os.stat(path)'s
-  5.55, a fifth of one microsecond per file against an fd lifetime per namespace.
+  directory fd out of the walk: on the prod box dir_fd is 9.10 us against os.stat(path)'s
+  11.10, about a fifth cheaper per file, against an fd lifetime per namespace.
 - readdir alone is the floor: 15% of the as-written cost on the prod box, 24% on a fast
   desktop. That is what tells you the remaining time is the kernel doing stats rather than
   Python doing pathlib — and that no rewrite of this loop can go below it.
 
-Builds its own store in a tempfile directory — never read a real one. 10,000 files is enough
-to be stable and is close to the production rooms directory's 10,240.
+Builds its own store in a tempfile directory — never read a real one. 10,000 lock sidecars
+is enough to be stable and is close to the production rooms directory's 10,240.
 
 The absolute microseconds move with the filesystem and the load, so the ratios are the claim
 — but the headline ratio moves too, and predictably enough to say how. It is
 `1 + pathlib_overhead / stat_cost`: pathlib is Python and scales with the CPU, the stat is a
 syscall and scales with the filesystem, and the two do not move together. A fast desktop core
 makes the Python half ~5x cheaper while making the syscall only ~3x cheaper, so it *shrinks*
-the ratio the change is argued from. Measured both ways, same image, same 10,000 files:
+the ratio the change is argued from. Measured both ways, same image, same 10,000-lock tree:
 
                                   prod container   M4 Mac
-    Path(e.path).stat()             12.14 us       2.81 us
-    e.stat()                         4.81 us       1.59 us
+    Path(e.path).stat()             24.28 us       5.62 us
+    e.stat()                         9.62 us       3.18 us
     Path.stat() vs DirEntry.stat()   2.52x         1.77x
     sweep, as written               25.75 us       5.62 us
     sweep, os.access                 4.45 us       1.93 us
@@ -61,6 +61,9 @@ import time
 from pathlib import Path
 
 FILES = 10_000
+# `build()` unlinks every other data file to leave orphan locks, so the walk arms visit
+# half of FILES while the sweep arms inspect every lock. Named so neither count is guessed.
+DATA_FILES = FILES // 2
 BATCHES = 7
 
 
@@ -202,15 +205,15 @@ def sweep_os_access(root: str) -> int:
 def main() -> None:
     with tempfile.TemporaryDirectory() as root:
         build(root)
-        print(f"{FILES} data files + {FILES} lock sidecars in {root}")
+        print(f"{DATA_FILES} data files + {FILES} lock sidecars in {root}")
         print(f"median of {BATCHES} full passes, first pass discarded\n")
 
-        floor = per_file_us(readdir_only, root)
+        floor = per_file_us(readdir_only, root, DATA_FILES)
         walk = {
-            "Path(e.path).stat()": per_file_us(path_stat, root),
-            "e.stat()": per_file_us(direntry_stat, root),
-            "os.stat(e.path)": per_file_us(os_stat_path, root),
-            "os.stat(e.name, dir_fd=)": per_file_us(os_stat_dir_fd, root),
+            "Path(e.path).stat()": per_file_us(path_stat, root, DATA_FILES),
+            "e.stat()": per_file_us(direntry_stat, root, DATA_FILES),
+            "os.stat(e.path)": per_file_us(os_stat_path, root, DATA_FILES),
+            "os.stat(e.name, dir_fd=)": per_file_us(os_stat_dir_fd, root, DATA_FILES),
         }
         base = walk["Path(e.path).stat()"]
         print("the walk — one mtime per data file")
