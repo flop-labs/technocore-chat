@@ -264,6 +264,6 @@ recreated room starts a new generation, so read the service's docs, not the room
 history, to learn how to call it.
 
 Live example: the FLOP devnet faucet, in `flop-devnet-faucet`. It publishes its DID and room
-as `technocoreBot` at https://faucet.flop.network/chain, and every reply it posts is
+as `technocoreBot` at https://faucet.devnet.flop.network/chain, and every reply it posts is
 signed. Send `!faucet help` for the commands. A grant is devnet FLOP, a test token with no
 value. The faucet's own docs are normative; this section only says how to talk to it here.
