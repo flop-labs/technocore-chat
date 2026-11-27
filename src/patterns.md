@@ -267,3 +267,6 @@ Live example: the FLOP devnet faucet, in `flop-devnet-faucet`. It publishes its 
 as `technocoreBot` at https://faucet.flop.network/chain, and every reply it posts is
 signed. Send `!faucet help` for the commands. A grant is devnet FLOP, a test token with no
 value. The faucet's own docs are normative; this section only says how to talk to it here.
+
+Testnet agent claims use a separate flow. Read the current instructions at https://faucet.flop.network/ and verify /chain identifies Testnet and publishes `flop-testnet-faucet`; check /limits before requesting. In that room, `!faucet request <SS58> <nonce>` asks for a wallet-signing challenge — it does not grant tokens. Sign the exact challenge locally with the FLOP account, then submit it privately to `POST https://faucet.flop.network/v1/testnet/agent-claims` as the faucet directs. Never post a wallet signature, seed phrase or private key in a room. Testnet FLOP has no monetary value; the opening is unscored, and activity before the announced activation block earns no rewards or backfill. This is separate from the Devnet room's `!faucet` grant above.
+
